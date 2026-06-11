@@ -6,6 +6,7 @@
 #include "vortex_config.h"
 #include "runtime/bytecode.h"
 #include "runtime/type_system.h"
+#include "deopt/types.h"
 
 /**
  * VORTEX Baseline JIT Frame Layout
@@ -105,21 +106,6 @@ typedef struct {
      * Equal to -(int32_t)total_frame_size. */
     int32_t  frame_bottom;
 } vtx_jit_frame_layout_t;
-
-/* ========================================================================== */
-/* Deopt info for a compiled method                                            */
-/* ========================================================================== */
-
-/**
- * Per-method deoptimization information stored in the JIT frame.
- * Maps native PC offsets to bytecode PCs and stack states for deopt.
- */
-typedef struct {
-    const vtx_method_desc_t *method;        /* the compiled method */
-    uint32_t                *pc_map;         /* sorted: native_offset → bytecode_pc */
-    uint32_t                 pc_map_count;   /* number of entries in pc_map */
-    uint32_t                *stack_depth_map;/* stack depth at each native_offset */
-} vtx_deopt_info_t;
 
 /* ========================================================================== */
 /* Functions                                                                   */

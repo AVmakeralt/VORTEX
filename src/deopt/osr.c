@@ -200,19 +200,19 @@ bool vtx_osr_up(vtx_interp_frame_t *interp,
 /* ========================================================================== */
 
 vtx_interp_frame_t *vtx_osr_down(vtx_interp_frame_t *interp,
-                                   const vtx_deopt_info_t *deopt_info)
+                                   const vtx_osr_deopt_context_t *deopt_ctx)
 {
-    if (!deopt_info || !deopt_info->frame_state) {
+    if (!deopt_ctx || !deopt_ctx->frame_state) {
         return NULL;
     }
 
-    /* Step 1: Look up FrameState from side table (already provided in deopt_info) */
-    const vtx_frame_state_t *fs = deopt_info->frame_state;
+    /* Step 1: Look up FrameState from side table (already provided in deopt_ctx) */
+    const vtx_frame_state_t *fs = deopt_ctx->frame_state;
 
     /* Step 2: Set up the resolution context */
     vtx_resolve_context_t ctx;
-    ctx.register_map = deopt_info->register_map;
-    ctx.register_map_size = deopt_info->register_count;
+    ctx.register_map = deopt_ctx->register_map;
+    ctx.register_map_size = deopt_ctx->register_count;
 
     /* Step 3: Build the interpreter frame for the innermost method */
     vtx_interp_frame_t *new_frame = vtx_osr_build_interp_frame(

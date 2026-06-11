@@ -16,6 +16,7 @@
 #include "baseline/guards.h"
 #include "baseline/deopt_stubs.h"
 #include "baseline/instrument.h"
+#include "codecache/types.h"
 
 /**
  * VORTEX Baseline JIT Code Generator
@@ -166,43 +167,8 @@ typedef struct {
 } vtx_branch_fixup_t;
 
 /* ========================================================================== */
-/* Bytecode-to-native PC mapping entry                                         */
+/* Compiled code result (defined in codecache/types.h)                        */
 /* ========================================================================== */
-
-typedef struct {
-    uint32_t bytecode_pc;    /* bytecode PC */
-    uint32_t native_offset;  /* corresponding native code offset */
-} vtx_bc_pc_map_entry_t;
-
-/* ========================================================================== */
-/* Compiled code result                                                        */
-/* ========================================================================== */
-
-/**
- * The result of baseline compilation: contains the generated native code
- * and all associated metadata.
- */
-typedef struct {
-    uint8_t              *code;           /* executable native code (malloc'd) */
-    uint32_t              code_size;      /* size of native code in bytes */
-
-    vtx_jit_frame_layout_t frame_layout;  /* frame layout for this method */
-    vtx_guard_array_t     guards;         /* emitted guards */
-    vtx_deopt_stub_array_t deopt_stubs;   /* generated deopt stubs */
-    vtx_side_table_t      *side_table;    /* deopt side table */
-    vtx_deopt_info_t      *deopt_info;    /* deopt info for the interpreter */
-
-    /* Bytecode PC → native offset mapping for debugging and deopt */
-    vtx_bc_pc_map_entry_t *bc_pc_map;     /* sorted by bytecode_pc */
-    uint32_t               bc_pc_map_count;
-
-    /* Native offset → bytecode PC mapping (for deopt) */
-    uint32_t              *native_to_bc_pc; /* indexed by native offset / 8 */
-    uint32_t               native_to_bc_pc_count;
-
-    /* Method identity */
-    const vtx_method_desc_t *method;      /* the compiled method */
-} vtx_compiled_code_t;
 
 /**
  * Destroy a compiled code struct and free all associated memory.

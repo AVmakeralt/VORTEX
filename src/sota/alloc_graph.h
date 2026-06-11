@@ -7,6 +7,7 @@
 #include "vortex_config.h"
 #include "ir/graph.h"
 #include "runtime/arena.h"
+#include "pea/analysis.h"
 
 /**
  * VORTEX SOTA — Allocation Graph Elimination
@@ -45,16 +46,6 @@
  */
 
 /* ========================================================================== */
-/* Escape state                                                                */
-/* ========================================================================== */
-
-typedef enum {
-    VTX_ESCAPE_NONE       = 0,  /* does not escape — safe for SR */
-    VTX_ESCAPE_ARG        = 1,  /* escapes through arguments only */
-    VTX_ESCAPE_GLOBAL     = 2   /* escapes globally — cannot SR */
-} vtx_escape_state_t;
-
-/* ========================================================================== */
 /* Object graph edge                                                           */
 /* ========================================================================== */
 
@@ -67,7 +58,7 @@ typedef struct {
     vtx_nodeid_t to_alloc;      /* allocation stored into the field (or VTX_NODEID_INVALID) */
     uint32_t     field_offset;  /* field offset of the store */
     vtx_nodeid_t store_node;    /* the StoreField node that created this edge */
-} vtx_alloc_edge_t;
+} vtx_sota_alloc_edge_t;
 
 /* ========================================================================== */
 /* Per-allocation record                                                       */
@@ -80,12 +71,12 @@ typedef struct {
     bool              is_virtual;        /* true if effectively NoEscape → SR candidate */
 
     /* Edges from this allocation to other allocations through field stores */
-    vtx_alloc_edge_t *out_edges;        /* array of outgoing edges */
+    vtx_sota_alloc_edge_t *out_edges;        /* array of outgoing edges */
     uint32_t          out_edge_count;
     uint32_t          out_edge_capacity;
 
     /* Edges pointing to this allocation from other allocations */
-    vtx_alloc_edge_t *in_edges;         /* array of incoming edges */
+    vtx_sota_alloc_edge_t *in_edges;         /* array of incoming edges */
     uint32_t          in_edge_count;
     uint32_t          in_edge_capacity;
 
@@ -93,7 +84,7 @@ typedef struct {
     uint32_t         *read_fields;      /* field offsets read at escape points */
     uint32_t          read_field_count;
     uint32_t          read_field_capacity;
-} vtx_alloc_record_t;
+} vtx_sota_alloc_record_t;
 
 /* ========================================================================== */
 /* Allocation graph                                                            */
@@ -102,12 +93,12 @@ typedef struct {
 #define VTX_ALLOC_GRAPH_INITIAL_CAPACITY 32
 
 typedef struct {
-    vtx_alloc_record_t *records;       /* array of allocation records */
+    vtx_sota_alloc_record_t *records;       /* array of allocation records */
     uint32_t            record_count;
     uint32_t            record_capacity;
 
     /* All edges in the graph (for iteration) */
-    vtx_alloc_edge_t   *all_edges;
+    vtx_sota_alloc_edge_t   *all_edges;
     uint32_t            edge_count;
     uint32_t            edge_capacity;
 
@@ -117,7 +108,7 @@ typedef struct {
     uint32_t            arg_escape_count;
     uint32_t            global_escape_count;
     uint32_t            effective_no_escape_count; /* cross-object SR candidates */
-} vtx_alloc_graph_t;
+} vtx_sota_alloc_graph_t;
 
 /* ========================================================================== */
 /* Build                                                                       */
@@ -137,13 +128,13 @@ typedef struct {
  * @param arena  Arena for allocations
  * @return       Populated allocation graph, or NULL on failure
  */
-vtx_alloc_graph_t *vtx_alloc_graph_build(const vtx_graph_t *graph,
-                                           vtx_arena_t *arena);
+vtx_sota_alloc_graph_t *vtx_alloc_graph_build(const vtx_graph_t *graph,
+                                                 vtx_arena_t *arena);
 
 /**
  * Destroy an allocation graph.
  */
-void vtx_alloc_graph_destroy(vtx_alloc_graph_t *alloc_graph);
+void vtx_alloc_graph_destroy(vtx_sota_alloc_graph_t *alloc_graph);
 
 /* ========================================================================== */
 /* Queries                                                                     */
@@ -160,15 +151,15 @@ void vtx_alloc_graph_destroy(vtx_alloc_graph_t *alloc_graph);
  * @return            Effective escape state
  */
 vtx_escape_state_t vtx_alloc_graph_effective_escape(
-    const vtx_alloc_graph_t *alloc_graph,
+    const vtx_sota_alloc_graph_t *alloc_graph,
     vtx_nodeid_t alloc_node);
 
 /**
  * Look up the allocation record for a node.
  * Returns NULL if the node is not an allocation.
  */
-const vtx_alloc_record_t *vtx_alloc_graph_lookup(
-    const vtx_alloc_graph_t *alloc_graph,
+const vtx_sota_alloc_record_t *vtx_alloc_graph_lookup(
+    const vtx_sota_alloc_graph_t *alloc_graph,
     vtx_nodeid_t alloc_node);
 
 /**
@@ -176,7 +167,7 @@ const vtx_alloc_record_t *vtx_alloc_graph_lookup(
  * An allocation can be SR'd if its effective escape is NoEscape.
  */
 bool vtx_alloc_graph_can_scalar_replace(
-    const vtx_alloc_graph_t *alloc_graph,
+    const vtx_sota_alloc_graph_t *alloc_graph,
     vtx_nodeid_t alloc_node);
 
 /**
@@ -190,7 +181,7 @@ bool vtx_alloc_graph_can_scalar_replace(
  * @return             Number of SR candidates
  */
 uint32_t vtx_alloc_graph_sr_candidates(
-    const vtx_alloc_graph_t *alloc_graph,
+    const vtx_sota_alloc_graph_t *alloc_graph,
     vtx_nodeid_t *candidates,
     uint32_t capacity);
 
@@ -222,7 +213,7 @@ uint32_t vtx_alloc_graph_sr_candidates(
  * @return            Number of allocations eliminated by scalar replacement
  */
 uint32_t vtx_alloc_graph_apply_sr(vtx_graph_t *graph,
-                                    vtx_alloc_graph_t *alloc_graph,
+                                    vtx_sota_alloc_graph_t *alloc_graph,
                                     vtx_arena_t *arena);
 
 #endif /* VORTEX_SOTA_ALLOC_GRAPH_H */

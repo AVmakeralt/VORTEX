@@ -13,7 +13,7 @@ static bool is_alloc_opcode(vtx_node_opcode_t opcode)
            opcode == VTX_OP_Allocate;
 }
 
-static vtx_alloc_record_t *find_or_create_record(vtx_alloc_graph_t *ag,
+static vtx_sota_alloc_record_t *find_or_create_record(vtx_sota_alloc_graph_t *ag,
                                                    vtx_nodeid_t alloc_node)
 {
     /* Linear scan for existing record */
@@ -26,15 +26,15 @@ static vtx_alloc_record_t *find_or_create_record(vtx_alloc_graph_t *ag,
     /* Grow if needed */
     if (ag->record_count >= ag->record_capacity) {
         uint32_t new_cap = ag->record_capacity * 2;
-        vtx_alloc_record_t *new_recs = (vtx_alloc_record_t *)realloc(
-            ag->records, new_cap * sizeof(vtx_alloc_record_t));
+        vtx_sota_alloc_record_t *new_recs = (vtx_sota_alloc_record_t *)realloc(
+            ag->records, new_cap * sizeof(vtx_sota_alloc_record_t));
         if (new_recs == NULL) return NULL;
         ag->records = new_recs;
         ag->record_capacity = new_cap;
     }
 
     /* Create new record */
-    vtx_alloc_record_t *rec = &ag->records[ag->record_count];
+    vtx_sota_alloc_record_t *rec = &ag->records[ag->record_count];
     memset(rec, 0, sizeof(*rec));
     rec->alloc_node = alloc_node;
     rec->escape_state = VTX_ESCAPE_GLOBAL; /* assume worst case */
@@ -54,12 +54,12 @@ static vtx_alloc_record_t *find_or_create_record(vtx_alloc_graph_t *ag,
     return rec;
 }
 
-static void add_out_edge(vtx_alloc_record_t *rec, const vtx_alloc_edge_t *edge)
+static void add_out_edge(vtx_sota_alloc_record_t *rec, const vtx_sota_alloc_edge_t *edge)
 {
     if (rec->out_edge_count >= rec->out_edge_capacity) {
         uint32_t new_cap = rec->out_edge_capacity == 0 ? 4 : rec->out_edge_capacity * 2;
-        vtx_alloc_edge_t *new_edges = (vtx_alloc_edge_t *)realloc(
-            rec->out_edges, new_cap * sizeof(vtx_alloc_edge_t));
+        vtx_sota_alloc_edge_t *new_edges = (vtx_sota_alloc_edge_t *)realloc(
+            rec->out_edges, new_cap * sizeof(vtx_sota_alloc_edge_t));
         if (new_edges == NULL) return;
         rec->out_edges = new_edges;
         rec->out_edge_capacity = new_cap;
@@ -67,12 +67,12 @@ static void add_out_edge(vtx_alloc_record_t *rec, const vtx_alloc_edge_t *edge)
     rec->out_edges[rec->out_edge_count++] = *edge;
 }
 
-static void add_in_edge(vtx_alloc_record_t *rec, const vtx_alloc_edge_t *edge)
+static void add_in_edge(vtx_sota_alloc_record_t *rec, const vtx_sota_alloc_edge_t *edge)
 {
     if (rec->in_edge_count >= rec->in_edge_capacity) {
         uint32_t new_cap = rec->in_edge_capacity == 0 ? 4 : rec->in_edge_capacity * 2;
-        vtx_alloc_edge_t *new_edges = (vtx_alloc_edge_t *)realloc(
-            rec->in_edges, new_cap * sizeof(vtx_alloc_edge_t));
+        vtx_sota_alloc_edge_t *new_edges = (vtx_sota_alloc_edge_t *)realloc(
+            rec->in_edges, new_cap * sizeof(vtx_sota_alloc_edge_t));
         if (new_edges == NULL) return;
         rec->in_edges = new_edges;
         rec->in_edge_capacity = new_cap;
@@ -80,7 +80,7 @@ static void add_in_edge(vtx_alloc_record_t *rec, const vtx_alloc_edge_t *edge)
     rec->in_edges[rec->in_edge_count++] = *edge;
 }
 
-static void add_read_field(vtx_alloc_record_t *rec, uint32_t field_offset)
+static void add_read_field(vtx_sota_alloc_record_t *rec, uint32_t field_offset)
 {
     /* Check if already recorded */
     for (uint32_t i = 0; i < rec->read_field_count; i++) {
@@ -205,10 +205,10 @@ static vtx_escape_state_t compute_escape(const vtx_graph_t *graph,
  * (so A must remain as a heap allocation), B can be eliminated because
  * its value is never actually needed through A.
  */
-static void compute_effective_escape(vtx_alloc_graph_t *ag)
+static void compute_effective_escape(vtx_sota_alloc_graph_t *ag)
 {
     for (uint32_t i = 0; i < ag->record_count; i++) {
-        vtx_alloc_record_t *rec = &ag->records[i];
+        vtx_sota_alloc_record_t *rec = &ag->records[i];
 
         /* Initialize effective escape to the standard escape state */
         rec->effective_escape = rec->escape_state;
@@ -244,7 +244,7 @@ static void compute_effective_escape(vtx_alloc_graph_t *ag)
 
         /* Check incoming edges (stores into this allocation's fields) */
         for (uint32_t e = 0; e < rec->in_edge_count; e++) {
-            const vtx_alloc_edge_t *edge = &rec->in_edges[e];
+            const vtx_sota_alloc_edge_t *edge = &rec->in_edges[e];
 
             /* edge->from_alloc is the container (A)
              * edge->to_alloc is the stored value (B, which might be this allocation)
@@ -254,7 +254,7 @@ static void compute_effective_escape(vtx_alloc_graph_t *ag)
             if (edge->to_alloc == rec->alloc_node) {
                 /* This allocation is stored in from_alloc's field.
                  * Check if that field is read at an escape point. */
-                vtx_alloc_record_t *container = find_or_create_record(ag, edge->from_alloc);
+                vtx_sota_alloc_record_t *container = find_or_create_record(ag, edge->from_alloc);
                 /* find_or_create_record may have already created this record
                  * during the build phase. Look it up properly. */
                 bool field_read_at_escape = false;
@@ -262,7 +262,7 @@ static void compute_effective_escape(vtx_alloc_graph_t *ag)
                 /* Find the container's record */
                 for (uint32_t k = 0; k < ag->record_count; k++) {
                     if (ag->records[k].alloc_node == edge->from_alloc) {
-                        const vtx_alloc_record_t *cont = &ag->records[k];
+                        const vtx_sota_alloc_record_t *cont = &ag->records[k];
 
                         /* Check if this field is read at an escape point */
                         for (uint32_t f = 0; f < cont->read_field_count; f++) {
@@ -290,29 +290,29 @@ static void compute_effective_escape(vtx_alloc_graph_t *ag)
 /* Build the allocation graph                                                  */
 /* ========================================================================== */
 
-vtx_alloc_graph_t *vtx_alloc_graph_build(const vtx_graph_t *graph,
+vtx_sota_alloc_graph_t *vtx_alloc_graph_build(const vtx_graph_t *graph,
                                            vtx_arena_t *arena)
 {
     if (graph == NULL || arena == NULL) return NULL;
 
     /* Allocate the graph structure */
-    vtx_alloc_graph_t *ag = (vtx_alloc_graph_t *)vtx_arena_alloc(
-        arena, sizeof(vtx_alloc_graph_t));
+    vtx_sota_alloc_graph_t *ag = (vtx_sota_alloc_graph_t *)vtx_arena_alloc(
+        arena, sizeof(vtx_sota_alloc_graph_t));
     if (ag == NULL) return NULL;
 
     memset(ag, 0, sizeof(*ag));
 
     /* Initialize records array */
     ag->record_capacity = VTX_ALLOC_GRAPH_INITIAL_CAPACITY;
-    ag->records = (vtx_alloc_record_t *)vtx_arena_alloc(
-        arena, ag->record_capacity * sizeof(vtx_alloc_record_t));
+    ag->records = (vtx_sota_alloc_record_t *)vtx_arena_alloc(
+        arena, ag->record_capacity * sizeof(vtx_sota_alloc_record_t));
     if (ag->records == NULL) return NULL;
-    memset(ag->records, 0, ag->record_capacity * sizeof(vtx_alloc_record_t));
+    memset(ag->records, 0, ag->record_capacity * sizeof(vtx_sota_alloc_record_t));
 
     /* Initialize edges array */
     ag->edge_capacity = 64;
-    ag->all_edges = (vtx_alloc_edge_t *)vtx_arena_alloc(
-        arena, ag->edge_capacity * sizeof(vtx_alloc_edge_t));
+    ag->all_edges = (vtx_sota_alloc_edge_t *)vtx_arena_alloc(
+        arena, ag->edge_capacity * sizeof(vtx_sota_alloc_edge_t));
     if (ag->all_edges == NULL) return NULL;
 
     /* Step 1: Find all allocation nodes and create records */
@@ -320,7 +320,7 @@ vtx_alloc_graph_t *vtx_alloc_graph_build(const vtx_graph_t *graph,
         const vtx_node_t *node = &graph->node_table.nodes[i];
         if (node->dead || !is_alloc_opcode(node->opcode)) continue;
 
-        vtx_alloc_record_t *rec = find_or_create_record(ag, node->id);
+        vtx_sota_alloc_record_t *rec = find_or_create_record(ag, node->id);
         if (rec == NULL) continue;
 
         ag->total_allocations++;
@@ -349,7 +349,7 @@ vtx_alloc_graph_t *vtx_alloc_graph_build(const vtx_graph_t *graph,
         /* Check if value is also an allocation (for cross-object edges) */
         const vtx_node_t *value = vtx_node_get_const(&graph->node_table, value_id);
 
-        vtx_alloc_edge_t edge;
+        vtx_sota_alloc_edge_t edge;
         memset(&edge, 0, sizeof(edge));
         edge.from_alloc = target_id;
         edge.to_alloc = (value != NULL && is_alloc_opcode(value->opcode))
@@ -365,14 +365,14 @@ vtx_alloc_graph_t *vtx_alloc_graph_build(const vtx_graph_t *graph,
         ag->all_edges[ag->edge_count++] = edge;
 
         /* Add to target's outgoing edges */
-        vtx_alloc_record_t *target_rec = find_or_create_record(ag, target_id);
+        vtx_sota_alloc_record_t *target_rec = find_or_create_record(ag, target_id);
         if (target_rec != NULL) {
             add_out_edge(target_rec, &edge);
         }
 
         /* Add to value's incoming edges (if value is also an allocation) */
         if (edge.to_alloc != VTX_NODEID_INVALID) {
-            vtx_alloc_record_t *value_rec = find_or_create_record(ag, value_id);
+            vtx_sota_alloc_record_t *value_rec = find_or_create_record(ag, value_id);
             if (value_rec != NULL) {
                 add_in_edge(value_rec, &edge);
             }
@@ -395,7 +395,7 @@ vtx_alloc_graph_t *vtx_alloc_graph_build(const vtx_graph_t *graph,
 
         if (target != NULL && is_alloc_opcode(target->opcode)) {
             /* Record that this field is read from the allocation */
-            vtx_alloc_record_t *rec = find_or_create_record(ag, target_id);
+            vtx_sota_alloc_record_t *rec = find_or_create_record(ag, target_id);
             if (rec != NULL) {
                 add_read_field(rec, node->field_offset);
             }
@@ -404,7 +404,7 @@ vtx_alloc_graph_t *vtx_alloc_graph_build(const vtx_graph_t *graph,
 
     /* Step 4: Run escape analysis for each allocation */
     for (uint32_t i = 0; i < ag->record_count; i++) {
-        vtx_alloc_record_t *rec = &ag->records[i];
+        vtx_sota_alloc_record_t *rec = &ag->records[i];
         rec->escape_state = compute_escape(graph, rec->alloc_node);
 
         switch (rec->escape_state) {
@@ -431,13 +431,13 @@ vtx_alloc_graph_t *vtx_alloc_graph_build(const vtx_graph_t *graph,
 /* Destroy                                                                     */
 /* ========================================================================== */
 
-void vtx_alloc_graph_destroy(vtx_alloc_graph_t *alloc_graph)
+void vtx_alloc_graph_destroy(vtx_sota_alloc_graph_t *alloc_graph)
 {
     if (alloc_graph == NULL) return;
 
     /* Free per-record dynamically allocated arrays */
     for (uint32_t i = 0; i < alloc_graph->record_count; i++) {
-        vtx_alloc_record_t *rec = &alloc_graph->records[i];
+        vtx_sota_alloc_record_t *rec = &alloc_graph->records[i];
         if (rec->out_edges != NULL) free(rec->out_edges);
         if (rec->in_edges != NULL) free(rec->in_edges);
         if (rec->read_fields != NULL) free(rec->read_fields);
@@ -456,18 +456,18 @@ void vtx_alloc_graph_destroy(vtx_alloc_graph_t *alloc_graph)
 /* ========================================================================== */
 
 vtx_escape_state_t vtx_alloc_graph_effective_escape(
-    const vtx_alloc_graph_t *alloc_graph,
+    const vtx_sota_alloc_graph_t *alloc_graph,
     vtx_nodeid_t alloc_node)
 {
     if (alloc_graph == NULL) return VTX_ESCAPE_GLOBAL;
 
-    const vtx_alloc_record_t *rec = vtx_alloc_graph_lookup(alloc_graph, alloc_node);
+    const vtx_sota_alloc_record_t *rec = vtx_alloc_graph_lookup(alloc_graph, alloc_node);
     if (rec == NULL) return VTX_ESCAPE_GLOBAL;
     return rec->effective_escape;
 }
 
-const vtx_alloc_record_t *vtx_alloc_graph_lookup(
-    const vtx_alloc_graph_t *alloc_graph,
+const vtx_sota_alloc_record_t *vtx_alloc_graph_lookup(
+    const vtx_sota_alloc_graph_t *alloc_graph,
     vtx_nodeid_t alloc_node)
 {
     if (alloc_graph == NULL) return NULL;
@@ -481,14 +481,14 @@ const vtx_alloc_record_t *vtx_alloc_graph_lookup(
 }
 
 bool vtx_alloc_graph_can_scalar_replace(
-    const vtx_alloc_graph_t *alloc_graph,
+    const vtx_sota_alloc_graph_t *alloc_graph,
     vtx_nodeid_t alloc_node)
 {
     return vtx_alloc_graph_effective_escape(alloc_graph, alloc_node) == VTX_ESCAPE_NONE;
 }
 
 uint32_t vtx_alloc_graph_sr_candidates(
-    const vtx_alloc_graph_t *alloc_graph,
+    const vtx_sota_alloc_graph_t *alloc_graph,
     vtx_nodeid_t *candidates,
     uint32_t capacity)
 {
@@ -613,7 +613,7 @@ static vtx_nodeid_t create_scalar_local(vtx_graph_t *graph,
 }
 
 uint32_t vtx_alloc_graph_apply_sr(vtx_graph_t *graph,
-                                    vtx_alloc_graph_t *alloc_graph,
+                                    vtx_sota_alloc_graph_t *alloc_graph,
                                     vtx_arena_t *arena)
 {
     if (graph == NULL || alloc_graph == NULL || arena == NULL) return 0;
@@ -622,7 +622,7 @@ uint32_t vtx_alloc_graph_apply_sr(vtx_graph_t *graph,
 
     /* Process each allocation with effective escape = NoEscape */
     for (uint32_t r = 0; r < alloc_graph->record_count; r++) {
-        vtx_alloc_record_t *rec = &alloc_graph->records[r];
+        vtx_sota_alloc_record_t *rec = &alloc_graph->records[r];
 
         if (rec->effective_escape != VTX_ESCAPE_NONE) continue;
         if (!rec->is_virtual) continue;
@@ -771,7 +771,7 @@ uint32_t vtx_alloc_graph_apply_sr(vtx_graph_t *graph,
          * the container's StoreField that stores this allocation is a dead
          * store (the field is never read at any escape point). Mark it dead. */
         for (uint32_t e = 0; e < rec->in_edge_count; e++) {
-            vtx_alloc_edge_t *edge = &rec->in_edges[e];
+            vtx_sota_alloc_edge_t *edge = &rec->in_edges[e];
             if (edge->to_alloc == alloc_node) {
                 /* This allocation was stored into from_alloc's field.
                  * The StoreField node is edge->store_node.

@@ -8,6 +8,8 @@
 #include "ir/node.h"
 #include "deopt/frame_state.h"
 #include "deopt/side_table.h"
+#include "deopt/types.h"
+#include "codecache/types.h"
 
 /**
  * VORTEX On-Stack Replacement (OSR)
@@ -49,27 +51,19 @@ typedef struct {
 } vtx_interp_frame_t;
 
 /* ========================================================================== */
-/* Compiled code descriptor                                                   */
+/* Compiled code descriptor (defined in codecache/types.h)                    */
 /* ========================================================================== */
 
-/**
- * Descriptor for JIT-compiled code. Used by OSR to set up the entry point.
- */
-typedef struct {
-    void             *entry_point;    /* native code entry address */
-    uint32_t          method_id;      /* method this code was compiled for */
-    uint32_t          stack_slots;    /* number of stack slots in the JIT frame */
-    uint32_t          local_slots;    /* number of local slots in the JIT frame */
-    vtx_side_table_t *side_table;     /* side table for deopt info */
-} vtx_compiled_code_t;
-
 /* ========================================================================== */
-/* Deoptimization info (for OSR down)                                         */
+/* OSR deopt context                                                          */
 /* ========================================================================== */
 
 /**
  * Information provided when a guard fails and OSR down is needed.
  * This is populated by the deopt stub before calling vtx_osr_down.
+ * This is distinct from vtx_deopt_info_t (which is the static per-method
+ * deopt metadata) — this struct contains the dynamic runtime state
+ * at the point of deoptimization.
  */
 typedef struct {
     uint32_t             method_id;       /* method where guard failed */
@@ -79,7 +73,7 @@ typedef struct {
     void                *frame_pointer;   /* frame pointer of the compiled frame */
     vtx_value_t         *register_map;    /* values of live registers at deopt */
     uint32_t             register_count;  /* number of entries in register_map */
-} vtx_deopt_info_t;
+} vtx_osr_deopt_context_t;
 
 /* ========================================================================== */
 /* OSR Up: Interpreter → Compiled Code                                        */
@@ -131,7 +125,7 @@ bool vtx_osr_up(vtx_interp_frame_t *interp,
  * @return The interpreter resume frame, or NULL on failure
  */
 vtx_interp_frame_t *vtx_osr_down(vtx_interp_frame_t *interp,
-                                   const vtx_deopt_info_t *deopt_info);
+                                   const vtx_osr_deopt_context_t *deopt_ctx);
 
 /* ========================================================================== */
 /* Internal helpers (exposed for testing)                                     */

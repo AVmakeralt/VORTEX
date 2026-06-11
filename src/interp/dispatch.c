@@ -4,6 +4,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <limits.h>
+#include <math.h>
 
 /* ========================================================================== */
 /* Helpers for the dispatch loop                                               */
@@ -554,20 +555,25 @@ dispatch_VT_OP_LOAD_UNDEFINED:
 dispatch_VT_OP_IADD:
     b = vtx_frame_pop(frame);
     a = vtx_frame_pop(frame);
-    ia = vtx_smi_value(a);
-    ib = vtx_smi_value(b);
-    {
-        if (!vtx_helpers_overflow_check_iadd(ia, ib)) {
+    if (vtx_is_smi(a) && vtx_is_smi(b)) {
+        int64_t ia_smi = vtx_smi_value(a);
+        int64_t ib_smi = vtx_smi_value(b);
+        if (!vtx_helpers_overflow_check_iadd(ia_smi, ib_smi)) {
             /* Overflow: promote to double */
-            vtx_frame_push(frame, vtx_make_double((double)ia + (double)ib));
+            vtx_frame_push(frame, vtx_make_double((double)ia_smi + (double)ib_smi));
         } else {
-            int64_t result_i = ia + ib;
+            int64_t result_i = ia_smi + ib_smi;
             if (result_i >= VTX_SMI_MIN && result_i <= VTX_SMI_MAX) {
                 vtx_frame_push(frame, vtx_make_smi(result_i));
             } else {
                 vtx_frame_push(frame, vtx_make_double((double)result_i));
             }
         }
+    } else {
+        /* Fallback: promote to double */
+        double da = vtx_is_double(a) ? vtx_double_value(a) : (vtx_is_smi(a) ? (double)vtx_smi_value(a) : 0.0);
+        double db = vtx_is_double(b) ? vtx_double_value(b) : (vtx_is_smi(b) ? (double)vtx_smi_value(b) : 0.0);
+        vtx_frame_push(frame, vtx_make_double(da + db));
     }
     DISPATCH_NEXT();
 
@@ -575,22 +581,27 @@ dispatch_VT_OP_IADD:
 dispatch_VT_OP_ISUB:
     b = vtx_frame_pop(frame);
     a = vtx_frame_pop(frame);
-    ia = vtx_smi_value(a);
-    ib = vtx_smi_value(b);
-    {
+    if (vtx_is_smi(a) && vtx_is_smi(b)) {
+        int64_t ia_smi = vtx_smi_value(a);
+        int64_t ib_smi = vtx_smi_value(b);
         bool overflow = false;
-        if (ib < 0 && ia > INT64_MAX + ib) overflow = true;
-        if (ib > 0 && ia < INT64_MIN + ib) overflow = true;
+        if (ib_smi < 0 && ia_smi > INT64_MAX + ib_smi) overflow = true;
+        if (ib_smi > 0 && ia_smi < INT64_MIN + ib_smi) overflow = true;
         if (overflow) {
-            vtx_frame_push(frame, vtx_make_double((double)ia - (double)ib));
+            vtx_frame_push(frame, vtx_make_double((double)ia_smi - (double)ib_smi));
         } else {
-            int64_t result_i = ia - ib;
+            int64_t result_i = ia_smi - ib_smi;
             if (result_i >= VTX_SMI_MIN && result_i <= VTX_SMI_MAX) {
                 vtx_frame_push(frame, vtx_make_smi(result_i));
             } else {
                 vtx_frame_push(frame, vtx_make_double((double)result_i));
             }
         }
+    } else {
+        /* Fallback: promote to double */
+        double da = vtx_is_double(a) ? vtx_double_value(a) : (vtx_is_smi(a) ? (double)vtx_smi_value(a) : 0.0);
+        double db = vtx_is_double(b) ? vtx_double_value(b) : (vtx_is_smi(b) ? (double)vtx_smi_value(b) : 0.0);
+        vtx_frame_push(frame, vtx_make_double(da - db));
     }
     DISPATCH_NEXT();
 
@@ -598,19 +609,24 @@ dispatch_VT_OP_ISUB:
 dispatch_VT_OP_IMUL:
     b = vtx_frame_pop(frame);
     a = vtx_frame_pop(frame);
-    ia = vtx_smi_value(a);
-    ib = vtx_smi_value(b);
-    {
-        if (!vtx_helpers_overflow_check_imul(ia, ib)) {
-            vtx_frame_push(frame, vtx_make_double((double)ia * (double)ib));
+    if (vtx_is_smi(a) && vtx_is_smi(b)) {
+        int64_t ia_smi = vtx_smi_value(a);
+        int64_t ib_smi = vtx_smi_value(b);
+        if (!vtx_helpers_overflow_check_imul(ia_smi, ib_smi)) {
+            vtx_frame_push(frame, vtx_make_double((double)ia_smi * (double)ib_smi));
         } else {
-            int64_t result_i = ia * ib;
+            int64_t result_i = ia_smi * ib_smi;
             if (result_i >= VTX_SMI_MIN && result_i <= VTX_SMI_MAX) {
                 vtx_frame_push(frame, vtx_make_smi(result_i));
             } else {
                 vtx_frame_push(frame, vtx_make_double((double)result_i));
             }
         }
+    } else {
+        /* Fallback: promote to double */
+        double da = vtx_is_double(a) ? vtx_double_value(a) : (vtx_is_smi(a) ? (double)vtx_smi_value(a) : 0.0);
+        double db = vtx_is_double(b) ? vtx_double_value(b) : (vtx_is_smi(b) ? (double)vtx_smi_value(b) : 0.0);
+        vtx_frame_push(frame, vtx_make_double(da * db));
     }
     DISPATCH_NEXT();
 
@@ -618,16 +634,21 @@ dispatch_VT_OP_IMUL:
 dispatch_VT_OP_IDIV:
     b = vtx_frame_pop(frame);
     a = vtx_frame_pop(frame);
-    ia = vtx_smi_value(a);
-    ib = vtx_smi_value(b);
-    {
-        VTX_ASSERT(ib != 0, "integer division by zero");
-        if (ia == INT64_MIN && ib == -1) {
+    if (vtx_is_smi(a) && vtx_is_smi(b)) {
+        int64_t ia_smi = vtx_smi_value(a);
+        int64_t ib_smi = vtx_smi_value(b);
+        VTX_ASSERT(ib_smi != 0, "integer division by zero");
+        if (ia_smi == INT64_MIN && ib_smi == -1) {
             vtx_frame_push(frame, vtx_make_double((double)INT64_MAX));
         } else {
-            int64_t result_i = ia / ib;
+            int64_t result_i = ia_smi / ib_smi;
             vtx_frame_push(frame, vtx_make_smi(result_i));
         }
+    } else {
+        /* Fallback: promote to double */
+        double da = vtx_is_double(a) ? vtx_double_value(a) : (vtx_is_smi(a) ? (double)vtx_smi_value(a) : 0.0);
+        double db = vtx_is_double(b) ? vtx_double_value(b) : (vtx_is_smi(b) ? (double)vtx_smi_value(b) : 0.0);
+        vtx_frame_push(frame, vtx_make_double(da / db));
     }
     DISPATCH_NEXT();
 
@@ -635,12 +656,17 @@ dispatch_VT_OP_IDIV:
 dispatch_VT_OP_IMOD:
     b = vtx_frame_pop(frame);
     a = vtx_frame_pop(frame);
-    ia = vtx_smi_value(a);
-    ib = vtx_smi_value(b);
-    {
-        VTX_ASSERT(ib != 0, "integer modulo by zero");
-        int64_t result_i = ia % ib;
+    if (vtx_is_smi(a) && vtx_is_smi(b)) {
+        int64_t ia_smi = vtx_smi_value(a);
+        int64_t ib_smi = vtx_smi_value(b);
+        VTX_ASSERT(ib_smi != 0, "integer modulo by zero");
+        int64_t result_i = ia_smi % ib_smi;
         vtx_frame_push(frame, vtx_make_smi(result_i));
+    } else {
+        /* Fallback: promote to double */
+        double da = vtx_is_double(a) ? vtx_double_value(a) : (vtx_is_smi(a) ? (double)vtx_smi_value(a) : 0.0);
+        double db = vtx_is_double(b) ? vtx_double_value(b) : (vtx_is_smi(b) ? (double)vtx_smi_value(b) : 0.0);
+        vtx_frame_push(frame, vtx_make_double(fmod(da, db)));
     }
     DISPATCH_NEXT();
 
@@ -759,32 +785,80 @@ dispatch_VT_OP_INOT:
 
 dispatch_VT_OP_ICMP_EQ:
     b = vtx_frame_pop(frame); a = vtx_frame_pop(frame);
-    vtx_frame_push(frame, vtx_make_bool(vtx_smi_value(a) == vtx_smi_value(b)));
+    if (vtx_is_smi(a) && vtx_is_smi(b)) {
+        int64_t result = (vtx_smi_value(a) == vtx_smi_value(b)) ? 1 : 0;
+        vtx_frame_push(frame, vtx_make_smi(result));
+    } else {
+        double da = vtx_is_double(a) ? vtx_double_value(a) : (vtx_is_smi(a) ? (double)vtx_smi_value(a) : 0.0);
+        double db = vtx_is_double(b) ? vtx_double_value(b) : (vtx_is_smi(b) ? (double)vtx_smi_value(b) : 0.0);
+        int64_t result = (da == db) ? 1 : 0;
+        vtx_frame_push(frame, vtx_make_smi(result));
+    }
     DISPATCH_NEXT();
 
 dispatch_VT_OP_ICMP_NE:
     b = vtx_frame_pop(frame); a = vtx_frame_pop(frame);
-    vtx_frame_push(frame, vtx_make_bool(vtx_smi_value(a) != vtx_smi_value(b)));
+    if (vtx_is_smi(a) && vtx_is_smi(b)) {
+        int64_t result = (vtx_smi_value(a) != vtx_smi_value(b)) ? 1 : 0;
+        vtx_frame_push(frame, vtx_make_smi(result));
+    } else {
+        double da = vtx_is_double(a) ? vtx_double_value(a) : (vtx_is_smi(a) ? (double)vtx_smi_value(a) : 0.0);
+        double db = vtx_is_double(b) ? vtx_double_value(b) : (vtx_is_smi(b) ? (double)vtx_smi_value(b) : 0.0);
+        int64_t result = (da != db) ? 1 : 0;
+        vtx_frame_push(frame, vtx_make_smi(result));
+    }
     DISPATCH_NEXT();
 
 dispatch_VT_OP_ICMP_LT:
     b = vtx_frame_pop(frame); a = vtx_frame_pop(frame);
-    vtx_frame_push(frame, vtx_make_bool(vtx_smi_value(a) < vtx_smi_value(b)));
+    if (vtx_is_smi(a) && vtx_is_smi(b)) {
+        int64_t result = (vtx_smi_value(a) < vtx_smi_value(b)) ? 1 : 0;
+        vtx_frame_push(frame, vtx_make_smi(result));
+    } else {
+        double da = vtx_is_double(a) ? vtx_double_value(a) : (vtx_is_smi(a) ? (double)vtx_smi_value(a) : 0.0);
+        double db = vtx_is_double(b) ? vtx_double_value(b) : (vtx_is_smi(b) ? (double)vtx_smi_value(b) : 0.0);
+        int64_t result = (da < db) ? 1 : 0;
+        vtx_frame_push(frame, vtx_make_smi(result));
+    }
     DISPATCH_NEXT();
 
 dispatch_VT_OP_ICMP_LE:
     b = vtx_frame_pop(frame); a = vtx_frame_pop(frame);
-    vtx_frame_push(frame, vtx_make_bool(vtx_smi_value(a) <= vtx_smi_value(b)));
+    if (vtx_is_smi(a) && vtx_is_smi(b)) {
+        int64_t result = (vtx_smi_value(a) <= vtx_smi_value(b)) ? 1 : 0;
+        vtx_frame_push(frame, vtx_make_smi(result));
+    } else {
+        double da = vtx_is_double(a) ? vtx_double_value(a) : (vtx_is_smi(a) ? (double)vtx_smi_value(a) : 0.0);
+        double db = vtx_is_double(b) ? vtx_double_value(b) : (vtx_is_smi(b) ? (double)vtx_smi_value(b) : 0.0);
+        int64_t result = (da <= db) ? 1 : 0;
+        vtx_frame_push(frame, vtx_make_smi(result));
+    }
     DISPATCH_NEXT();
 
 dispatch_VT_OP_ICMP_GT:
     b = vtx_frame_pop(frame); a = vtx_frame_pop(frame);
-    vtx_frame_push(frame, vtx_make_bool(vtx_smi_value(a) > vtx_smi_value(b)));
+    if (vtx_is_smi(a) && vtx_is_smi(b)) {
+        int64_t result = (vtx_smi_value(a) > vtx_smi_value(b)) ? 1 : 0;
+        vtx_frame_push(frame, vtx_make_smi(result));
+    } else {
+        double da = vtx_is_double(a) ? vtx_double_value(a) : (vtx_is_smi(a) ? (double)vtx_smi_value(a) : 0.0);
+        double db = vtx_is_double(b) ? vtx_double_value(b) : (vtx_is_smi(b) ? (double)vtx_smi_value(b) : 0.0);
+        int64_t result = (da > db) ? 1 : 0;
+        vtx_frame_push(frame, vtx_make_smi(result));
+    }
     DISPATCH_NEXT();
 
 dispatch_VT_OP_ICMP_GE:
     b = vtx_frame_pop(frame); a = vtx_frame_pop(frame);
-    vtx_frame_push(frame, vtx_make_bool(vtx_smi_value(a) >= vtx_smi_value(b)));
+    if (vtx_is_smi(a) && vtx_is_smi(b)) {
+        int64_t result = (vtx_smi_value(a) >= vtx_smi_value(b)) ? 1 : 0;
+        vtx_frame_push(frame, vtx_make_smi(result));
+    } else {
+        double da = vtx_is_double(a) ? vtx_double_value(a) : (vtx_is_smi(a) ? (double)vtx_smi_value(a) : 0.0);
+        double db = vtx_is_double(b) ? vtx_double_value(b) : (vtx_is_smi(b) ? (double)vtx_smi_value(b) : 0.0);
+        int64_t result = (da >= db) ? 1 : 0;
+        vtx_frame_push(frame, vtx_make_smi(result));
+    }
     DISPATCH_NEXT();
 
     /* ===================================================================
