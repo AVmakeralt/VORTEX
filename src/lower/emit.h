@@ -310,6 +310,38 @@ int vtx_x86_emit_function(vtx_x86_emit_t *emit, vtx_inst_stream_t *stream,
                            const vtx_regalloc_result_t *result, vtx_arena_t *arena);
 
 /**
+ * Apply peephole optimizations to the instruction stream.
+ * Must be called after register allocation (physical registers resolved).
+ * Optimizations applied:
+ *   - Eliminate redundant MOV reg, reg (src == dst)
+ *   - CMP reg, 0 → TEST reg, reg (1 byte shorter)
+ *   - Fold ADD/SUB with 0 into NOP
+ *   - Eliminate dead code (write to unused register)
+ *
+ * @param stream   Instruction stream (modified in place)
+ * @param result   Register allocation result
+ * @return         Number of instructions eliminated
+ */
+uint32_t vtx_peephole_optimize(vtx_inst_stream_t *stream,
+                                const vtx_regalloc_result_t *result);
+
+/**
+ * Optimize branch layout in the instruction stream.
+ * Must be called after peephole optimization and before emission.
+ * Optimizations applied:
+ *   - Invert JCC + JMP to fall-through where possible
+ *   - Use short jumps (2 bytes) when target is within ±127 bytes
+ *   - Align loop headers to 16-byte boundaries for I-cache performance
+ *
+ * @param stream   Instruction stream (modified in place)
+ * @param emit     Emitter context (for position tracking)
+ * @param result   Register allocation result
+ * @return         0 on success, -1 on failure
+ */
+int vtx_branch_optimize(vtx_inst_stream_t *stream, vtx_x86_emit_t *emit,
+                         const vtx_regalloc_result_t *result);
+
+/**
  * Map VTX condition code to x86-64 condition code byte.
  * Returns the x86 condition code (0-15) for JCC/SETCC/CMOVcc.
  */

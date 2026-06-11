@@ -300,24 +300,38 @@ static int reconstruct_from_frame_state(
 
 /**
  * Default node-to-value resolution for stack walking.
- * In a real implementation, this would use the register map from the
- * side table to map NodeIDs to their values in registers and stack slots.
- * For now, we return VTX_VALUE_UNDEFINED as a placeholder — the actual
- * resolution is done by the OSR module at deopt time.
+ * Resolves Constant nodes directly from the node table.
+ * For other node kinds, returns VTX_VALUE_UNDEFINED since we don't
+ * have access to actual register/stack maps at this level — the OSR
+ * module handles full resolution at deopt time.
  */
 static vtx_value_t default_node_to_value(vtx_nodeid_t node_id, void *ctx)
 {
-    (void)ctx;
     if (node_id == VTX_NODEID_INVALID) {
         return VTX_VALUE_UNDEFINED;
     }
-    /* In a full implementation, this would:
-     * 1. Check the register map for the current PC
-     * 2. If the NodeID is in a register, read the register value
-     * 3. If the NodeID is on the stack, read the stack slot
-     * 4. If the NodeID is a Constant, return the constant value
-     * 5. If the NodeID cannot be resolved, this is a bug
-     */
+
+    /* Try to resolve constant values directly */
+    vtx_node_table_t *table = (vtx_node_table_t *)ctx;
+    if (table) {
+        const vtx_node_t *node = vtx_node_get_const(table, node_id);
+        if (node && node->opcode == VTX_OP_Constant) {
+            switch (node->constval.kind) {
+            case VTX_TYPE_Int:
+                return vtx_make_smi(node->constval.as.int_val);
+            case VTX_TYPE_Float:
+                return vtx_make_double(node->constval.as.float_val);
+            case VTX_TYPE_Ptr:
+                if (node->constval.as.ptr_val == NULL) {
+                    return VTX_VALUE_NULL;
+                }
+                return vtx_make_heap_ptr(node->constval.as.ptr_val);
+            default:
+                break;
+            }
+        }
+    }
+
     return VTX_VALUE_UNDEFINED;
 }
 
@@ -384,7 +398,7 @@ vtx_reconstructed_stack_t *vtx_stack_walk(
              * A compiled frame may contain inlined methods, producing
              * multiple logical frames. */
             if (reconstruct_from_frame_state(fs, default_node_to_value,
-                                              NULL, stack) != 0) {
+                                              (void *)config->node_table, stack) != 0) {
                 vtx_reconstructed_stack_destroy(stack);
                 return NULL;
             }
@@ -449,7 +463,7 @@ vtx_reconstructed_stack_t *vtx_stack_walk(
             if (!fs) goto next_frame;
 
             if (reconstruct_from_frame_state(fs, default_node_to_value,
-                                              NULL, stack) != 0) {
+                                              (void *)config->node_table, stack) != 0) {
                 vtx_reconstructed_stack_destroy(stack);
                 return NULL;
             }

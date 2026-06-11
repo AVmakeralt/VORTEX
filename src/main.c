@@ -1198,7 +1198,7 @@ static int run_self_test(void)
         vtx_gc_t gc;
         bool ok = true;
 
-        if (vtx_gc_init(&gc, &ts) != 0) {
+        if (vtx_gc_init(&gc, &ts, VTX_GC_GENERATIONAL) != 0) {
             printf("FAIL (init)\n");
             failed++;
         } else {
@@ -1303,7 +1303,7 @@ static int run_self_test(void)
         vtx_type_system_init(&ts);
 
         vtx_gc_t gc;
-        vtx_gc_init(&gc, &ts);
+        vtx_gc_init(&gc, &ts, VTX_GC_GENERATIONAL);
 
         /* Test fibonacci for several values */
         struct { int64_t n; int64_t expected; } fib_tests[] = {

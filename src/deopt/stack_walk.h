@@ -114,6 +114,7 @@ typedef struct {
 typedef struct {
     void                       *start_fp;         /* starting frame pointer */
     vtx_side_table_registry_t  *registry;         /* side table registry */
+    const vtx_node_table_t     *node_table;       /* node table for constant resolution */
     vtx_frame_state_t         **frame_states;      /* global FrameState array */
     uint32_t                    frame_state_count; /* number of FrameStates */
     uint32_t                    max_depth;         /* max frames to walk (0 = unlimited) */

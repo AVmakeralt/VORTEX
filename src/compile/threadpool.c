@@ -13,34 +13,6 @@
 #include <unistd.h>
 
 /* ========================================================================== */
-/* Internal: worker thread main loop                                           */
-/* ========================================================================== */
-
-static void *worker_main(void *arg)
-{
-    vtx_worker_t *worker = (vtx_worker_t *)arg;
-    vtx_threadpool_t *pool = (vtx_threadpool_t *)(
-        (char *)worker - worker->worker_id * sizeof(vtx_worker_t));
-    /* Note: the above pointer arithmetic is fragile. Instead, we store
-     * the pool pointer in the worker. But our struct doesn't have it.
-     * Alternative: pass the pool pointer as the argument. We need to
-     * restructure slightly — use a wrapper struct for the thread arg. */
-
-    /* Actually, let's just pass the pool pointer as the arg.
-     * The worker_main function receives a pointer to the pool.
-     * But we created the thread with &pool->workers[i], so we need
-     * to recover the pool pointer. The simplest fix: add a back-pointer
-     * to the worker struct, or change the thread argument.
-     *
-     * For now, we'll use a different approach: store the pool pointer
-     * in a separate array indexed by worker_id, or pass it directly.
-     *
-     * Let's redesign: worker_main receives a struct containing both
-     * the pool and worker pointers. */
-    return NULL; /* placeholder — see actual implementation below */
-}
-
-/* ========================================================================== */
 /* Internal: thread argument wrapper                                           */
 /* ========================================================================== */
 

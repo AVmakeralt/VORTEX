@@ -357,7 +357,7 @@ static int run_self_test(void)
         vtx_type_system_init(&ts);
 
         vtx_gc_t gc;
-        vtx_gc_init(&gc);
+        vtx_gc_init(&gc, &ts, VTX_GC_GENERATIONAL);
 
         /* Verify object allocation */
         vtx_heap_object_t *obj = vtx_gc_alloc(&gc, vtx_heap_object_alloc_size(2), 1);
@@ -452,7 +452,7 @@ static int run_self_test(void)
         vtx_type_system_init(&ts);
 
         vtx_gc_t gc;
-        vtx_gc_init(&gc);
+        vtx_gc_init(&gc, &ts, VTX_GC_GENERATIONAL);
 
         vtx_bytecode_t *bc = build_fib_bytecode(&arena);
         if (!bc) {
@@ -716,7 +716,7 @@ static int run_benchmarks(void)
     vtx_type_system_init(&ts);
 
     vtx_gc_t gc;
-    vtx_gc_init(&gc);
+    vtx_gc_init(&gc, &ts, VTX_GC_GENERATIONAL);
 
     /* Benchmark: Interpreter fibonacci */
     {
@@ -841,7 +841,7 @@ int main(int argc, char *argv[])
         vtx_type_system_init(&ts);
 
         vtx_gc_t gc;
-        vtx_gc_init(&gc);
+        vtx_gc_init(&gc, &ts, VTX_GC_GENERATIONAL);
 
         vtx_method_desc_t method = {
             .name = "main",

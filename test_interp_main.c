@@ -15,7 +15,7 @@ int main(void)
     if (vtx_type_system_init(&ts) != 0) { fprintf(stderr, "Failed to init type system\n"); return 1; }
 
     vtx_gc_t gc;
-    if (vtx_gc_init(&gc, &ts) != 0) { fprintf(stderr, "Failed to init GC\n"); return 1; }
+    if (vtx_gc_init(&gc, &ts, VTX_GC_GENERATIONAL) != 0) { fprintf(stderr, "Failed to init GC\n"); return 1; }
 
     vtx_interp_t interp;
     if (vtx_interp_init(&interp, &ts, &gc) != 0) { fprintf(stderr, "Failed to init interpreter\n"); return 1; }

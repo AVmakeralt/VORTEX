@@ -74,6 +74,9 @@ static vtx_live_interval_t *compute_live_intervals(vtx_inst_stream_t *stream,
         intervals[v].is_fixed = false;
         intervals[v].fixed_reg = 0xFF;
         intervals[v].is_spilled = false;
+        intervals[v].use_count = 0;
+        intervals[v].loop_depth = 0;
+        intervals[v].coalesce_src = VTX_VREG_INVALID;
 
         /* Check if this vreg has a fixed register constraint */
         if (v < stream->vreg_fixed_reg_count && stream->vreg_fixed_reg[v] != 0xFF) {
@@ -114,6 +117,9 @@ static vtx_live_interval_t *compute_live_intervals(vtx_inst_stream_t *stream,
                     intervals[vreg].end = pos;
                 }
 
+                /* Count uses for spill cost estimation */
+                intervals[vreg].use_count++;
+
                 /* Also consider it a definition for the first operand of
                  * two-operand instructions (add, sub, etc. modify the first operand) */
                 if (op == 0 && (inst->opcode == VTX_X86_ADD || inst->opcode == VTX_X86_SUB ||
@@ -139,12 +145,60 @@ static vtx_live_interval_t *compute_live_intervals(vtx_inst_stream_t *stream,
                         intervals[inst->mem.base_vreg].end = pos;
                     if (pos < intervals[inst->mem.base_vreg].start)
                         intervals[inst->mem.base_vreg].start = pos;
+                    intervals[inst->mem.base_vreg].use_count++;
                 }
                 if (inst->mem.index_vreg != VTX_VREG_INVALID && inst->mem.index_vreg < vreg_count) {
                     if (pos > intervals[inst->mem.index_vreg].end)
                         intervals[inst->mem.index_vreg].end = pos;
                     if (pos < intervals[inst->mem.index_vreg].start)
                         intervals[inst->mem.index_vreg].start = pos;
+                    intervals[inst->mem.index_vreg].use_count++;
+                }
+            }
+        }
+    }
+
+    /* Estimate loop depth for each block based on back-edges.
+     * A block that is the target of a back-edge (JCC/JMP to an earlier block)
+     * is a loop header with depth >= 1. Nested loops increase depth. */
+    uint32_t *block_loop_depth = (uint32_t *)vtx_arena_alloc(
+        arena, stream->block_count * sizeof(uint32_t));
+    if (block_loop_depth) {
+        memset(block_loop_depth, 0, stream->block_count * sizeof(uint32_t));
+
+        /* Detect back-edges and assign loop depths */
+        for (uint32_t b = 0; b < stream->block_count; b++) {
+            vtx_inst_block_t *blk = &stream->blocks[b];
+            for (uint32_t i = 0; i < blk->inst_count; i++) {
+                vtx_inst_t *inst = &blk->insts[i];
+                if ((inst->opcode == VTX_X86_JCC || inst->opcode == VTX_X86_JMP) &&
+                    inst->opnd_kinds[0] == VTX_OPND_LABEL) {
+                    uint32_t target = inst->operands[0];
+                    if (target < b && target < stream->block_count) {
+                        /* Back-edge: blocks from target to b are in a loop */
+                        uint32_t depth = block_loop_depth[target] + 1;
+                        for (uint32_t bb = target; bb <= b && bb < stream->block_count; bb++) {
+                            if (depth > block_loop_depth[bb])
+                                block_loop_depth[bb] = depth;
+                        }
+                    }
+                }
+            }
+        }
+
+        /* Assign loop depth to intervals based on their start block */
+        for (uint32_t v = 0; v < vreg_count; v++) {
+            if (intervals[v].start > intervals[v].end) continue;
+            /* Find which block this interval starts in */
+            uint32_t pos = intervals[v].start;
+            for (uint32_t b = 0; b < stream->block_count; b++) {
+                vtx_inst_block_t *blk = &stream->blocks[b];
+                if (blk->inst_count == 0) continue;
+                uint32_t blk_start = blk->insts[0].native_offset;
+                uint32_t blk_end = blk->insts[blk->inst_count - 1].native_offset;
+                if (pos >= blk_start && pos <= blk_end) {
+                    intervals[v].loop_depth = block_loop_depth[b];
+                    break;
                 }
             }
         }
@@ -189,6 +243,146 @@ static int cmp_intervals_by_start(const void *a, const void *b)
 }
 
 /* ========================================================================== */
+/* Register coalescing for copy instructions                                   */
+/* ========================================================================== */
+
+/**
+ * Compute the spill cost for an interval.
+ * Higher cost = less desirable to spill.
+ * Cost = use_count * (10 ^ loop_depth) — values in loops are much more
+ * expensive to spill because every spill/reload is executed per iteration.
+ */
+static uint64_t compute_spill_cost(const vtx_live_interval_t *interval)
+{
+    if (interval->use_count == 0) return 0;
+    uint64_t cost = interval->use_count;
+    /* Multiply by 10 for each level of loop nesting */
+    for (uint32_t d = 0; d < interval->loop_depth; d++) {
+        cost *= 10;
+    }
+    return cost;
+}
+
+/**
+ * Perform register coalescing: for MOV dst, src instructions where
+ * both src and dst are virtual registers, try to assign them the same
+ * physical register to eliminate the copy.
+ *
+ * @param stream    Instruction stream
+ * @param intervals Live intervals array (indexed by vreg)
+ * @param vreg_count Number of vregs
+ * @return          Number of coalescences performed
+ */
+static uint32_t coalesce_copies(vtx_inst_stream_t *stream,
+                                 vtx_live_interval_t *intervals,
+                                 uint32_t vreg_count)
+{
+    uint32_t coalesced = 0;
+
+    /* Union-Find for coalescing groups */
+    uint32_t *parent = (uint32_t *)malloc(vreg_count * sizeof(uint32_t));
+    if (!parent) return 0;
+    for (uint32_t v = 0; v < vreg_count; v++) parent[v] = v;
+
+    /* Scan for MOV reg, reg copy instructions */
+    for (uint32_t b = 0; b < stream->block_count; b++) {
+        vtx_inst_block_t *blk = &stream->blocks[b];
+        for (uint32_t i = 0; i < blk->inst_count; i++) {
+            vtx_inst_t *inst = &blk->insts[i];
+            if (inst->opcode != VTX_X86_MOV) continue;
+            if (inst->flags & VTX_INST_FLAG_HAS_IMM) continue;
+            if (inst->flags & VTX_INST_FLAG_HAS_MEM) continue;
+            if (inst->opnd_kinds[0] != VTX_OPND_VREG) continue;
+            if (inst->opnd_kinds[1] != VTX_OPND_VREG) continue;
+
+            uint32_t dst_vreg = inst->operands[0];
+            uint32_t src_vreg = inst->operands[1];
+            if (dst_vreg >= vreg_count || src_vreg >= vreg_count) continue;
+            if (dst_vreg == src_vreg) continue;
+
+            /* Find roots with path compression */
+            uint32_t dst_root = dst_vreg;
+            while (parent[dst_root] != dst_root) {
+                parent[dst_root] = parent[parent[dst_root]];
+                dst_root = parent[dst_root];
+            }
+            uint32_t src_root = src_vreg;
+            while (parent[src_root] != src_root) {
+                parent[src_root] = parent[parent[src_root]];
+                src_root = parent[src_root];
+            }
+
+            /* Check if intervals don't overlap (safe to coalesce) */
+            vtx_live_interval_t *di = &intervals[dst_root];
+            vtx_live_interval_t *si = &intervals[src_root];
+
+            /* Can't coalesce if both are fixed to different registers */
+            if (di->is_fixed && si->is_fixed && di->fixed_reg != si->fixed_reg)
+                continue;
+
+            /* Check for interval overlap — safe to coalesce if no overlap */
+            bool overlaps = !(di->end < si->start || si->end < di->start);
+            if (overlaps) continue;
+
+            /* Safe to coalesce: merge the intervals */
+            uint32_t root = src_root;
+            uint32_t child = dst_root;
+
+            /* Merge into the root with the wider interval */
+            if (intervals[root].start > intervals[child].start)
+                intervals[root].start = intervals[child].start;
+            if (intervals[root].end < intervals[child].end)
+                intervals[root].end = intervals[child].end;
+            intervals[root].use_count += intervals[child].use_count;
+            if (intervals[child].loop_depth > intervals[root].loop_depth)
+                intervals[root].loop_depth = intervals[child].loop_depth;
+
+            /* Union */
+            parent[child] = root;
+            intervals[child].coalesce_src = root;
+            coalesced++;
+        }
+    }
+
+    /* Apply coalescing: update vreg references in the instruction stream */
+    for (uint32_t b = 0; b < stream->block_count; b++) {
+        vtx_inst_block_t *blk = &stream->blocks[b];
+        for (uint32_t i = 0; i < blk->inst_count; i++) {
+            vtx_inst_t *inst = &blk->insts[i];
+            for (int op = 0; op < VTX_INST_MAX_OPERANDS; op++) {
+                if (inst->opnd_kinds[op] == VTX_OPND_VREG) {
+                    uint32_t vreg = inst->operands[op];
+                    if (vreg < vreg_count) {
+                        /* Find root with path compression */
+                        while (parent[vreg] != vreg) {
+                            parent[vreg] = parent[parent[vreg]];
+                            vreg = parent[vreg];
+                        }
+                        inst->operands[op] = vreg;
+                    }
+                }
+            }
+            /* Also update memory operand vregs */
+            if (inst->flags & VTX_INST_FLAG_HAS_MEM) {
+                if (inst->mem.base_vreg != VTX_VREG_INVALID && inst->mem.base_vreg < vreg_count) {
+                    uint32_t v = inst->mem.base_vreg;
+                    while (parent[v] != v) { parent[v] = parent[parent[v]]; v = parent[v]; }
+                    inst->mem.base_vreg = v;
+                }
+                if (inst->mem.index_vreg != VTX_VREG_INVALID && inst->mem.index_vreg < vreg_count) {
+                    uint32_t v = inst->mem.index_vreg;
+                    while (parent[v] != v) { parent[v] = parent[parent[v]]; v = parent[v]; }
+                    inst->mem.index_vreg = v;
+                }
+            }
+        }
+    }
+
+    free(parent);
+    return coalesced;
+}
+
+/* ========================================================================== */
 /* Linear scan                                                                 */
 /* ========================================================================== */
 
@@ -208,13 +402,18 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
     result->intervals = intervals;
     result->interval_count = interval_count;
 
+    /* Perform register coalescing before sorting */
+    uint32_t vreg_count = stream->vreg_count;
+    if (intervals && vreg_count > 0) {
+        coalesce_copies(stream, intervals, vreg_count);
+    }
+
     /* Sort intervals by start position */
     if (intervals && interval_count > 0) {
         qsort(intervals, interval_count, sizeof(vtx_live_interval_t), cmp_intervals_by_start);
     }
 
     /* Allocate vreg → phys_reg mapping */
-    uint32_t vreg_count = stream->vreg_count;
     if (vreg_count == 0) return result;
 
     result->vreg_to_phys = (uint8_t *)vtx_arena_alloc(arena, vreg_count);
@@ -248,6 +447,9 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
     /* Returns the number of intervals expired */
     for (uint32_t i = 0; i < interval_count; i++) {
         vtx_live_interval_t *current = &intervals[i];
+
+        /* Skip intervals that were coalesced into another */
+        if (current->coalesce_src != VTX_VREG_INVALID) continue;
 
         /* Expire: remove from active any interval that ended before current starts */
         uint32_t new_active_count = 0;
@@ -303,16 +505,29 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
 
         /* Try to allocate a free register */
         if (free_regs != 0) {
-            /* Prefer caller-saved registers first */
+            /* Prefer caller-saved registers for short-lived values,
+             * callee-saved for long-lived values in loops */
             uint32_t caller_free = free_regs & VTX_CALLER_SAVED_MASK;
+            uint32_t callee_free = free_regs & VTX_CALLEE_SAVED_MASK;
             uint32_t reg_bit;
 
-            if (caller_free != 0) {
+            /* Heuristic: short-lived values (small interval range) prefer
+             * caller-saved registers. Long-lived values in deep loops
+             * prefer callee-saved registers (less save/restore overhead). */
+            uint32_t interval_length = current->end - current->start;
+            bool prefer_caller_saved = (interval_length < 20) || (current->loop_depth == 0);
+
+            if (prefer_caller_saved && caller_free != 0) {
                 reg_bit = caller_free & (~caller_free + 1u); /* lowest set bit */
-            } else {
-                uint32_t callee_free = free_regs & VTX_CALLEE_SAVED_MASK;
+            } else if (callee_free != 0) {
                 reg_bit = callee_free & (~callee_free + 1u);
                 callee_saved_used |= reg_bit;
+            } else if (caller_free != 0) {
+                /* Fallback to caller-saved if no callee-saved available */
+                reg_bit = caller_free & (~caller_free + 1u);
+            } else {
+                /* No registers available at all — shouldn't happen since free_regs != 0 */
+                continue;
             }
 
             uint8_t reg = 0;
@@ -329,19 +544,25 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
                 active[active_count++] = current;
             }
         } else {
-            /* No free register — spill the interval with the furthest end point */
-            /* Find the active interval with the furthest end */
+            /* No free register — spill the interval with the lowest spill cost.
+             * Spill cost = use_count * 10^loop_depth.
+             * Intervals in deep loops have much higher cost, so they are
+             * less likely to be spilled. */
             uint32_t spill_idx = 0;
-            uint32_t furthest_end = 0;
+            uint64_t min_cost = UINT64_MAX;
             for (uint32_t j = 0; j < active_count; j++) {
-                if (active[j]->end > furthest_end && !active[j]->is_fixed) {
-                    furthest_end = active[j]->end;
+                if (active[j]->is_fixed) continue;
+                uint64_t cost = compute_spill_cost(active[j]);
+                if (cost < min_cost) {
+                    min_cost = cost;
                     spill_idx = j;
                 }
             }
 
-            if (active_count > 0 && furthest_end > current->end) {
-                /* Spill the active interval, assign its register to current */
+            uint64_t current_cost = compute_spill_cost(current);
+
+            if (active_count > 0 && min_cost < current_cost) {
+                /* Spill the active interval with lowest cost, assign its register to current */
                 vtx_live_interval_t *spill = active[spill_idx];
                 current->phys_reg = spill->phys_reg;
                 spill->is_spilled = true;

@@ -593,6 +593,396 @@ void vtx_x86_emit_epilogue(vtx_x86_emit_t *e, uint32_t callee_saved_mask)
 }
 
 /* ========================================================================== */
+/* Peephole optimizations                                                      */
+/* ========================================================================== */
+
+/**
+ * Check if an instruction writes to a physical register operand.
+ * Returns the physical register written, or 0xFF if none.
+ */
+static uint8_t inst_dst_preg(const vtx_inst_t *inst)
+{
+    if (inst->opnd_kinds[0] != VTX_OPND_PREG) return 0xFF;
+    /* Only certain opcodes write to operand 0 */
+    switch (inst->opcode) {
+    case VTX_X86_MOV: case VTX_X86_ADD: case VTX_X86_SUB:
+    case VTX_X86_IMUL: case VTX_X86_AND: case VTX_X86_OR:
+    case VTX_X86_XOR: case VTX_X86_SHL: case VTX_X86_SHR:
+    case VTX_X86_SAR: case VTX_X86_NEG: case VTX_X86_NOT:
+    case VTX_X86_LEA: case VTX_X86_INC: case VTX_X86_DEC:
+    case VTX_X86_CMOV: case VTX_X86_SETCC: case VTX_X86_MOVZX:
+    case VTX_X86_MOVSX: case VTX_X86_POP:
+        return (uint8_t)inst->operands[0];
+    default:
+        return 0xFF;
+    }
+}
+
+/**
+ * Check if an instruction reads from a physical register.
+ * Returns true if the instruction reads the given register.
+ */
+static bool inst_reads_preg(const vtx_inst_t *inst, uint8_t preg)
+{
+    /* Check operand 1 (source) */
+    if (inst->opnd_kinds[1] == VTX_OPND_PREG && (uint8_t)inst->operands[1] == preg)
+        return true;
+    /* Check operand 2 */
+    if (inst->opnd_kinds[2] == VTX_OPND_PREG && (uint8_t)inst->operands[2] == preg)
+        return true;
+    /* For MOV reg,reg — operand 0 can also be a read (for ops like ADD) */
+    if (inst->opnd_kinds[0] == VTX_OPND_PREG && (uint8_t)inst->operands[0] == preg) {
+        /* Operand 0 is a read for CMP, TEST, PUSH */
+        if (inst->opcode == VTX_X86_CMP || inst->opcode == VTX_X86_TEST ||
+            inst->opcode == VTX_X86_PUSH)
+            return true;
+    }
+    return false;
+}
+
+/**
+ * Check if a physical register is read by any instruction in the block
+ * starting from position `from` (exclusive) to end of block.
+ */
+static bool is_reg_read_after(vtx_inst_block_t *blk, uint32_t from, uint8_t preg)
+{
+    for (uint32_t i = from + 1; i < blk->inst_count; i++) {
+        if (inst_reads_preg(&blk->insts[i], preg))
+            return true;
+    }
+    return false;
+}
+
+uint32_t vtx_peephole_optimize(vtx_inst_stream_t *stream,
+                                const vtx_regalloc_result_t *result)
+{
+    if (!stream) return 0;
+    uint32_t eliminated = 0;
+
+    for (uint32_t b = 0; b < stream->block_count; b++) {
+        vtx_inst_block_t *blk = &stream->blocks[b];
+
+        for (uint32_t i = 0; i < blk->inst_count; i++) {
+            vtx_inst_t *inst = &blk->insts[i];
+
+            /* ---- Pattern 1: Eliminate redundant MOV reg, reg (src == dst) ---- */
+            if (inst->opcode == VTX_X86_MOV &&
+                !(inst->flags & VTX_INST_FLAG_HAS_IMM) &&
+                !(inst->flags & VTX_INST_FLAG_HAS_MEM) &&
+                inst->opnd_kinds[0] == VTX_OPND_PREG &&
+                inst->opnd_kinds[1] == VTX_OPND_PREG &&
+                inst->operands[0] == inst->operands[1]) {
+                /* MOV r, r → NOP */
+                inst->opcode = VTX_X86_NOP;
+                inst->flags = 0;
+                memset(inst->opnd_kinds, 0, sizeof(inst->opnd_kinds));
+                memset(inst->operands, 0, sizeof(inst->operands));
+                eliminated++;
+                continue;
+            }
+
+            /* ---- Pattern 2: CMP reg, 0 → TEST reg, reg ---- */
+            if (inst->opcode == VTX_X86_CMP &&
+                (inst->flags & VTX_INST_FLAG_HAS_IMM) &&
+                inst->imm == 0 &&
+                inst->opnd_kinds[0] == VTX_OPND_PREG) {
+                /* CMP reg, 0 → TEST reg, reg (1 byte shorter encoding) */
+                inst->opcode = VTX_X86_TEST;
+                inst->opnd_kinds[1] = VTX_OPND_PREG;
+                inst->operands[1] = inst->operands[0]; /* TEST reg, reg */
+                inst->flags &= ~VTX_INST_FLAG_HAS_IMM;
+                continue;
+            }
+
+            /* ---- Pattern 3: CMP reg1, reg2 where reg1==reg2 → TEST reg, reg ---- */
+            if (inst->opcode == VTX_X86_CMP &&
+                !(inst->flags & VTX_INST_FLAG_HAS_IMM) &&
+                inst->opnd_kinds[0] == VTX_OPND_PREG &&
+                inst->opnd_kinds[1] == VTX_OPND_PREG &&
+                inst->operands[0] == inst->operands[1]) {
+                inst->opcode = VTX_X86_TEST;
+                inst->operands[1] = inst->operands[0];
+                continue;
+            }
+
+            /* ---- Pattern 4: ADD reg, 0 or SUB reg, 0 → NOP ---- */
+            if ((inst->opcode == VTX_X86_ADD || inst->opcode == VTX_X86_SUB) &&
+                (inst->flags & VTX_INST_FLAG_HAS_IMM) &&
+                inst->imm == 0 &&
+                inst->opnd_kinds[0] == VTX_OPND_PREG) {
+                inst->opcode = VTX_X86_NOP;
+                inst->flags = 0;
+                memset(inst->opnd_kinds, 0, sizeof(inst->opnd_kinds));
+                memset(inst->operands, 0, sizeof(inst->operands));
+                eliminated++;
+                continue;
+            }
+
+            /* ---- Pattern 5: XOR reg, 0 → NOP ---- */
+            if (inst->opcode == VTX_X86_XOR &&
+                (inst->flags & VTX_INST_FLAG_HAS_IMM) &&
+                inst->imm == 0 &&
+                inst->opnd_kinds[0] == VTX_OPND_PREG) {
+                inst->opcode = VTX_X86_NOP;
+                inst->flags = 0;
+                memset(inst->opnd_kinds, 0, sizeof(inst->opnd_kinds));
+                memset(inst->operands, 0, sizeof(inst->operands));
+                eliminated++;
+                continue;
+            }
+
+            /* ---- Pattern 6: OR reg, 0 / AND reg, -1 → NOP ---- */
+            if (inst->opcode == VTX_X86_OR &&
+                (inst->flags & VTX_INST_FLAG_HAS_IMM) &&
+                inst->imm == 0 &&
+                inst->opnd_kinds[0] == VTX_OPND_PREG) {
+                inst->opcode = VTX_X86_NOP;
+                inst->flags = 0;
+                memset(inst->opnd_kinds, 0, sizeof(inst->opnd_kinds));
+                memset(inst->operands, 0, sizeof(inst->operands));
+                eliminated++;
+                continue;
+            }
+            if (inst->opcode == VTX_X86_AND &&
+                (inst->flags & VTX_INST_FLAG_HAS_IMM) &&
+                inst->imm == -1 &&
+                inst->opnd_kinds[0] == VTX_OPND_PREG) {
+                inst->opcode = VTX_X86_NOP;
+                inst->flags = 0;
+                memset(inst->opnd_kinds, 0, sizeof(inst->opnd_kinds));
+                memset(inst->operands, 0, sizeof(inst->operands));
+                eliminated++;
+                continue;
+            }
+
+            /* ---- Pattern 7: MOV reg, 0 → XOR reg, reg (1 byte shorter) ---- */
+            if (inst->opcode == VTX_X86_MOV &&
+                (inst->flags & VTX_INST_FLAG_HAS_IMM) &&
+                inst->imm == 0 &&
+                inst->opnd_kinds[0] == VTX_OPND_PREG) {
+                inst->opcode = VTX_X86_XOR;
+                inst->opnd_kinds[1] = VTX_OPND_PREG;
+                inst->operands[1] = inst->operands[0]; /* XOR reg, reg */
+                inst->flags &= ~VTX_INST_FLAG_HAS_IMM;
+                continue;
+            }
+
+            /* ---- Pattern 8: Dead store elimination ----
+             * If an instruction writes to a register that is never read again
+             * within this block (and the register is caller-saved, so no
+             * cross-block liveness concern), eliminate it.
+             */
+            if (inst->opcode != VTX_X86_NOP && inst->opcode != VTX_X86_CALL &&
+                inst->opcode != VTX_X86_RET && inst->opcode != VTX_X86_JCC &&
+                inst->opcode != VTX_X86_JMP && inst->opcode != VTX_X86_PUSH &&
+                inst->opcode != VTX_X86_POP && inst->opcode != VTX_X86_CMP &&
+                inst->opcode != VTX_X86_TEST && inst->opcode != VTX_X86_IDIV) {
+                uint8_t dst_reg = inst_dst_preg(inst);
+                if (dst_reg != 0xFF && !(inst->flags & VTX_INST_FLAG_HAS_MEM)) {
+                    /* Check if the register is a caller-saved register */
+                    if (VTX_CALLER_SAVED_MASK & (1u << dst_reg)) {
+                        /* Check if it's never read again in this block */
+                        if (!is_reg_read_after(blk, i, dst_reg)) {
+                            inst->opcode = VTX_X86_NOP;
+                            inst->flags = 0;
+                            memset(inst->opnd_kinds, 0, sizeof(inst->opnd_kinds));
+                            memset(inst->operands, 0, sizeof(inst->operands));
+                            eliminated++;
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            /* ---- Pattern 9: CMP + SETCC for EQ/NE against 0 → TEST + SETCC ---- */
+            /* If CMP is immediately followed by SETCC with EQ/NE condition,
+             * and the CMP compares against 0, we can use TEST instead.
+             * This is already handled by pattern 2 (CMP → TEST) above. */
+        }
+    }
+
+    return eliminated;
+}
+
+/* ========================================================================== */
+/* Branch optimization                                                         */
+/* ========================================================================== */
+
+/**
+ * Invert an x86 condition code.
+ * E.g., JE → JNE, JL → JGE
+ */
+static uint8_t invert_x86_cond(uint8_t cond)
+{
+    return cond ^ 1; /* Flip the low bit inverts the condition */
+}
+
+/**
+ * Estimate the native code size of an instruction in bytes.
+ * Used for jump offset calculation before actual emission.
+ */
+static uint32_t estimate_inst_size(const vtx_inst_t *inst)
+{
+    switch (inst->opcode) {
+    case VTX_X86_NOP:    return 1;  /* 1-byte NOP */
+    case VTX_X86_RET:    return 1;  /* C3 */
+    case VTX_X86_PUSH:   return 2;  /* REX + 50+rd (or 1 byte) */
+    case VTX_X86_POP:    return 2;  /* REX + 58+rd */
+    case VTX_X86_JMP:    return 5;  /* E9 + rel32 */
+    case VTX_X86_JCC:    return 6;  /* 0F 8x + rel32 */
+    case VTX_X86_CALL:   return 5;  /* E8 + rel32 */
+    case VTX_X86_CQO:    return 2;  /* REX.W 99 */
+    case VTX_X86_MOV:
+        if (inst->flags & VTX_INST_FLAG_HAS_IMM) {
+            /* mov r64, imm32: REX.W C7 /0 + imm32 = 7 bytes */
+            /* mov r64, imm64: REX.W B8+rd + imm64 = 10 bytes */
+            if (inst->imm >= INT32_MIN && inst->imm <= INT32_MAX)
+                return 7;
+            return 10;
+        }
+        if (inst->flags & VTX_INST_FLAG_HAS_MEM) return 8; /* approximate */
+        return 3; /* REX.W 89 ModR/M */
+    case VTX_X86_LEA:    return 5;  /* REX.W 8D + ModR/M + disp32 approx */
+    case VTX_X86_SETCC:  return 3;  /* 0F 9x + ModR/M */
+    case VTX_X86_ADD: case VTX_X86_SUB: case VTX_X86_AND:
+    case VTX_X86_OR:  case VTX_X86_XOR:
+        if (inst->flags & VTX_INST_FLAG_HAS_IMM) {
+            int64_t imm = inst->imm;
+            if (imm >= -128 && imm <= 127) return 4; /* REX.W 83 /x + imm8 */
+            return 7; /* REX.W 81 /x + imm32 */
+        }
+        return 3; /* REX.W op + ModR/M */
+    case VTX_X86_IMUL:   return 4;  /* REX.W 0F AF + ModR/M */
+    case VTX_X86_IDIV:   return 3;  /* REX.W F7 /7 */
+    case VTX_X86_SHL: case VTX_X86_SHR: case VTX_X86_SAR:
+        if (inst->flags & VTX_INST_FLAG_HAS_IMM) return 4; /* REX.W C1 /x + imm8 */
+        return 3; /* REX.W D3 /x */
+    case VTX_X86_CMP: case VTX_X86_TEST:
+        if (inst->flags & VTX_INST_FLAG_HAS_IMM) {
+            if (inst->imm >= -128 && inst->imm <= 127) return 4;
+            return 7;
+        }
+        return 3;
+    case VTX_X86_NEG: case VTX_X86_NOT: return 3; /* REX.W F7 /x */
+    default: return 4; /* conservative estimate */
+    }
+}
+
+int vtx_branch_optimize(vtx_inst_stream_t *stream, vtx_x86_emit_t *emit,
+                         const vtx_regalloc_result_t *result)
+{
+    if (!stream) return 0;
+
+    /* ---- Phase 1: Invert JCC + JMP to eliminate jumps over jumps ---- */
+    for (uint32_t b = 0; b < stream->block_count; b++) {
+        vtx_inst_block_t *blk = &stream->blocks[b];
+
+        for (uint32_t i = 0; i + 1 < blk->inst_count; i++) {
+            vtx_inst_t *inst = &blk->insts[i];
+            vtx_inst_t *next = &blk->insts[i + 1];
+
+            /* Pattern: JCC target1 followed by JMP target2
+             * Invert to: JCC(inverted) target2 followed by... (target1 becomes fall-through)
+             * This eliminates one jump when target1 is the next block. */
+            if (inst->opcode == VTX_X86_JCC && next->opcode == VTX_X86_JMP &&
+                (inst->flags & VTX_INST_FLAG_HAS_COND) &&
+                inst->opnd_kinds[0] == VTX_OPND_LABEL &&
+                next->opnd_kinds[0] == VTX_OPND_LABEL) {
+
+                /* Invert the condition and swap targets */
+                uint8_t old_x86_cond = vtx_cond_to_x86(inst->cond);
+                uint8_t new_x86_cond = invert_x86_cond(old_x86_cond);
+
+                /* Convert the inverted x86 cond back to vtx_cond */
+                /* We just update the condition code directly */
+                vtx_cond_t inverted_cond = vtx_cond_negate(inst->cond);
+                inst->cond = inverted_cond;
+                inst->operands[0] = next->operands[0]; /* Take the JMP's target */
+
+                /* Remove the JMP (convert to NOP) */
+                next->opcode = VTX_X86_NOP;
+                next->flags = 0;
+                memset(next->opnd_kinds, 0, sizeof(next->opnd_kinds));
+                memset(next->operands, 0, sizeof(next->operands));
+            }
+        }
+    }
+
+    /* ---- Phase 2: Compute estimated code offsets for short jump detection ---- */
+    /* First pass: assign estimated offsets */
+    for (uint32_t b = 0; b < stream->block_count; b++) {
+        vtx_inst_block_t *blk = &stream->blocks[b];
+        uint32_t offset = (b == 0) ? 0 : blk->insts[0].native_offset;
+
+        for (uint32_t i = 0; i < blk->inst_count; i++) {
+            blk->insts[i].native_offset = offset;
+            offset += estimate_inst_size(&blk->insts[i]);
+        }
+    }
+
+    /* ---- Phase 3: Mark short jumps ---- */
+    for (uint32_t b = 0; b < stream->block_count; b++) {
+        vtx_inst_block_t *blk = &stream->blocks[b];
+
+        for (uint32_t i = 0; i < blk->inst_count; i++) {
+            vtx_inst_t *inst = &blk->insts[i];
+
+            if (inst->opcode == VTX_X86_JCC || inst->opcode == VTX_X86_JMP) {
+                if (inst->opnd_kinds[0] != VTX_OPND_LABEL) continue;
+
+                uint32_t target_block = inst->operands[0];
+                if (target_block >= stream->block_count) continue;
+
+                /* Estimate source and target offsets */
+                uint32_t src_offset = inst->native_offset;
+                uint32_t tgt_offset = stream->blocks[target_block].insts[0].native_offset;
+
+                /* Estimate jump instruction size */
+                uint32_t inst_size = estimate_inst_size(inst);
+
+                /* Calculate relative offset (from end of jump instruction) */
+                int32_t rel = (int32_t)(tgt_offset - (src_offset + inst_size));
+
+                /* Short jump: 2 bytes (opcode + rel8), range ±127 */
+                if (rel >= -127 && rel <= 127) {
+                    /* Mark this instruction for short jump encoding.
+                     * We use a flag bit to indicate short jump. */
+                    inst->flags |= (1u << 16); /* Custom flag for short jump */
+                }
+            }
+        }
+    }
+
+    /* ---- Phase 4: Mark loop headers for alignment ---- */
+    /* A block is a loop header if it has a back-edge from a later block.
+     * We detect this by checking if any successor of a later block points
+     * back to an earlier block. */
+    for (uint32_t b = 0; b < stream->block_count; b++) {
+        vtx_inst_block_t *blk = &stream->blocks[b];
+
+        for (uint32_t i = 0; i < blk->inst_count; i++) {
+            vtx_inst_t *inst = &blk->insts[i];
+            if ((inst->opcode == VTX_X86_JCC || inst->opcode == VTX_X86_JMP) &&
+                inst->opnd_kinds[0] == VTX_OPND_LABEL) {
+                uint32_t target_block = inst->operands[0];
+                if (target_block < b) {
+                    /* Back-edge found: target_block is a loop header.
+                     * Mark it for 16-byte alignment. */
+                    if (target_block < stream->block_count) {
+                        vtx_inst_block_t *hdr = &stream->blocks[target_block];
+                        if (hdr->inst_count > 0) {
+                            hdr->insts[0].flags |= (1u << 17); /* Alignment flag */
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return 0;
+}
+
+/* ========================================================================== */
 /* Emit entire function                                                        */
 /* ========================================================================== */
 
@@ -831,6 +1221,12 @@ int vtx_x86_emit_function(vtx_x86_emit_t *emit, vtx_inst_stream_t *stream,
 {
     if (!emit || !stream) return -1;
 
+    /* Apply peephole optimizations before emission */
+    if (result) {
+        vtx_peephole_optimize(stream, result);
+        vtx_branch_optimize(stream, emit, result);
+    }
+
     /* Emit prologue */
     vtx_x86_emit_prologue(emit, result ? result->frame_size : 0,
                            result ? result->callee_saved_mask : 0);
@@ -838,10 +1234,39 @@ int vtx_x86_emit_function(vtx_x86_emit_t *emit, vtx_inst_stream_t *stream,
     /* Emit instructions for each block */
     for (uint32_t b = 0; b < stream->block_count; b++) {
         vtx_inst_block_t *blk = &stream->blocks[b];
+
+        /* Align loop headers to 16-byte boundaries */
+        if (blk->inst_count > 0 && (blk->insts[0].flags & (1u << 17))) {
+            uint32_t pos = vtx_x86_emit_position(emit);
+            uint32_t aligned = (pos + 15u) & ~15u;
+            while (pos < aligned) {
+                vtx_x86_emit_nop(emit);
+                pos++;
+            }
+        }
+
         for (uint32_t i = 0; i < blk->inst_count; i++) {
             vtx_inst_t *inst = &blk->insts[i];
             /* Record the native offset before emitting */
             inst->native_offset = vtx_x86_emit_position(emit);
+
+            /* Handle short jumps for JCC */
+            if (inst->opcode == VTX_X86_JCC && (inst->flags & (1u << 16))) {
+                /* Short JCC: 7x cb (2 bytes) — will be patched by reloc */
+                uint8_t x86_cond = vtx_cond_to_x86(inst->cond);
+                emit_byte(emit, (uint8_t)(0x70 + x86_cond));
+                emit_byte(emit, 0x00); /* placeholder rel8 */
+                continue;
+            }
+
+            /* Handle short jumps for JMP */
+            if (inst->opcode == VTX_X86_JMP && (inst->flags & (1u << 16))) {
+                /* Short JMP: EB cb (2 bytes) */
+                emit_byte(emit, 0xEB);
+                emit_byte(emit, 0x00); /* placeholder rel8 */
+                continue;
+            }
+
             if (emit_single_inst(emit, inst, result) != 0) {
                 return -1;
             }

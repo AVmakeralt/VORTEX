@@ -61,7 +61,7 @@ VTX_TEST(interp_iadd)
     vtx_type_system_init(&ts);
 
     vtx_gc_t gc;
-    vtx_gc_init(&gc, &ts);
+    vtx_gc_init(&gc, &ts, VTX_GC_GENERATIONAL);
 
     vtx_interp_t interp;
     vtx_interp_init(&interp, &ts, &gc);
@@ -99,7 +99,7 @@ VTX_TEST(interp_isub)
     vtx_type_system_t ts;
     vtx_type_system_init(&ts);
     vtx_gc_t gc;
-    vtx_gc_init(&gc, &ts);
+    vtx_gc_init(&gc, &ts, VTX_GC_GENERATIONAL);
     vtx_interp_t interp;
     vtx_interp_init(&interp, &ts, &gc);
 
@@ -136,7 +136,7 @@ VTX_TEST(interp_imul)
     vtx_type_system_t ts;
     vtx_type_system_init(&ts);
     vtx_gc_t gc;
-    vtx_gc_init(&gc, &ts);
+    vtx_gc_init(&gc, &ts, VTX_GC_GENERATIONAL);
     vtx_interp_t interp;
     vtx_interp_init(&interp, &ts, &gc);
 
@@ -168,7 +168,7 @@ VTX_TEST(interp_return_void)
     vtx_type_system_t ts;
     vtx_type_system_init(&ts);
     vtx_gc_t gc;
-    vtx_gc_init(&gc, &ts);
+    vtx_gc_init(&gc, &ts, VTX_GC_GENERATIONAL);
     vtx_interp_t interp;
     vtx_interp_init(&interp, &ts, &gc);
 
@@ -205,7 +205,7 @@ VTX_TEST(interp_load_const_int)
     vtx_type_system_t ts;
     vtx_type_system_init(&ts);
     vtx_gc_t gc;
-    vtx_gc_init(&gc, &ts);
+    vtx_gc_init(&gc, &ts, VTX_GC_GENERATIONAL);
     vtx_interp_t interp;
     vtx_interp_init(&interp, &ts, &gc);
 
@@ -241,7 +241,7 @@ VTX_TEST(interp_load_specials)
     vtx_type_system_t ts;
     vtx_type_system_init(&ts);
     vtx_gc_t gc;
-    vtx_gc_init(&gc, &ts);
+    vtx_gc_init(&gc, &ts, VTX_GC_GENERATIONAL);
     vtx_interp_t interp;
     vtx_interp_init(&interp, &ts, &gc);
 
@@ -320,7 +320,7 @@ VTX_TEST(interp_icmp_and_branch)
     vtx_type_system_t ts;
     vtx_type_system_init(&ts);
     vtx_gc_t gc;
-    vtx_gc_init(&gc, &ts);
+    vtx_gc_init(&gc, &ts, VTX_GC_GENERATIONAL);
     vtx_interp_t interp;
     vtx_interp_init(&interp, &ts, &gc);
 
@@ -455,7 +455,7 @@ VTX_TEST(interp_loop_countdown)
     vtx_type_system_t ts;
     vtx_type_system_init(&ts);
     vtx_gc_t gc;
-    vtx_gc_init(&gc, &ts);
+    vtx_gc_init(&gc, &ts, VTX_GC_GENERATIONAL);
     vtx_interp_t interp;
     vtx_interp_init(&interp, &ts, &gc);
 
@@ -494,7 +494,7 @@ VTX_TEST(interp_dup_pop)
     vtx_type_system_t ts;
     vtx_type_system_init(&ts);
     vtx_gc_t gc;
-    vtx_gc_init(&gc, &ts);
+    vtx_gc_init(&gc, &ts, VTX_GC_GENERATIONAL);
     vtx_interp_t interp;
     vtx_interp_init(&interp, &ts, &gc);
 

@@ -84,6 +84,9 @@ typedef struct {
     bool     is_fixed;     /* true if vreg is fixed to a physical register */
     uint8_t  fixed_reg;    /* the fixed physical register (if is_fixed) */
     bool     is_spilled;   /* true if this interval was spilled */
+    uint32_t use_count;    /* number of uses of this vreg (for spill cost) */
+    uint32_t loop_depth;   /* estimated loop nesting depth (for spill cost) */
+    uint32_t coalesce_src; /* vreg this was coalesced from (VTX_VREG_INVALID = none) */
 } vtx_live_interval_t;
 
 /* ========================================================================== */

@@ -134,7 +134,7 @@ int main(void)
                                                     0, NULL, 1, override_methods);
 
     vtx_gc_t gc;
-    vtx_gc_init(&gc, &ts);
+    vtx_gc_init(&gc, &ts, VTX_GC_GENERATIONAL);
 
     vtx_interp_t interp;
     vtx_interp_init(&interp, &ts, &gc);

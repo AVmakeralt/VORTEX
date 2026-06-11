@@ -226,7 +226,7 @@ static void old_gen_free(vtx_old_gen_t *old, void *ptr, size_t size)
 /* GC init/destroy                                                             */
 /* ========================================================================== */
 
-int vtx_gc_init(vtx_gc_t *gc, vtx_type_system_t *ts)
+int vtx_gc_init(vtx_gc_t *gc, vtx_type_system_t *ts, vtx_gc_mode_t mode)
 {
     VTX_ASSERT(gc != NULL, "GC must not be NULL");
     VTX_ASSERT(ts != NULL, "type system must not be NULL");
@@ -291,8 +291,81 @@ int vtx_gc_init(vtx_gc_t *gc, vtx_type_system_t *ts)
     gc->type_system = ts;
     gc->collection_requested = false;
     gc->collections_done = 0;
+    gc->mode = mode;
+    vtx_gc_set_mode(gc, mode);
 
     return 0;
+}
+
+void vtx_gc_set_mode(vtx_gc_t *gc, vtx_gc_mode_t mode)
+{
+    VTX_ASSERT(gc != NULL, "GC must not be NULL");
+    gc->mode = mode;
+
+    switch (mode) {
+    case VTX_GC_GENERATIONAL:
+        gc->fn_write_barrier = vtx_gc_write_barrier;
+        gc->fn_safepoint = vtx_gc_safepoint;
+        gc->fn_root_push = vtx_gc_root_push;
+        gc->fn_root_pop = vtx_gc_root_pop;
+        break;
+    case VTX_GC_NONE:
+        gc->fn_write_barrier = NULL;
+        gc->fn_safepoint = NULL;
+        gc->fn_root_push = NULL;
+        gc->fn_root_pop = NULL;
+        break;
+    case VTX_GC_MANUAL:
+        gc->fn_write_barrier = NULL;
+        gc->fn_safepoint = NULL;
+        gc->fn_root_push = vtx_gc_root_push;
+        gc->fn_root_pop = vtx_gc_root_pop;
+        gc->manual_free_list = NULL;
+        break;
+    case VTX_GC_ARENA:
+        gc->fn_write_barrier = NULL;
+        gc->fn_safepoint = NULL;
+        gc->fn_root_push = vtx_gc_root_push;
+        gc->fn_root_pop = vtx_gc_root_pop;
+        gc->arena_save_point = gc->young_from.current;
+        break;
+    }
+}
+
+vtx_gc_mode_t vtx_gc_get_mode(const vtx_gc_t *gc)
+{
+    VTX_ASSERT(gc != NULL, "GC must not be NULL");
+    return gc->mode;
+}
+
+void vtx_gc_manual_free(vtx_gc_t *gc, void *ptr, size_t size)
+{
+    VTX_ASSERT(gc != NULL, "GC must not be NULL");
+    VTX_ASSERT(gc->mode == VTX_GC_MANUAL, "manual_free only valid in manual mode");
+    if (gc->mode != VTX_GC_MANUAL) return;
+
+    size = align_up_8(size);
+    if (size < sizeof(vtx_free_node_t)) {
+        size = sizeof(vtx_free_node_t);
+    }
+    vtx_free_node_t *node = (vtx_free_node_t *)ptr;
+    node->size = size;
+    node->next = gc->manual_free_list;
+    gc->manual_free_list = node;
+}
+
+void vtx_gc_arena_enter(vtx_gc_t *gc)
+{
+    VTX_ASSERT(gc != NULL, "GC must not be NULL");
+    VTX_ASSERT(gc->mode == VTX_GC_ARENA, "arena_enter only valid in arena mode");
+    gc->arena_save_point = gc->young_from.current;
+}
+
+void vtx_gc_arena_leave(vtx_gc_t *gc)
+{
+    VTX_ASSERT(gc != NULL, "GC must not be NULL");
+    VTX_ASSERT(gc->mode == VTX_GC_ARENA, "arena_leave only valid in arena mode");
+    gc->young_from.current = gc->arena_save_point;
 }
 
 void vtx_gc_destroy(vtx_gc_t *gc)

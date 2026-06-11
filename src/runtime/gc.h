@@ -83,7 +83,7 @@ typedef struct {
 } vtx_root_entry_t;
 
 /* The garbage collector */
-typedef struct {
+typedef struct vtx_gc_t {
     /* Young generation: two semi-spaces */
     vtx_semi_space_t  young_from;     /* current allocation space */
     vtx_semi_space_t  young_to;       /* copy destination during collection */
@@ -117,11 +117,11 @@ typedef struct {
     vtx_gc_mode_t     mode;           /* current GC mode */
 
     /* Function pointers for mode-dependent operations */
-    void (*fn_write_barrier)(vtx_gc_t *gc, vtx_heap_object_t *obj,
+    void (*fn_write_barrier)(struct vtx_gc_t *gc, vtx_heap_object_t *obj,
                              uint32_t field_offset, vtx_value_t value);
-    void (*fn_safepoint)(vtx_gc_t *gc);
-    void (*fn_root_push)(vtx_gc_t *gc, vtx_value_t value);
-    vtx_value_t (*fn_root_pop)(vtx_gc_t *gc);
+    void (*fn_safepoint)(struct vtx_gc_t *gc);
+    void (*fn_root_push)(struct vtx_gc_t *gc, vtx_value_t value);
+    vtx_value_t (*fn_root_pop)(struct vtx_gc_t *gc);
 
     /* Manual mode: free list for explicit free */
     vtx_free_node_t  *manual_free_list;

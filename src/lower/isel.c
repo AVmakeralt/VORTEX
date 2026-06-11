@@ -289,6 +289,179 @@ static uint32_t ensure_node_vreg(vtx_inst_stream_t *stream, vtx_nodeid_t node_id
 }
 
 /* ========================================================================== */
+/* Strength reduction helpers                                                  */
+/* ========================================================================== */
+
+/**
+ * Check if a value is a power of 2.
+ * Returns the shift amount (log2) if true, or -1 if false.
+ */
+static int is_power_of_2(int64_t val)
+{
+    if (val <= 0) return -1;
+    if ((val & (val - 1)) != 0) return -1;
+    int shift = 0;
+    while (val > 1) { val >>= 1; shift++; }
+    return shift;
+}
+
+/**
+ * Try to get the constant integer value of a node.
+ * Returns true and sets *out_val if the node is a Constant with Int type.
+ */
+static bool try_get_const_int(const vtx_graph_t *graph, vtx_nodeid_t node_id,
+                               int64_t *out_val)
+{
+    const vtx_node_t *node = vtx_node_get_const(&graph->node_table, node_id);
+    if (!node || node->opcode != VTX_OP_Constant) return false;
+    if (node->constval.kind != VTX_TYPE_Int) return false;
+    *out_val = node->constval.as.int_val;
+    return true;
+}
+
+/**
+ * Compute the magic number for signed division by a constant.
+ * Implements the algorithm from Hacker's Delight (Warren, Chapter 10).
+ * For d != 0, computes M such that floor(n/d) = floor(M*n / 2^p).
+ *
+ * @param d     Divisor (must be != 0, != -1, != 1)
+ * @param M     Output: magic number multiplier
+ * @param s     Output: post-shift amount
+ * @return      true on success
+ */
+static bool compute_magic_number(int64_t d, int64_t *M, int *s)
+{
+    if (d == 0 || d == 1 || d == -1) return false;
+
+    /* Use absolute value for the algorithm */
+    uint64_t ad = (d < 0) ? (uint64_t)(-d) : (uint64_t)d;
+    uint64_t nc = ((uint64_t)1 << 63) - 1 + (ad - (uint64_t)1) / ad; /* nc = 2^63-1 - (2^63-1)\ad + 1 */
+    /* Simplified: we approximate with a standard magic number computation */
+    int p = 63;
+    uint64_t q = (uint64_t)1 << p;       /* 2^p */
+    uint64_t r = q % ad;                  /* remainder */
+    uint64_t m = q / ad;                  /* initial magic */
+
+    /* Iterate to find the correct shift */
+    for (;;) {
+        p++;
+        q = r * 2;
+        r = q % ad;
+        m = m * 2 + q / ad;
+        if (r == 0 || p >= 127) break;
+    }
+
+    *M = (int64_t)m;
+    *s = p - 64;
+    return true;
+}
+
+/**
+ * Emit a multiply-by-constant sequence using LEA + shift/add.
+ * Handles common small constants efficiently.
+ * Returns true if the sequence was emitted, false if IMUL should be used.
+ */
+static bool emit_mul_by_constant(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
+                                  uint32_t dst, uint32_t lhs_vreg, int64_t constant,
+                                  vtx_nodeid_t node_id, vtx_arena_t *arena)
+{
+    /* x * 0 → xor dst, dst */
+    if (constant == 0) {
+        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_XOR, dst, dst, node_id), arena);
+        return true;
+    }
+
+    /* x * 1 → just move (or nop if dst == lhs) */
+    if (constant == 1) {
+        if (dst != lhs_vreg)
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_vreg, node_id), arena);
+        return true;
+    }
+
+    /* x * -1 → neg */
+    if (constant == -1) {
+        if (dst != lhs_vreg)
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_vreg, node_id), arena);
+        vtx_isel_emit_inst(block, make_r_inst(VTX_X86_NEG, dst, node_id, 0), arena);
+        return true;
+    }
+
+    /* x * 2^n → shl dst, n */
+    int shift = is_power_of_2(constant);
+    if (shift >= 0) {
+        if (dst != lhs_vreg)
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_vreg, node_id), arena);
+        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, dst, shift, node_id), arena);
+        return true;
+    }
+
+    /* x * 3 → lea dst, [lhs + lhs*2] */
+    if (constant == 3) {
+        vtx_x86_memop_t mem = { lhs_vreg, lhs_vreg, 2, 0 };
+        vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_LEA, dst, &mem, node_id), arena);
+        return true;
+    }
+
+    /* x * 5 → lea dst, [lhs + lhs*4] */
+    if (constant == 5) {
+        vtx_x86_memop_t mem = { lhs_vreg, lhs_vreg, 4, 0 };
+        vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_LEA, dst, &mem, node_id), arena);
+        return true;
+    }
+
+    /* x * 6 → lea dst, [lhs*2 + lhs*4] then add lhs (or: lea [lhs+lhs*2]; shl 1) */
+    if (constant == 6) {
+        vtx_x86_memop_t mem = { lhs_vreg, lhs_vreg, 2, 0 };
+        vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_LEA, dst, &mem, node_id), arena);
+        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, dst, 1, node_id), arena);
+        return true;
+    }
+
+    /* x * 9 → lea dst, [lhs + lhs*8] */
+    if (constant == 9) {
+        vtx_x86_memop_t mem = { lhs_vreg, lhs_vreg, 8, 0 };
+        vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_LEA, dst, &mem, node_id), arena);
+        return true;
+    }
+
+    /* x * 10 → lea dst, [lhs + lhs*4]; shl 1 */
+    if (constant == 10) {
+        vtx_x86_memop_t mem = { lhs_vreg, lhs_vreg, 4, 0 };
+        vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_LEA, dst, &mem, node_id), arena);
+        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, dst, 1, node_id), arena);
+        return true;
+    }
+
+    /* x * (2^n + 1) → lea dst, [lhs + lhs*2^n] */
+    for (int n = 1; n <= 3; n++) {
+        if (constant == ((1 << n) + 1)) {
+            vtx_x86_memop_t mem = { lhs_vreg, lhs_vreg, (uint8_t)(1 << n), 0 };
+            vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_LEA, dst, &mem, node_id), arena);
+            return true;
+        }
+    }
+
+    /* x * (2^n - 1) → lea dst, [lhs*2^n - lhs] (use negative disp) */
+    for (int n = 2; n <= 3; n++) {
+        if (constant == ((1 << n) - 1)) {
+            vtx_x86_memop_t mem = { lhs_vreg, lhs_vreg, (uint8_t)(1 << n), -8 };
+            vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_LEA, dst, &mem, node_id), arena);
+            return true;
+        }
+    }
+
+    /* For negative constants: compute |c| * x, then negate */
+    if (constant < 0 && constant > -64) {
+        if (emit_mul_by_constant(stream, block, dst, lhs_vreg, -constant, node_id, arena)) {
+            vtx_isel_emit_inst(block, make_r_inst(VTX_X86_NEG, dst, node_id, 0), arena);
+            return true;
+        }
+    }
+
+    return false; /* fall back to IMUL */
+}
+
+/* ========================================================================== */
 /* Call clobber mask                                                           */
 /* ========================================================================== */
 
@@ -402,6 +575,22 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         uint32_t rhs_vreg = vtx_isel_node_vreg(stream, node->inputs[1]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (lhs_vreg == VTX_VREG_INVALID || rhs_vreg == VTX_VREG_INVALID) return -1;
+
+        /* Strength reduction: try to replace IMUL with cheaper ops */
+        int64_t rhs_const;
+        if (try_get_const_int(graph, node->inputs[1], &rhs_const)) {
+            /* RHS is constant — try LEA/shift/add sequence */
+            if (emit_mul_by_constant(stream, block, dst, lhs_vreg, rhs_const, node_id, arena))
+                break;
+        }
+        int64_t lhs_const;
+        if (try_get_const_int(graph, node->inputs[0], &lhs_const)) {
+            /* LHS is constant — swap and try */
+            if (emit_mul_by_constant(stream, block, dst, rhs_vreg, lhs_const, node_id, arena))
+                break;
+        }
+
+        /* Fallback: use IMUL */
         if (dst != lhs_vreg)
             vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_vreg, node_id), arena);
         vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_IMUL, dst, rhs_vreg, node_id), arena);
@@ -413,6 +602,43 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         uint32_t lhs_vreg = vtx_isel_node_vreg(stream, node->inputs[0]);
         uint32_t rhs_vreg = vtx_isel_node_vreg(stream, node->inputs[1]);
         if (lhs_vreg == VTX_VREG_INVALID || rhs_vreg == VTX_VREG_INVALID) return -1;
+
+        /* Strength reduction: divide by constant power of 2 → SAR */
+        int64_t rhs_const;
+        if (try_get_const_int(graph, node->inputs[1], &rhs_const)) {
+            int shift = is_power_of_2(rhs_const);
+            if (shift >= 0) {
+                /* x / 2^n → sar dst, n (with rounding fixup for signed div) */
+                uint32_t dst = ensure_node_vreg(stream, node_id, arena);
+                if (dst != lhs_vreg)
+                    vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_vreg, node_id), arena);
+                /* For signed division, add round-to-zero fixup:
+                 * if x < 0, add (2^n - 1) before shifting */
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHR, dst, 63, node_id), arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_AND, dst, (int64_t)((1 << shift) - 1), node_id), arena);
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_ADD, dst, lhs_vreg, node_id), arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, dst, shift, node_id), arena);
+                break;
+            }
+
+            /* Divide by constant using magic number multiplication */
+            int64_t magic;
+            int magic_shift;
+            if (compute_magic_number(rhs_const, &magic, &magic_shift)) {
+                uint32_t dst = ensure_node_vreg(stream, node_id, arena);
+                if (dst != lhs_vreg)
+                    vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_vreg, node_id), arena);
+                /* mov tmp, magic; imul dst, tmp; sar dst, shift */
+                uint32_t tmp = vtx_isel_alloc_vreg(stream, arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, tmp, magic, node_id), arena);
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_IMUL, dst, tmp, node_id), arena);
+                if (magic_shift > 0)
+                    vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, dst, magic_shift, node_id), arena);
+                break;
+            }
+        }
+
+        /* Fallback: use CQO + IDIV */
         uint32_t rax_vreg = vtx_isel_alloc_vreg_fixed(stream, arena, 0);
         uint32_t rdx_vreg = vtx_isel_alloc_vreg_fixed(stream, arena, 2);
         if (rax_vreg == VTX_VREG_INVALID || rdx_vreg == VTX_VREG_INVALID) return -1;
@@ -441,6 +667,30 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         uint32_t lhs_vreg = vtx_isel_node_vreg(stream, node->inputs[0]);
         uint32_t rhs_vreg = vtx_isel_node_vreg(stream, node->inputs[1]);
         if (lhs_vreg == VTX_VREG_INVALID || rhs_vreg == VTX_VREG_INVALID) return -1;
+
+        /* Strength reduction: modulo by power of 2 → AND with mask */
+        int64_t rhs_const;
+        if (try_get_const_int(graph, node->inputs[1], &rhs_const)) {
+            int shift = is_power_of_2(rhs_const);
+            if (shift >= 0) {
+                /* x % 2^n → and dst, (2^n - 1) (for unsigned)
+                 * For signed mod: need to handle negative dividend.
+                 * Use: and of sign bits + and of magnitude */
+                uint32_t dst = ensure_node_vreg(stream, node_id, arena);
+                if (dst != lhs_vreg)
+                    vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_vreg, node_id), arena);
+                /* Get sign mask: shr dst, 63 gives all 1s if negative, 0 if positive */
+                uint32_t tmp = vtx_isel_alloc_vreg(stream, arena);
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, tmp, dst, node_id), arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHR, tmp, 63, node_id), arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_AND, tmp, (int64_t)((1 << shift) - 1), node_id), arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_AND, dst, (int64_t)((1 << shift) - 1), node_id), arena);
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_ADD, dst, tmp, node_id), arena);
+                break;
+            }
+        }
+
+        /* Fallback: use CQO + IDIV, result in RDX */
         uint32_t rax_vreg = vtx_isel_alloc_vreg_fixed(stream, arena, 0);
         uint32_t rdx_vreg = vtx_isel_alloc_vreg_fixed(stream, arena, 2);
         if (rax_vreg == VTX_VREG_INVALID || rdx_vreg == VTX_VREG_INVALID) return -1;
@@ -593,7 +843,15 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         uint32_t rhs = vtx_isel_node_vreg(stream, node->inputs[1]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (lhs == VTX_VREG_INVALID || rhs == VTX_VREG_INVALID) return -1;
-        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_CMP, lhs, rhs, node_id), arena);
+
+        /* Optimization: CMP against 0 → TEST reg, reg */
+        int64_t rhs_const;
+        if (try_get_const_int(graph, node->inputs[1], &rhs_const) && rhs_const == 0) {
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_TEST, lhs, lhs, node_id), arena);
+        } else {
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_CMP, lhs, rhs, node_id), arena);
+        }
+
         vtx_inst_t setcc;
         memset(&setcc, 0, sizeof(setcc));
         setcc.opcode = VTX_X86_SETCC;

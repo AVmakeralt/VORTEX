@@ -48,6 +48,8 @@ add_library(vortex_ir STATIC
     ir/dce.c
     ir/schedule.c
     ir/verify.c
+    ir/licm.c
+    ir/bounds_check.c
 )
 target_include_directories(vortex_ir PUBLIC ${VORTEX_INCLUDE_DIRS})
 target_link_libraries(vortex_ir PUBLIC vortex_common)
@@ -139,9 +141,10 @@ add_library(vortex_compile STATIC
     compile/priority.c
     compile/safepoint.c
     compile/version.c
+    compile/pipeline.c
 )
 target_include_directories(vortex_compile PUBLIC ${VORTEX_INCLUDE_DIRS})
-target_link_libraries(vortex_compile PUBLIC vortex_ir vortex_codecache Threads::Threads)
+target_link_libraries(vortex_compile PUBLIC vortex_ir vortex_pea vortex_inliner vortex_lower vortex_deopt vortex_codecache Threads::Threads)
 
 find_package(Threads REQUIRED)
 
