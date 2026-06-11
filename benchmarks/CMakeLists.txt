@@ -45,3 +45,18 @@ target_link_libraries(bench_fib PRIVATE
     vortex_runtime
     m
 )
+
+# ---- JIT execution benchmarks ----
+
+# bench_jit_exec
+add_executable(bench_jit_exec
+    jit_exec/jit_exec_bench.c
+)
+target_link_libraries(bench_jit_exec PRIVATE
+    vortex_bench_framework
+    vortex_interp
+    vortex_runtime
+    vortex_codecache
+    vortex_lower
+    m
+)
