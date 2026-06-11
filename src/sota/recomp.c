@@ -11,7 +11,7 @@
  * Snapshot of a method's profile at compilation time.
  * Stores the type distribution at each call site.
  */
-typedef struct {
+typedef struct vtx_recomp_snapshot {
     uint32_t method_id;        /* method this snapshot is for */
     bool     valid;            /* true if snapshot data is populated */
 

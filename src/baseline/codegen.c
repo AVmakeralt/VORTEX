@@ -463,6 +463,8 @@ static void emit_idiv_reg(vtx_code_buffer_t *buf, vtx_reg_t reg)
 #define CC_GE 0xD
 #define CC_B  0x2
 #define CC_AE 0x3
+#define CC_BE 0x6  /* below or equal (CF=1 || ZF=1) */
+#define CC_A  0x7  /* above (CF=0 && ZF=0) */
 #define CC_O  0x0
 
 /* ========================================================================== */
@@ -1999,7 +2001,7 @@ static void compile_checkcast(vtx_compile_ctx_t *ctx, uint16_t typeid_)
 
     /* Patch the je to jump here (skip the type check) */
     int8_t je_disp = (int8_t)(vtx_code_buffer_position(buf) - skip_check_target);
-    buf.bytes[je_pos] = (uint8_t)je_disp;
+    buf->bytes[je_pos] = (uint8_t)je_disp;
 }
 
 static void compile_instanceof(vtx_compile_ctx_t *ctx, uint16_t typeid_)
@@ -2041,7 +2043,7 @@ static void compile_instanceof(vtx_compile_ctx_t *ctx, uint16_t typeid_)
 
     /* Patch: je null_target */
     int8_t je_disp = (int8_t)(null_target - (je_pos + 1));
-    buf.bytes[je_pos] = (uint8_t)je_disp;
+    buf->bytes[je_pos] = (uint8_t)je_disp;
 
     /* Patch: jmp past_null */
     uint32_t past_null = vtx_code_buffer_position(buf);
@@ -2221,11 +2223,14 @@ static void compile_catch(vtx_compile_ctx_t *ctx, uint16_t handler_pc)
      * is managed by the runtime. The handler PC is recorded in the
      * side table for deopt purposes. */
 
+    vtx_code_buffer_t *buf = &ctx->buf;
+
     /* Record the handler in the side table */
     if (ctx->side_table) {
         vtx_side_table_add_entry(ctx->side_table,
             vtx_code_buffer_position(buf), 0, 0);
     }
+    (void)handler_pc;
 }
 
 /* ========================================================================== */

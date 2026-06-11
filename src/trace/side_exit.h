@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include "vortex_config.h"
 #include "ir/node.h"
+#include "runtime/arena.h"
 
 /**
  * VORTEX Side Exit Handling

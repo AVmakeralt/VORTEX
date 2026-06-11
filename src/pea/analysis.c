@@ -318,7 +318,6 @@ static void transfer_node(vtx_node_t *node, vtx_node_table_t *table,
 
     /* ---- Guard: the checked value doesn't escape ---- */
     case VTX_OP_Guard:
-    case VTX_OP_DeoptGuard:
         /* Guards don't cause escape — they just check a condition */
         break;
 

@@ -9,6 +9,7 @@
 #include "runtime/bytecode.h"
 #include "runtime/type_system.h"
 #include "runtime/arena.h"
+#include "runtime/gc.h"
 #include "deopt/side_table.h"
 #include "interp/profiler.h"
 #include "baseline/frame_layout.h"

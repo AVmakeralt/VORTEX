@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include "vortex_config.h"
 #include "guard/ewma.h"
+#include "ir/node.h"
 
 /**
  * VORTEX Adaptive Guards — Metadata and Strength Tracking

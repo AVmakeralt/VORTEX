@@ -5,6 +5,7 @@
  * and lifecycle transitions.
  */
 
+#define _POSIX_C_SOURCE 199309L
 #include "compile/version.h"
 #include "compile/priority.h"
 #include <stdlib.h>

@@ -62,7 +62,7 @@ typedef struct {
  * A hyperblock: a single-entry, multiple-exit SoN subgraph produced
  * by stitching a trace tree.
  */
-typedef struct {
+typedef struct vtx_hyperblock_t {
     /* Entry point */
     vtx_nodeid_t        entry_node;    /* the LoopBegin node (single entry) */
 

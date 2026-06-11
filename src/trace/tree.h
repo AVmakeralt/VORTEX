@@ -184,4 +184,12 @@ uint32_t vtx_trace_tree_find_hot_exits(const vtx_trace_tree_t *tree,
 vtx_trace_branch_t *vtx_trace_tree_get_branch(const vtx_trace_tree_t *tree,
                                                 uint32_t index);
 
+/**
+ * Find a side exit descriptor by ID across all traces in the tree.
+ * Searches the root trace and all branch traces.
+ * Returns the side exit, or NULL if not found.
+ */
+vtx_side_exit_t *vtx_trace_tree_find_exit(const vtx_trace_tree_t *tree,
+                                             vtx_side_exit_id_t exit_id);
+
 #endif /* VORTEX_TREE_H */

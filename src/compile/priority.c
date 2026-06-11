@@ -4,6 +4,7 @@
  * Binary max-heap with mutex protection and lock-free fast path.
  */
 
+#define _POSIX_C_SOURCE 199309L
 #include "compile/priority.h"
 #include <stdlib.h>
 #include <string.h>

@@ -5,9 +5,11 @@
  * task scheduling.
  */
 
+#define _POSIX_C_SOURCE 199309L
 #include "compile/threadpool.h"
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 /* ========================================================================== */

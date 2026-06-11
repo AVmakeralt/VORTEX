@@ -28,6 +28,12 @@ typedef enum {
     VT_TIER_T3 = 3    /* Speculative JIT */
 } vtx_compile_tier_t;
 
+/* Aliases for consistent VTX_ prefixed naming */
+#define VTX_TIER_T0 VT_TIER_T0
+#define VTX_TIER_T1 VT_TIER_T1
+#define VTX_TIER_T2 VT_TIER_T2
+#define VTX_TIER_T3 VT_TIER_T3
+
 /* ========================================================================== */
 /* Per-method profile data                                                     */
 /* ========================================================================== */

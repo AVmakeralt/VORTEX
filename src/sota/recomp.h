@@ -8,6 +8,7 @@
 #include "profile/data.h"
 #include "compile/version.h"
 #include "runtime/arena.h"
+#include "profile/phase.h"
 
 /**
  * VORTEX SOTA — Continuous Background Recompilation
@@ -62,12 +63,15 @@ typedef struct {
     bool     processed;         /* true if already picked up by a worker */
 } vtx_recomp_queue_entry_t;
 
+/* Forward declaration — defined in recomp.c */
+typedef struct vtx_recomp_snapshot vtx_recomp_snapshot_t;
+
 typedef struct {
     /* Per-method compilation-time profile snapshot.
      * Stored as a dense array indexed by method_id.
      * Each snapshot records the type distribution at each call site
      * at the time of compilation, so we can compare with current profile. */
-    struct vtx_recomp_snapshot *snapshots;
+    vtx_recomp_snapshot_t *snapshots;
     uint32_t                    snapshot_count;
     uint32_t                    snapshot_capacity;
 

@@ -5,6 +5,7 @@
  * at safe points. The fast path is a single atomic load.
  */
 
+#define _POSIX_C_SOURCE 199309L
 #include "compile/safepoint.h"
 #include <stdlib.h>
 #include <string.h>

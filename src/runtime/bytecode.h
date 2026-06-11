@@ -124,6 +124,9 @@ typedef enum {
     VT_OP_ISNULL,
     VT_OP_TYPEOF,
 
+    /* Runtime calls */
+    VT_OP_CALL_RUNTIME,    /* call into runtime helper */
+
     /* Total opcode count */
     VT_OP_COUNT
 } vtx_opcode_t;

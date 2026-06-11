@@ -6,6 +6,9 @@
 #include "vortex_config.h"
 #include "ir/graph.h"
 
+/* Forward declaration — defined in region/stitch.h */
+struct vtx_hyperblock_t;
+
 /**
  * VORTEX Hyperblock Size Budget
  *

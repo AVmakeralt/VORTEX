@@ -123,7 +123,7 @@ static vtx_trace_branch_t *vtx_trace_tree_find_branch_for_exit(
 /**
  * Find the side exit descriptor across all traces in the tree.
  */
-static vtx_side_exit_t *vtx_trace_tree_find_exit(
+vtx_side_exit_t *vtx_trace_tree_find_exit(
     const vtx_trace_tree_t *tree,
     vtx_side_exit_id_t exit_id)
 {

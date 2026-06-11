@@ -8,6 +8,7 @@
 #include "vortex_config.h"
 #include "codecache/install.h"
 #include "runtime/arena.h"
+#include "interp/profiler.h"
 
 /**
  * VORTEX Code Version Management

@@ -277,7 +277,7 @@ void vtx_instrument_emit_call_type_record(vtx_code_buffer_t *buf,
     }
 
     /* Call the profiler function */
-    extern void vtx_profiler_record_call_type(vtx_profile_data_t *,
+    extern void vtx_profiler_record_call_type(vtx_profiler_t *,
                                                const vtx_method_desc_t *,
                                                uint32_t, vtx_typeid_t);
     emit_mov_reg_imm64(buf, VTX_REG_RAX,

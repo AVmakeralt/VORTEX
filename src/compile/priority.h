@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include "vortex_config.h"
 #include "runtime/arena.h"
+#include "interp/profiler.h"
 
 /**
  * VORTEX Compilation Priority Queue
@@ -22,16 +23,6 @@
  * scenarios: the application thread submits tasks and one worker thread
  * consumes them. The fast path avoids the mutex when there is no contention.
  */
-
-/* ========================================================================== */
-/* Compilation tier                                                            */
-/* ========================================================================== */
-
-typedef enum {
-    VTX_TIER_T1 = 1,  /* Baseline JIT — lowest compilation priority */
-    VTX_TIER_T2 = 2,  /* Optimizing JIT */
-    VTX_TIER_T3 = 3   /* Speculative JIT — highest compilation priority */
-} vtx_compile_tier_t;
 
 /* ========================================================================== */
 /* Compilation task                                                            */

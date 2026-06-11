@@ -139,6 +139,12 @@ typedef struct {
 #define VTX_INST_FLAG_IS_GUARD    (1u << 7)  /* is a guard check (needs deopt) */
 #define VTX_INST_FLAG_IS_DEOPT    (1u << 8)  /* is a deopt stub entry */
 #define VTX_INST_FLAG_IS_BRANCH   (1u << 9)  /* is a branch (needs reloc) */
+#define VTX_INST_FLAG_CLOBBER_RSI (1u << 10) /* clobbers RSI (call arg) */
+#define VTX_INST_FLAG_CLOBBER_RDI (1u << 11) /* clobbers RDI (call arg) */
+#define VTX_INST_FLAG_CLOBBER_R8  (1u << 12) /* clobbers R8 (call arg) */
+#define VTX_INST_FLAG_CLOBBER_R9  (1u << 13) /* clobbers R9 (call arg) */
+#define VTX_INST_FLAG_CLOBBER_R10 (1u << 14) /* clobbers R10 (call arg) */
+#define VTX_INST_FLAG_CLOBBER_R11 (1u << 15) /* clobbers R11 (call arg) */
 
 typedef struct {
     vtx_x86_opcode_t opcode;
