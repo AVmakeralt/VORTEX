@@ -36,6 +36,17 @@
 #define VTX_GC_REMEMBERED_SET_INIT 256              /* initial remembered set capacity */
 
 /* ========================================================================== */
+/* GC mode enumeration                                                         */
+/* ========================================================================== */
+
+typedef enum {
+    VTX_GC_GENERATIONAL = 0,  /* current behavior — full GC */
+    VTX_GC_NONE,              /* no collection, no barriers, no safepoints */
+    VTX_GC_MANUAL,            /* explicit alloc/free, no barriers */
+    VTX_GC_ARENA,             /* bump-pointer only, free-all-at-once */
+} vtx_gc_mode_t;
+
+/* ========================================================================== */
 /* GC structures                                                               */
 /* ========================================================================== */
 
@@ -101,6 +112,22 @@ typedef struct {
     vtx_heap_object_t **pinned_objects;
     uint32_t            pinned_count;
     uint32_t            pinned_capacity;
+
+    /* GC mode and mode-dependent function pointers */
+    vtx_gc_mode_t     mode;           /* current GC mode */
+
+    /* Function pointers for mode-dependent operations */
+    void (*fn_write_barrier)(vtx_gc_t *gc, vtx_heap_object_t *obj,
+                             uint32_t field_offset, vtx_value_t value);
+    void (*fn_safepoint)(vtx_gc_t *gc);
+    void (*fn_root_push)(vtx_gc_t *gc, vtx_value_t value);
+    vtx_value_t (*fn_root_pop)(vtx_gc_t *gc);
+
+    /* Manual mode: free list for explicit free */
+    vtx_free_node_t  *manual_free_list;
+
+    /* Arena mode: entry/leave stack */
+    uint8_t          *arena_save_point;  /* saved bump pointer for arena_enter/leave */
 } vtx_gc_t;
 
 /* ========================================================================== */
@@ -110,9 +137,10 @@ typedef struct {
 /**
  * Initialize the garbage collector. Requires a type_system for
  * object size/field layout information.
+ * The mode parameter selects the GC strategy.
  * Returns 0 on success, -1 on failure.
  */
-int vtx_gc_init(vtx_gc_t *gc, vtx_type_system_t *ts);
+int vtx_gc_init(vtx_gc_t *gc, vtx_type_system_t *ts, vtx_gc_mode_t mode);
 
 /**
  * Destroy the garbage collector and release all memory.
@@ -201,6 +229,61 @@ void vtx_gc_unpin(vtx_gc_t *gc, vtx_heap_object_t *obj);
  * Check if an object is pinned.
  */
 bool vtx_gc_is_pinned(vtx_gc_t *gc, vtx_heap_object_t *obj);
+
+/* ========================================================================== */
+/* GC mode management                                                         */
+/* ========================================================================== */
+
+/**
+ * Set the GC mode at runtime. This reconfigures the function pointers
+ * and may adjust internal state for the new mode.
+ */
+void vtx_gc_set_mode(vtx_gc_t *gc, vtx_gc_mode_t mode);
+
+/**
+ * Get the current GC mode.
+ */
+vtx_gc_mode_t vtx_gc_get_mode(const vtx_gc_t *gc);
+
+/**
+ * Manual mode: free a previously allocated object.
+ * Adds the block to a free list for O(1) free.
+ * Only valid when mode is VTX_GC_MANUAL.
+ */
+void vtx_gc_manual_free(vtx_gc_t *gc, void *ptr, size_t size);
+
+/**
+ * Arena mode: save current allocation point.
+ * Only valid when mode is VTX_GC_ARENA.
+ */
+void vtx_gc_arena_enter(vtx_gc_t *gc);
+
+/**
+ * Arena mode: restore to saved allocation point (free everything since enter).
+ * Only valid when mode is VTX_GC_ARENA.
+ */
+void vtx_gc_arena_leave(vtx_gc_t *gc);
+
+/**
+ * Check if a mode requires write barriers.
+ */
+static inline bool vtx_gc_mode_needs_barrier(vtx_gc_mode_t mode) {
+    return mode == VTX_GC_GENERATIONAL;
+}
+
+/**
+ * Check if a mode needs safepoints.
+ */
+static inline bool vtx_gc_mode_needs_safepoint(vtx_gc_mode_t mode) {
+    return mode == VTX_GC_GENERATIONAL;
+}
+
+/**
+ * Check if a mode needs root management.
+ */
+static inline bool vtx_gc_mode_needs_roots(vtx_gc_mode_t mode) {
+    return mode == VTX_GC_GENERATIONAL;
+}
 
 /* ========================================================================== */
 /* Internal helpers (exposed for testing)                                      */
