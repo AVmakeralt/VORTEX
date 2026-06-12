@@ -113,6 +113,7 @@ typedef enum {
     VTX_OPND_IMM,       /* immediate (value in imm field) */
     VTX_OPND_MEM,       /* memory (address in mem field) */
     VTX_OPND_LABEL,     /* branch target label = block index (value in operand field) */
+    VTX_OPND_SPILL,     /* spill slot index (value in operand field, for spill reload/store) */
 } vtx_opnd_kind_t;
 
 /* ========================================================================== */
@@ -151,6 +152,8 @@ typedef struct {
 #define VTX_INST_FLAG_CLOBBER_R10 (1u << 14) /* clobbers R10 (call arg) */
 #define VTX_INST_FLAG_CLOBBER_R11 (1u << 15) /* clobbers R11 (call arg) */
 #define VTX_INST_FLAG_PHI_COPY   (1u << 16) /* MOV inserted for Phi resolution */
+#define VTX_INST_FLAG_SPILL_LOAD (1u << 17) /* load from spill slot to register */
+#define VTX_INST_FLAG_SPILL_STORE (1u << 18) /* store from register to spill slot */
 
 typedef struct {
     vtx_x86_opcode_t opcode;

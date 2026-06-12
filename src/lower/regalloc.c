@@ -455,10 +455,12 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
     /* Next spill slot */
     uint32_t next_spill_slot = 0;
 
-    /* Helper: expire old intervals */
-    /* Returns the number of intervals expired */
-    for (uint32_t i = 0; i < interval_count; i++) {
-        vtx_live_interval_t *current = &intervals[i];
+    /* Linear scan: iterate over the compacted, sorted valid_intervals array.
+     * The original bug (G1) iterated over the raw vreg-indexed intervals[]
+     * array, which is NOT sorted by start position. The linear scan algorithm
+     * REQUIRES intervals to be processed in start-position order. */
+    for (uint32_t i = 0; i < valid_count; i++) {
+        vtx_live_interval_t *current = &valid_intervals[i];
 
         /* Skip intervals that were coalesced into another */
         if (current->coalesce_src != VTX_VREG_INVALID) continue;
@@ -651,22 +653,78 @@ int vtx_regalloc_apply(vtx_inst_stream_t *stream,
                 }
             }
 
-            /* Handle memory operand vregs */
+            /* Handle memory operand vregs.
+             * G2 fix: When a memory operand vreg is spilled (phys == 0xFF),
+             * we must insert a reload instruction before the current instruction
+             * to load the spilled value into a scratch register, then use that
+             * scratch register as the base/index. We use R12 (VTX_SPILL_TMP_REG)
+             * for base and R13 for index — these are callee-saved scratch registers
+             * reserved for spill handling in the emitter. */
             if (inst->flags & VTX_INST_FLAG_HAS_MEM) {
                 if (inst->mem.base_vreg != VTX_VREG_INVALID &&
                     inst->mem.base_vreg < result->vreg_to_phys_count) {
                     uint8_t phys = result->vreg_to_phys[inst->mem.base_vreg];
                     if (phys != 0xFF) {
-                        inst->mem.base_phys = phys;    /* Store physical register in the proper field */
-                        inst->mem.base_vreg = VTX_VREG_INVALID; /* Mark as resolved */
+                        inst->mem.base_phys = phys;
+                        inst->mem.base_vreg = VTX_VREG_INVALID;
+                    } else {
+                        /* Spilled: insert a MOV from spill slot into R12 before this inst */
+                        uint32_t spill_slot = result->vreg_to_spill[inst->mem.base_vreg];
+                        if (spill_slot != VTX_NO_SPILL) {
+                            vtx_inst_t reload;
+                            memset(&reload, 0, sizeof(reload));
+                            reload.opcode = VTX_X86_MOV;
+                            reload.opnd_kinds[0] = VTX_OPND_PREG;
+                            reload.operands[0] = 12; /* R12 */
+                            reload.opnd_kinds[1] = VTX_OPND_SPILL;
+                            reload.operands[1] = spill_slot;
+                            reload.flags |= VTX_INST_FLAG_SPILL_LOAD;
+                            reload.source_node = inst->source_node;
+                            /* Insert reload before current instruction */
+                            if (vtx_isel_block_ensure_capacity(blk, 1, arena) != 0) return -1;
+                            memmove(&blk->insts[i + 1], &blk->insts[i],
+                                    (blk->inst_count - i) * sizeof(vtx_inst_t));
+                            blk->insts[i] = reload;
+                            blk->inst_count++;
+                            i++; /* Skip past the inserted reload */
+                            /* Now use R12 as the base */
+                            inst = &blk->insts[i]; /* re-read after memmove */
+                            inst->mem.base_phys = 12; /* R12 */
+                            inst->mem.base_vreg = VTX_VREG_INVALID;
+                        }
                     }
                 }
                 if (inst->mem.index_vreg != VTX_VREG_INVALID &&
                     inst->mem.index_vreg < result->vreg_to_phys_count) {
                     uint8_t phys = result->vreg_to_phys[inst->mem.index_vreg];
                     if (phys != 0xFF) {
-                        inst->mem.index_phys = phys;   /* Store physical register in the proper field */
-                        inst->mem.index_vreg = VTX_VREG_INVALID; /* Mark as resolved */
+                        inst->mem.index_phys = phys;
+                        inst->mem.index_vreg = VTX_VREG_INVALID;
+                    } else {
+                        /* Spilled: insert a MOV from spill slot into R13 before this inst */
+                        uint32_t spill_slot = result->vreg_to_spill[inst->mem.index_vreg];
+                        if (spill_slot != VTX_NO_SPILL) {
+                            vtx_inst_t reload;
+                            memset(&reload, 0, sizeof(reload));
+                            reload.opcode = VTX_X86_MOV;
+                            reload.opnd_kinds[0] = VTX_OPND_PREG;
+                            reload.operands[0] = 13; /* R13 */
+                            reload.opnd_kinds[1] = VTX_OPND_SPILL;
+                            reload.operands[1] = spill_slot;
+                            reload.flags |= VTX_INST_FLAG_SPILL_LOAD;
+                            reload.source_node = inst->source_node;
+                            /* Insert reload before current instruction */
+                            if (vtx_isel_block_ensure_capacity(blk, 1, arena) != 0) return -1;
+                            memmove(&blk->insts[i + 1], &blk->insts[i],
+                                    (blk->inst_count - i) * sizeof(vtx_inst_t));
+                            blk->insts[i] = reload;
+                            blk->inst_count++;
+                            i++; /* Skip past the inserted reload */
+                            /* Now use R13 as the index */
+                            inst = &blk->insts[i]; /* re-read after memmove */
+                            inst->mem.index_phys = 13; /* R13 */
+                            inst->mem.index_vreg = VTX_VREG_INVALID;
+                        }
                     }
                 }
             }

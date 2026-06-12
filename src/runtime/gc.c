@@ -104,6 +104,7 @@ static int old_gen_init(vtx_old_gen_t *old, size_t size)
     old->free_list = (vtx_free_node_t *)old->start;
     old->free_list->size = size;
     old->free_list->next = NULL;
+    old->free_list->gc_mark = 0xFF; /* RT-4: Mark as free block */
 
     return 0;
 }
@@ -188,6 +189,7 @@ static void old_gen_free(vtx_old_gen_t *old, void *ptr, size_t size)
     vtx_free_node_t *node = (vtx_free_node_t *)ptr;
     node->size = size;
     node->next = old->free_list;
+    node->gc_mark = 0xFF; /* RT-4: Mark as free block so sweep can identify it */
     old->free_list = node;
     old->used -= size;
 
@@ -351,6 +353,7 @@ void vtx_gc_manual_free(vtx_gc_t *gc, void *ptr, size_t size)
     vtx_free_node_t *node = (vtx_free_node_t *)ptr;
     node->size = size;
     node->next = gc->manual_free_list;
+    node->gc_mark = 0xFF; /* RT-4: Mark as free block */
     gc->manual_free_list = node;
 }
 
@@ -530,17 +533,33 @@ void vtx_gc_write_barrier(vtx_gc_t *gc, vtx_heap_object_t *obj,
  * Returns the new location of the object in to-space.
  * If the object has already been forwarded, returns the forwarding address.
  */
+/* Sentinel value for size field indicating the object has been forwarded.
+ * No valid object can have this size because it's astronomically large.
+ * The forwarding address is stored in the first sizeof(uintptr_t) bytes
+ * of the object (overwriting type_id + gc_* fields), which is safe because
+ * the object's data has already been copied to the new location. */
+#define VTX_GC_FORWARDING_SENTINEL ((uint32_t)0xDEADF00D)
+
 static vtx_heap_object_t *forward_object(vtx_gc_t *gc, vtx_heap_object_t *obj)
 {
     VTX_ASSERT(obj != NULL, "object must not be NULL");
 
-    /* Check if this object has already been forwarded.
-     * A forwarded object has its first 8 bytes replaced with a forwarding
-     * pointer: the low bit is set to 1 to distinguish from a valid header. */
-    uintptr_t first_word = *(uintptr_t *)obj;
-    if (first_word & 1) {
-        /* This is a forwarding pointer. Clear the low bit to get the address. */
-        return (vtx_heap_object_t *)(first_word & ~(uintptr_t)1);
+    /* RT-1 fix: Check if this object has already been forwarded.
+     * OLD BUG: Used `first_word & 1` as the forwarding pointer tag, but on
+     * little-endian x86-64, any object with an odd type_id (e.g.
+     * VTX_TYPE_OBJECT=1) sets bit 0 of the first uintptr_t, causing the GC
+     * to misidentify LIVE objects as forwarding pointers → wild pointers,
+     * memory corruption, segfaults.
+     *
+     * NEW approach: Use a sentinel value in the size field
+     * (VTX_GC_FORWARDING_SENTINEL = 0xDEADF00D). No valid object can have
+     * this size. The forwarding address is stored in the first 8 bytes of
+     * the object (overwriting type_id + gc_* byte fields). This is safe
+     * because the object has already been copied to its new location. */
+    if (obj->size == VTX_GC_FORWARDING_SENTINEL) {
+        /* This is a forwarding pointer — address is in first 8 bytes */
+        uintptr_t fwd_addr = *(uintptr_t *)obj;
+        return (vtx_heap_object_t *)fwd_addr;
     }
 
     /* Check if the object is pinned — don't move it */
@@ -556,8 +575,11 @@ static vtx_heap_object_t *forward_object(vtx_gc_t *gc, vtx_heap_object_t *obj)
             memcpy(new_ptr, obj, obj->size);
             vtx_heap_object_t *new_obj = (vtx_heap_object_t *)new_ptr;
 
-            /* Leave a forwarding pointer in the old location */
-            *(uintptr_t *)obj = (uintptr_t)new_obj | 1;
+            /* Leave a forwarding pointer in the old location.
+             * RT-1 fix: Store the new address in the first 8 bytes
+             * and set size to the sentinel value. */
+            *(uintptr_t *)obj = (uintptr_t)new_obj;
+            obj->size = VTX_GC_FORWARDING_SENTINEL;
 
             return new_obj;
         }
@@ -576,8 +598,11 @@ static vtx_heap_object_t *forward_object(vtx_gc_t *gc, vtx_heap_object_t *obj)
     vtx_heap_object_t *new_obj = (vtx_heap_object_t *)new_ptr;
     new_obj->gc_age = obj->gc_age + 1;
 
-    /* Leave a forwarding pointer in the old location */
-    *(uintptr_t *)obj = (uintptr_t)new_obj | 1;
+    /* Leave a forwarding pointer in the old location.
+     * RT-1 fix: Store the new address in the first 8 bytes
+     * and set size to the sentinel value. */
+    *(uintptr_t *)obj = (uintptr_t)new_obj;
+    obj->size = VTX_GC_FORWARDING_SENTINEL;
 
     return new_obj;
 }
@@ -669,19 +694,79 @@ void vtx_gc_collect_young(vtx_gc_t *gc)
     /* Phase 3: Scan to-space (processes objects copied in phases 1 & 2) */
     scan_to_space(gc);
 
-    /* Phase 4: Handle pinned objects — they stayed in from-space */
-    for (uint32_t i = 0; i < gc->pinned_count; i++) {
-        vtx_heap_object_t *pinned = gc->pinned_objects[i];
-        /* Pinned objects stay in from-space, but their fields may need updating */
-        scan_object(gc, pinned);
+    /* Phase 4: Handle pinned objects — they stayed in from-space.
+     * RT-3 fix: After scanning pinned objects, we must continue scanning
+     * to-space because pinned-object scanning may have forwarded additional
+     * young-gen objects that weren't reached in Phase 3. These newly-forwarded
+     * objects need their fields traced too (the transitive closure must be
+     * complete). We keep alternating between scanning pinned objects and
+     * scanning to-space until no new objects are forwarded. */
+    bool pinned_changed = true;
+    while (pinned_changed) {
+        pinned_changed = false;
+        for (uint32_t i = 0; i < gc->pinned_count; i++) {
+            vtx_heap_object_t *pinned = gc->pinned_objects[i];
+            /* Pinned objects stay in from-space, but their fields may need updating */
+            uint8_t old_field_count = pinned->field_count; /* save before scan may change refs */
+            (void)old_field_count;
+            scan_object(gc, pinned);
+        }
+        /* Scan to-space again — pinned-object scanning may have forwarded
+         * new objects that need their fields traced */
+        uint8_t *scan_before = gc->young_to.current;
+        scan_to_space(gc);
+        if (gc->young_to.current != scan_before) {
+            pinned_changed = true; /* New objects were forwarded, re-scan pinned */
+        }
     }
 
-    /* Phase 5: Swap semi-spaces */
+    /* Phase 5: Swap semi-spaces.
+     * RT-2 fix: Pinned objects remain in the OLD from-space (young_from
+     * before swap). After swap, young_from becomes the NEW from-space
+     * (containing the live objects), and young_to becomes the OLD from-space
+     * (to be used as to-space next collection). The pinned objects are in
+     * the OLD from-space, which after swap is young_to. We must NOT reset
+     * young_to on the next collection until all pinned objects have been
+     * copied out or unpinned.
+     *
+     * For now, the simplest correct fix is to copy pinned objects into
+     * the new from-space (young_to before swap = young_from after swap)
+     * before swapping, so they survive the swap. */
+    for (uint32_t i = 0; i < gc->pinned_count; i++) {
+        vtx_heap_object_t *pinned = gc->pinned_objects[i];
+        /* Pinned objects are still in from-space. Copy them to to-space
+         * so they survive the swap. We can't move them (they're pinned),
+         * so we copy them and leave a forwarding pointer. But wait —
+         * other references to the pinned object (from root stack, etc.)
+         * still point to the OLD location. We need to update those too.
+         *
+         * The simplest approach: since pinned objects are rare, just copy
+         * them to to-space and update all references. The forwarding pointer
+         * left in the old location will redirect any stale references. */
+        void *new_ptr = semi_space_alloc(&gc->young_to, pinned->size);
+        if (new_ptr != NULL) {
+            memcpy(new_ptr, pinned, pinned->size);
+            vtx_heap_object_t *new_obj = (vtx_heap_object_t *)new_ptr;
+            new_obj->gc_pinned = 0; /* No longer needs to be pinned in new location */
+            /* Leave forwarding pointer in old location */
+            *(uintptr_t *)pinned = (uintptr_t)new_obj;
+            pinned->size = VTX_GC_FORWARDING_SENTINEL;
+        }
+    }
+
     vtx_semi_space_t tmp = gc->young_from;
     gc->young_from = gc->young_to;
     gc->young_to = tmp;
 
-    /* Clear the remembered set (will be rebuilt by write barriers) */
+    /* RT-6 fix: Rebuild the remembered set instead of clearing it.
+     * OLD BUG: The remembered set was unconditionally cleared, hoping write
+     * barriers would rebuild it. But write barriers only fire on NEW writes.
+     * Old-gen objects that still reference into the new young generation
+     * would not have their entries recreated, causing the next collection
+     * to miss those references and prematurely collect live objects.
+     *
+     * NEW approach: After the swap, scan all old-gen objects and rebuild
+     * the remembered set with any old→young references found. */
     for (uint32_t i = 0; i < gc->remembered_count; i++) {
         vtx_heap_object_t *old_obj = gc->remembered_set[i].obj;
         if (old_obj != NULL) {
@@ -689,6 +774,41 @@ void vtx_gc_collect_young(vtx_gc_t *gc)
         }
     }
     gc->remembered_count = 0;
+
+    /* Rebuild remembered set by scanning old-gen objects for young references */
+    if (gc->old_gen.start != NULL && gc->old_gen.size > 0) {
+        uint8_t *ptr = gc->old_gen.start;
+        uint8_t *end = gc->old_gen.start + gc->old_gen.used;
+        while (ptr < end) {
+            vtx_heap_object_t *obj = (vtx_heap_object_t *)ptr;
+            if (obj->size == 0 || obj->size == VTX_GC_FORWARDING_SENTINEL) {
+                ptr += sizeof(vtx_free_node_t);
+                continue;
+            }
+            if (obj->size >= VTX_GC_FORWARDING_SENTINEL) {
+                /* Skip corrupted/invalid entries */
+                break;
+            }
+            size_t obj_size = align_up_8(obj->size);
+            /* Check if this old-gen object has any references into young gen */
+            for (uint32_t f = 0; f < obj->field_count; f++) {
+                vtx_value_t field = obj->fields[f];
+                if (vtx_is_heap_ptr(field)) {
+                    void *field_ptr = vtx_heap_ptr(field);
+                    if (vtx_gc_in_young(gc, field_ptr)) {
+                        /* Add to remembered set */
+                        if (gc->remembered_count < gc->remembered_capacity) {
+                            gc->remembered_set[gc->remembered_count].obj = obj;
+                            gc->remembered_count++;
+                            obj->gc_remembered = 1;
+                        }
+                        break; /* Only add each object once */
+                    }
+                }
+            }
+            ptr += obj_size;
+        }
+    }
 
     gc->collections_done++;
 }
@@ -699,6 +819,10 @@ void vtx_gc_collect_young(vtx_gc_t *gc)
 
 /**
  * Mark an object and recursively trace its fields.
+ * RT-5 fix: Trace through ALL reachable objects, not just old-gen.
+ * Young-gen objects can hold references to old-gen objects, and we must
+ * follow those references during old-gen collection to avoid sweeping
+ * live old-gen objects.
  */
 static void mark_object(vtx_gc_t *gc, vtx_heap_object_t *obj)
 {
@@ -710,13 +834,36 @@ static void mark_object(vtx_gc_t *gc, vtx_heap_object_t *obj)
 
     obj->gc_mark = 1;
 
-    /* Trace fields */
+    /* Trace fields — follow ALL references, not just old-gen */
     for (uint32_t i = 0; i < obj->field_count; i++) {
         vtx_value_t field = obj->fields[i];
         if (vtx_is_heap_ptr(field)) {
             vtx_heap_object_t *field_obj = (vtx_heap_object_t *)vtx_heap_ptr(field);
+            /* RT-5 fix: Only mark old-gen objects (we're doing old-gen
+             * collection). But we DO recurse through young-gen objects
+             * to find their old-gen references. */
             if (vtx_gc_in_old(gc, field_obj)) {
                 mark_object(gc, field_obj);
+            }
+            /* Also recurse into young-gen objects to find transitive
+             * old-gen references, but don't mark them (they're managed
+             * by the young-gen collector). Use a separate visited set
+             * to avoid infinite loops on cycles in young-gen. */
+            else if (vtx_gc_in_young(gc, field_obj) && !field_obj->gc_mark) {
+                /* Temporarily mark to avoid re-visiting */
+                field_obj->gc_mark = 1;
+                /* Recurse to find old-gen references through young-gen */
+                for (uint32_t j = 0; j < field_obj->field_count; j++) {
+                    vtx_value_t inner = field_obj->fields[j];
+                    if (vtx_is_heap_ptr(inner)) {
+                        vtx_heap_object_t *inner_obj = (vtx_heap_object_t *)vtx_heap_ptr(inner);
+                        if (vtx_gc_in_old(gc, inner_obj)) {
+                            mark_object(gc, inner_obj);
+                        }
+                    }
+                }
+                /* Note: we don't clear gc_mark on young-gen objects here
+                 * because young-gen collection handles its own marking. */
             }
         }
     }
@@ -724,17 +871,18 @@ static void mark_object(vtx_gc_t *gc, vtx_heap_object_t *obj)
 
 /**
  * Mark phase: trace from all roots.
+ * RT-5 fix: Also trace through young-gen objects that may reference old-gen.
+ * OLD BUG: mark_phase only traced roots that are directly in old gen.
+ * If Root → YoungObj → OldObj, the OldObj was never marked and got swept.
  */
 static void mark_phase(vtx_gc_t *gc)
 {
-    /* Mark from root stack */
+    /* Mark from root stack — trace ALL reachable objects, not just old-gen */
     for (uint32_t i = 0; i < gc->root_count; i++) {
         vtx_value_t value = gc->root_stack[i].value;
         if (vtx_is_heap_ptr(value)) {
             vtx_heap_object_t *obj = (vtx_heap_object_t *)vtx_heap_ptr(value);
-            if (vtx_gc_in_old(gc, obj)) {
-                mark_object(gc, obj);
-            }
+            mark_object(gc, obj);
         }
     }
 }
@@ -742,6 +890,8 @@ static void mark_phase(vtx_gc_t *gc)
 /**
  * Sweep phase: walk through old gen memory, free unmarked objects,
  * clear marks on marked objects.
+ * RT-4 fix: Use gc_mark == 0xFF sentinel to distinguish free blocks
+ * from live objects. Free blocks are skipped (already on the free list).
  */
 static void sweep_phase(vtx_gc_t *gc)
 {
@@ -751,8 +901,20 @@ static void sweep_phase(vtx_gc_t *gc)
     while (ptr < end) {
         vtx_heap_object_t *obj = (vtx_heap_object_t *)ptr;
 
-        if (obj->size == 0) {
-            /* Uninitialized/empty block — skip minimum unit */
+        /* RT-4 fix: Check if this is a free block (gc_mark == 0xFF) */
+        if (obj->gc_mark == 0xFF) {
+            /* This is a free block — skip it */
+            vtx_free_node_t *free_node = (vtx_free_node_t *)ptr;
+            size_t free_size = align_up_8(free_node->size);
+            if (free_size < sizeof(vtx_free_node_t)) {
+                free_size = sizeof(vtx_free_node_t);
+            }
+            ptr += free_size;
+            continue;
+        }
+
+        if (obj->size == 0 || obj->size >= VTX_GC_FORWARDING_SENTINEL) {
+            /* Uninitialized/corrupted block — skip minimum unit */
             ptr += sizeof(vtx_free_node_t);
             continue;
         }

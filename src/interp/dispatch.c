@@ -1243,10 +1243,11 @@ dispatch_VT_OP_CALL_STATIC:
         vtx_profiler_record_call_type(&interp->profiler, frame->method,
                                        (uint32_t)pc, receiver_tid);
 
-        /* Bug #1 fix: Pop arguments from caller's stack and copy to callee locals */
+        /* Pop arguments from caller's stack and copy to callee locals.
+         * Fixed: No longer silently truncates at 16 args — uses alloca
+         * for dynamic stack allocation to support any arg count. */
         uint32_t arg_count = count_method_args(target_method->signature);
-        vtx_value_t call_args[16];
-        if (arg_count > 16) arg_count = 16;
+        vtx_value_t *call_args = (vtx_value_t *)alloca(arg_count * sizeof(vtx_value_t));
         for (uint32_t ai = arg_count; ai > 0; ai--) {
             call_args[ai - 1] = *--sp;
         }
@@ -1323,10 +1324,13 @@ dispatch_VT_OP_CALL_VIRTUAL:
         /* Record invocation */
         vtx_profiler_record_invocation(&interp->profiler, target_method);
 
-        /* Bug #1 fix: Pop arguments from caller's stack and copy to callee locals */
-        uint32_t varg_count = count_method_args(target_method->signature);
-        vtx_value_t vcall_args[16];
-        if (varg_count > 16) varg_count = 16;
+        /* Pop arguments from caller's stack and copy to callee locals.
+         * For virtual calls, the receiver (this) is the implicit first
+         * argument and must be included in the pop count and passed as
+         * local[0] in the callee. count_method_args returns only the
+         * explicit parameters, so we add 1 for the receiver. */
+        uint32_t varg_count = count_method_args(target_method->signature) + 1; /* +1 for receiver */
+        vtx_value_t *vcall_args = (vtx_value_t *)alloca(varg_count * sizeof(vtx_value_t));
         for (uint32_t ai = varg_count; ai > 0; ai--) {
             vcall_args[ai - 1] = *--sp;
         }
@@ -1388,6 +1392,13 @@ dispatch_VT_OP_CALL_INTERFACE:
                 interp->type_system, ic, receiver, interface_typeid, method_name);
         }
 
+        /* Fallback: direct vtable walk if IC miss or IC unavailable */
+        if (target_method == NULL && vtx_is_heap_ptr(receiver) && method_name != NULL) {
+            vtx_typeid_t tid = value_typeid(receiver);
+            target_method = vtx_type_resolve_method(
+                interp->type_system, tid, method_name);
+        }
+
         /* Record call type */
         vtx_typeid_t receiver_tid = value_typeid(receiver);
         vtx_profiler_record_call_type(&interp->profiler, frame->method,
@@ -1403,10 +1414,13 @@ dispatch_VT_OP_CALL_INTERFACE:
 
         vtx_profiler_record_invocation(&interp->profiler, target_method);
 
-        /* Bug #1 fix: Pop arguments from caller's stack and copy to callee locals */
-        uint32_t iarg_count = count_method_args(target_method->signature);
-        vtx_value_t icall_args[16];
-        if (iarg_count > 16) iarg_count = 16;
+        /* Pop arguments from caller's stack and copy to callee locals.
+         * For interface calls, the receiver (this) is the implicit first
+         * argument and must be included in the pop count and passed as
+         * local[0] in the callee. count_method_args returns only the
+         * explicit parameters, so we add 1 for the receiver. */
+        uint32_t iarg_count = count_method_args(target_method->signature) + 1; /* +1 for receiver */
+        vtx_value_t *icall_args = (vtx_value_t *)alloca(iarg_count * sizeof(vtx_value_t));
         for (uint32_t ai = iarg_count; ai > 0; ai--) {
             icall_args[ai - 1] = *--sp;
         }

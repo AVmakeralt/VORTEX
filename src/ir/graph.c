@@ -1695,9 +1695,18 @@ int vtx_graph_build(vtx_graph_t *graph,
                 pf->cond = VTX_COND_EQ;
                 vtx_node_add_input(&graph->node_table, proj_false, block->control_node);
 
-                /* Connect projections to successor Region nodes */
+                /* Connect projections to successor Region nodes.
+                 * IR-2 fix: For IF_TRUE, successor[0] = true target, successor[1] = false fallthrough.
+                 * For IF_FALSE, successor[0] = false target, successor[1] = true fallthrough.
+                 * The original code always sent proj_true to succ[0] regardless of
+                 * branch direction, swapping the projections for IF_FALSE blocks. */
                 if (block->succ_count >= 2) {
-                    /* Branch target (successor 0) gets the true projection */
+                    /* Determine which projection goes to which successor.
+                     * For IF_TRUE:  succ[0] gets proj_true,  succ[1] gets proj_false
+                     * For IF_FALSE: succ[0] gets proj_false, succ[1] gets proj_true */
+                    vtx_nodeid_t succ0_proj = (term_op == VT_OP_IF_FALSE) ? proj_false : proj_true;
+                    vtx_nodeid_t succ1_proj = (term_op == VT_OP_IF_FALSE) ? proj_true  : proj_false;
+
                     uint32_t target_idx = block->succ_indices[0];
                     vtx_nodeid_t target_region = blocks[target_idx].region_node;
                     if (target_region != VTX_NODEID_INVALID) {
@@ -1709,14 +1718,13 @@ int vtx_graph_build(vtx_graph_t *graph,
                                 vtx_nodeid_t inp = region_n->inputs[i];
                                 const vtx_node_t *inp_n = vtx_node_get_const(&graph->node_table, inp);
                                 if (inp_n != NULL && inp == block->control_node) {
-                                    vtx_node_replace_input(&graph->node_table, target_region, i, proj_true);
+                                    vtx_node_replace_input(&graph->node_table, target_region, i, succ0_proj);
                                     break;
                                 }
                             }
                         }
                     }
 
-                    /* Fall-through (successor 1) gets the false projection */
                     uint32_t fall_idx = block->succ_indices[1];
                     vtx_nodeid_t fall_region = blocks[fall_idx].region_node;
                     if (fall_region != VTX_NODEID_INVALID) {
@@ -1726,7 +1734,7 @@ int vtx_graph_build(vtx_graph_t *graph,
                                 vtx_nodeid_t inp = region_n->inputs[i];
                                 const vtx_node_t *inp_n = vtx_node_get_const(&graph->node_table, inp);
                                 if (inp_n != NULL && inp == block->control_node) {
-                                    vtx_node_replace_input(&graph->node_table, fall_region, i, proj_false);
+                                    vtx_node_replace_input(&graph->node_table, fall_region, i, succ1_proj);
                                     break;
                                 }
                             }

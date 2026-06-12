@@ -366,8 +366,12 @@ static vtx_lattice_val_t evaluate_node(vtx_node_opcode_t opcode,
     /* ---- Phi: meet of all inputs ---- */
     case VTX_OP_Phi: {
         vtx_lattice_val_t result = vtx_lattice_top();
-        for (uint32_t i = 0; i < input_count; i++) {
-            /* Skip the Region input (last input in our representation) */
+        /* IR-1 fix: The last input of a Phi is the Region (control) node,
+         * which has no data-flow value and evaluates to Bottom in SCCP.
+         * Since Bottom meet X = Bottom, including the Region input makes
+         * every Phi resolve to Bottom, defeating constant propagation.
+         * We must skip the last input (the Region). */
+        for (uint32_t i = 0; i + 1 < input_count; i++) {
             result = vtx_lattice_meet(result, inputs[i]);
         }
         return result;

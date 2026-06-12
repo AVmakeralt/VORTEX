@@ -57,11 +57,16 @@ typedef struct {
     size_t      size;        /* total size of this semi-space */
 } vtx_semi_space_t;
 
-/* Free list node for old generation */
+/* Free list node for old generation.
+ * RT-4 fix: Added gc_mark field set to 0xFF so the sweep phase can
+ * distinguish free blocks from live objects. Live objects have
+ * gc_mark == 0 or 1 (0=unmarked, 1=marked). Free blocks have
+ * gc_mark == 0xFF, which is never a valid mark state for a live object. */
 typedef struct vtx_free_node vtx_free_node_t;
 struct vtx_free_node {
     size_t           size;     /* size of this free block (including this header) */
     vtx_free_node_t *next;    /* next free block */
+    uint8_t          gc_mark; /* RT-4: always 0xFF for free blocks */
 };
 
 /* Old generation (mark-sweep) */
