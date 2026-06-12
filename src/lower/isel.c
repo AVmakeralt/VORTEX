@@ -65,6 +65,13 @@ static const char *vtx_x86_opcode_names[VTX_X86_OPCODE_COUNT] = {
     [VTX_X86_LAHF]  = "lahf",
     [VTX_X86_SAHF]  = "sahf",
     [VTX_X86_UCOMISD] = "ucomisd",
+    [VTX_X86_ADDSD]  = "addsd",
+    [VTX_X86_SUBSD]  = "subsd",
+    [VTX_X86_MULSD]  = "mulsd",
+    [VTX_X86_DIVSD]  = "divsd",
+    [VTX_X86_XORPS]  = "xorps",
+    [VTX_X86_MOVSD]  = "movsd",
+    [VTX_X86_SAFEPOINT_POLL] = "safepoint_poll",
 };
 
 const char *vtx_x86_opcode_name(vtx_x86_opcode_t opcode)
@@ -101,6 +108,15 @@ static vtx_inst_t make_rr_inst(vtx_x86_opcode_t opcode, uint32_t dst_vreg,
     inst.opnd_kinds[1] = VTX_OPND_VREG;
     inst.operands[1] = src_vreg;
     inst.source_node = source_node;
+    return inst;
+}
+
+/* SSE variant of make_rr_inst — marks the instruction with IS_SSE flag */
+static vtx_inst_t make_sse_rr_inst(vtx_x86_opcode_t opcode, uint32_t dst_vreg,
+                                     uint32_t src_vreg, vtx_nodeid_t source_node)
+{
+    vtx_inst_t inst = make_rr_inst(opcode, dst_vreg, src_vreg, source_node);
+    inst.flags |= VTX_INST_FLAG_IS_SSE;
     return inst;
 }
 
@@ -555,6 +571,15 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         uint32_t rhs_vreg = vtx_isel_node_vreg(stream, node->inputs[1]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (lhs_vreg == VTX_VREG_INVALID || rhs_vreg == VTX_VREG_INVALID) return -1;
+
+        /* Float Add → ADDSD xmm, xmm */
+        if (node->type == VTX_TYPE_Float) {
+            if (dst != lhs_vreg)
+                vtx_isel_emit_inst(block, make_sse_rr_inst(VTX_X86_MOVSD, dst, lhs_vreg, node_id), arena);
+            vtx_isel_emit_inst(block, make_sse_rr_inst(VTX_X86_ADDSD, dst, rhs_vreg, node_id), arena);
+            break;
+        }
+
         if (dst != lhs_vreg)
             vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_vreg, node_id), arena);
         vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_ADD, dst, rhs_vreg, node_id), arena);
@@ -567,6 +592,15 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         uint32_t rhs_vreg = vtx_isel_node_vreg(stream, node->inputs[1]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (lhs_vreg == VTX_VREG_INVALID || rhs_vreg == VTX_VREG_INVALID) return -1;
+
+        /* Float Sub → SUBSD xmm, xmm */
+        if (node->type == VTX_TYPE_Float) {
+            if (dst != lhs_vreg)
+                vtx_isel_emit_inst(block, make_sse_rr_inst(VTX_X86_MOVSD, dst, lhs_vreg, node_id), arena);
+            vtx_isel_emit_inst(block, make_sse_rr_inst(VTX_X86_SUBSD, dst, rhs_vreg, node_id), arena);
+            break;
+        }
+
         if (dst != lhs_vreg)
             vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_vreg, node_id), arena);
         vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_SUB, dst, rhs_vreg, node_id), arena);
@@ -579,6 +613,14 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         uint32_t rhs_vreg = vtx_isel_node_vreg(stream, node->inputs[1]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (lhs_vreg == VTX_VREG_INVALID || rhs_vreg == VTX_VREG_INVALID) return -1;
+
+        /* Float Mul → MULSD xmm, xmm */
+        if (node->type == VTX_TYPE_Float) {
+            if (dst != lhs_vreg)
+                vtx_isel_emit_inst(block, make_sse_rr_inst(VTX_X86_MOVSD, dst, lhs_vreg, node_id), arena);
+            vtx_isel_emit_inst(block, make_sse_rr_inst(VTX_X86_MULSD, dst, rhs_vreg, node_id), arena);
+            break;
+        }
 
         /* Strength reduction: try to replace IMUL with cheaper ops */
         int64_t rhs_const;
@@ -606,6 +648,15 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         uint32_t lhs_vreg = vtx_isel_node_vreg(stream, node->inputs[0]);
         uint32_t rhs_vreg = vtx_isel_node_vreg(stream, node->inputs[1]);
         if (lhs_vreg == VTX_VREG_INVALID || rhs_vreg == VTX_VREG_INVALID) return -1;
+
+        /* Float Div → DIVSD xmm, xmm */
+        if (node->type == VTX_TYPE_Float) {
+            uint32_t dst = ensure_node_vreg(stream, node_id, arena);
+            if (dst != lhs_vreg)
+                vtx_isel_emit_inst(block, make_sse_rr_inst(VTX_X86_MOVSD, dst, lhs_vreg, node_id), arena);
+            vtx_isel_emit_inst(block, make_sse_rr_inst(VTX_X86_DIVSD, dst, rhs_vreg, node_id), arena);
+            break;
+        }
 
         /* Strength reduction: divide by constant power of 2 → SAR */
         int64_t rhs_const;
@@ -822,6 +873,32 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         uint32_t src = vtx_isel_node_vreg(stream, node->inputs[0]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (src == VTX_VREG_INVALID) return -1;
+
+        /* Float Neg → xorps sign bit flip:
+         * Load a constant with only the sign bit set (0x8000000000000000)
+         * into a temp XMM register, then XORPS dst, tmp. */
+        if (node->type == VTX_TYPE_Float) {
+            uint32_t tmp = vtx_isel_alloc_vreg(stream, arena);
+            /* mov tmp, 0x8000000000000000 (sign bit mask) */
+            vtx_inst_t mov_imm;
+            memset(&mov_imm, 0, sizeof(mov_imm));
+            mov_imm.opcode = VTX_X86_MOV;
+            mov_imm.opnd_kinds[0] = VTX_OPND_VREG;
+            mov_imm.operands[0] = tmp;
+            mov_imm.opnd_kinds[1] = VTX_OPND_IMM;
+            /* 0x8000000000000000 as signed int64 = -9223372036854775808 */
+            mov_imm.imm = (int64_t)0x8000000000000000ULL;
+            mov_imm.flags = VTX_INST_FLAG_HAS_IMM;
+            mov_imm.source_node = node_id;
+            vtx_isel_emit_inst(block, mov_imm, arena);
+
+            if (dst != src)
+                vtx_isel_emit_inst(block, make_sse_rr_inst(VTX_X86_MOVSD, dst, src, node_id), arena);
+            /* xorps dst, tmp — flip the sign bit */
+            vtx_isel_emit_inst(block, make_sse_rr_inst(VTX_X86_XORPS, dst, tmp, node_id), arena);
+            break;
+        }
+
         if (dst != src)
             vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, src, node_id), arena);
         vtx_isel_emit_inst(block, make_r_inst(VTX_X86_NEG, dst, node_id, 0), arena);
@@ -907,6 +984,42 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         if (obj == VTX_VREG_INVALID || val == VTX_VREG_INVALID) return -1;
         vtx_x86_memop_t mem = { obj, VTX_VREG_INVALID, 0xFF, 0xFF, 1, (int32_t)node->field_offset };
         vtx_isel_emit_inst(block, make_mr_inst(VTX_X86_MOV, &mem, val, node_id), arena);
+
+        /* Emit GC write barrier for reference stores.
+         * Check if the stored value is a pointer/reference type or if
+         * the node has the VTX_NF_WRITE_BARRIER flag set. */
+        {
+            bool is_ref_store = vtx_nf_has(node->flags, VTX_NF_WRITE_BARRIER);
+            if (!is_ref_store && node->inputs[1] < graph->node_table.count) {
+                const vtx_node_t *val_node = &graph->node_table.nodes[node->inputs[1]];
+                if (val_node && val_node->type == VTX_TYPE_Ptr) {
+                    is_ref_store = true;
+                }
+            }
+            if (is_ref_store) {
+                /* Push obj address to RDI (first arg) and field_offset to ESI (second arg).
+                 * Per System V AMD64 ABI: RDI = arg0, ESI = arg1 */
+                uint32_t rdi_vreg = vtx_isel_alloc_vreg_fixed(stream, arena, 7); /* RDI */
+                uint32_t rsi_vreg = vtx_isel_alloc_vreg_fixed(stream, arena, 6); /* RSI */
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, rdi_vreg, obj, node_id), arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, rsi_vreg,
+                                   (int64_t)node->field_offset, node_id), arena);
+                /* Call write barrier stub (imm = -4) */
+                vtx_inst_t wb_call;
+                memset(&wb_call, 0, sizeof(wb_call));
+                wb_call.opcode = VTX_X86_CALL;
+                wb_call.opnd_kinds[0] = VTX_OPND_IMM;
+                wb_call.imm = -4;
+                wb_call.flags = VTX_INST_FLAG_HAS_IMM | VTX_INST_FLAG_IS_CALL |
+                                VTX_INST_FLAG_CLOBBER_RAX | VTX_INST_FLAG_CLOBBER_RCX |
+                                VTX_INST_FLAG_CLOBBER_RDX | VTX_INST_FLAG_CLOBBER_RSI |
+                                VTX_INST_FLAG_CLOBBER_RDI | VTX_INST_FLAG_CLOBBER_R8 |
+                                VTX_INST_FLAG_CLOBBER_R9 | VTX_INST_FLAG_CLOBBER_R10 |
+                                VTX_INST_FLAG_CLOBBER_R11;
+                wb_call.source_node = node_id;
+                vtx_isel_emit_inst(block, wb_call, arena);
+            }
+        }
         break;
     }
 
@@ -929,6 +1042,45 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         if (base == VTX_VREG_INVALID || idx == VTX_VREG_INVALID || val == VTX_VREG_INVALID) return -1;
         vtx_x86_memop_t mem = { base, idx, 0xFF, 0xFF, 8, 0 };
         vtx_isel_emit_inst(block, make_mr_inst(VTX_X86_MOV, &mem, val, node_id), arena);
+
+        /* Emit GC write barrier for reference stores.
+         * For StoreIndexed, the field offset is computed at runtime as
+         * idx * element_size + header_size. We pass 0 as field_offset
+         * and let the write barrier use the object's base address to
+         * mark the card. This is conservative (marks the whole card
+         * containing the object) but correct — the GC will scan all
+         * fields of the object anyway when the card is dirty. */
+        {
+            bool is_ref_store = vtx_nf_has(node->flags, VTX_NF_WRITE_BARRIER);
+            if (!is_ref_store && node->inputs[2] < graph->node_table.count) {
+                const vtx_node_t *val_node = &graph->node_table.nodes[node->inputs[2]];
+                if (val_node && val_node->type == VTX_TYPE_Ptr) {
+                    is_ref_store = true;
+                }
+            }
+            if (is_ref_store) {
+                /* Push base address to RDI (first arg), 0 as field_offset to ESI (second arg).
+                 * Per System V AMD64 ABI: RDI = arg0, ESI = arg1 */
+                uint32_t rdi_vreg = vtx_isel_alloc_vreg_fixed(stream, arena, 7); /* RDI */
+                uint32_t rsi_vreg = vtx_isel_alloc_vreg_fixed(stream, arena, 6); /* RSI */
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, rdi_vreg, base, node_id), arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, rsi_vreg, 0, node_id), arena);
+                /* Call write barrier stub (imm = -4) */
+                vtx_inst_t wb_call;
+                memset(&wb_call, 0, sizeof(wb_call));
+                wb_call.opcode = VTX_X86_CALL;
+                wb_call.opnd_kinds[0] = VTX_OPND_IMM;
+                wb_call.imm = -4;
+                wb_call.flags = VTX_INST_FLAG_HAS_IMM | VTX_INST_FLAG_IS_CALL |
+                                VTX_INST_FLAG_CLOBBER_RAX | VTX_INST_FLAG_CLOBBER_RCX |
+                                VTX_INST_FLAG_CLOBBER_RDX | VTX_INST_FLAG_CLOBBER_RSI |
+                                VTX_INST_FLAG_CLOBBER_RDI | VTX_INST_FLAG_CLOBBER_R8 |
+                                VTX_INST_FLAG_CLOBBER_R9 | VTX_INST_FLAG_CLOBBER_R10 |
+                                VTX_INST_FLAG_CLOBBER_R11;
+                wb_call.source_node = node_id;
+                vtx_isel_emit_inst(block, wb_call, arena);
+            }
+        }
         break;
     }
 
@@ -1328,6 +1480,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         ucomisd.operands[0] = lhs;
         ucomisd.opnd_kinds[1] = VTX_OPND_VREG;
         ucomisd.operands[1] = rhs;
+        ucomisd.flags = VTX_INST_FLAG_IS_SSE;
         ucomisd.source_node = node_id;
         vtx_isel_emit_inst(block, ucomisd, arena);
 
@@ -1364,7 +1517,21 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
     case VTX_OP_FrameState:
     case VTX_OP_Start:
     case VTX_OP_End:
-    case VTX_OP_LoopEnd:
+    case VTX_OP_LoopEnd: {
+        /* Emit safepoint poll at loop back-edge.
+         * This pseudo-instruction expands to:
+         *   cmpq [vtx_safepoint_flag], 0
+         *   jne  deopt_stub
+         * The JNE is marked IS_GUARD so the guard emission pipeline
+         * patches it to jump to the appropriate deopt stub. */
+        vtx_inst_t sp;
+        memset(&sp, 0, sizeof(sp));
+        sp.opcode = VTX_X86_SAFEPOINT_POLL;
+        sp.source_node = node_id;
+        sp.flags = VTX_INST_FLAG_IS_GUARD | VTX_INST_FLAG_IS_SAFEPOINT;
+        vtx_isel_emit_inst(block, sp, arena);
+        break;
+    }
     case VTX_OP_Switch:
     case VTX_OP_Unwind:
     case VTX_OP_Catch:

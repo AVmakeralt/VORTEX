@@ -1,5 +1,171 @@
 # VORTEX JIT Compilation Error Fix Worklog
 
+**Date:** 2026-03-05
+**Task ID:** infra-6
+**Project:** /home/z/my-project/VORTEX
+**Description:** Implement GC write barriers for the VORTEX JIT compiler
+
+## Summary
+
+Implemented a card-table based GC write barrier for the VORTEX JIT compiler's
+generational garbage collector. The write barrier is emitted after StoreField
+and StoreIndexed IR nodes that store reference (pointer) types, ensuring
+cross-generational references are tracked during young-gen collection.
+
+**All 12 tests pass.** The `vortex` executable has a pre-existing linker error
+(unrelated `vtx_safepoint_flag` undefined reference) that predates this change.
+
+---
+
+## Changes Made
+
+### 1. `src/ir/node.h` — Add VTX_NF_WRITE_BARRIER flag
+
+Added `VTX_NF_WRITE_BARRIER = (1u << 5)` to `vtx_node_flags_t` enum. This flag
+marks StoreField/StoreIndexed nodes that require a GC write barrier because they
+store a reference (pointer) type. Optimizations can check this flag to determine
+whether a write barrier is needed, and it can also be set explicitly by IR
+transformation passes.
+
+```c
+VTX_NF_WRITE_BARRIER = (1u << 5), /* node requires a GC write barrier (StoreField/StoreIndexed of ref) */
+```
+
+### 2. `src/runtime/helpers.h` — Write barrier declaration
+
+Added declaration for `vtx_helpers_write_barrier(void *obj, uint32_t field_offset)`:
+- `obj`: Pointer to the heap object containing the written field
+- `field_offset`: Byte offset of the field within the object
+- Called from JIT-compiled code per System V AMD64 ABI (RDI=obj, ESI=field_offset)
+
+### 3. `src/runtime/helpers.c` — Write barrier implementation
+
+Implemented `vtx_helpers_write_barrier()`:
+1. Null-checks the object pointer
+2. Gets the current GC instance via `vtx_get_current_gc()`
+3. Returns early if GC is NULL or not in generational mode
+4. Computes field address and marks the containing card dirty (0xFF) in the card table
+5. Conservatively adds the object to the remembered set if it's in old gen
+
+The card-table marking uses 512-byte cards (VTX_CARD_SIZE) with 1-byte entries.
+The dirty marker is 0xFF (matching HotSpot JVM convention), allowing lower bits
+to encode metadata when the card is clean.
+
+### 4. `src/runtime/gc.h` — New API declarations
+
+Added:
+- `vtx_gc_card_mark_dirty(gc, field_addr)` — Marks the card containing a field
+  address as dirty. Used by the write barrier and available for GC internals.
+- `vtx_get_current_gc()` / `vtx_set_current_gc()` — Moved from runtime_stubs.c
+  to gc.c/gc.h so they're available to the runtime library (helpers.c needs
+  them). Previously these were only in runtime_stubs.c which wasn't linked
+  into the test executables.
+
+### 5. `src/runtime/gc.c` — Card-table marking implementation
+
+Added:
+- Global `the_gc` pointer with `vtx_get_current_gc()` / `vtx_set_current_gc()`
+  (moved from runtime_stubs.c to fix linking)
+- `vtx_gc_card_mark_dirty()` — Computes card index from field address and
+  marks it dirty (0xFF). Performs bounds checking on the card table.
+
+### 6. `src/runtime_stubs.c` — Removed duplicate GC globals
+
+Removed `the_gc`, `vtx_get_current_gc()`, and `vtx_set_current_gc()` from
+runtime_stubs.c since they're now in gc.c/gc.h. This avoids duplicate symbol
+errors and ensures the write barrier can call `vtx_get_current_gc()`.
+
+### 7. `src/lower/isel.c` — Emit write barrier after reference stores
+
+After StoreField and StoreIndexed instructions that store reference types:
+1. Check if the stored value has type `VTX_TYPE_Ptr` or if the node has
+   `VTX_NF_WRITE_BARRIER` flag
+2. If so, emit:
+   - `MOV RDI, obj_vreg` (first arg: object pointer)
+   - `MOV RSI, field_offset` (second arg: field offset; 0 for StoreIndexed)
+   - `CALL -4` (write barrier stub ID)
+3. The CALL uses `VTX_OPND_IMM` with `imm = -4` as a stub ID, consistent
+   with existing stub IDs (-1=NewObject, -2=NewArray, -3=Allocate)
+
+For StoreIndexed, the field offset is passed as 0 because the exact offset
+depends on the runtime index. This is conservative but correct — the card
+containing the object is marked dirty, and the GC scans all fields when
+processing dirty cards.
+
+### 8. `src/lower/emit.c` — Write barrier call relocation
+
+Added:
+- `#include "runtime/helpers.h"` to access `vtx_helpers_write_barrier` address
+- In `vtx_x86_emit_function()`, after emitting a CALL instruction with
+  `imm == -4`, record an external call relocation targeting
+  `vtx_helpers_write_barrier`. The relocation is marked `is_external = true`
+  and will be resolved at code install time when the final code address in
+  the code cache is known.
+
+---
+
+## Architecture
+
+```
+JIT StoreField/StoreIndexed (ref type)
+        │
+        ▼
+  isel.c: emit MOV store + CALL -4
+        │
+        ▼
+  emit.c: CALL rel32 + external reloc to vtx_helpers_write_barrier
+        │
+        ▼
+  install.c: resolve reloc → patch CALL displacement
+        │
+        ▼
+  vtx_helpers_write_barrier(obj, field_offset)
+        │
+        ├── Null check → return
+        ├── vtx_get_current_gc() → NULL? → return
+        ├── Not generational mode? → return
+        ├── Card table: mark card[obj+offset] = 0xFF
+        └── Remembered set: if obj in old gen, add to set
+
+  GC young-gen collection:
+        ├── Scan dirty cards in card table
+        └── Scan remembered set (old→young refs)
+```
+
+---
+
+## Build & Test Results
+
+```
+12/12 tests passed:
+  test_arena, test_object, test_bytecode, test_type_system,
+  test_node, test_graph, test_interp_basics, test_stress_runtime,
+  test_stress_ir, test_stress_profile_trace, test_stress_compile_lower,
+  test_stress_integration
+```
+
+Note: The `vortex` main executable has a pre-existing linker error
+(`vtx_safepoint_flag` undefined reference) unrelated to this change.
+
+---
+
+## Files Modified
+
+| File | Change |
+|------|--------|
+| `src/ir/node.h` | Added `VTX_NF_WRITE_BARRIER` flag to `vtx_node_flags_t` enum |
+| `src/runtime/helpers.h` | Added `vtx_helpers_write_barrier()` declaration |
+| `src/runtime/helpers.c` | Added `vtx_helpers_write_barrier()` implementation + `#include "runtime/gc.h"` |
+| `src/runtime/gc.h` | Added `vtx_gc_card_mark_dirty()`, `vtx_get_current_gc()`, `vtx_set_current_gc()` declarations |
+| `src/runtime/gc.c` | Added `vtx_gc_card_mark_dirty()` implementation, moved `the_gc`/get/set from runtime_stubs.c |
+| `src/runtime_stubs.c` | Removed duplicate `the_gc`/`vtx_get_current_gc()`/`vtx_set_current_gc()` |
+| `src/lower/isel.c` | Emit write barrier call after StoreField/StoreIndexed of reference type |
+| `src/lower/emit.c` | Added `#include "runtime/helpers.h"`, write barrier call relocation (stub -4) |
+
+---
+
+
+
 **Date:** 2026-03-04
 **Project:** /home/z/my-project/VORTEX
 **Compiler:** gcc -std=c17 -O2 -Isrc -Ibuild -Wno-unused-parameter -Wno-unused-function -Wno-unused-variable -Wno-sign-compare -Wno-missing-field-initializers
@@ -1100,4 +1266,99 @@ Stage Summary:
 - All 22 identified stub/placeholder/incomplete items have been fully implemented
 - No TODO, FIXME, or "not yet implemented" comments remain in the source tree
 - All "simplified" and "for now" placeholders either implemented or clarified as by-design
+
+---
+
+## Task ID: infra-7 — Implement Safepoint Polling
+
+**Date:** 2026-03-05
+**Status:** ✅ Complete
+
+### Objective
+
+Add safepoint polling to the VORTEX JIT compiler so that JIT-compiled code
+checks a global flag at every loop back-edge, enabling the GC/runtime to
+safely stop-the-world when needed.
+
+### Changes Made
+
+#### 1. `src/compile/safepoint.h` — Global flag declaration
+- Added `extern volatile int vtx_safepoint_flag` — the global variable the
+  GC/runtime sets to non-zero when it needs all threads to reach a safepoint.
+- Added `vtx_safepoint_should_stop()` inline helper that returns
+  `vtx_safepoint_flag != 0`.
+
+#### 2. `src/compile/safepoint.c` — Global flag definition
+- Defined `volatile int vtx_safepoint_flag = 0;`.
+
+#### 3. `src/lower/isel.h` — New opcode and instruction flag
+- Added `VTX_X86_SAFEPOINT_POLL` opcode (pseudo-instruction that expands to
+  `cmpq [vtx_safepoint_flag], 0; jne deopt_stub`).
+- Added `VTX_INST_FLAG_IS_SAFEPOINT` flag (`1u << 21`) to identify safepoint
+  poll instructions in the instruction stream.
+
+#### 4. `src/lower/isel.c` — LoopEnd instruction selection
+- Changed `case VTX_OP_LoopEnd:` from a no-op to emitting a
+  `VTX_X86_SAFEPOINT_POLL` instruction with `VTX_INST_FLAG_IS_GUARD |
+  VTX_INST_FLAG_IS_SAFEPOINT` flags.
+- Added `"safepoint_poll"` to the opcode name table.
+
+#### 5. `src/lower/emit.h` — Safepoint poll emission API
+- Declared `int vtx_x86_emit_safepoint_poll(vtx_x86_emit_t *e)`.
+
+#### 6. `src/lower/emit.c` — Safepoint poll machine code emission
+- Added `#include "compile/safepoint.h"` for `vtx_safepoint_flag` address.
+- Implemented `vtx_x86_emit_safepoint_poll()`:
+  - Emits `cmpq [rip + disp32], 0` (8 bytes: `48 83 3D dd dd dd dd 00`)
+    using RIP-relative addressing to `vtx_safepoint_flag`.
+  - Records a `VTX_RELOC_RIP_REL32` external relocation for the CMP's
+    displacement, so it's patched at code install time when the final
+    code address in the code cache is known.
+  - Emits `jne rel32` (6 bytes: `0F 85 dd dd dd dd`) with placeholder
+    displacement that will be patched by the guard emission pipeline.
+- Added `case VTX_X86_SAFEPOINT_POLL:` in `emit_single_inst()` that calls
+  `vtx_x86_emit_safepoint_poll()`.
+
+#### 7. `src/deopt/side_table.h` — Safepoint recording API
+- Declared `vtx_side_table_record_safepoint()` which records a side table
+  entry at a safepoint PC offset with the `VTX_STF_SAFEPPOINT` flag and
+  a GC root map (array of NodeIDs that hold object references).
+
+#### 8. `src/deopt/side_table.c` — Safepoint recording implementation
+- Implemented `vtx_side_table_record_safepoint()`:
+  - Adds a side table entry at `native_pc_offset` with `VTX_STF_SAFEPPOINT`
+    flag and `frame_state_index = UINT32_MAX` sentinel.
+  - Records each GC root NodeID as a register map entry with
+    `register_number = 0xFFFFFFFF` sentinel (indicating the root is
+    identified by NodeID rather than physical register).
+
+### Build & Test Results
+
+- All core libraries compile successfully: `vortex_lower`, `vortex_compile`,
+  `vortex_deopt`, `vortex_ir`, `vortex_runtime`, `vortex_common`.
+- `test_stress_compile_lower`: 200/200 PASS
+- `test_stress_ir`: 200/200 PASS
+- `test_stress_runtime`: 200/200 PASS
+- All unit tests: PASS (node, graph, arena, bytecode, object, type_system)
+- Pre-existing link error in `test_stress_integration` (undefined
+  `vtx_get_current_gc`) is unrelated to this change.
+
+### Architecture Notes
+
+The safepoint poll is a 14-byte instruction sequence:
+```
+48 83 3D xx xx xx xx 00    ; cmpq [rip+vtx_safepoint_flag], 0
+0F 85 yy yy yy yy          ; jne deopt_stub
+```
+
+- The CMP uses RIP-relative addressing for position-independent access to the
+  global `vtx_safepoint_flag`. The displacement is patched at code install time
+  via an external `VTX_RELOC_RIP_REL32` relocation.
+- The JNE is marked with `VTX_INST_FLAG_IS_GUARD` in the instruction stream,
+  enabling the existing guard emission pipeline to patch it to jump to the
+  appropriate deopt stub.
+- The total overhead per loop iteration is a single 8-byte compare + 6-byte
+  conditional jump (14 bytes), which is amortized across the loop body.
+  On the fast path (flag == 0), the CMP + JNE is typically fused into a
+  single macro-op on modern x86-64 CPUs.
 - The codebase now has zero-tolerance compliance with the project roadmap

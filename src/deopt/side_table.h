@@ -211,4 +211,27 @@ const vtx_reg_map_entry_t *vtx_side_table_get_register_map(
     uint32_t native_pc_offset,
     uint32_t *out_count);
 
+/* ========================================================================== */
+/* Safepoint recording                                                         */
+/* ========================================================================== */
+
+/**
+ * Record a safepoint with GC root map at the given native PC offset.
+ *
+ * Creates a side table entry at the given native PC offset, flagged with
+ * VTX_STF_SAFEPPOINT, and records the GC root map (which NodeIDs hold
+ * object references at this point). The root_node_ids array must remain
+ * valid for the lifetime of the side table (typically arena-allocated).
+ *
+ * @param table             The side table
+ * @param native_pc_offset  Native PC offset of the safepoint
+ * @param root_node_ids     Array of NodeIDs that are GC roots at this point
+ * @param root_count        Number of entries in root_node_ids
+ * @return                  0 on success, -1 on failure
+ */
+int vtx_side_table_record_safepoint(vtx_side_table_t *table,
+                                     uint32_t native_pc_offset,
+                                     const uint32_t *root_node_ids,
+                                     uint32_t root_count);
+
 #endif /* VORTEX_DEOPT_SIDE_TABLE_H */

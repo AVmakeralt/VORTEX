@@ -14,6 +14,7 @@
 
 #include "lower/emit.h"
 #include "lower/reloc.h"
+#include "runtime/helpers.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -576,6 +577,138 @@ void vtx_x86_emit_ucomisd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
     emit_byte(e, 0x0F);  /* Two-byte opcode escape */
     emit_byte(e, 0x2E);  /* UCOMISD opcode */
     emit_modrm(e, 3, src & 7, dst & 7);  /* mod=11 (reg-reg) */
+}
+
+/* ========================================================================== */
+/* SSE/SSE2 scalar double-precision instructions                               */
+/* ========================================================================== */
+
+/**
+ * Helper: emit an SSE scalar double instruction with F2 prefix.
+ * Format: F2 [REX] 0F opcode ModR/M(mod=11, reg=src, rm=dst)
+ *
+ * @param e       Emitter
+ * @param opcode  The opcode byte after 0F
+ * @param dst     Destination XMM register (r/m field)
+ * @param src     Source XMM register (reg field)
+ */
+static void emit_sse_sd_rr(vtx_x86_emit_t *e, uint8_t opcode,
+                             uint8_t dst, uint8_t src)
+{
+    int r = reg_hi(src);
+    int b = reg_hi(dst);
+    /* Emit REX prefix if needed for extended registers */
+    if (r || b) {
+        emit_rex(e, 0, r, 0, b);
+    }
+    emit_byte(e, 0xF2);  /* scalar double prefix */
+    emit_byte(e, 0x0F);  /* Two-byte opcode escape */
+    emit_byte(e, opcode);
+    emit_modrm(e, 3, src & 7, dst & 7);  /* mod=11 (reg-reg) */
+}
+
+void vtx_x86_emit_addsd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    emit_sse_sd_rr(e, 0x58, dst, src);  /* F2 0F 58 /r */
+}
+
+void vtx_x86_emit_subsd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    emit_sse_sd_rr(e, 0x5C, dst, src);  /* F2 0F 5C /r */
+}
+
+void vtx_x86_emit_mulsd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    emit_sse_sd_rr(e, 0x59, dst, src);  /* F2 0F 59 /r */
+}
+
+void vtx_x86_emit_divsd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    emit_sse_sd_rr(e, 0x5E, dst, src);  /* F2 0F 5E /r */
+}
+
+void vtx_x86_emit_movsd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    emit_sse_sd_rr(e, 0x10, dst, src);  /* F2 0F 10 /r (movsd xmm, xmm) */
+}
+
+void vtx_x86_emit_xorps(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    /* XORPS xmm, xmm — no mandatory prefix, just 0F 57 /r */
+    int r = reg_hi(src);
+    int b = reg_hi(dst);
+    if (r || b) {
+        emit_rex(e, 0, r, 0, b);
+    }
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0x57);
+    emit_modrm(e, 3, src & 7, dst & 7);  /* mod=11 (reg-reg) */
+}
+
+/* ========================================================================== */
+/* Safepoint poll emission                                                     */
+/* ========================================================================== */
+
+int vtx_x86_emit_safepoint_poll(vtx_x86_emit_t *e)
+{
+    if (!e) return -1;
+
+    /* Emit:
+     *   cmp qword ptr [rip + disp32], 0   (8 bytes)
+     *   jne rel32                          (6 bytes)
+     *
+     * CMP encoding (CMP r/m64, imm8 with RIP-relative addressing):
+     *   REX.W (0x48) + 0x83 + ModR/M(00,/7,101) + disp32 + imm8
+     *   0x48 0x83 0x3D dd dd dd dd 0x00
+     *
+     * The displacement is a placeholder (0); a VTX_RELOC_RIP_REL32
+     * external relocation is recorded so it gets patched at code
+     * install time when the final code address is known.
+     *
+     * JNE encoding:
+     *   0x0F 0x85 dd dd dd dd
+     *
+     * The JNE displacement is a placeholder (0); it will be patched
+     * by the guard emission pipeline to jump to a deopt stub.
+     */
+
+    /* Ensure buffer has space: 8 (CMP) + 6 (JNE) = 14 bytes */
+    if (vtx_x86_emit_ensure(e, 14) != 0) return -1;
+
+    /* ---- Emit CMP qword ptr [rip + disp32], 0 ---- */
+    uint32_t cmp_disp_offset = vtx_x86_emit_position(e) + 3; /* disp32 starts at byte 3 */
+
+    emit_byte(e, 0x48);  /* REX.W */
+    emit_byte(e, 0x83);  /* CMP r/m64, imm8 */
+    emit_byte(e, 0x3D);  /* ModR/M: mod=00, reg=/7 (CMP), r/m=5 (RIP-relative) */
+    emit_dword(e, 0);    /* placeholder disp32 — will be patched by relocation */
+    emit_byte(e, 0x00);  /* immediate 0 */
+
+    /* Record RIP-relative relocation for the CMP's displacement.
+     * Marked as external because the code's final address in the code
+     * cache is not known at emit time. The target is the address of
+     * vtx_safepoint_flag.
+     * Use stub_id -5 as a special external relocation ID that the
+     * code install step will resolve to &vtx_safepoint_flag. */
+    if (e->relocs && e->reloc_arena) {
+        uint32_t reloc_idx = vtx_reloc_add(e->relocs, VTX_RELOC_RIP_REL32,
+                                            cmp_disp_offset,
+                                            0,  /* target_offset (N/A for external) */
+                                            0,  /* target_addr: resolved at install time */
+                                            -5, /* stub_id: special marker for safepoint_flag */
+                                            0, e->reloc_arena);
+        if (reloc_idx == UINT32_MAX) return -1;
+        /* Mark as external so it gets re-applied at install time */
+        e->relocs->entries[reloc_idx].is_external = true;
+    }
+
+    /* ---- Emit JNE rel32 ---- */
+    /* 0F 85 cd — JNE rel32 (jump if not equal / not zero) */
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0x85);
+    emit_dword(e, 0);    /* placeholder disp32 — will be patched by guard emission */
+
+    return 0;
 }
 
 /* ========================================================================== */
@@ -1793,6 +1926,61 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
         }
         break;
 
+    case VTX_X86_ADDSD:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) {
+            vtx_x86_emit_addsd(e, r0, r1);
+        }
+        break;
+
+    case VTX_X86_SUBSD:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) {
+            vtx_x86_emit_subsd(e, r0, r1);
+        }
+        break;
+
+    case VTX_X86_MULSD:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) {
+            vtx_x86_emit_mulsd(e, r0, r1);
+        }
+        break;
+
+    case VTX_X86_DIVSD:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) {
+            vtx_x86_emit_divsd(e, r0, r1);
+        }
+        break;
+
+    case VTX_X86_XORPS:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) {
+            vtx_x86_emit_xorps(e, r0, r1);
+        }
+        break;
+
+    case VTX_X86_MOVSD:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) {
+            vtx_x86_emit_movsd(e, r0, r1);
+        }
+        break;
+
+    case VTX_X86_SAFEPOINT_POLL:
+        /* Emit safepoint poll: cmpq [vtx_safepoint_flag], 0; jne deopt_stub */
+        if (vtx_x86_emit_safepoint_poll(e) != 0) {
+            return -1;
+        }
+        break;
+
     default:
         /* Unknown opcode — emit nop as safe fallback */
         vtx_x86_emit_nop(e);
@@ -2036,6 +2224,19 @@ int vtx_x86_emit_function(vtx_x86_emit_t *emit, vtx_inst_stream_t *stream,
                 if (emit->relocs->count > 0) {
                     emit->relocs->entries[emit->relocs->count - 1].symbol = target_block;
                 }
+            }
+            /* ---- GC write barrier call relocation ---- *
+             * CALL with VTX_OPND_IMM and imm == -4 is a write barrier stub call.
+             * We record an external call relocation targeting
+             * vtx_helpers_write_barrier, which will be resolved at code
+             * install time when the final code address is known. */
+            else if (inst->opcode == VTX_X86_CALL &&
+                     (inst->flags & VTX_INST_FLAG_HAS_IMM) &&
+                     inst->imm == -4) {
+                uint32_t patch_offset = inst->native_offset + 1; /* disp32 at +1 for CALL */
+                vtx_reloc_add_call(emit->relocs, patch_offset,
+                                   (uint64_t)(uintptr_t)vtx_helpers_write_barrier,
+                                   emit->reloc_arena);
             }
         }
     }

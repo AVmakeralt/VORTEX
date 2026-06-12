@@ -49,6 +49,12 @@ typedef struct {
     uint32_t       succ_count;
     uint32_t      *pred_blocks;
     uint32_t       pred_count;
+
+    /* Dominance frontier: blocks where this block's dominance ends.
+     * Used for SSA Phi node placement (Cytron et al. 1991). */
+    uint32_t      *df_blocks;    /* array of block indices in DF(this) */
+    uint32_t       df_count;     /* number of blocks in the frontier */
+    uint32_t       df_capacity;  /* allocated capacity of df_blocks */
 } vtx_schedule_block_t;
 
 /* ========================================================================== */
@@ -90,5 +96,19 @@ uint32_t vtx_schedule_node_block(const vtx_schedule_t *schedule, vtx_nodeid_t no
  * Print the schedule to stderr for debugging.
  */
 void vtx_schedule_print(const vtx_schedule_t *schedule, const vtx_graph_t *graph);
+
+/**
+ * Compute dominance frontiers for each block.
+ * For each block b, DF(b) is the set of blocks where b's dominance ends —
+ * i.e., blocks that are successors of blocks dominated by b, but are not
+ * themselves dominated by b. This is used for SSA Phi node placement.
+ *
+ * The frontier sets are stored as arrays of block indices in each
+ * vtx_schedule_block_t, using the df_blocks and df_count fields.
+ */
+void vtx_compute_dominance_frontiers(vtx_schedule_block_t *blocks,
+                                       uint32_t count,
+                                       const uint32_t *dom,
+                                       uint32_t start_block);
 
 #endif /* VORTEX_SCHEDULE_H */

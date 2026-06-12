@@ -13,6 +13,17 @@
 #include <time.h>
 
 /* ========================================================================== */
+/* Global safepoint flag                                                       */
+/* ========================================================================== */
+
+/**
+ * Global safepoint flag, polled by JIT-compiled code at loop back-edges.
+ * Set to non-zero by the GC/runtime when all threads must reach a safepoint.
+ * Cleared when the safepoint operation is complete.
+ */
+volatile int vtx_safepoint_flag = 0;
+
+/* ========================================================================== */
 /* Lifecycle                                                                   */
 /* ========================================================================== */
 

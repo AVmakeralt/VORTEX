@@ -137,6 +137,85 @@ static uint32_t *compute_dominators(uint32_t block_count,
 }
 
 /* ========================================================================== */
+/* Dominance frontier computation (Cytron et al. 1991)                        */
+/* ========================================================================== */
+
+/**
+ * Add a block index to a dominance frontier set, avoiding duplicates.
+ * Returns 0 on success, -1 on allocation failure.
+ */
+static int df_add(vtx_schedule_block_t *blk, uint32_t block_idx)
+{
+    /* Check for duplicate */
+    for (uint32_t i = 0; i < blk->df_count; i++) {
+        if (blk->df_blocks[i] == block_idx) return 0;
+    }
+
+    /* Grow array if needed */
+    if (blk->df_count >= blk->df_capacity) {
+        uint32_t new_cap = (blk->df_capacity == 0) ? 8 : blk->df_capacity * 2;
+        uint32_t *new_arr = (uint32_t *)realloc(blk->df_blocks,
+                                                 new_cap * sizeof(uint32_t));
+        if (new_arr == NULL) return -1;
+        blk->df_blocks = new_arr;
+        blk->df_capacity = new_cap;
+    }
+
+    blk->df_blocks[blk->df_count++] = block_idx;
+    return 0;
+}
+
+/**
+ * Compute dominance frontiers for each block.
+ *
+ * Algorithm (Cytron et al. 1991):
+ *   For each join block b (pred_count >= 2):
+ *     For each predecessor p of b:
+ *       runner = p
+ *       while runner != dom[b]:
+ *         add b to DF(runner)
+ *         runner = dom[runner]
+ *
+ * DF(b) is the set of blocks where b's dominance ends — blocks that are
+ * successors of blocks dominated by b, but are not themselves strictly
+ * dominated by b. This is the standard criterion for SSA Phi node
+ * placement.
+ */
+void vtx_compute_dominance_frontiers(vtx_schedule_block_t *blocks,
+                                       uint32_t count,
+                                       const uint32_t *dom,
+                                       uint32_t start_block)
+{
+    if (blocks == NULL || dom == NULL || count == 0) return;
+
+    /* Initialize all frontier sets to empty */
+    for (uint32_t i = 0; i < count; i++) {
+        blocks[i].df_count = 0;
+    }
+
+    /* For each block b, walk up the dominator tree from each predecessor */
+    for (uint32_t b = 0; b < count; b++) {
+        /* Only join blocks (>= 2 predecessors) contribute to frontiers */
+        if (blocks[b].pred_count < 2) continue;
+
+        for (uint32_t pi = 0; pi < blocks[b].pred_count; pi++) {
+            uint32_t runner = blocks[b].pred_blocks[pi];
+
+            /* Walk up the dominator tree until we reach b's immediate
+             * dominator. Every block along the way has b in its frontier. */
+            while (runner != dom[b] && runner != start_block) {
+                /* Guard: if runner is out of range, stop */
+                if (runner >= count) break;
+
+                df_add(&blocks[runner], b);
+
+                runner = dom[runner];
+            }
+        }
+    }
+}
+
+/* ========================================================================== */
 /* Loop depth computation                                                      */
 /* ========================================================================== */
 
@@ -413,6 +492,81 @@ int vtx_schedule_run(vtx_graph_t *graph, vtx_arena_t *arena, vtx_schedule_t *sch
                 }
             }
         }
+
+        /* Handle ExceptProj nodes: they represent exception edges.
+         * An ExceptProj connects a throwing node's block to the catch
+         * handler block (the block containing the Catch node that the
+         * ExceptProj feeds into). We treat this like a control edge —
+         * the catch handler block is a successor of the throwing block. */
+        if (node->opcode == VTX_OP_ExceptProj) {
+            /* Find which Catch node this ExceptProj feeds into.
+             * The ExceptProj's input is the throwing node; we need
+             * to find the Catch node that consumes this ExceptProj. */
+            for (uint32_t j = 0; j < node_count; j++) {
+                vtx_node_t *catch_node = &nt->nodes[j];
+                if (catch_node->dead) continue;
+                if (catch_node->opcode == VTX_OP_Catch) {
+                    for (uint32_t k = 0; k < catch_node->input_count; k++) {
+                        if (catch_node->inputs[k] == i) {
+                            /* This ExceptProj feeds into this Catch.
+                             * The Catch's block is the successor.
+                             * The throwing node's block is the predecessor. */
+                            uint32_t catch_block = schedule->node_block[j];
+                            if (catch_block == (uint32_t)-1) continue;
+
+                            /* Find the block of the throwing node */
+                            if (node->input_count > 0 && node->inputs[0] < node_count) {
+                                vtx_nodeid_t thrower = node->inputs[0];
+                                uint32_t from_block = schedule->node_block[thrower];
+                                /* If the thrower isn't directly in a block,
+                                 * walk back through its inputs to find one */
+                                while (from_block == (uint32_t)-1 &&
+                                       thrower != VTX_NODEID_INVALID &&
+                                       thrower < node_count) {
+                                    vtx_node_t *tn = &nt->nodes[thrower];
+                                    if (tn->input_count > 0) {
+                                        thrower = tn->inputs[0];
+                                        from_block = schedule->node_block[thrower];
+                                    } else {
+                                        break;
+                                    }
+                                }
+
+                                if (from_block != (uint32_t)-1 &&
+                                    from_block != catch_block) {
+                                    vtx_schedule_block_t *fb = &schedule->blocks[from_block];
+                                    vtx_schedule_block_t *tb = &schedule->blocks[catch_block];
+
+                                    /* Add exception successor edge */
+                                    if (fb->succ_count < 4) {
+                                        if (fb->succ_count == 0) {
+                                            fb->succ_blocks = (uint32_t *)vtx_arena_alloc(arena, 4 * sizeof(uint32_t));
+                                        }
+                                        if (fb->succ_blocks &&
+                                            /* Avoid duplicate edges */
+                                            fb->succ_blocks[fb->succ_count - 1] != catch_block) {
+                                            fb->succ_blocks[fb->succ_count++] = catch_block;
+                                        }
+                                    }
+                                    /* Add exception predecessor edge */
+                                    if (tb->pred_count < 4) {
+                                        if (tb->pred_count == 0) {
+                                            tb->pred_blocks = (uint32_t *)vtx_arena_alloc(arena, 4 * sizeof(uint32_t));
+                                        }
+                                        if (tb->pred_blocks &&
+                                            /* Avoid duplicate edges */
+                                            tb->pred_blocks[tb->pred_count - 1] != from_block) {
+                                            tb->pred_blocks[tb->pred_count++] = from_block;
+                                        }
+                                    }
+                                }
+                            }
+                            break; /* Each ExceptProj feeds into at most one Catch */
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /* Phase 4: Compute dominators and loop depth */
@@ -630,6 +784,7 @@ void vtx_schedule_destroy(vtx_schedule_t *schedule)
     if (schedule->blocks != NULL) {
         for (uint32_t i = 0; i < schedule->count; i++) {
             free(schedule->blocks[i].nodes);
+            free(schedule->blocks[i].df_blocks);
             /* pred_blocks and succ_blocks are arena-allocated, no free needed */
         }
         free(schedule->blocks);

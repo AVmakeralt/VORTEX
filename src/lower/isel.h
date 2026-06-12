@@ -34,6 +34,7 @@
 /* Per-vreg metadata flags */
 #define VTX_VREG_FLAG_NONE    0u
 #define VTX_VREG_FLAG_FIXED   (1u << 0)   /* fixed to a physical register */
+#define VTX_VREG_FLAG_XMM     (1u << 1)   /* requires XMM register (float type) */
 
 /* ========================================================================== */
 /* x86-64 instruction opcodes                                                  */
@@ -96,8 +97,17 @@ typedef enum {
     VTX_X86_LAHF,       /* load flags into AH */
     VTX_X86_SAHF,       /* store AH into flags */
 
-    /* Floating-point operations */
+    /* Floating-point operations (SSE/SSE2) */
     VTX_X86_UCOMISD,    /* ucomisd xmm, xmm — unordered compare double */
+    VTX_X86_ADDSD,      /* addsd xmm, xmm — scalar double add */
+    VTX_X86_SUBSD,      /* subsd xmm, xmm — scalar double subtract */
+    VTX_X86_MULSD,      /* mulsd xmm, xmm — scalar double multiply */
+    VTX_X86_DIVSD,      /* divsd xmm, xmm — scalar double divide */
+    VTX_X86_XORPS,      /* xorps xmm, xmm — bitwise XOR (used for neg) */
+    VTX_X86_MOVSD,      /* movsd xmm, xmm — scalar double move */
+
+    /* Safepoint poll (pseudo-instruction) */
+    VTX_X86_SAFEPOINT_POLL, /* cmpq [vtx_safepoint_flag], 0; jne deopt_stub */
 
     VTX_X86_OPCODE_COUNT
 } vtx_x86_opcode_t;
@@ -155,6 +165,8 @@ typedef struct {
 #define VTX_INST_FLAG_SPILL_LOAD (1u << 17) /* load from spill slot to register */
 #define VTX_INST_FLAG_SPILL_STORE (1u << 18) /* store from register to spill slot */
 #define VTX_INST_FLAG_FUSED     (1u << 19) /* P6: CMP+JCC fused pair — scheduler must keep adjacent */
+#define VTX_INST_FLAG_IS_SSE    (1u << 20) /* SSE/XMM instruction — uses XMM registers */
+#define VTX_INST_FLAG_IS_SAFEPOINT (1u << 21) /* safepoint poll (loop back-edge) */
 
 typedef struct {
     vtx_x86_opcode_t opcode;

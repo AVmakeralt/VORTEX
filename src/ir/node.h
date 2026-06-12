@@ -97,6 +97,7 @@ typedef enum {
     VTX_OP_Phi,
     VTX_OP_Region,         /* merge point for control flow */
     VTX_OP_Proj,           /* projection of a multi-output node */
+    VTX_OP_ExceptProj,     /* exception projection of a potentially-throwing node */
 
     /* ---- Allocation ---- */
     VTX_OP_NewObject,
@@ -152,6 +153,7 @@ typedef enum {
     VTX_NF_DATA       = (1u << 2),   /* node is a pure data computation */
     VTX_NF_SIDE_EFFECT= (1u << 3),   /* node has side effects (keeps alive in DCE) */
     VTX_NF_PINNED     = (1u << 4),   /* node must not float freely (e.g. Phi) */
+    VTX_NF_WRITE_BARRIER = (1u << 5), /* node requires a GC write barrier (StoreField/StoreIndexed of ref) */
 } vtx_node_flags_t;
 
 /* Bitwise operators for flags */

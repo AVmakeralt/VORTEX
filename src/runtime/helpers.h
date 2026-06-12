@@ -179,6 +179,21 @@ const char *vtx_helpers_string_data(vtx_value_t str_value);
 uint32_t vtx_helpers_string_length(vtx_value_t str_value);
 
 /* ========================================================================== */
+/* GC write barrier                                                            */
+/* ========================================================================== */
+
+/**
+ * GC write barrier: must be called after storing a reference to an object.
+ * Implements a card-table based write barrier for generational GC.
+ * Marks the card containing [obj + offset] as dirty so the GC can
+ * find cross-generational references during young-gen collection.
+ *
+ * @param obj           Pointer to the heap object containing the field
+ * @param field_offset  Byte offset of the field within the object
+ */
+void vtx_helpers_write_barrier(void *obj, uint32_t field_offset);
+
+/* ========================================================================== */
 /* D8: Register-based call helpers                                             */
 /* ========================================================================== */
 

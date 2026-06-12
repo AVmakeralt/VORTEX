@@ -77,14 +77,14 @@ static int verify_between_passes(const vtx_graph_t *graph,
 
 vtx_pipeline_config_t vtx_pipeline_config_t1(void)
 {
-    /* T1 — Baseline JIT: minimal optimizations for fast compilation.
-     * Only GVN (1 iteration) + DCE (1 iteration). No expensive analysis.
-     * Target: < 1ms compilation time for small methods. */
+    /* T1 — Baseline JIT: no optimizations for fastest compilation.
+     * Pure code generation with no IR passes. Target: < 1ms compilation
+     * time for small methods. GVN/DCE/SCCP are deferred to T2. */
     vtx_pipeline_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
-    cfg.run_gvn           = true;
+    cfg.run_gvn           = false;
     cfg.run_sccp          = false;
-    cfg.run_dce           = true;
+    cfg.run_dce           = false;
     cfg.run_licm          = false;
     cfg.run_bounds_check  = false;
     cfg.run_pea           = false;
@@ -92,9 +92,9 @@ vtx_pipeline_config_t vtx_pipeline_config_t1(void)
     cfg.run_verify        = false;
     cfg.run_loop_spec     = false;
     cfg.run_vectorize     = false;
-    cfg.gvn_iterations    = 1;
+    cfg.gvn_iterations    = 0;
     cfg.sccp_iterations   = 0;
-    cfg.dce_iterations    = 1;
+    cfg.dce_iterations    = 0;
     cfg.shared_gbdt_model = NULL;
     cfg.owns_gbdt_model   = false;
     cfg.run_midtier       = false;

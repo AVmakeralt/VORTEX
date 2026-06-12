@@ -5,6 +5,19 @@
 #include <stdlib.h>
 
 /* ========================================================================== */
+/* Global GC instance                                                          */
+/* ========================================================================== */
+
+/* Current GC instance (thread-local in a full VM; global for now).
+ * This is used by runtime helpers (e.g., write barrier) that need GC
+ * access but are called from JIT-compiled code which doesn't pass a
+ * GC pointer. */
+static vtx_gc_t *the_gc = NULL;
+
+vtx_gc_t *vtx_get_current_gc(void) { return the_gc; }
+void vtx_set_current_gc(vtx_gc_t *gc) { the_gc = gc; }
+
+/* ========================================================================== */
 /* Internal helpers                                                            */
 /* ========================================================================== */
 
@@ -627,6 +640,41 @@ void vtx_gc_write_barrier_card(vtx_gc_t *gc, vtx_heap_object_t *obj,
     gc->remembered_set[gc->remembered_count].obj = obj;
     gc->remembered_count++;
     obj->gc_remembered = 1;
+}
+
+/* ========================================================================== */
+/* Card-table write barrier (JIT-called helper)                                */
+/* ========================================================================== */
+
+/**
+ * Card-table based write barrier for JIT-compiled code.
+ *
+ * This is a simplified card-table barrier that marks the card containing
+ * the field at [obj + field_offset] as dirty (0xFF). It is designed to
+ * be called from the vtx_helpers_write_barrier() runtime helper, which
+ * is the entry point for JIT-compiled code.
+ *
+ * Card table design:
+ *   - Heap is divided into 512-byte cards (VTX_CARD_SIZE)
+ *   - Each card has a 1-byte entry in the card table
+ *   - On write barrier: compute card index = (field_addr - heap_base) >> 9
+ *   - Mark card dirty: card_table[card_index] = 0xFF
+ *
+ * The 0xFF dirty marker (instead of VTX_CARD_DIRTY = 0x01) allows the
+ * lower bits to encode additional metadata when the card is clean, and
+ * matches the HotSpot JVM convention where 0xFF means "definitely dirty."
+ */
+void vtx_gc_card_mark_dirty(vtx_gc_t *gc, const void *field_addr)
+{
+    if (gc == NULL || gc->card_table == NULL || gc->heap_base == NULL) return;
+
+    uintptr_t offset = (uintptr_t)((const uint8_t *)field_addr - gc->heap_base);
+    if (offset >= gc->heap_size) return;
+
+    size_t card_index = offset >> VTX_CARD_SHIFT;
+    if (card_index < gc->card_table_size) {
+        gc->card_table[card_index] = 0xFF;
+    }
 }
 
 /* ========================================================================== */

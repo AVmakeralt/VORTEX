@@ -99,4 +99,11 @@ bool vtx_profile_load(vtx_profile_global_t *global, const char *filename);
 int vtx_profile_register_atexit(vtx_profile_global_t *global,
                                  const char *filename);
 
+/**
+ * Unregister the atexit handler. Clears the stored global pointer
+ * so the atexit handler will not attempt to access a destroyed global.
+ * Must be called before destroying the registered global.
+ */
+void vtx_profile_unregister_atexit(void);
+
 #endif /* VORTEX_PROFILE_PERSIST_H */

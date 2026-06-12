@@ -27,11 +27,8 @@
 /* Global state                                                                */
 /* ========================================================================== */
 
-/* Current GC instance (thread-local in a full VM; global for now) */
-static vtx_gc_t *the_gc = NULL;
-
-vtx_gc_t *vtx_get_current_gc(void) { return the_gc; }
-void vtx_set_current_gc(vtx_gc_t *gc) { the_gc = gc; }
+/* Current GC instance — now defined in runtime/gc.c.
+ * vtx_get_current_gc() and vtx_set_current_gc() are declared in gc.h. */
 
 /* Current type system instance — access via vtx_get_current_type_system()
  * which is defined in runtime/type_system.c. */

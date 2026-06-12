@@ -33,6 +33,24 @@
  */
 
 /* ========================================================================== */
+/* Global safepoint flag (polled by JIT-compiled code at loop back-edges)      */
+/* ========================================================================== */
+
+/**
+ * Global safepoint flag. Set to non-zero by the GC/runtime when it needs
+ * all threads to reach a safepoint. JIT-compiled code polls this flag at
+ * every loop back-edge with:
+ *   cmpq [vtx_safepoint_flag], 0
+ *   jne  deopt_stub
+ */
+extern volatile int vtx_safepoint_flag;
+
+/** Poll the safepoint flag. Called by JIT-compiled code at loop back-edges. */
+static inline bool vtx_safepoint_should_stop(void) {
+    return vtx_safepoint_flag != 0;
+}
+
+/* ========================================================================== */
 /* Safe point state                                                            */
 /* ========================================================================== */
 

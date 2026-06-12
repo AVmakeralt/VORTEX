@@ -231,6 +231,17 @@ void vtx_gc_write_barrier(vtx_gc_t *gc, vtx_heap_object_t *obj,
 void vtx_gc_write_barrier_card(vtx_gc_t *gc, vtx_heap_object_t *obj,
                                uint32_t field_offset, vtx_value_t value);
 
+/**
+ * Card-table dirty-marking helper. Marks the card containing the
+ * given field address as dirty (0xFF). Called by the JIT write
+ * barrier runtime helper (vtx_helpers_write_barrier) and by the
+ * GC internals during card-table scanning.
+ *
+ * @param gc          GC instance (must not be NULL)
+ * @param field_addr  Address of the field that was written
+ */
+void vtx_gc_card_mark_dirty(vtx_gc_t *gc, const void *field_addr);
+
 /* ========================================================================== */
 /* Collection                                                                  */
 /* ========================================================================== */
@@ -301,6 +312,18 @@ void vtx_gc_arena_enter(vtx_gc_t *gc);
  * Only valid when mode is VTX_GC_ARENA.
  */
 void vtx_gc_arena_leave(vtx_gc_t *gc);
+
+/**
+ * Get the current GC instance (thread-local in a full VM; global for now).
+ * This is used by runtime helpers (e.g., write barrier) that need GC access
+ * but are called from JIT-compiled code which doesn't pass a GC pointer.
+ */
+vtx_gc_t *vtx_get_current_gc(void);
+
+/**
+ * Set the current GC instance. Called during VM initialization.
+ */
+void vtx_set_current_gc(vtx_gc_t *gc);
 
 /**
  * Check if a mode requires write barriers.

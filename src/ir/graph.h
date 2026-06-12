@@ -42,9 +42,10 @@ typedef struct {
     bool    is_catch_handler;   /* true if this block starts at a catch handler */
 
     /* SoN nodes created for this block */
-    vtx_nodeid_t region_node;   /* Region/LoopBegin node ID for this block */
-    vtx_nodeid_t control_node;  /* current control output for this block */
-    vtx_nodeid_t memory_node;   /* current memory state for this block */
+    vtx_nodeid_t region_node;       /* Region/LoopBegin node ID for this block */
+    vtx_nodeid_t control_node;      /* current control output for this block */
+    vtx_nodeid_t memory_node;       /* current memory state for this block */
+    vtx_nodeid_t exception_target;  /* nearest catch handler node for exception edges */
 
     /* Per-block local variable map (local index → NodeID producing that value) */
     vtx_nodeid_t *locals;       /* array of size max_locals, arena-allocated */

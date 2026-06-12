@@ -284,6 +284,63 @@ void vtx_x86_emit_nop(vtx_x86_emit_t *e);
  */
 void vtx_x86_emit_ucomisd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
 
+/**
+ * Emit ADDSD xmm, xmm — scalar double-precision add.
+ * Encoding: F2 0F 58 /r
+ */
+void vtx_x86_emit_addsd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+
+/**
+ * Emit SUBSD xmm, xmm — scalar double-precision subtract.
+ * Encoding: F2 0F 5C /r
+ */
+void vtx_x86_emit_subsd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+
+/**
+ * Emit MULSD xmm, xmm — scalar double-precision multiply.
+ * Encoding: F2 0F 59 /r
+ */
+void vtx_x86_emit_mulsd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+
+/**
+ * Emit DIVSD xmm, xmm — scalar double-precision divide.
+ * Encoding: F2 0F 5E /r
+ */
+void vtx_x86_emit_divsd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+
+/**
+ * Emit XORPS xmm, xmm — bitwise XOR of 128-bit operands.
+ * Used for float negation by XORing with a sign-bit mask.
+ * Encoding: 0F 57 /r
+ */
+void vtx_x86_emit_xorps(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+
+/**
+ * Emit MOVSD xmm, xmm — move scalar double between XMM registers.
+ * Encoding: F2 0F 10 /r (load) or F2 0F 11 /r (store).
+ * For reg-reg move: F2 0F 10 ModR/M(mod=11)
+ */
+void vtx_x86_emit_movsd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+
+/**
+ * Emit safepoint poll at a loop back-edge.
+ * Emits:
+ *   cmpq [vtx_safepoint_flag], 0   (RIP-relative, 8 bytes)
+ *   jne  deopt_stub                (rel32, 6 bytes)
+ *
+ * The CMP uses RIP-relative addressing to access the global
+ * vtx_safepoint_flag. A VTX_RELOC_RIP_REL32 external relocation is
+ * recorded so the displacement is patched at code install time.
+ *
+ * The JNE has its displacement set to 0 (placeholder). It is marked
+ * with VTX_INST_FLAG_IS_GUARD in the instruction stream and will be
+ * patched by the guard emission pipeline to jump to a deopt stub.
+ *
+ * @param e  Emitter context (must have relocs initialized)
+ * @return   0 on success, -1 on failure
+ */
+int vtx_x86_emit_safepoint_poll(vtx_x86_emit_t *e);
+
 /* ========================================================================== */
 /* Function prologue/epilogue                                                  */
 /* ========================================================================== */

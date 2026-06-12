@@ -126,6 +126,12 @@ bool vtx_install_method(vtx_code_cache_t *cache,
     void *code_mem = vtx_code_cache_alloc(cache, code_size);
     if (!code_mem) return false;
 
+    /* Ensure the page is writable before copying. A previous install
+     * into the same segment may have made the page executable-only
+     * (PROT_EXEC|PROT_READ), which would cause a SIGSEGV on write.
+     * This is a no-op if the page is already writable. */
+    vtx_code_cache_make_writable(cache, code_mem, code_size);
+
     /* Copy the compiled code into the cache */
     memcpy(code_mem, code, code_size);
 

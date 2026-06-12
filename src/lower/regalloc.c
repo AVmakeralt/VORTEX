@@ -80,6 +80,7 @@ static vtx_live_interval_t *compute_live_intervals(vtx_inst_stream_t *stream,
         intervals[v].use_count = 0;
         intervals[v].loop_depth = 0;
         intervals[v].coalesce_src = VTX_VREG_INVALID;
+        intervals[v].reg_class = VTX_REG_CLASS_GPR; /* default; updated below */
         intervals[v].split_parent = NULL;
         intervals[v].split_child = NULL;
 
@@ -87,6 +88,25 @@ static vtx_live_interval_t *compute_live_intervals(vtx_inst_stream_t *stream,
         if (v < stream->vreg_fixed_reg_count && stream->vreg_fixed_reg[v] != 0xFF) {
             intervals[v].is_fixed = true;
             intervals[v].fixed_reg = stream->vreg_fixed_reg[v];
+        }
+    }
+
+    /* Classify vregs into GPR or XMM register class based on the
+     * VTX_INST_FLAG_IS_SSE flag on instructions that define/use them.
+     * If any instruction with IS_SSE touches this vreg, it's XMM class. */
+    for (uint32_t b = 0; b < stream->block_count; b++) {
+        vtx_inst_block_t *blk = &stream->blocks[b];
+        for (uint32_t i = 0; i < blk->inst_count; i++) {
+            vtx_inst_t *inst = &blk->insts[i];
+            if (!(inst->flags & VTX_INST_FLAG_IS_SSE)) continue;
+            for (int op = 0; op < VTX_INST_MAX_OPERANDS; op++) {
+                if (inst->opnd_kinds[op] == VTX_OPND_VREG) {
+                    uint32_t vreg = inst->operands[op];
+                    if (vreg < vreg_count) {
+                        intervals[vreg].reg_class = VTX_REG_CLASS_XMM;
+                    }
+                }
+            }
         }
     }
 
@@ -547,10 +567,12 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
         arena, active_capacity * sizeof(vtx_live_interval_t *));
     if (!active && active_capacity > 0) return NULL;
 
-    /* Free register pool: bitmask of available registers */
-    uint32_t free_regs = VTX_CALLER_SAVED_MASK | VTX_CALLEE_SAVED_MASK;
-    /* Remove reserved registers */
-    free_regs &= ~VTX_REG_RESERVED_MASK;
+    /* Free register pools: separate bitmasks for GPR and XMM.
+     * GPR: caller-saved + callee-saved, minus reserved (RSP, RBP).
+     * XMM: all 16 XMM registers available. */
+    uint32_t free_gpr_regs = VTX_CALLER_SAVED_MASK | VTX_CALLEE_SAVED_MASK;
+    free_gpr_regs &= ~VTX_REG_RESERVED_MASK;
+    uint32_t free_xmm_regs = VTX_XMM_ALL_MASK;
 
     /* Track which callee-saved registers are used */
     uint32_t callee_saved_used = 0;
@@ -561,21 +583,35 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
     /* Linear scan: iterate over the compacted, sorted valid_intervals array.
      * The original bug (G1) iterated over the raw vreg-indexed intervals[]
      * array, which is NOT sorted by start position. The linear scan algorithm
-     * REQUIRES intervals to be processed in start-position order. */
+     * REQUIRES intervals to be processed in start-position order.
+     *
+     * XMM intervals are allocated from the XMM register pool (XMM0-XMM15).
+     * GPR intervals are allocated from the GPR register pool (RAX-R15).
+     * Both classes share the same active list but use separate register pools,
+     * so they never compete for the same registers. */
     for (uint32_t i = 0; i < valid_count; i++) {
         vtx_live_interval_t *current = &valid_intervals[i];
 
         /* Skip intervals that were coalesced into another */
         if (current->coalesce_src != VTX_VREG_INVALID) continue;
 
-        /* Expire: remove from active any interval that ended before current starts */
+        /* Select the appropriate register pool for this interval's class */
+        uint32_t *free_regs = (current->reg_class == VTX_REG_CLASS_XMM)
+                              ? &free_xmm_regs : &free_gpr_regs;
+
+        /* Expire: remove from active any interval that ended before current starts.
+         * Only free registers in the same class. */
         uint32_t new_active_count = 0;
         for (uint32_t j = 0; j < active_count; j++) {
             vtx_live_interval_t *a = active[j];
             if (a->end < current->start) {
-                /* This interval has expired — free its register */
+                /* This interval has expired — free its register in the correct pool */
                 if (a->phys_reg != 0xFF) {
-                    free_regs |= (1u << a->phys_reg);
+                    if (a->reg_class == VTX_REG_CLASS_XMM) {
+                        free_xmm_regs |= (1u << a->phys_reg);
+                    } else {
+                        free_gpr_regs |= (1u << a->phys_reg);
+                    }
                 }
             } else {
                 active[new_active_count++] = a;
@@ -588,9 +624,9 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
             uint8_t fixed = current->fixed_reg;
             current->phys_reg = fixed;
 
-            /* Evict any active interval using this register */
+            /* Evict any active interval using this register in the same class */
             for (uint32_t j = 0; j < active_count; j++) {
-                if (active[j]->phys_reg == fixed) {
+                if (active[j]->phys_reg == fixed && active[j]->reg_class == current->reg_class) {
                     /* Spill the evicted interval */
                     active[j]->is_spilled = true;
                     active[j]->spill_slot = next_spill_slot++;
@@ -604,9 +640,10 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
                 }
             }
 
-            /* Mark the register as used */
-            free_regs &= ~(1u << fixed);
-            if (VTX_CALLEE_SAVED_MASK & (1u << fixed)) {
+            /* Mark the register as used in the correct pool */
+            *free_regs &= ~(1u << fixed);
+            if (current->reg_class == VTX_REG_CLASS_GPR &&
+                VTX_CALLEE_SAVED_MASK & (1u << fixed)) {
                 callee_saved_used |= (1u << fixed);
             }
 
@@ -621,30 +658,36 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
         }
 
         /* Try to allocate a free register */
-        if (free_regs != 0) {
-            /* Prefer caller-saved registers for short-lived values,
-             * callee-saved for long-lived values in loops */
-            uint32_t caller_free = free_regs & VTX_CALLER_SAVED_MASK;
-            uint32_t callee_free = free_regs & VTX_CALLEE_SAVED_MASK;
+        if (*free_regs != 0) {
             uint32_t reg_bit;
 
-            /* Heuristic: short-lived values (small interval range) prefer
-             * caller-saved registers. Long-lived values in deep loops
-             * prefer callee-saved registers (less save/restore overhead). */
-            uint32_t interval_length = current->end - current->start;
-            bool prefer_caller_saved = (interval_length < 20) || (current->loop_depth == 0);
-
-            if (prefer_caller_saved && caller_free != 0) {
-                reg_bit = caller_free & (~caller_free + 1u); /* lowest set bit */
-            } else if (callee_free != 0) {
-                reg_bit = callee_free & (~callee_free + 1u);
-                callee_saved_used |= reg_bit;
-            } else if (caller_free != 0) {
-                /* Fallback to caller-saved if no callee-saved available */
-                reg_bit = caller_free & (~caller_free + 1u);
+            if (current->reg_class == VTX_REG_CLASS_XMM) {
+                /* XMM registers: just pick the lowest free one */
+                reg_bit = *free_regs & (~(*free_regs) + 1u);
             } else {
-                /* No registers available at all — shouldn't happen since free_regs != 0 */
-                continue;
+                /* GPR: prefer caller-saved registers for short-lived values,
+                 * callee-saved for long-lived values in loops */
+                uint32_t caller_free = *free_regs & VTX_CALLER_SAVED_MASK;
+                uint32_t callee_free = *free_regs & VTX_CALLEE_SAVED_MASK;
+
+                /* Heuristic: short-lived values (small interval range) prefer
+                 * caller-saved registers. Long-lived values in deep loops
+                 * prefer callee-saved registers (less save/restore overhead). */
+                uint32_t interval_length = current->end - current->start;
+                bool prefer_caller_saved = (interval_length < 20) || (current->loop_depth == 0);
+
+                if (prefer_caller_saved && caller_free != 0) {
+                    reg_bit = caller_free & (~caller_free + 1u); /* lowest set bit */
+                } else if (callee_free != 0) {
+                    reg_bit = callee_free & (~callee_free + 1u);
+                    callee_saved_used |= reg_bit;
+                } else if (caller_free != 0) {
+                    /* Fallback to caller-saved if no callee-saved available */
+                    reg_bit = caller_free & (~caller_free + 1u);
+                } else {
+                    /* No registers available at all — shouldn't happen since free_regs != 0 */
+                    continue;
+                }
             }
 
             /* Use __builtin_ctz for O(1) register number extraction from bitmask,
@@ -652,7 +695,7 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
             uint8_t reg = (uint8_t)__builtin_ctz(reg_bit);
 
             current->phys_reg = reg;
-            free_regs &= ~reg_bit;
+            *free_regs &= ~reg_bit;
 
             /* Update result mapping */
             result->vreg_to_phys[current->vreg] = reg;
@@ -662,7 +705,7 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
                 active[active_count++] = current;
             }
         } else {
-            /* No free register — P5: Use interval splitting instead of
+            /* No free register in this class — P5: Use interval splitting instead of
              * spilling the entire lifetime. We split the evicted interval
              * at the current position so that only the overlapping part
              * is spilled. The non-overlapping parts can keep their register.
@@ -672,7 +715,9 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
             uint32_t spill_idx = 0;
             uint64_t min_cost = UINT64_MAX;
             for (uint32_t j = 0; j < active_count; j++) {
+                /* Only evict intervals in the same register class */
                 if (active[j]->is_fixed) continue;
+                if (active[j]->reg_class != current->reg_class) continue;
                 uint64_t cost = compute_spill_cost(active[j]);
                 if (cost < min_cost) {
                     min_cost = cost;
@@ -682,7 +727,16 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
 
             uint64_t current_cost = compute_spill_cost(current);
 
-            if (active_count > 0 && min_cost < current_cost) {
+            /* Check if there's any evictable interval in the same class */
+            bool has_evictable = false;
+            for (uint32_t j = 0; j < active_count; j++) {
+                if (!active[j]->is_fixed && active[j]->reg_class == current->reg_class) {
+                    has_evictable = true;
+                    break;
+                }
+            }
+
+            if (has_evictable && min_cost < current_cost) {
                 /* Evict the active interval with lowest cost.
                  * P5: Try to split the interval at current->start so that
                  * the part before current->start keeps its register, and
@@ -712,13 +766,13 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
                         /* The first half (spill) keeps its register but is
                          * no longer active since it ends before current->start.
                          * Its register is freed. */
-                        free_regs |= (1u << spill->phys_reg);
+                        *free_regs |= (1u << spill->phys_reg);
 
                         /* Assign the freed register to current */
                         uint32_t reg_bit = (1u << spill->phys_reg);
                         uint8_t reg = spill->phys_reg;
                         current->phys_reg = reg;
-                        free_regs &= ~reg_bit;
+                        *free_regs &= ~reg_bit;
                         result->vreg_to_phys[current->vreg] = reg;
 
                         /* Replace in active list */
@@ -749,11 +803,12 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
                  * its entire lifetime. If it overlaps with an active interval
                  * only partially, split at the active interval's start. */
                 bool did_split = false;
-                /* Find the active interval that ends latest (the one most
-                 * blocking us) and try to split current before it. */
+                /* Find the active interval in the same class that ends latest
+                 * (the one most blocking us) and try to split current before it. */
                 uint32_t latest_end = 0;
                 for (uint32_t j = 0; j < active_count; j++) {
-                    if (active[j]->end > latest_end) {
+                    if (active[j]->reg_class == current->reg_class &&
+                        active[j]->end > latest_end) {
                         latest_end = active[j]->end;
                     }
                 }

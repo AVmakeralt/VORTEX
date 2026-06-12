@@ -76,6 +76,7 @@ const vtx_node_opcode_info_t vtx_node_opcode_table[VTX_NODE_OP_COUNT] = {
     OP_INFO(Phi,            VTX_NF_DATA | VTX_NF_PINNED, 0),   /* variable: one per predecessor */
     OP_INFO(Region,         VTX_NF_CONTROL | VTX_NF_PINNED, 0), /* variable: one per predecessor */
     OP_INFO(Proj,           VTX_NF_DATA, 1),   /* input node + which output */
+    OP_INFO(ExceptProj,     VTX_NF_CONTROL, 1), /* exception projection: input=throwing node, connects to catch */
 
     /* Allocation */
     OP_INFO(NewObject,      VTX_NF_MEMORY | VTX_NF_SIDE_EFFECT | VTX_NF_DATA, 1), /* memory */
@@ -698,6 +699,41 @@ void vtx_node_table_clear_marks(vtx_node_table_t *table)
 void vtx_node_table_clear_dead(vtx_node_table_t *table)
 {
     VTX_ASSERT(table != NULL, "table must not be NULL");
+
+    /* IR-DEAD-CLEAN: Disconnect all references to dead nodes, then compact
+     * the inputs array to remove VTX_NODEID_INVALID slots. When DCE marks
+     * a node dead, its users may still reference it via input edges. We
+     * remove those references and shift remaining inputs down to keep
+     * the graph well-formed for verification. */
+    for (uint32_t i = 0; i < table->count; i++) {
+        vtx_node_t *node = &table->nodes[i];
+        if (node->dead) continue; /* skip dead nodes themselves */
+
+        /* Remove inputs that point to dead nodes */
+        uint32_t write_idx = 0;
+        for (uint32_t j = 0; j < node->input_count; j++) {
+            vtx_nodeid_t inp = node->inputs[j];
+            if (inp != VTX_NODEID_INVALID && inp < table->count && table->nodes[inp].dead) {
+                /* This input points to a dead node — skip it */
+                if (table->nodes[inp].output_count > 0) {
+                    table->nodes[inp].output_count--;
+                }
+                continue;
+            }
+            if (inp == VTX_NODEID_INVALID) {
+                /* Already-invalid input — skip it */
+                continue;
+            }
+            /* Keep this input */
+            if (write_idx != j) {
+                node->inputs[write_idx] = node->inputs[j];
+            }
+            write_idx++;
+        }
+        node->input_count = write_idx;
+    }
+
+    /* Now clear all dead flags */
     for (uint32_t i = 0; i < table->count; i++) {
         table->nodes[i].dead = false;
     }

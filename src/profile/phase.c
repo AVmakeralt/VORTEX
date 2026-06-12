@@ -432,6 +432,22 @@ vtx_phase_graph_t *vtx_phase_detect(const vtx_profile_global_t *global)
         pg->phase_count++;
     }
 
+    /* Check if any significant phases exist; if not, no phases were detected */
+    bool has_significant = false;
+    for (uint32_t i = 0; i < pg->phase_count; i++) {
+        if (pg->phases[i].is_significant) {
+            has_significant = true;
+            break;
+        }
+    }
+    if (!has_significant) {
+        vtx_phase_graph_destroy(pg);
+        free(t.indices); free(t.lowlinks); free(t.on_stack);
+        free(t.stack); free(t.scc_ids); free(sccs);
+        free(scc_node_buf); cg_destroy(cg);
+        return NULL;
+    }
+
     /* Step 4: Extract phase transitions (inter-SCC edges between significant phases) */
     for (uint32_t i = 0; i < global->call_edge_count; i++) {
         const vtx_call_edge_t *edge = &global->call_edges[i];

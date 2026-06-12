@@ -107,13 +107,13 @@ vtx_range_t vtx_bounds_compute_range(const vtx_node_t *node,
                                       const vtx_range_t *ranges,
                                       uint32_t range_count)
 {
-    if (node == NULL || table == NULL || ranges == NULL) {
+    if (node == NULL || table == NULL) {
         return VTX_RANGE_UNKNOWN;
     }
 
     switch (node->opcode) {
 
-    /* ---- Constants ---- */
+    /* ---- Constants: can compute range even without ranges array ---- */
     case VTX_OP_Constant: {
         if (node->constval.kind == VTX_TYPE_Int) {
             int64_t v = node->constval.as.int_val;

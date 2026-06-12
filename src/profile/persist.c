@@ -576,3 +576,10 @@ int vtx_profile_register_atexit(vtx_profile_global_t *global,
 
     return 0;
 }
+
+void vtx_profile_unregister_atexit(void)
+{
+    g_atexit_global = NULL;
+    free(g_atexit_filename);
+    g_atexit_filename = NULL;
+}

@@ -197,9 +197,11 @@ static inline bool vtx_gbdt_should_inline(double score)
  */
 static inline double vtx_sigmoid(double x)
 {
-    /* Guard against overflow */
-    if (x > 500.0) return 1.0;
-    if (x < -500.0) return 0.0;
+    /* Guard against overflow — use <= and >= so that exact
+     * boundary values produce the saturated output rather than
+     * computing 1/(1+exp(±500)) which may not equal 0.0 or 1.0. */
+    if (x >= 500.0) return 1.0;
+    if (x <= -500.0) return 0.0;
     return 1.0 / (1.0 + exp(-x));
 }
 

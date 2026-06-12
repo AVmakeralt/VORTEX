@@ -821,6 +821,7 @@ VTX_TEST(test_persist_10)
     vtx_profile_global_init(&global);
     int rc = vtx_profile_register_atexit(&global, "/tmp/vtx_test_atexit.bin");
     VTX_ASSERT_EQUAL(rc, 0);
+    vtx_profile_unregister_atexit(); /* clear atexit ref before destroying global */
     vtx_profile_global_destroy(&global);
     /* We can't actually test the atexit behavior without process exit */
 }

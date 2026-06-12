@@ -43,13 +43,9 @@ double vtx_ewma_update(vtx_ewma_t *ewma, double failure_rate)
     if (!ewma->initialized) {
         /* First update: initialize EWMA to the observed rate.
          * This avoids the slow ramp-up that would occur if we
-         * started at 0.0 and gradually incorporated observations.
-         * Also set the effective sample count to at least 3 so
-         * that a single failure doesn't immediately dominate and
-         * cause premature FastCheck→FullCheck transition. */
+         * started at 0.0 and gradually incorporated observations. */
         ewma->value = failure_rate;
         ewma->initialized = true;
-        ewma->update_count = 3; /* pretend we've seen 3 samples already */
     } else {
         /* Standard EWMA formula:
          * ewma_new = alpha * observation + (1 - alpha) * ewma_old
@@ -69,12 +65,6 @@ double vtx_ewma_update(vtx_ewma_t *ewma, double failure_rate)
     if (ewma->value > 1.0) ewma->value = 1.0;
 
     ewma->update_count++;
-
-    /* Ensure effective sample count is at least 3 to prevent
-     * a single failure from flipping the guard state. */
-    if (ewma->update_count < 3) {
-        ewma->update_count = 3;
-    }
 
     return ewma->value;
 }

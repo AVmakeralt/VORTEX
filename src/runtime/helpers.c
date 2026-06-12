@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
+#include "runtime/gc.h"
 #include "interp/dispatch.h"
 
 /* ========================================================================== */
@@ -43,9 +44,11 @@ bool vtx_helpers_null_check(vtx_value_t value)
 bool vtx_helpers_bounds_check(int64_t index, int64_t length)
 {
     if (index < 0 || index >= length) {
-        /* Trap: array index out of bounds */
-        VTX_ASSERT(false, "array index out of bounds");
-        abort();
+        /* Out of bounds: return false so the calling guard can deoptimize.
+         * Do NOT abort — this is a runtime helper that JIT code calls;
+         * the result determines whether a guard fails, not whether the
+         * process should crash. */
+        return false;
     }
     return true;
 }
@@ -226,6 +229,74 @@ int vtx_helpers_string_compare(vtx_value_t a, vtx_value_t b)
     const char *str_b = vtx_helpers_string_data(b);
 
     return strcmp(str_a, str_b);
+}
+
+/* ========================================================================== */
+/* GC write barrier                                                            */
+/* ========================================================================== */
+
+/**
+ * GC write barrier: must be called after storing a reference to an object.
+ *
+ * Implements a card-table based write barrier for generational GC.
+ * Divides the heap into 512-byte cards (VTX_CARD_SIZE). Each card has
+ * a 1-byte entry in the card table. On write barrier invocation, computes
+ * which card the field [obj + field_offset] falls in and marks it dirty (0xFF)
+ * so the GC can find cross-generational references during young-gen collection.
+ *
+ * This function is designed to be called from JIT-compiled code with two
+ * arguments per the System V AMD64 ABI:
+ *   RDI = obj (pointer to the heap object)
+ *   ESI = field_offset (byte offset of the field within the object)
+ */
+void vtx_helpers_write_barrier(void *obj, uint32_t field_offset)
+{
+    if (obj == NULL) return;
+
+    /* Get the current GC instance (defined in runtime/gc.c, declared in gc.h) */
+    vtx_gc_t *gc = vtx_get_current_gc();
+    if (gc == NULL) return;
+
+    /* Only needed in generational mode */
+    if (!vtx_gc_mode_needs_barrier(gc->mode)) return;
+
+    /* Compute the address of the field that was written */
+    uintptr_t field_addr = (uintptr_t)((uint8_t *)obj + field_offset);
+
+    /* Card-table write barrier:
+     * 1. Compute card index from field address: (field_addr - heap_base) >> VTX_CARD_SHIFT
+     * 2. Mark the card as dirty: card_table[index] = 0xFF
+     *
+     * We use 0xFF as the dirty marker (instead of VTX_CARD_DIRTY = 0x01) to
+     * allow the GC to use the card byte for additional metadata in the lower
+     * bits when not dirty. This matches the HotSpot JVM convention. */
+    if (gc->card_table != NULL && gc->heap_base != NULL) {
+        uintptr_t offset = field_addr - (uintptr_t)gc->heap_base;
+        if (offset < gc->heap_size) {
+            size_t card_index = offset >> VTX_CARD_SHIFT;
+            if (card_index < gc->card_table_size) {
+                gc->card_table[card_index] = 0xFF;
+            }
+        }
+    }
+
+    /* Also maintain the remembered set for correctness.
+     * This ensures old→young references are tracked even if the
+     * card-table scanning path has a bug, and provides a complete
+     * list for the remembered-set rebuild after collection. */
+    vtx_heap_object_t *heap_obj = (vtx_heap_object_t *)obj;
+    if (vtx_gc_in_old(gc, obj) && !heap_obj->gc_remembered) {
+        /* Check if the stored value might be a young-gen pointer.
+         * We conservatively assume it might be, since we don't have
+         * the value here — the JIT emits this barrier unconditionally
+         * for reference stores. The GC will scan the object's fields
+         * during collection to find actual young-gen pointers. */
+        if (gc->remembered_count < gc->remembered_capacity) {
+            gc->remembered_set[gc->remembered_count].obj = heap_obj;
+            gc->remembered_count++;
+            heap_obj->gc_remembered = 1;
+        }
+    }
 }
 
 /* ========================================================================== */

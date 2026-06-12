@@ -114,6 +114,45 @@ static vtx_nodeid_t emit_guard(vtx_graph_t *graph,
 }
 
 /* ========================================================================== */
+/* Internal helper: emit an exception edge from a throwing node                 */
+/* ========================================================================== */
+
+/**
+ * If the current block has an exception_target (a Catch handler), create an
+ * ExceptProj node from the throwing node that connects to the catch handler.
+ *
+ * The ExceptProj is a control projection that represents the exceptional
+ * control flow path. Its input is the throwing node, and it feeds into
+ * the Catch node's Region (or the Catch node itself as an input).
+ *
+ * Returns 0 on success, -1 on failure.
+ */
+static int emit_exception_edge(vtx_graph_t *graph,
+                                vtx_block_info_t *block,
+                                vtx_nodeid_t throwing_node)
+{
+    if (block->exception_target == VTX_NODEID_INVALID) return 0; /* no handler */
+
+    vtx_node_table_t *nt = &graph->node_table;
+
+    /* Create an ExceptProj node that projects the exceptional exit
+     * from the throwing node. */
+    vtx_nodeid_t exc_proj = vtx_node_create(nt, VTX_OP_ExceptProj);
+    if (exc_proj == VTX_NODEID_INVALID) return -1;
+
+    /* The ExceptProj takes the throwing node as input */
+    vtx_node_add_input(nt, exc_proj, throwing_node);
+
+    /* Connect the ExceptProj to the Catch node (exception target).
+     * The Catch node already has its normal control input; we add
+     * the exception edge as an additional input so the Catch can
+     * receive exceptions from multiple throwing sites. */
+    vtx_node_add_input(nt, block->exception_target, exc_proj);
+
+    return 0;
+}
+
+/* ========================================================================== */
 /* Internal helper: count method arguments from signature                       */
 /* ========================================================================== */
 
@@ -432,6 +471,7 @@ static uint32_t identify_blocks(vtx_arena_t *arena,
             blocks[bi].region_node = VTX_NODEID_INVALID;
             blocks[bi].control_node = VTX_NODEID_INVALID;
             blocks[bi].memory_node = VTX_NODEID_INVALID;
+            blocks[bi].exception_target = VTX_NODEID_INVALID;
             blocks[bi].locals = NULL;
             blocks[bi].pred_indices = NULL;
             blocks[bi].pred_count = 0;
@@ -1396,6 +1436,8 @@ int vtx_graph_build(vtx_graph_t *graph,
                 vtx_node_add_input(&graph->node_table, result, obj);
                 block->memory_node = result;
                 op_stack[sp++] = result;
+                /* Exception edge: LoadField can throw NPE */
+                if (emit_exception_edge(graph, block, result) != 0) return -1;
                 break;
             }
             case VT_OP_STORE_FIELD: {
@@ -1431,6 +1473,8 @@ int vtx_graph_build(vtx_graph_t *graph,
                 vtx_node_add_input(&graph->node_table, result, obj);
                 vtx_node_add_input(&graph->node_table, result, val);
                 block->memory_node = result;
+                /* Exception edge: StoreField can throw NPE */
+                if (emit_exception_edge(graph, block, result) != 0) return -1;
                 break;
             }
 
@@ -1454,6 +1498,10 @@ int vtx_graph_build(vtx_graph_t *graph,
                 vtx_node_add_input(&graph->node_table, result, a);
                 vtx_node_add_input(&graph->node_table, result, b);
                 op_stack[sp++] = result;
+                /* Exception edge: IDIV/IMOD can throw ArithmeticException */
+                if (ir_op == VTX_OP_Div || ir_op == VTX_OP_Mod) {
+                    if (emit_exception_edge(graph, block, result) != 0) return -1;
+                }
                 break;
             }
 
@@ -1477,6 +1525,10 @@ int vtx_graph_build(vtx_graph_t *graph,
                 vtx_node_add_input(&graph->node_table, result, a);
                 vtx_node_add_input(&graph->node_table, result, b);
                 op_stack[sp++] = result;
+                /* Exception edge: FDIV can throw (e.g. floating-point exception) */
+                if (ir_op == VTX_OP_Div) {
+                    if (emit_exception_edge(graph, block, result) != 0) return -1;
+                }
                 break;
             }
 
@@ -1651,6 +1703,8 @@ int vtx_graph_build(vtx_graph_t *graph,
                 block->control_node = call;
                 block->memory_node = call;
                 op_stack[sp++] = call;
+                /* Exception edge: CallStatic can throw */
+                if (emit_exception_edge(graph, block, call) != 0) return -1;
                 break;
             }
             case VT_OP_CALL_VIRTUAL: {
@@ -1688,6 +1742,8 @@ int vtx_graph_build(vtx_graph_t *graph,
                 block->control_node = call;
                 block->memory_node = call;
                 op_stack[sp++] = call;
+                /* Exception edge: CallVirtual can throw */
+                if (emit_exception_edge(graph, block, call) != 0) return -1;
                 break;
             }
             case VT_OP_CALL_INTERFACE: {
@@ -1725,6 +1781,8 @@ int vtx_graph_build(vtx_graph_t *graph,
                 block->control_node = call;
                 block->memory_node = call;
                 op_stack[sp++] = call;
+                /* Exception edge: CallInterface can throw */
+                if (emit_exception_edge(graph, block, call) != 0) return -1;
                 break;
             }
 
@@ -1737,6 +1795,8 @@ int vtx_graph_build(vtx_graph_t *graph,
                 vtx_node_add_input(&graph->node_table, result, block->memory_node);
                 block->memory_node = result;
                 op_stack[sp++] = result;
+                /* Exception edge: NewObject can throw OutOfMemoryError */
+                if (emit_exception_edge(graph, block, result) != 0) return -1;
                 break;
             }
             case VT_OP_NEWARRAY: {
@@ -1750,6 +1810,8 @@ int vtx_graph_build(vtx_graph_t *graph,
                 vtx_node_add_input(&graph->node_table, result, size);
                 block->memory_node = result;
                 op_stack[sp++] = result;
+                /* Exception edge: NewArray can throw OutOfMemoryError / NegativeArraySizeException */
+                if (emit_exception_edge(graph, block, result) != 0) return -1;
                 break;
             }
 
@@ -1805,6 +1867,8 @@ int vtx_graph_build(vtx_graph_t *graph,
                 n->type_id = operand;
                 vtx_node_add_input(&graph->node_table, result, obj);
                 op_stack[sp++] = result;
+                /* Exception edge: CheckCast can throw ClassCastException */
+                if (emit_exception_edge(graph, block, result) != 0) return -1;
                 break;
             }
             case VT_OP_INSTANCEOF: {
@@ -1878,6 +1942,8 @@ int vtx_graph_build(vtx_graph_t *graph,
                 vtx_node_add_input(&graph->node_table, result, idx);
                 block->memory_node = result;
                 op_stack[sp++] = result;
+                /* Exception edge: LoadIndexed can throw ArrayIndexOutOfBoundsException */
+                if (emit_exception_edge(graph, block, result) != 0) return -1;
                 break;
             }
             case VT_OP_ARRAY_STORE: {
@@ -1935,6 +2001,8 @@ int vtx_graph_build(vtx_graph_t *graph,
                 vtx_node_add_input(&graph->node_table, result, idx);
                 vtx_node_add_input(&graph->node_table, result, val);
                 block->memory_node = result;
+                /* Exception edge: StoreIndexed can throw ArrayIndexOutOfBoundsException / ArrayStoreException */
+                if (emit_exception_edge(graph, block, result) != 0) return -1;
                 break;
             }
             case VT_OP_ARRAY_LENGTH: {
@@ -1968,6 +2036,10 @@ int vtx_graph_build(vtx_graph_t *graph,
                 if (catch_n == VTX_NODEID_INVALID) return -1;
                 vtx_node_add_input(&graph->node_table, catch_n, block->control_node);
                 block->control_node = catch_n;
+                /* Record this Catch node as the current exception target
+                 * for subsequent potentially-throwing instructions in
+                 * this block. */
+                block->exception_target = catch_n;
                 op_stack[sp++] = catch_n;
                 break;
             }
@@ -1983,6 +2055,8 @@ int vtx_graph_build(vtx_graph_t *graph,
                 vtx_node_add_input(&graph->node_table, rt, obj);
                 block->control_node = rt;
                 block->memory_node = rt;
+                /* Exception edge: MonitorEnter can throw */
+                if (emit_exception_edge(graph, block, rt) != 0) return -1;
                 break;
             }
             case VT_OP_MONITOR_EXIT: {
@@ -1995,6 +2069,8 @@ int vtx_graph_build(vtx_graph_t *graph,
                 vtx_node_add_input(&graph->node_table, rt, obj);
                 block->control_node = rt;
                 block->memory_node = rt;
+                /* Exception edge: MonitorExit can throw IllegalMonitorStateException */
+                if (emit_exception_edge(graph, block, rt) != 0) return -1;
                 break;
             }
 

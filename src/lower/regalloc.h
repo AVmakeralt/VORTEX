@@ -26,10 +26,20 @@
  */
 
 /* ========================================================================== */
-/* Physical register sets                                                      */
+/* Register class                                                              */
 /* ========================================================================== */
 
-/* Number of allocatable physical registers (excludes RSP, RBP) */
+typedef enum {
+    VTX_REG_CLASS_GPR = 0,  /* General-purpose registers */
+    VTX_REG_CLASS_XMM = 1,  /* SSE/XMM registers for floats */
+    VTX_REG_CLASS_COUNT
+} vtx_reg_class_t;
+
+/* ========================================================================== */
+/* Physical register sets — GPR                                                */
+/* ========================================================================== */
+
+/* Number of allocatable physical GPR registers (excludes RSP, RBP) */
 #define VTX_PHYS_REG_COUNT 14
 
 /* Caller-saved registers (first choice for allocation) */
@@ -68,6 +78,34 @@ static const uint8_t vtx_callee_saved_regs[VTX_CALLEE_SAVED_COUNT] = {
 #define VTX_CALLEE_SAVED_MASK \
     ((1u << 3) | (1u << 12) | (1u << 13) | (1u << 14) | (1u << 15))
 
+/* ========================================================================== */
+/* Physical register sets — XMM (SSE)                                         */
+/* ========================================================================== */
+
+#define VTX_XMM_COUNT 16  /* XMM0-XMM15 */
+
+#define VTX_XMM0   0
+#define VTX_XMM1   1
+#define VTX_XMM2   2
+#define VTX_XMM3   3
+#define VTX_XMM4   4
+#define VTX_XMM5   5
+#define VTX_XMM6   6
+#define VTX_XMM7   7
+#define VTX_XMM8   8
+#define VTX_XMM9   9
+#define VTX_XMM10  10
+#define VTX_XMM11  11
+#define VTX_XMM12  12
+#define VTX_XMM13  13
+#define VTX_XMM14  14
+#define VTX_XMM15  15
+
+/* XMM registers use the same encoding as GPR for ModR/M (0-15).
+ * XMM8-XMM15 require REX.R/B in the REX prefix.
+ * Bitmask: all 16 XMM registers are allocatable. */
+#define VTX_XMM_ALL_MASK 0xFFFFu
+
 /* No spill slot sentinel */
 #define VTX_NO_SPILL ((uint32_t)0xFFFFFFFF)
 
@@ -101,6 +139,7 @@ typedef struct vtx_live_interval {
     uint32_t use_count;    /* number of uses of this vreg (for spill cost) */
     uint32_t loop_depth;   /* estimated loop nesting depth (for spill cost) */
     uint32_t coalesce_src; /* vreg this was coalesced from (VTX_VREG_INVALID = none) */
+    vtx_reg_class_t reg_class; /* register class: GPR or XMM */
     /* Split children for interval splitting (P5) */
     struct vtx_live_interval *split_parent; /* parent interval (NULL = root) */
     struct vtx_live_interval *split_child;  /* child interval (NULL = leaf) */

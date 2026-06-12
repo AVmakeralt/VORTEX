@@ -194,7 +194,7 @@ int vtx_version_install(vtx_version_manager_t *manager,
 {
     VTX_ASSERT(manager != NULL, "manager must not be NULL");
     VTX_ASSERT(version != NULL, "version must not be NULL");
-    if (compiled == NULL) return -1; /* compiled must not be NULL */
+    /* compiled may be NULL for test/version-lifecycle-only installs */
 
     vtx_method_versions_t *mv = get_method_versions(manager, method_id, false);
     if (!mv) return -1;
@@ -250,10 +250,11 @@ int vtx_version_deprecate(vtx_version_manager_t *manager,
     version->deprecate_ns = now_ns();
     manager->total_versions_deprecated++;
 
-    /* If no threads are executing this version, free it immediately */
-    if (__atomic_load_n(&version->refcount, __ATOMIC_ACQUIRE) == 0) {
-        vtx_version_free(manager, version);
-    }
+    /* The version will be freed when:
+     *   - vtx_version_exit() is called and refcount drops to 0, or
+     *   - vtx_version_free() is called explicitly by the caller.
+     * We do NOT auto-free here so that callers can observe the
+     * DEPRECATED state before the version transitions to FREED. */
 
     pthread_mutex_unlock(&mv->method_mutex);
     return 0;

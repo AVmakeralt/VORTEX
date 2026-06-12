@@ -256,3 +256,43 @@ const vtx_reg_map_entry_t *vtx_side_table_get_register_map(
     if (out_count) *out_count = entry->register_map_count;
     return entry->register_map;
 }
+
+/* ========================================================================== */
+/* Safepoint recording                                                         */
+/* ========================================================================== */
+
+int vtx_side_table_record_safepoint(vtx_side_table_t *table,
+                                     uint32_t native_pc_offset,
+                                     const uint32_t *root_node_ids,
+                                     uint32_t root_count)
+{
+    if (!table) return -1;
+
+    /* Add a side table entry at the safepoint PC offset with the
+     * VTX_STF_SAFEPPOINT flag. Use frame_state_index = UINT32_MAX
+     * as a sentinel since safepoints don't necessarily have an
+     * associated FrameState — the GC root map is the primary data. */
+    uint32_t entry_idx = vtx_side_table_add_entry(table,
+                                                    native_pc_offset,
+                                                    UINT32_MAX,
+                                                    VTX_STF_SAFEPPOINT);
+    if (entry_idx == UINT32_MAX) return -1;
+
+    /* Record each GC root as a register map entry. We store the
+     * NodeID in the node_id field and use VTX_REG_NONE (0xFF) as
+     * the register_number to indicate that the root's location is
+     * identified by NodeID rather than a physical register.
+     * This supports stack-allocated roots where the register
+     * allocator has spilled the value. */
+    for (uint32_t i = 0; i < root_count; i++) {
+        /* Use a special register number to indicate "NodeID-based root".
+         * 0xFFFFFFFF means the root is identified by node_id alone;
+         * the GC will look up the node's location from the register
+         * map or spill slots. */
+        if (vtx_side_table_add_register(table, 0xFFFFFFFF, root_node_ids[i]) != 0) {
+            return -1;
+        }
+    }
+
+    return 0;
+}
