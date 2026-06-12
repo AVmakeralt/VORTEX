@@ -14,7 +14,7 @@
  * Collected by the T0 interpreter and T1 baseline JIT, consumed by the T2/T3
  * optimizing compilers for speculative optimizations and inlining decisions.
  *
- * Type observations at call sites are bounded by VTX_POLY_LIMIT (4). When more
+ * Type observations at call sites are bounded by VTX_POLY_LIMIT (16, max aggro). When more
  * types are observed than the limit, the site transitions to megamorphic and
  * stops recording individual types (a sentinel VTX_TYPEID_MEGAMORPHIC is stored).
  *

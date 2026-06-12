@@ -66,7 +66,7 @@
 /**
  * Maximum number of parked versions per method.
  * Parked versions consume memory but avoid recompilation.
- * This is higher than VTX_DEOPTLESS_MAX_VERSIONS (8) because
+ * This is higher than VTX_DEOPTLESS_MAX_VERSIONS (64, max aggro) because
  * parked versions only retain compiled code (no graph snapshots needed),
  * so they are cheaper to keep around.
  */

@@ -16,16 +16,14 @@ struct vtx_hyperblock_t;
  * and code cache pressure.
  *
  * Two limits:
- *   1. VTX_MAX_HYPERBLOCK_NODES (4096) — maximum number of SoN nodes
- *      in a hyperblock. Derived from compile-time budget: each node
- *      requires ~100ns of compilation time on average, so 4096 nodes
- *      ≈ 400μs compile time, which is within the acceptable budget
- *      for a T2 compilation.
+ *   1. VTX_MAX_HYPERBLOCK_NODES (65536, max aggro) — maximum number of SoN nodes
+ *      in a hyperblock. Max aggro: compiles in background thread, so no
+ *      pause on the main execution thread. 65536 nodes ≈ 6.5ms compile time,
+ *      acceptable for T3 background compilation.
  *
- *   2. VTX_MAX_NATIVE_SIZE (32KB) — maximum estimated native code size.
- *      Derived from code cache pressure: 32KB is small enough that
- *      multiple hyperblocks can coexist in the L1 instruction cache
- *      (typically 32KB), ensuring hot code stays cached.
+ *   2. VTX_MAX_NATIVE_SIZE (512KB, max aggro) — maximum estimated native code size.
+ *      Max aggro: L2 cache is 256KB–1MB, so hot code stays resident.
+ *      Deoptless continuations handle the larger guards cheaply.
  *
  * The budget checker supports a greedy algorithm:
  *   1. Sort branch candidates by priority (exit_count * estimated_speedup).

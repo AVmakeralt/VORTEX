@@ -52,6 +52,7 @@ add_library(vortex_ir STATIC
     ir/bounds_check.c
     ir/induction.c
     ir/tbaa.c
+    ir/spec_elim.c
 )
 target_include_directories(vortex_ir PUBLIC ${VORTEX_INCLUDE_DIRS})
 target_link_libraries(vortex_ir PUBLIC vortex_common)
@@ -146,6 +147,7 @@ add_library(vortex_compile STATIC
     compile/version.c
     compile/pipeline.c
     compile/phase_react.c
+    compile/spec_versioning.c
 )
 target_include_directories(vortex_compile PUBLIC ${VORTEX_INCLUDE_DIRS})
 target_link_libraries(vortex_compile PUBLIC vortex_ir vortex_pea vortex_inliner vortex_lower vortex_deopt vortex_codecache Threads::Threads)
@@ -161,6 +163,7 @@ add_library(vortex_guard STATIC
     guard/value_profile.c
     guard/guard_deps.c
     guard/guard_page_type.c
+    guard/heap_value_prop.c
 )
 target_include_directories(vortex_guard PUBLIC ${VORTEX_INCLUDE_DIRS})
 target_link_libraries(vortex_guard PUBLIC vortex_ir vortex_deopt vortex_pea)

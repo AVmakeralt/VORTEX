@@ -1333,14 +1333,21 @@ static int run_self_test(void)
         found = vtx_ic_lookup(&ic, 99);
         if (found != NULL) ok = false;
 
-        /* Fill up to megamorphic */
+        /* Fill up to megamorphic — with VTX_POLY_LIMIT=16 (max aggro),
+         * we need 17 distinct types to trigger megamorphic transition. */
         vtx_method_desc_t m3 = {.name = "baz", .is_virtual = true};
         vtx_method_desc_t m4 = {.name = "qux", .is_virtual = true};
         vtx_method_desc_t m5 = {.name = "quux", .is_virtual = true};
         vtx_ic_update(&ic, 4, &m3);
         vtx_ic_update(&ic, 5, &m4);
+        vtx_ic_update(&ic, 6, &m5);
         if (ic.state != VT_IC_POLYMORPHIC) ok = false;
-        vtx_ic_update(&ic, 6, &m5); /* VTX_POLY_LIMIT=4, so 5th different type → megamorphic */
+
+        /* Keep adding distinct types until we exceed VTX_POLY_LIMIT */
+        for (uint32_t tid = 7; tid <= VTX_POLY_LIMIT + 1; tid++) {
+            vtx_method_desc_t m = {.name = "many", .is_virtual = true};
+            vtx_ic_update(&ic, tid, &m);
+        }
         if (ic.state != VT_IC_MEGAMORPHIC) ok = false;
 
         if (ok) {
