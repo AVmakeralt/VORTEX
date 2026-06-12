@@ -1354,3 +1354,63 @@ void vtx_pipeline_config_destroy(vtx_pipeline_config_t *config)
         config->owns_gbdt_model = false;
     }
 }
+
+/* ========================================================================== */
+/* Heat-adapted speculation budgets (Proposal #12)                               */
+/* ========================================================================== */
+
+vtx_pipeline_config_t vtx_pipeline_config_heat_adapted(uint64_t execution_count)
+{
+    /* Start with the T3 config as the base */
+    vtx_pipeline_config_t config = vtx_pipeline_config_t3();
+
+    /* For very cold methods, use conservative defaults */
+    if (execution_count < 1000) {
+        return config;
+    }
+
+    /* Compute logarithmic scaling factor.
+     * log10(1000) = 3, log10(10M) = 7
+     * We use this to gradually increase aggressiveness. */
+    double log_exec = 0.0;
+    if (execution_count > 0) {
+        /* Approximate log10 without linking -lm */
+        uint64_t tmp = execution_count;
+        while (tmp >= 10) { log_exec += 1.0; tmp /= 10; }
+        log_exec += (double)tmp / 10.0; /* fractional part approximation */
+    }
+
+    /* Adjust inline size limit: hotter methods can inline larger callees.
+     * Default T3 limit is around 512 nodes.
+     * For very hot methods, increase to 768. */
+    if (config.inline_size_limit == 0) config.inline_size_limit = 512;
+    uint32_t size_boost = (uint32_t)(log_exec * 30);
+    if (size_boost > 256) size_boost = 256;
+    config.inline_size_limit += size_boost;
+
+    /* Adjust GVN iterations: hotter methods benefit from more iterations.
+     * Default is around 3. Increase to 5 for very hot methods. */
+    if (config.gvn_iterations < 3) config.gvn_iterations = 3;
+    if (log_exec > 6.0 && config.gvn_iterations < 5) {
+        config.gvn_iterations = 5;
+    }
+
+    /* Adjust SCCP iterations similarly */
+    if (config.sccp_iterations < 3) config.sccp_iterations = 3;
+    if (log_exec > 6.0 && config.sccp_iterations < 5) {
+        config.sccp_iterations = 5;
+    }
+
+    /* Enable more aggressive speculative optimizations for hot methods */
+    if (execution_count > 100000) {
+        config.run_speculative = true;
+        config.run_loop_spec = true;
+    }
+
+    /* For extremely hot methods, enable vectorization */
+    if (execution_count > 10000000) {
+        config.run_vectorize = true;
+    }
+
+    return config;
+}

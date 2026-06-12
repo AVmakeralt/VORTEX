@@ -50,10 +50,11 @@
 /* ========================================================================== */
 
 typedef enum {
-    VTX_GUARD_UNCONDITIONAL = 0,  /* always true, no check needed */
-    VTX_GUARD_FAST_CHECK    = 1,  /* rarely fails, simple check */
-    VTX_GUARD_FULL_CHECK    = 2,  /* sometimes fails, full check + side exit */
-    VTX_GUARD_DEOPT_ALWAYS  = 3   /* always fails, unconditional deopt */
+    VTX_GUARD_UNCONDITIONAL    = 0,  /* always true, no check needed */
+    VTX_GUARD_FAST_CHECK       = 1,  /* rarely fails, simple check */
+    VTX_GUARD_PREDICATED_CHECK = 2,  /* very low failure rate, CMOVCC+INT3 (Proposal #11) */
+    VTX_GUARD_FULL_CHECK       = 3,  /* sometimes fails, full check + side exit */
+    VTX_GUARD_DEOPT_ALWAYS     = 4   /* always fails, unconditional deopt */
 } vtx_guard_strength_t;
 
 /* Human-readable name for guard strength level */
@@ -103,6 +104,11 @@ typedef struct {
      * entire type signature at once. */
     uint64_t            expected_signature_hash; /* expected FNV hash of the type signature */
     bool                is_composite_guard;      /* true if this is a composite type signature guard */
+
+    /* Bidirectional guard strength (Proposal #10) */
+    vtx_ewma_t          long_failure_rate_ewma;  /* longer-window EWMA (alpha=0.01) for strengthening */
+    uint32_t            phase_context;            /* method call stack hash at time of last weakening */
+    uint64_t            residence_count;          /* executions at current strength level */
 } vtx_guard_meta_t;
 
 /* ========================================================================== */
@@ -123,6 +129,7 @@ typedef struct {
     uint32_t            fast_check_count;
     uint32_t            full_check_count;
     uint32_t            deopt_always_count;
+    uint32_t            predicated_check_count;  /* Proposal #11 */
 } vtx_guard_meta_table_t;
 
 /* ========================================================================== */
@@ -214,5 +221,39 @@ uint32_t vtx_guard_meta_pending_transitions(const vtx_guard_meta_table_t *table)
  * Clear all strength_changed flags in the table.
  */
 void vtx_guard_meta_clear_transition_flags(vtx_guard_meta_table_t *table);
+
+/* ========================================================================== */
+/* Bidirectional guard strength (Proposal #10)                                  */
+/* ========================================================================== */
+
+/**
+ * EWMA failure rate threshold for guard predication.
+ * Below this rate, guards transition to PredicatedCheck which
+ * uses CMOVCC+INT3 instead of JCC to avoid branch misprediction.
+ */
+#define VTX_GUARD_PREDICATE_THRESHOLD 0.00001  /* 0.001% */
+
+/**
+ * Guard strengthening threshold: if the long-window EWMA failure rate
+ * drops below this, the guard may strengthen. Set to 0.1% (one-tenth
+ * of the weaken threshold) to avoid thrashing.
+ */
+#define VTX_GUARD_STRENGTHEN_THRESHOLD 0.001
+
+/**
+ * Minimum number of executions at current strength before a guard
+ * can be considered for strengthening. Prevents rapid oscillation.
+ */
+#define VTX_GUARD_MIN_RESIDENCE 10000
+
+/**
+ * Try to strengthen a guard based on long-window EWMA and phase context.
+ * Called from the safepoint handler when a phase transition is detected.
+ *
+ * @param meta           Guard metadata
+ * @param new_phase      New phase context hash
+ * @return               true if the guard was strengthened
+ */
+bool vtx_guard_meta_try_strengthen(vtx_guard_meta_t *meta, uint32_t new_phase);
 
 #endif /* VORTEX_GUARD_METADATA_H */

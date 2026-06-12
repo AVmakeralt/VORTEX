@@ -9,6 +9,7 @@
 static const char * const strength_names[] = {
     "Unconditional",
     "FastCheck",
+    "PredicatedCheck",
     "FullCheck",
     "DeoptAlways"
 };
@@ -39,6 +40,7 @@ int vtx_guard_meta_table_init(vtx_guard_meta_table_t *table)
     table->fast_check_count = 0;
     table->full_check_count = 0;
     table->deopt_always_count = 0;
+    table->predicated_check_count = 0;
 
     return 0;
 }
@@ -81,18 +83,20 @@ static void update_strength_counts(vtx_guard_meta_table_t *table,
 {
     /* Decrement old count */
     switch (old_strength) {
-    case VTX_GUARD_UNCONDITIONAL: table->unconditional_count--; break;
-    case VTX_GUARD_FAST_CHECK:    table->fast_check_count--; break;
-    case VTX_GUARD_FULL_CHECK:    table->full_check_count--; break;
-    case VTX_GUARD_DEOPT_ALWAYS:  table->deopt_always_count--; break;
+    case VTX_GUARD_UNCONDITIONAL:    table->unconditional_count--; break;
+    case VTX_GUARD_FAST_CHECK:       table->fast_check_count--; break;
+    case VTX_GUARD_PREDICATED_CHECK: table->predicated_check_count--; break;
+    case VTX_GUARD_FULL_CHECK:       table->full_check_count--; break;
+    case VTX_GUARD_DEOPT_ALWAYS:     table->deopt_always_count--; break;
     }
 
     /* Increment new count */
     switch (new_strength) {
-    case VTX_GUARD_UNCONDITIONAL: table->unconditional_count++; break;
-    case VTX_GUARD_FAST_CHECK:    table->fast_check_count++; break;
-    case VTX_GUARD_FULL_CHECK:    table->full_check_count++; break;
-    case VTX_GUARD_DEOPT_ALWAYS:  table->deopt_always_count++; break;
+    case VTX_GUARD_UNCONDITIONAL:    table->unconditional_count++; break;
+    case VTX_GUARD_FAST_CHECK:       table->fast_check_count++; break;
+    case VTX_GUARD_PREDICATED_CHECK: table->predicated_check_count++; break;
+    case VTX_GUARD_FULL_CHECK:       table->full_check_count++; break;
+    case VTX_GUARD_DEOPT_ALWAYS:     table->deopt_always_count++; break;
     }
 }
 
@@ -134,14 +138,21 @@ vtx_guard_meta_t *vtx_guard_meta_register(vtx_guard_meta_table_t *table,
     /* Initialize EWMA with the default alpha (VTX_GUARD_ALPHA = 0.1) */
     vtx_ewma_init(&meta->failure_rate_ewma);
 
+    /* Initialize long-window EWMA for bidirectional strengthening (Proposal #10) */
+    vtx_ewma_init(&meta->long_failure_rate_ewma);
+    meta->long_failure_rate_ewma.alpha = 0.01;  /* long window: alpha=0.01, half-life ~70 observations */
+    meta->phase_context = 0;
+    meta->residence_count = 0;
+
     table->guard_count++;
 
     /* Update strength category count */
     switch (strength) {
-    case VTX_GUARD_UNCONDITIONAL: table->unconditional_count++; break;
-    case VTX_GUARD_FAST_CHECK:    table->fast_check_count++; break;
-    case VTX_GUARD_FULL_CHECK:    table->full_check_count++; break;
-    case VTX_GUARD_DEOPT_ALWAYS:  table->deopt_always_count++; break;
+    case VTX_GUARD_UNCONDITIONAL:    table->unconditional_count++; break;
+    case VTX_GUARD_FAST_CHECK:       table->fast_check_count++; break;
+    case VTX_GUARD_PREDICATED_CHECK: table->predicated_check_count++; break;
+    case VTX_GUARD_FULL_CHECK:       table->full_check_count++; break;
+    case VTX_GUARD_DEOPT_ALWAYS:     table->deopt_always_count++; break;
     }
 
     return meta;
@@ -179,6 +190,12 @@ void vtx_guard_meta_update(vtx_guard_meta_t *meta, bool failed)
     double obs = failed ? 1.0 : 0.0;
     vtx_ewma_update(&meta->failure_rate_ewma, obs);
 
+    /* Update long-window EWMA for bidirectional strengthening (Proposal #10) */
+    vtx_ewma_update(&meta->long_failure_rate_ewma, obs);
+    if (meta->residence_count < UINT64_MAX) {
+        meta->residence_count++;
+    }
+
     /* Check for strength transition using the EWMA failure rate.
      * Transitions are monotonic: guard can only get weaker.
      * The EWMA provides a more stable signal than the raw rate,
@@ -196,7 +213,18 @@ void vtx_guard_meta_update(vtx_guard_meta_t *meta, bool failed)
         break;
 
     case VTX_GUARD_FAST_CHECK:
+        /* FastCheck → PredicatedCheck if EWMA < PREDICATE_THRESHOLD */
+        if (ewma_rate < VTX_GUARD_PREDICATE_THRESHOLD && meta->execution_count >= 10000) {
+            new_strength = VTX_GUARD_PREDICATED_CHECK;
+        }
         /* FastCheck → FullCheck if EWMA failure rate > VTX_GUARD_WEAKEN_THRESHOLD */
+        else if (ewma_rate > VTX_GUARD_WEAKEN_THRESHOLD) {
+            new_strength = VTX_GUARD_FULL_CHECK;
+        }
+        break;
+
+    case VTX_GUARD_PREDICATED_CHECK:
+        /* PredicatedCheck → FullCheck if EWMA > WEAKEN_THRESHOLD */
         if (ewma_rate > VTX_GUARD_WEAKEN_THRESHOLD) {
             new_strength = VTX_GUARD_FULL_CHECK;
         }
@@ -267,4 +295,60 @@ void vtx_guard_meta_clear_transition_flags(vtx_guard_meta_table_t *table)
     for (uint32_t i = 0; i < table->guard_count; i++) {
         table->guards[i].strength_changed = false;
     }
+}
+
+/* ========================================================================== */
+/* Bidirectional guard strength (Proposal #10)                                  */
+/* ========================================================================== */
+
+bool vtx_guard_meta_try_strengthen(vtx_guard_meta_t *meta, uint32_t new_phase)
+{
+    if (meta == NULL) return false;
+
+    /* Can only strengthen from weakened states */
+    if (meta->strength == VTX_GUARD_UNCONDITIONAL || meta->strength == VTX_GUARD_DEOPT_ALWAYS) {
+        return false;
+    }
+
+    /* Check minimum residence time at current strength */
+    if (meta->residence_count < VTX_GUARD_MIN_RESIDENCE) return false;
+
+    /* Check that phase context has changed (otherwise no reason to strengthen) */
+    if (meta->phase_context == new_phase) return false;
+
+    /* Check long-window EWMA failure rate is below strengthen threshold */
+    double long_rate = vtx_ewma_value(&meta->long_failure_rate_ewma);
+    if (long_rate > VTX_GUARD_STRENGTHEN_THRESHOLD) return false;
+
+    /* Strengthen: move one level up */
+    vtx_guard_strength_t old_strength = meta->strength;
+    vtx_guard_strength_t new_strength = old_strength;
+
+    switch (old_strength) {
+    case VTX_GUARD_FULL_CHECK:
+        new_strength = VTX_GUARD_PREDICATED_CHECK;
+        break;
+    case VTX_GUARD_PREDICATED_CHECK:
+        new_strength = VTX_GUARD_FAST_CHECK;
+        break;
+    case VTX_GUARD_FAST_CHECK:
+        new_strength = VTX_GUARD_UNCONDITIONAL;
+        break;
+    default:
+        return false;
+    }
+
+    if (new_strength != old_strength) {
+        meta->strength = new_strength;
+        meta->strength_changed = true;
+        meta->phase_context = new_phase;
+        meta->residence_count = 0;
+        /* Reset both EWMAs after strengthening to avoid immediate re-weakening */
+        vtx_ewma_init(&meta->failure_rate_ewma);
+        vtx_ewma_init(&meta->long_failure_rate_ewma);
+        meta->long_failure_rate_ewma.alpha = 0.01;
+        return true;
+    }
+
+    return false;
 }

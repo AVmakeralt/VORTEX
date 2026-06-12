@@ -160,4 +160,29 @@ void vtx_guard_emit_set_deopt_handler(void *handler);
  */
 void *vtx_guard_emit_get_deopt_handler(void);
 
+/* ========================================================================== */
+/* Predicated guard emission (Proposal #11)                                     */
+/* ========================================================================== */
+
+/**
+ * Emit a predicated guard using CMOVCC + conditional INT3.
+ * Used for guards with very low failure rates where branch
+ * misprediction penalty exceeds the cost of always-decoded deopt path.
+ *
+ * The emission strategy:
+ *   1. Evaluate the guard condition into a register
+ *   2. CMOVCC: conditionally set a flag byte to 0xCC (INT3 opcode)
+ *   3. The flag byte is placed right after the CMOVCC
+ *   4. If the condition fails, the flag becomes 0xCC → INT3 fires → deopt handler
+ *   5. If the condition passes, the flag remains 0x90 (NOP) → no trap
+ *
+ * @param guard       Guard descriptor
+ * @param code_buf    Output code buffer
+ * @param buf_size    Size of code buffer
+ * @return            Number of bytes emitted, or -1 on failure
+ */
+int vtx_guard_emit_predicated(const vtx_guard_desc_t *guard,
+                                uint8_t *code_buf,
+                                uint32_t buf_size);
+
 #endif /* VORTEX_LOWER_GUARD_EMIT_H */

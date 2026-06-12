@@ -1,4 +1,5 @@
 #include "deopt/deoptless.h"
+#include "interp/type_feedback.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -558,4 +559,89 @@ vtx_graph_t *vtx_deoptless_create_incremental_continuation(
     vtx_deoptless_record_failed_guard(table, failed_guard_id);
 
     return new_graph;
+}
+
+/* ========================================================================== */
+/* Profile-guarded specialization (Proposal #13)                                 */
+/* ========================================================================== */
+
+uint64_t vtx_deoptless_compute_decision_hash(const vtx_graph_t *graph)
+{
+    if (!graph) return 0;
+
+    /* FNV-1a hash over all DeoptGuard nodes' assumptions.
+     * Each DeoptGuard encodes a speculation decision:
+     *   - The guard's bytecode_pc (which call site it protects)
+     *   - The guard's type_id (which type was assumed)
+     *   - The guard's cond (what comparison is made) */
+    uint64_t h = 14695981039346656037ULL;
+
+    for (uint32_t i = 0; i < graph->node_table.count; i++) {
+        const vtx_node_t *node = &graph->node_table.nodes[i];
+        if (node->dead) continue;
+        if (node->opcode != VTX_OP_DeoptGuard) continue;
+
+        /* Mix the guard's identity into the hash */
+        uint32_t pc = node->bytecode_pc;
+        uint32_t tid = node->type_id;
+        uint32_t cond = (uint32_t)node->cond;
+
+        h ^= (uint64_t)(pc & 0xFF);
+        h *= 1099511628211ULL;
+        h ^= (uint64_t)((pc >> 8) & 0xFF);
+        h *= 1099511628211ULL;
+        h ^= (uint64_t)(tid & 0xFF);
+        h *= 1099511628211ULL;
+        h ^= (uint64_t)(cond & 0xFF);
+        h *= 1099511628211ULL;
+    }
+
+    return h;
+}
+
+bool vtx_deoptless_needs_recompilation(const vtx_deoptless_table_t *table,
+                                         uint64_t current_hash)
+{
+    if (!table) return true;  /* no table → must compile */
+    if (table->compiled_profile_hash == 0) return true;  /* never compiled → must compile */
+    return table->compiled_profile_hash != current_hash;
+}
+
+uint64_t vtx_profile_compute_hash(const vtx_type_feedback_t *type_feedback,
+                                    uint32_t method_id)
+{
+    if (!type_feedback) return 0;
+
+    /* FNV-1a hash over the type feedback data for the given method.
+     * We hash the dominant type at each call site and the stable shapes
+     * at each field site. This captures the information that affects
+     * speculation decisions. */
+    uint64_t h = 14695981039346656037ULL;
+
+    /* Hash call site type signatures */
+    uint32_t site_count = type_feedback->call_site_count;
+    if (method_id < site_count) {
+        const vtx_tf_call_site_t *site = &type_feedback->call_sites[method_id];
+        /* Hash the stable signature if available */
+        if (site->stable_signature.slot_count > 0) {
+            for (uint32_t i = 0; i < site->stable_signature.slot_count && i < VTX_TYPE_SIGNATURE_MAX_SLOTS; i++) {
+                uint32_t tid = site->stable_signature.types[i];
+                h ^= (uint64_t)(tid & 0xFF);
+                h *= 1099511628211ULL;
+                h ^= (uint64_t)((tid >> 8) & 0xFF);
+                h *= 1099511628211ULL;
+            }
+        }
+        /* Hash the type frequency entries */
+        for (uint32_t i = 0; i < site->type_freq.entry_count && i < VTX_TYPE_FREQ_MAX_SLOTS; i++) {
+            uint32_t tid = site->type_freq.entries[i].type_id;
+            uint32_t cnt = site->type_freq.entries[i].count;
+            h ^= (uint64_t)(tid & 0xFF);
+            h *= 1099511628211ULL;
+            h ^= (uint64_t)(cnt & 0xFF);
+            h *= 1099511628211ULL;
+        }
+    }
+
+    return h;
 }

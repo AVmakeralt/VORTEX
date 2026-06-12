@@ -7,6 +7,7 @@
 #include "ir/node.h"
 #include "ir/graph.h"
 #include "runtime/arena.h"
+#include "interp/type_feedback.h"
 
 /**
  * VORTEX Deoptless Continuation Versions
@@ -90,6 +91,10 @@ typedef struct {
     vtx_guard_id_t      *failed_guards;      /* array of all failed guard IDs */
     uint32_t             failed_guard_count;  /* number of failed guards tracked */
     uint32_t             failed_guard_capacity; /* allocated capacity */
+
+    /* Profile-guarded specialization (Proposal #13) */
+    uint64_t            decision_vector_hash;  /* hash of (guard_id, assumption) pairs */
+    uint64_t            compiled_profile_hash; /* hash of the profile at compilation time */
 } vtx_deoptless_table_t;
 
 /* ========================================================================== */
@@ -234,5 +239,38 @@ bool vtx_deoptless_is_guard_removed(const vtx_deoptless_table_t *table,
  */
 int vtx_deoptless_record_failed_guard(vtx_deoptless_table_t *table,
                                         vtx_guard_id_t guard_id);
+
+/**
+ * Compute a decision vector hash from the current graph's guard assumptions.
+ * The hash encodes all speculation decisions as a compact fingerprint.
+ * Two graphs with the same decision vector hash make the same speculative
+ * assumptions, so recompilation would produce identical code.
+ *
+ * @param graph  The SoN graph
+ * @return       64-bit hash of the speculation decisions
+ */
+uint64_t vtx_deoptless_compute_decision_hash(const vtx_graph_t *graph);
+
+/**
+ * Check if recompilation is needed by comparing the current profile
+ * hash against the compiled profile hash.
+ *
+ * @param table           Deoptless version table
+ * @param current_hash    Hash of the current profile state
+ * @return                true if recompilation is needed (hashes differ)
+ */
+bool vtx_deoptless_needs_recompilation(const vtx_deoptless_table_t *table,
+                                         uint64_t current_hash);
+
+/**
+ * Compute a 64-bit hash of the current profile state for a method.
+ * Used to detect profile changes that might affect speculation decisions.
+ *
+ * @param type_feedback   Type feedback data
+ * @param method_id       Method ID
+ * @return                64-bit hash
+ */
+uint64_t vtx_profile_compute_hash(const vtx_type_feedback_t *type_feedback,
+                                    uint32_t method_id);
 
 #endif /* VORTEX_DEOPT_DEOPTLESS_H */

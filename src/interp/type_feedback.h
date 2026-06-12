@@ -343,4 +343,22 @@ const vtx_type_signature_t *vtx_tf_call_site_get_signature(
  */
 uint64_t vtx_type_signature_hash(const vtx_type_signature_t *sig);
 
+/* ========================================================================== */
+/* Shape stability queries (Proposal #9)                                         */
+/* ========================================================================== */
+
+#define VTX_SHAPE_STABILITY_WINDOW 500
+
+/**
+ * Check if a field site's shape has been stable for long enough
+ * to warrant shape-specialized code generation.
+ */
+bool vtx_tf_field_site_is_shape_stable(const vtx_tf_field_site_t *site);
+
+/**
+ * Get the stable shape ID for a field site.
+ * Returns VTX_SHAPE_INVALID if the site is not shape-stable.
+ */
+vtx_shapeid_t vtx_tf_field_site_get_stable_shape(const vtx_tf_field_site_t *site);
+
 #endif /* VORTEX_TYPE_FEEDBACK_H */

@@ -260,6 +260,23 @@ void vtx_type_feedback_record_field(vtx_type_feedback_t *feedback,
     if (site->count < VTX_TYPE_FEEDBACK_BUFFER_SIZE) {
         site->count++;
     }
+
+    /* Update shape stability tracking (Proposal #9) */
+    {
+        vtx_tf_field_site_t *fsite = &feedback->field_sites[site_index];
+        if (fsite->shape_stability_count == 0 || fsite->last_shapeid != holder_shapeid) {
+            fsite->last_shapeid = holder_shapeid;
+            fsite->shape_stability_count = 1;
+            fsite->is_shape_stable = false;
+        } else {
+            if (fsite->shape_stability_count < UINT32_MAX) {
+                fsite->shape_stability_count++;
+            }
+            if (fsite->shape_stability_count >= VTX_SHAPE_STABILITY_WINDOW) {
+                fsite->is_shape_stable = true;
+            }
+        }
+    }
 }
 
 void vtx_type_feedback_record_branch(vtx_type_feedback_t *feedback,
@@ -737,4 +754,21 @@ uint64_t vtx_type_signature_hash(const vtx_type_signature_t *sig)
         h *= 1099511628211ULL;
     }
     return h;
+}
+
+/* ========================================================================== */
+/* Shape stability queries (Proposal #9)                                          */
+/* ========================================================================== */
+
+bool vtx_tf_field_site_is_shape_stable(const vtx_tf_field_site_t *site)
+{
+    if (site == NULL) return false;
+    return site->is_shape_stable;
+}
+
+vtx_shapeid_t vtx_tf_field_site_get_stable_shape(const vtx_tf_field_site_t *site)
+{
+    if (site == NULL) return VTX_SHAPE_INVALID;
+    if (!site->is_shape_stable) return VTX_SHAPE_INVALID;
+    return site->last_shapeid;
 }

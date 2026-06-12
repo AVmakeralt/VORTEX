@@ -139,6 +139,19 @@ int vtx_pipeline_config_init_shared_model(vtx_pipeline_config_t *config);
  */
 void vtx_pipeline_config_destroy(vtx_pipeline_config_t *config);
 
+/**
+ * Compute heat-adapted speculation thresholds for a method.
+ * The hotter a method, the more aggressive the speculation:
+ *   - Very hot methods (E > 10M): lower inline threshold, stronger guards, more deoptless
+ *   - Cold methods (E < 1000): default conservative thresholds
+ *
+ * Uses logarithmic scaling to avoid extreme values.
+ *
+ * @param execution_count  Method execution count from profile
+ * @return                 Dynamically adapted pipeline config
+ */
+vtx_pipeline_config_t vtx_pipeline_config_heat_adapted(uint64_t execution_count);
+
 /* Run the optimization pipeline on a graph */
 int vtx_pipeline_run(vtx_graph_t *graph,
                       const vtx_pipeline_config_t *config,
