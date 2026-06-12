@@ -491,6 +491,24 @@ void vtx_x86_emit_cqo(vtx_x86_emit_t *e)
     emit_byte(e, 0x99);
 }
 
+/* INC r/m64: REX.W FF /0 */
+static void vtx_x86_emit_inc_r(vtx_x86_emit_t *e, uint8_t reg)
+{
+    int b = reg_hi(reg);
+    emit_rex(e, 1, 0, 0, b);
+    emit_byte(e, 0xFF);
+    emit_modrm(e, 3, 0, reg & 7);
+}
+
+/* DEC r/m64: REX.W FF /1 */
+static void vtx_x86_emit_dec_r(vtx_x86_emit_t *e, uint8_t reg)
+{
+    int b = reg_hi(reg);
+    emit_rex(e, 1, 0, 0, b);
+    emit_byte(e, 0xFF);
+    emit_modrm(e, 3, 1, reg & 7);
+}
+
 /* SETcc r/m8: 0F 9x /0 (mod=11) */
 void vtx_x86_emit_setcc(vtx_x86_emit_t *e, uint8_t cond, uint8_t reg)
 {
@@ -1100,6 +1118,7 @@ static uint32_t estimate_inst_size(const vtx_inst_t *inst)
         }
         return 3;
     case VTX_X86_NEG: case VTX_X86_NOT: return 3; /* REX.W F7 /x */
+    case VTX_X86_INC: case VTX_X86_DEC: return 3; /* REX.W FF /0 or /1 */
     default: return 4; /* conservative estimate */
     }
 }
@@ -1156,38 +1175,35 @@ int vtx_branch_optimize(vtx_inst_stream_t *stream, vtx_x86_emit_t *emit,
         }
     }
 
-    /* ---- Phase 3: Mark short jumps ---- */
-    for (uint32_t b = 0; b < stream->block_count; b++) {
-        vtx_inst_block_t *blk = &stream->blocks[b];
-
-        for (uint32_t i = 0; i < blk->inst_count; i++) {
-            vtx_inst_t *inst = &blk->insts[i];
-
-            if (inst->opcode == VTX_X86_JCC || inst->opcode == VTX_X86_JMP) {
-                if (inst->opnd_kinds[0] != VTX_OPND_LABEL) continue;
-
-                uint32_t target_block = inst->operands[0];
-                if (target_block >= stream->block_count) continue;
-
-                /* Estimate source and target offsets */
-                uint32_t src_offset = inst->native_offset;
-                uint32_t tgt_offset = stream->blocks[target_block].insts[0].native_offset;
-
-                /* Estimate jump instruction size */
-                uint32_t inst_size = estimate_inst_size(inst);
-
-                /* Calculate relative offset (from end of jump instruction) */
-                int32_t rel = (int32_t)(tgt_offset - (src_offset + inst_size));
-
-                /* Short jump: 2 bytes (opcode + rel8), range ±127 */
-                if (rel >= -127 && rel <= 127) {
-                    /* Mark this instruction for short jump encoding.
-                     * We use a flag bit to indicate short jump. */
-                    inst->flags |= (1u << 16); /* Custom flag for short jump */
-                }
-            }
-        }
-    }
+    /* ---- Phase 3: Short jump detection ----
+     *
+     * P0 FIX: Short jump optimization is DISABLED for correctness.
+     *
+     * The problem: estimate_inst_size() estimates instruction sizes using
+     * rel32 encoding (6 bytes for JCC, 5 for JMP). When we mark a jump as
+     * "short" and emit only 2 bytes, all subsequent offsets shift by 4 bytes
+     * (for JCC) or 3 bytes (for JMP). This cascading offset shift can cause
+     * other jumps' targets to move out of rel8 range, producing silent
+     * miscompilation.
+     *
+     * A correct implementation requires multi-pass offset computation:
+     *   1. Compute offsets assuming all rel32
+     *   2. Identify candidates that fit in rel8
+     *   3. Re-compute offsets with the smaller sizes
+     *   4. Verify all candidates still fit; iterate if not
+     *
+     * Since the code size savings (3-4 bytes per short jump) are minimal
+     * compared to the correctness risk, we skip short jumps entirely.
+     * The rel32 encoding is always correct regardless of offset shifts.
+     *
+     * To re-enable short jumps safely, implement a fixpoint iteration:
+     *   - Start with all jumps as rel32
+     *   - Repeatedly try to shorten jumps that fit in rel8
+     *   - After each shortening, recompute offsets from that point onward
+     *   - If a shortened jump's target moves out of rel8 range, revert it
+     *   - Continue until no more changes occur (fixpoint reached)
+     */
+    /* Short jumps intentionally NOT marked. All branches use rel32 encoding. */
 
     /* ---- Phase 4: Mark loop headers for alignment ---- */
     /* A block is a loop header if it has a back-edge from a later block.
@@ -1223,7 +1239,7 @@ int vtx_branch_optimize(vtx_inst_stream_t *stream, vtx_x86_emit_t *emit,
 /* ========================================================================== */
 
 /**
- * Emit a load from a spill slot into a temporary register.
+ * Emit a load from a spill slot into a temporary GPR register.
  * Spill slot address: [rbp - 8 * (slot + 1)]
  * RBP = register 5.
  */
@@ -1234,7 +1250,7 @@ static void emit_spill_load(vtx_x86_emit_t *e, uint32_t spill_slot, uint8_t tmp_
 }
 
 /**
- * Emit a store from a temporary register into a spill slot.
+ * Emit a store from a temporary GPR register into a spill slot.
  * Spill slot address: [rbp - 8 * (slot + 1)]
  * RBP = register 5.
  */
@@ -1242,6 +1258,48 @@ static void emit_spill_store(vtx_x86_emit_t *e, uint32_t spill_slot, uint8_t tmp
 {
     int32_t disp = -(int32_t)(8 * (spill_slot + 1));
     vtx_x86_emit_mov_memr(e, 5, disp, tmp_reg); /* mov [rbp + disp], tmp */
+}
+
+/**
+ * Emit a load from a spill slot into a temporary XMM register.
+ * Uses MOVSD xmm, [rbp + disp] — F2 0F 10 /r with RBP-relative addressing.
+ * Spill slot address: [rbp - 8 * (slot + 1)]
+ */
+static void emit_spill_load_xmm(vtx_x86_emit_t *e, uint32_t spill_slot, uint8_t tmp_xmm)
+{
+    int32_t disp = -(int32_t)(8 * (spill_slot + 1));
+    /* F2 0F 10 /r — movsd xmm, r/m64
+     * We use the same vtx_x86_emit_rm helper but need the F2 prefix.
+     * Encoding: F2 [REX] 0F 10 ModR/M + displacement */
+    int r = reg_hi(tmp_xmm);
+    int b = reg_hi(5); /* RBP = 5, reg_hi(5) = 0 */
+    if (r || b) {
+        emit_rex(e, 0, r, 0, b);
+    }
+    emit_byte(e, 0xF2);  /* scalar double prefix */
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0x10);  /* MOVSD xmm, r/m64 */
+    emit_mem_operand(e, tmp_xmm & 7, 5 /* RBP */, 0xFF, 1, disp);
+}
+
+/**
+ * Emit a store from a temporary XMM register into a spill slot.
+ * Uses MOVSD [rbp + disp], xmm — F2 0F 11 /r with RBP-relative addressing.
+ * Spill slot address: [rbp - 8 * (slot + 1)]
+ */
+static void emit_spill_store_xmm(vtx_x86_emit_t *e, uint32_t spill_slot, uint8_t tmp_xmm)
+{
+    int32_t disp = -(int32_t)(8 * (spill_slot + 1));
+    /* F2 0F 11 /r — movsd r/m64, xmm */
+    int r = reg_hi(tmp_xmm);
+    int b = reg_hi(5); /* RBP = 5 */
+    if (r || b) {
+        emit_rex(e, 0, r, 0, b);
+    }
+    emit_byte(e, 0xF2);  /* scalar double prefix */
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0x11);  /* MOVSD r/m64, xmm */
+    emit_mem_operand(e, tmp_xmm & 7, 5 /* RBP */, 0xFF, 1, disp);
 }
 
 /**
@@ -1265,6 +1323,12 @@ static uint32_t get_spill_slot_for_opnd(const vtx_inst_t *inst,
 
 /* R12 is used as a temporary register for spill/fill (caller-saved, rarely used by isel) */
 #define VTX_SPILL_TMP_REG 12  /* R12 */
+
+/* XMM14 is used as a temporary XMM register for SSE spill/fill.
+ * XMM14 is caller-saved, and isel rarely emits it as a destination.
+ * Using a dedicated XMM temp avoids clobbering XMM0-XMM7 which are
+ * the most commonly allocated by regalloc. */
+#define VTX_SPILL_XMM_TMP 14  /* XMM14 */
 
 /* ========================================================================== */
 /* Emit entire function                                                        */
@@ -1818,6 +1882,34 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
         }
         break;
 
+    case VTX_X86_INC:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        if (r0 == 0xFF) {
+            uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+            if (slot0 != VTX_NO_SPILL) {
+                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                vtx_x86_emit_inc_r(e, VTX_SPILL_TMP_REG);
+                emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+            }
+        } else {
+            vtx_x86_emit_inc_r(e, r0);
+        }
+        break;
+
+    case VTX_X86_DEC:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        if (r0 == 0xFF) {
+            uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+            if (slot0 != VTX_NO_SPILL) {
+                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                vtx_x86_emit_dec_r(e, VTX_SPILL_TMP_REG);
+                emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+            }
+        } else {
+            vtx_x86_emit_dec_r(e, r0);
+        }
+        break;
+
     case VTX_X86_CQO:
         vtx_x86_emit_cqo(e);
         break;
@@ -1994,7 +2086,34 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
     case VTX_X86_ADDSD:
         r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
         r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
-        if (r0 != 0xFF && r1 != 0xFF) {
+        if (r0 == 0xFF && r1 != 0xFF) {
+            /* P0 fix: Destination XMM spilled, source in register.
+             * Load spilled dst into XMM temp, operate, store back. */
+            uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+            if (slot0 != VTX_NO_SPILL) {
+                emit_spill_load_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+                vtx_x86_emit_addsd(e, VTX_SPILL_XMM_TMP, r1);
+                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+            }
+        } else if (r0 != 0xFF && r1 == 0xFF) {
+            /* Source XMM spilled */
+            uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+            if (slot1 != VTX_NO_SPILL) {
+                emit_spill_load_xmm(e, slot1, VTX_SPILL_XMM_TMP);
+                vtx_x86_emit_addsd(e, r0, VTX_SPILL_XMM_TMP);
+            }
+        } else if (r0 == 0xFF && r1 == 0xFF) {
+            /* Both XMM spilled */
+            uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+            uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+            if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
+                emit_spill_load_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+                /* Use XMM15 as second temp (XMM15 = 15) */
+                emit_spill_load_xmm(e, slot1, 15);
+                vtx_x86_emit_addsd(e, VTX_SPILL_XMM_TMP, 15);
+                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+            }
+        } else {
             vtx_x86_emit_addsd(e, r0, r1);
         }
         break;
@@ -2002,7 +2121,29 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
     case VTX_X86_SUBSD:
         r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
         r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
-        if (r0 != 0xFF && r1 != 0xFF) {
+        if (r0 == 0xFF && r1 != 0xFF) {
+            uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+            if (slot0 != VTX_NO_SPILL) {
+                emit_spill_load_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+                vtx_x86_emit_subsd(e, VTX_SPILL_XMM_TMP, r1);
+                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+            }
+        } else if (r0 != 0xFF && r1 == 0xFF) {
+            uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+            if (slot1 != VTX_NO_SPILL) {
+                emit_spill_load_xmm(e, slot1, VTX_SPILL_XMM_TMP);
+                vtx_x86_emit_subsd(e, r0, VTX_SPILL_XMM_TMP);
+            }
+        } else if (r0 == 0xFF && r1 == 0xFF) {
+            uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+            uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+            if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
+                emit_spill_load_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+                emit_spill_load_xmm(e, slot1, 15);
+                vtx_x86_emit_subsd(e, VTX_SPILL_XMM_TMP, 15);
+                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+            }
+        } else {
             vtx_x86_emit_subsd(e, r0, r1);
         }
         break;
@@ -2010,7 +2151,29 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
     case VTX_X86_MULSD:
         r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
         r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
-        if (r0 != 0xFF && r1 != 0xFF) {
+        if (r0 == 0xFF && r1 != 0xFF) {
+            uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+            if (slot0 != VTX_NO_SPILL) {
+                emit_spill_load_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+                vtx_x86_emit_mulsd(e, VTX_SPILL_XMM_TMP, r1);
+                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+            }
+        } else if (r0 != 0xFF && r1 == 0xFF) {
+            uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+            if (slot1 != VTX_NO_SPILL) {
+                emit_spill_load_xmm(e, slot1, VTX_SPILL_XMM_TMP);
+                vtx_x86_emit_mulsd(e, r0, VTX_SPILL_XMM_TMP);
+            }
+        } else if (r0 == 0xFF && r1 == 0xFF) {
+            uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+            uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+            if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
+                emit_spill_load_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+                emit_spill_load_xmm(e, slot1, 15);
+                vtx_x86_emit_mulsd(e, VTX_SPILL_XMM_TMP, 15);
+                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+            }
+        } else {
             vtx_x86_emit_mulsd(e, r0, r1);
         }
         break;
@@ -2018,7 +2181,29 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
     case VTX_X86_DIVSD:
         r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
         r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
-        if (r0 != 0xFF && r1 != 0xFF) {
+        if (r0 == 0xFF && r1 != 0xFF) {
+            uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+            if (slot0 != VTX_NO_SPILL) {
+                emit_spill_load_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+                vtx_x86_emit_divsd(e, VTX_SPILL_XMM_TMP, r1);
+                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+            }
+        } else if (r0 != 0xFF && r1 == 0xFF) {
+            uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+            if (slot1 != VTX_NO_SPILL) {
+                emit_spill_load_xmm(e, slot1, VTX_SPILL_XMM_TMP);
+                vtx_x86_emit_divsd(e, r0, VTX_SPILL_XMM_TMP);
+            }
+        } else if (r0 == 0xFF && r1 == 0xFF) {
+            uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+            uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+            if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
+                emit_spill_load_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+                emit_spill_load_xmm(e, slot1, 15);
+                vtx_x86_emit_divsd(e, VTX_SPILL_XMM_TMP, 15);
+                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+            }
+        } else {
             vtx_x86_emit_divsd(e, r0, r1);
         }
         break;
@@ -2026,7 +2211,29 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
     case VTX_X86_XORPS:
         r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
         r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
-        if (r0 != 0xFF && r1 != 0xFF) {
+        if (r0 == 0xFF && r1 != 0xFF) {
+            uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+            if (slot0 != VTX_NO_SPILL) {
+                emit_spill_load_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+                vtx_x86_emit_xorps(e, VTX_SPILL_XMM_TMP, r1);
+                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+            }
+        } else if (r0 != 0xFF && r1 == 0xFF) {
+            uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+            if (slot1 != VTX_NO_SPILL) {
+                emit_spill_load_xmm(e, slot1, VTX_SPILL_XMM_TMP);
+                vtx_x86_emit_xorps(e, r0, VTX_SPILL_XMM_TMP);
+            }
+        } else if (r0 == 0xFF && r1 == 0xFF) {
+            uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+            uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+            if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
+                emit_spill_load_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+                emit_spill_load_xmm(e, slot1, 15);
+                vtx_x86_emit_xorps(e, VTX_SPILL_XMM_TMP, 15);
+                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+            }
+        } else {
             vtx_x86_emit_xorps(e, r0, r1);
         }
         break;
@@ -2034,7 +2241,27 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
     case VTX_X86_MOVSD:
         r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
         r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
-        if (r0 != 0xFF && r1 != 0xFF) {
+        if (r0 == 0xFF && r1 != 0xFF) {
+            /* Destination XMM spilled, source in register */
+            uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+            if (slot0 != VTX_NO_SPILL) {
+                emit_spill_store_xmm(e, slot0, r1);
+            }
+        } else if (r0 != 0xFF && r1 == 0xFF) {
+            /* Source XMM spilled, destination in register */
+            uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+            if (slot1 != VTX_NO_SPILL) {
+                emit_spill_load_xmm(e, slot1, r0);
+            }
+        } else if (r0 == 0xFF && r1 == 0xFF) {
+            /* Both XMM spilled */
+            uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+            uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+            if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
+                emit_spill_load_xmm(e, slot1, VTX_SPILL_XMM_TMP);
+                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+            }
+        } else if (r0 != r1) {
             vtx_x86_emit_movsd(e, r0, r1);
         }
         break;

@@ -506,6 +506,32 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
     case VTX_OP_Constant: {
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (dst == VTX_VREG_INVALID) return -1;
+
+        /* P1 isel: XORPS for float zero — 1 instruction vs 2.
+         *
+         * Pattern: double constant 0.0
+         *   Old: mov dst, 0x0000000000000000 (10 bytes for imm64)
+         *   New: xorps dst, dst             (3 bytes for XMM, zeroed)
+         *
+         * XORPS xmm, xmm zeros the entire 128-bit register, which gives
+         * us +0.0 in the low 64 bits. This is shorter and faster than
+         * loading a 64-bit immediate. The register renamer handles
+         * XOR zeroing for free on modern CPUs.
+         */
+        if (node->constval.kind == VTX_TYPE_Float && node->constval.as.float_val == 0.0) {
+            vtx_inst_t xorps;
+            memset(&xorps, 0, sizeof(xorps));
+            xorps.opcode = VTX_X86_XORPS;
+            xorps.opnd_kinds[0] = VTX_OPND_VREG;
+            xorps.operands[0] = dst;
+            xorps.opnd_kinds[1] = VTX_OPND_VREG;
+            xorps.operands[1] = dst;
+            xorps.flags = VTX_INST_FLAG_IS_SSE;
+            xorps.source_node = node_id;
+            vtx_isel_emit_inst(block, xorps, arena);
+            break;
+        }
+
         vtx_inst_t inst;
         memset(&inst, 0, sizeof(inst));
         inst.opcode = VTX_X86_MOV;
@@ -582,6 +608,66 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             break;
         }
 
+        /* P1 isel: LEA for Add(x, Const) — replaces MOV+ADD with single LEA.
+         *
+         * Pattern: dst = lhs + constant
+         *   Old: mov dst, lhs; add dst, imm
+         *   New: lea dst, [lhs + imm]     (1 instruction, no flag write)
+         *
+         * LEA can represent [base + disp32] where disp32 is the constant.
+         * For imm in [-2^31, 2^31-1], this is a single LEA instruction.
+         * For imm outside that range, fall through to MOV+ADD.
+         *
+         * Advantage: LEA doesn't set flags (unlike ADD), so it doesn't
+         * interfere with subsequent flag-dependent instructions.
+         * On modern CPUs, LEA has the same throughput as ADD.
+         *
+         * Special case: Add(x, 1) or Add(x, -1) when dst == lhs → INC/DEC
+         *   INC dst is 3 bytes (REX.W + FF /0) vs LEA 7 bytes (REX.W + 8D + ModRM + disp32)
+         *   DEC dst is 3 bytes (REX.W + FF /1) vs LEA 7 bytes
+         *   INC/DEC are slightly worse because they clobber flags (but partial
+         *   flag stalls are rare on modern CPUs), but the 4-byte size savings
+         *   and 1 fewer uop make them preferable when dst == lhs.
+         */
+        int64_t rhs_const;
+        if (try_get_const_int(graph, node->inputs[1], &rhs_const)) {
+            if (rhs_const == 1 && dst == lhs_vreg) {
+                /* P1: INC for +1 when dst == lhs (in-place) */
+                vtx_isel_emit_inst(block, make_r_inst(VTX_X86_INC, dst, node_id, 0), arena);
+                break;
+            }
+            if (rhs_const == -1 && dst == lhs_vreg) {
+                /* P1: DEC for -1 when dst == lhs (in-place) */
+                vtx_isel_emit_inst(block, make_r_inst(VTX_X86_DEC, dst, node_id, 0), arena);
+                break;
+            }
+            if (rhs_const != 0 && rhs_const >= INT32_MIN && rhs_const <= INT32_MAX) {
+                vtx_x86_memop_t mem = { lhs_vreg, VTX_VREG_INVALID, 0xFF, 0xFF, 1, (int32_t)rhs_const };
+                vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_LEA, dst, &mem, node_id), arena);
+                break;
+            }
+            /* rhs_const == 0: just MOV (handled below by dst != lhs path) */
+        }
+
+        /* P1 isel: LEA for Add(x, y) where dst ≠ lhs — saves a MOV.
+         *
+         * Pattern: dst = lhs + rhs (dst != lhs)
+         *   Old: mov dst, lhs; add dst, rhs
+         *   New: lea dst, [lhs + rhs]     (1 instruction instead of 2)
+         *
+         * LEA can represent [base + index*scale] where scale=1,
+         * giving base + index = lhs + rhs. This eliminates the MOV.
+         *
+         * Constraint: dst must differ from both lhs and rhs to avoid
+         * clobbering. If dst == lhs, the ADD form is fine (in-place).
+         */
+        if (dst != lhs_vreg && dst != rhs_vreg) {
+            vtx_x86_memop_t mem = { lhs_vreg, rhs_vreg, 0xFF, 0xFF, 1, 0 };
+            vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_LEA, dst, &mem, node_id), arena);
+            break;
+        }
+
+        /* Fallback: MOV + ADD */
         if (dst != lhs_vreg)
             vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_vreg, node_id), arena);
         vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_ADD, dst, rhs_vreg, node_id), arena);
@@ -601,6 +687,38 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
                 vtx_isel_emit_inst(block, make_sse_rr_inst(VTX_X86_MOVSD, dst, lhs_vreg, node_id), arena);
             vtx_isel_emit_inst(block, make_sse_rr_inst(VTX_X86_SUBSD, dst, rhs_vreg, node_id), arena);
             break;
+        }
+
+        /* P1 isel: LEA for Sub(x, Const) — subtract via LEA with negative disp.
+         *
+         * Pattern: dst = lhs - constant
+         *   Old: mov dst, lhs; sub dst, imm
+         *   New: lea dst, [lhs + (-imm)]   (1 instruction, no flag write)
+         *
+         * Only valid when -imm fits in int32 (i.e., imm in [-2^31+1, 2^31]).
+         * Note: LEA doesn't set flags, which is an advantage for subsequent
+         * flag-dependent code.
+         *
+         * Special case: Sub(x, 1) when dst == lhs → DEC
+         *   DEC dst is 3 bytes vs LEA 7 bytes */
+        int64_t rhs_const_sub;
+        if (try_get_const_int(graph, node->inputs[1], &rhs_const_sub)) {
+            /* P1: DEC for Sub(x, 1) when dst == lhs (in-place) */
+            if (rhs_const_sub == 1 && dst == lhs_vreg) {
+                vtx_isel_emit_inst(block, make_r_inst(VTX_X86_DEC, dst, node_id, 0), arena);
+                break;
+            }
+            /* P1: INC for Sub(x, -1) = Add(x, 1) when dst == lhs */
+            if (rhs_const_sub == -1 && dst == lhs_vreg) {
+                vtx_isel_emit_inst(block, make_r_inst(VTX_X86_INC, dst, node_id, 0), arena);
+                break;
+            }
+            int64_t neg_imm = -rhs_const_sub;
+            if (neg_imm != 0 && neg_imm >= INT32_MIN && neg_imm <= INT32_MAX) {
+                vtx_x86_memop_t mem = { lhs_vreg, VTX_VREG_INVALID, 0xFF, 0xFF, 1, (int32_t)neg_imm };
+                vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_LEA, dst, &mem, node_id), arena);
+                break;
+            }
         }
 
         if (dst != lhs_vreg)
@@ -627,6 +745,14 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         /* Strength reduction: try to replace IMUL with cheaper ops */
         int64_t rhs_const;
         if (try_get_const_int(graph, node->inputs[1], &rhs_const)) {
+            /* P1 isel: LEA for Mul(x, 3/5/9) — already handled by
+             * emit_mul_by_constant() which uses LEA for these cases.
+             * The existing code correctly emits:
+             *   x*3 → lea dst, [x + x*2]
+             *   x*5 → lea dst, [x + x*4]
+             *   x*9 → lea dst, [x + x*8]
+             * These are 1-instruction replacements for what would otherwise
+             * be a 2-instruction MOV+IMUL sequence. */
             /* RHS is constant — try LEA/shift/add sequence */
             if (emit_mul_by_constant(stream, block, dst, lhs_vreg, rhs_const, node_id, arena))
                 break;
@@ -935,6 +1061,21 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_CMP, lhs, rhs, node_id), arena);
         }
 
+        /* P1 isel: SETCC into zeroed register — eliminates the AND 0xFF.
+         *
+         * Pattern: dst = (lhs cmp rhs) ? 1 : 0
+         *   Old: setcc dst_lo; and dst, 0xFF    (2 instructions)
+         *   New: xor dst, dst; setcc dst_lo      (2 instructions, but xor is cheaper)
+         *
+         * Why XOR+SETCC is better than SETCC+AND:
+         *   - XOR reg,reg is 1 uop (register renaming zeros the register)
+         *   - SETCC writes only the low byte, but XOR already zeroed the
+         *     upper bytes, so the result is correctly zero-extended
+         *   - AND 0xFF is 1 uop but requires an immediate operand
+         *   - More importantly: XOR+SETCC can be macro-fused on some CPUs
+         *   - The register renamer handles XOR zeroing for free (no execution)
+         */
+        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_XOR, dst, dst, node_id), arena);
         vtx_inst_t setcc;
         memset(&setcc, 0, sizeof(setcc));
         setcc.opcode = VTX_X86_SETCC;
@@ -944,7 +1085,6 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         setcc.flags = VTX_INST_FLAG_HAS_COND;
         setcc.source_node = node_id;
         vtx_isel_emit_inst(block, setcc, arena);
-        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_AND, dst, 0xFF, node_id), arena);
         break;
     }
 
@@ -1236,11 +1376,25 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
                 break;
             }
         }
-        if (cond_vreg != VTX_VREG_INVALID)
-            vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_TEST, cond_vreg, 1, node_id), arena);
+        /* P1 isel: TEST+JCC fusion marker.
+         *
+         * Modern x86-64 CPUs (Intel since Nehalem, AMD since Bulldozer)
+         * can fuse TEST+JCC into a single macro-op, but ONLY if they are
+         * adjacent with no intervening instructions. Marking both with
+         * VTX_INST_FLAG_FUSED tells the scheduler to keep them together.
+         *
+         * TEST+JCC is the most commonly fused pair (for null checks,
+         * boolean tests, etc.). CMP+JCC fusion is already handled by
+         * the guard_emit pipeline. */
+        if (cond_vreg != VTX_VREG_INVALID) {
+            vtx_inst_t test = make_ri_inst(VTX_X86_TEST, cond_vreg, 1, node_id);
+            test.flags |= VTX_INST_FLAG_FUSED; /* P1: mark for fusion */
+            vtx_isel_emit_inst(block, test, arena);
+        }
         vtx_cond_t jcc_cond = (node->cond != VTX_COND_NEVER) ? node->cond : VTX_COND_NE;
-        vtx_isel_emit_inst(block,
-            make_branch_inst(VTX_X86_JCC, 0, jcc_cond, node_id), arena);
+        vtx_inst_t jcc = make_branch_inst(VTX_X86_JCC, 0, jcc_cond, node_id);
+        jcc.flags |= VTX_INST_FLAG_FUSED; /* P1: mark for fusion */
+        vtx_isel_emit_inst(block, jcc, arena);
         break;
     }
 
@@ -1294,6 +1448,8 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         vtx_x86_memop_t type_mem = { obj, VTX_VREG_INVALID, 1, 0 };
         vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_MOV, dst, &type_mem, node_id), arena);
         vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_CMP, dst, (int64_t)node->type_id, node_id), arena);
+        /* P1: XOR+SETCC for InstanceOf (same as Cmp/CmpP) */
+        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_XOR, dst, dst, node_id), arena);
         vtx_inst_t setcc;
         memset(&setcc, 0, sizeof(setcc));
         setcc.opcode = VTX_X86_SETCC;
@@ -1303,7 +1459,6 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         setcc.flags = VTX_INST_FLAG_HAS_COND;
         setcc.source_node = node_id;
         vtx_isel_emit_inst(block, setcc, arena);
-        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_AND, dst, 0xFF, node_id), arena);
         break;
     }
 
@@ -1562,7 +1717,8 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         default: break;
         }
 
-        /* Emit SETCC dst */
+        /* P1 isel: XOR+SETCC for float comparisons too (drop AND 0xFF) */
+        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_XOR, dst, dst, node_id), arena);
         vtx_inst_t setcc;
         memset(&setcc, 0, sizeof(setcc));
         setcc.opcode = VTX_X86_SETCC;
@@ -1572,9 +1728,6 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         setcc.flags = VTX_INST_FLAG_HAS_COND;
         setcc.source_node = node_id;
         vtx_isel_emit_inst(block, setcc, arena);
-
-        /* Zero-extend the byte result: AND dst, 0xFF */
-        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_AND, dst, 0xFF, node_id), arena);
         break;
     }
 
@@ -1699,32 +1852,22 @@ static int resolve_phis(vtx_inst_stream_t *stream, const vtx_schedule_t *schedul
             if (copy_count == 0) continue;
 
             /* Detect cycles: a copy (dst_i ← src_i) is part of a cycle if
-             * src_i is also some dst_j. We use a simple approach:
-             * - Find copies whose source is also a destination (potential cycle members)
-             * - For each such copy, save the source to a temp vreg FIRST
-             * - Then perform all copies normally
-             * - Finally, copy the temp to the destination that needed the saved value
+             * src_i is also some dst_j. We use the standard parallel copy
+             * algorithm that correctly handles multiple independent cycles
+             * by allocating one temp vreg per cycle.
              *
-             * Simpler approach: just identify which sources are also destinations,
-             * save those sources to temp vregs first, then do all copies. */
-
-            /* Allocate a temp vreg for cycle breaking if needed */
-            uint32_t temp_vreg = VTX_VREG_INVALID;
-            bool needs_temp = false;
-            for (uint32_t i = 0; i < copy_count && !needs_temp; i++) {
-                for (uint32_t j = 0; j < copy_count; j++) {
-                    if (copy_src[i] == copy_dst[j]) {
-                        needs_temp = true;
-                        break;
-                    }
-                }
-            }
-
-            if (needs_temp) {
-                temp_vreg = stream->vreg_count++;
-                /* Ensure the vreg_to_node map can hold this */
-                (void)arena; /* temp_vreg doesn't need node mapping */
-            }
+             * P0 FIX: The old implementation only allocated ONE temp vreg and
+             * only saved the first endangered source, silently corrupting
+             * additional independent cycles. For example, with copies:
+             *   A ← B, B ← A, C ← D, D ← C
+             * The old code would save B→temp, then do A←B (OK), B←temp (OK),
+             * C←D (WRONG — D already overwritten by D←C), D←C (WRONG).
+             *
+             * The fix: detect each independent cycle and allocate a separate
+             * temp vreg for each. For each cycle, save the last source to a
+             * temp, then perform the cycle copies in reverse, finally copy
+             * temp to the last destination.
+             */
 
             /* Find insertion point: before the first trailing branch */
             uint32_t insert_pos = pred_blk->inst_count;
@@ -1750,81 +1893,151 @@ static int resolve_phis(vtx_inst_stream_t *stream, const vtx_schedule_t *schedul
 
             uint32_t cur_insert = insert_pos;
 
-            if (needs_temp) {
-                /* Save all sources that are also destinations to the temp vreg.
-                 * We process copies in order: for each copy whose src is some other
-                 * copy's dst, we first save src → temp. Then we do all copies
-                 * using the original src vregs (some of which have been saved to temp).
-                 * Finally, for copies that had a cycle, we copy temp → dst.
-                 *
-                 * Actually, a simpler correct approach for parallel copy:
-                 * 1. For any src that is also a dst, first copy src → temp
-                 * 2. Then perform all dst ← src copies (src values are unchanged
-                 *    because we only write to dst vregs, and we've already saved
-                 *    any src that would be overwritten)
-                 * Wait, this doesn't work because step 2 overwrites src values.
-                 *
-                 * Correct algorithm (standard parallel copy):
-                 * 1. For each copy (dst ← src) where src is also a dst of some
-                 *    other copy, replace src with temp in the copy
-                 * 2. First emit: MOV temp, src_original (save the endangered value)
-                 * 3. Then emit all the remaining copies
-                 *
-                 * But this only handles one cycle. For multiple cycles, we'd need
-                 * multiple temps. For simplicity, we handle the common case of
-                 * a single cycle (which covers 99% of real code like swap patterns).
-                 * For multiple cycles, we'd need more temps. */
+            /* ---- Parallel copy algorithm (correct for multiple cycles) ----
+             *
+             * Algorithm:
+             * 1. Build a graph: each copy (dst_i ← src_i) is a directed edge
+             * 2. Find all connected components that are cycles
+             * 3. For each cycle, allocate a temp vreg and break the cycle:
+             *    a. Save the last source in the cycle to temp
+             *    b. Perform copies in reverse order around the cycle
+             *    c. Copy temp to the last destination
+             * 4. Emit all non-cycle copies normally
+             *
+             * We track which copies have been processed to avoid
+             * processing a cycle member twice.
+             */
 
-                /* Find which sources are also destinations (endangered) */
-                bool src_is_dst[MAX_PHI_COPIES];
-                memset(src_is_dst, 0, sizeof(src_is_dst));
-                for (uint32_t i = 0; i < copy_count; i++) {
-                    for (uint32_t j = 0; j < copy_count; j++) {
-                        if (copy_src[i] == copy_dst[j]) {
-                            src_is_dst[i] = true;
-                            break;
-                        }
-                    }
-                }
-
-                /* Phase 1: Save the first endangered source to temp.
-                 * This breaks the first cycle. For multiple independent cycles,
-                 * we'd need more temps, but that's extremely rare. */
-                uint32_t saved_src = VTX_VREG_INVALID;
-                for (uint32_t i = 0; i < copy_count; i++) {
-                    if (src_is_dst[i]) {
-                        INSERT_MOV(temp_vreg, copy_src[i], copy_node[i], cur_insert);
-                        cur_insert++;
-                        saved_src = copy_src[i];
+            /* Classify copies: which are part of cycles, which are acyclic */
+            bool src_is_dst[MAX_PHI_COPIES];
+            bool processed[MAX_PHI_COPIES];
+            memset(src_is_dst, 0, sizeof(src_is_dst));
+            memset(processed, 0, sizeof(processed));
+            for (uint32_t i = 0; i < copy_count; i++) {
+                for (uint32_t j = 0; j < copy_count; j++) {
+                    if (copy_src[i] == copy_dst[j]) {
+                        src_is_dst[i] = true;
                         break;
                     }
                 }
+            }
 
-                /* Phase 2: Emit all copies. For copies whose src was the saved
-                 * value, use the temp vreg instead (since the original src may
-                 * have been overwritten by now). */
-                for (uint32_t i = 0; i < copy_count; i++) {
-                    uint32_t src = copy_src[i];
-                    /* If this source was the one we saved, check if it's already
-                     * been overwritten by a previous copy in this sequence.
-                     * If the original dst that matches saved_src has already been
-                     * written, use temp instead. */
-                    if (saved_src != VTX_VREG_INVALID && src == saved_src) {
-                        /* Check if the destination matching saved_src has already
-                         * been emitted as a copy (meaning the original value is gone).
-                         * For safety, always use temp for the saved source. */
-                        INSERT_MOV(copy_dst[i], temp_vreg, copy_node[i], cur_insert);
-                    } else {
-                        INSERT_MOV(copy_dst[i], copy_src[i], copy_node[i], cur_insert);
+            /* Phase 1: Process all cycles.
+             * For each unprocessed copy that is part of a cycle,
+             * trace the cycle and break it with a temp vreg. */
+            for (uint32_t start = 0; start < copy_count; start++) {
+                if (processed[start] || !src_is_dst[start]) continue;
+
+                /* Trace the cycle starting from copy 'start':
+                 * start: dst_s ← src_s (src_s is also some dst_k)
+                 * Find k: dst_k == src_s
+                 * Then find: dst_? == src_k
+                 * Continue until we return to dst_s */
+                uint32_t cycle_indices[MAX_PHI_COPIES];
+                uint32_t cycle_len = 0;
+
+                uint32_t cur = start;
+                bool found_cycle = false;
+                do {
+                    if (processed[cur]) break;
+                    cycle_indices[cycle_len++] = cur;
+                    processed[cur] = true;
+
+                    /* Find the copy whose dst == this copy's src */
+                    found_cycle = false;
+                    for (uint32_t j = 0; j < copy_count; j++) {
+                        if (copy_dst[j] == copy_src[cur] && !processed[j]) {
+                            cur = j;
+                            found_cycle = true;
+                            break;
+                        }
                     }
+                } while (found_cycle && cur != start && cycle_len < MAX_PHI_COPIES);
+
+                if (cycle_len < 2) continue; /* Not a real cycle */
+
+                /* Break the cycle with a temp vreg.
+                 * Strategy: save the source of the LAST copy in the cycle
+                 * to a temp, then emit copies in reverse order, and finally
+                 * copy temp to the first copy's destination.
+                 *
+                 * Example cycle: A←B, B←C, C←A
+                 *   1. Save A → temp (save the source of the last copy C←A)
+                 *   2. C ← A (emit last copy, A is still original)
+                 *   3. B ← C (emit middle copy)
+                 *   4. A ← temp (copy saved value to first destination)
+                 *
+                 * Wait — this is WRONG. After step 2, C has been overwritten.
+                 * If B←C was supposed to use the original C, it's gone.
+                 *
+                 * Correct approach for cycle A←B, B←C, C←A:
+                 *   1. Save last src (A) to temp: temp ← A
+                 *   2. Emit copies in REVERSE order: C←A, B←C, A←B...
+                 *      No — that overwrites before reading.
+                 *
+                 * The standard correct algorithm:
+                 *   1. temp ← src_of_last_copy (= A for C←A)
+                 *   2. Emit copies in REVERSE cycle order:
+                 *      C ← A (now C has A's original value)
+                 *      B ← C (now B has A's original value... WRONG!)
+                 *
+                 * Actually, the CORRECT way:
+                 *   1. temp ← src_of_last (save: temp = A)
+                 *   2. Emit copies FORWARD, but skip the first:
+                 *      A ← B (writes A, but we saved original A in temp)
+                 *      B ← C (writes B, original B already used by A←B)
+                 *   3. C ← temp (write C with saved original A)
+                 *
+                 * Wait, that only works if A←B is the first copy.
+                 * Let me re-think. The cycle is: A←B, B←C, C←A.
+                 * The "last" copy is C←A. We save src_of_last = A to temp.
+                 * Then emit copies in REVERSE order:
+                 *   C←A (C gets A's original value, but A is unmodified so far)
+                 *   B←C (B gets C's original value, C was just overwritten but
+                 *         we want the original C. FAIL.)
+                 *
+                 * The truly correct algorithm:
+                 *   1. Save last copy's SOURCE to temp: temp ← A (from C←A)
+                 *   2. Process copies from last to first (reverse cycle order):
+                 *      C←A: This writes C. A is still original. OK.
+                 *      B←C: This writes B. But C was just overwritten!
+                 *      We need ORIGINAL C here. FAIL again.
+                 *
+                 * OK, the REAL correct algorithm for parallel copy with cycles:
+                 *   1. Save the first copy's SOURCE to temp: temp ← B (from A←B)
+                 *   2. Emit copies starting from the LAST, going backwards:
+                 *      C←A (A still has its original value)
+                 *      B←C (C still has its original value)
+                 *   3. A←temp (temp has B's original value)
+                 *   This works! Going backwards, each source is read before
+                 *   it's written by any earlier copy in the reverse sequence.
+                 */
+
+                /* Allocate a temp vreg for this cycle */
+                uint32_t temp_vreg = stream->vreg_count++;
+
+                /* Save first copy's source to temp */
+                uint32_t first = cycle_indices[0];
+                INSERT_MOV(temp_vreg, copy_src[first], copy_node[first], cur_insert);
+                cur_insert++;
+
+                /* Emit copies in reverse cycle order (last to second) */
+                for (int ci = (int)cycle_len - 1; ci >= 1; ci--) {
+                    uint32_t idx = cycle_indices[ci];
+                    INSERT_MOV(copy_dst[idx], copy_src[idx], copy_node[idx], cur_insert);
                     cur_insert++;
                 }
-            } else {
-                /* No cycles — emit copies directly */
-                for (uint32_t i = 0; i < copy_count; i++) {
-                    INSERT_MOV(copy_dst[i], copy_src[i], copy_node[i], cur_insert);
-                    cur_insert++;
-                }
+
+                /* Copy temp to first copy's destination */
+                INSERT_MOV(copy_dst[first], temp_vreg, copy_node[first], cur_insert);
+                cur_insert++;
+            }
+
+            /* Phase 2: Emit all non-cycle copies (acyclic, safe to emit directly) */
+            for (uint32_t i = 0; i < copy_count; i++) {
+                if (processed[i]) continue; /* already handled as part of a cycle */
+                INSERT_MOV(copy_dst[i], copy_src[i], copy_node[i], cur_insert);
+                cur_insert++;
             }
 
             #undef INSERT_MOV

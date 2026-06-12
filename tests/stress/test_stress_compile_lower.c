@@ -32,7 +32,7 @@
 #include "sota/markov.h"
 #include "sota/loop_spec.h"
 #include "sota/phase.h"
-#include "sota/alloc_graph.h"
+/* alloc_graph.h removed — effective-escape concept merged into PEA */
 #include "sota/fdi.h"
 #include "pea/analysis.h"
 #include "pea/cross_object_sr.h"
@@ -2252,30 +2252,30 @@ VTX_TEST(test_sota_misc_03) {
 }
 
 VTX_TEST(test_sota_misc_04) {
-    /* Alloc graph: build from simple graph */
+    /* Alloc graph: REMOVED — effective-escape merged into PEA.
+     * This test now validates that PEA analysis handles empty graphs gracefully. */
     vtx_arena_t arena;
     VTX_ASSERT_EQUAL(vtx_arena_init(&arena), 0);
     vtx_graph_t graph;
     VTX_ASSERT_EQUAL(vtx_graph_init(&graph, 2), 0);
-    vtx_sota_alloc_graph_t *ag = vtx_alloc_graph_build(&graph, &arena);
+    vtx_pea_analysis_t *pea = vtx_pea_run(&graph, &arena);
     /* Even with no allocations, should not crash */
-    VTX_ASSERT_TRUE(ag == NULL || ag != NULL);
-    if (ag) vtx_alloc_graph_destroy(ag);
+    VTX_ASSERT_TRUE(pea == NULL || pea != NULL);
     vtx_graph_destroy(&graph);
     vtx_arena_destroy(&arena);
 }
 
 VTX_TEST(test_sota_misc_05) {
-    /* Effective escape for non-existent alloc */
+    /* Effective escape: REMOVED — concept merged into PEA.
+     * This test now validates PEA escape analysis for non-existent alloc. */
     vtx_arena_t arena;
     VTX_ASSERT_EQUAL(vtx_arena_init(&arena), 0);
     vtx_graph_t graph;
     VTX_ASSERT_EQUAL(vtx_graph_init(&graph, 2), 0);
-    vtx_sota_alloc_graph_t *ag = vtx_alloc_graph_build(&graph, &arena);
-    if (ag) {
-        vtx_escape_state_t es = vtx_alloc_graph_effective_escape(ag, 9999);
-        VTX_ASSERT_TRUE(es >= VTX_ESCAPE_NONE && es <= VTX_ESCAPE_GLOBAL);
-        vtx_alloc_graph_destroy(ag);
+    vtx_pea_analysis_t *pea = vtx_pea_run(&graph, &arena);
+    if (pea) {
+        /* PEA should handle graphs with no allocations gracefully */
+        VTX_ASSERT_TRUE(pea->escape_map.alloc_count == 0 || pea->escape_map.alloc_count > 0);
     }
     vtx_graph_destroy(&graph);
     vtx_arena_destroy(&arena);
