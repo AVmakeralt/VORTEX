@@ -232,6 +232,9 @@ void vtx_type_feedback_record_call(vtx_type_feedback_t *feedback,
      * increments (tracking overall observation volume) but this new
      * type doesn't get its own slot. The KL divergence computation
      * handles this via the "unseen type penalty" path. */
+
+    /* Update stable-type signature tracking (Proposal #2) */
+    vtx_tf_call_site_update_signature(site, receiver_typeid, result_typeid);
 }
 
 void vtx_type_feedback_record_field(vtx_type_feedback_t *feedback,
@@ -651,4 +654,87 @@ double vtx_type_freq_kl_divergence(const vtx_type_freq_t *current,
 
     /* KL divergence is non-negative by definition */
     return kl > 0.0 ? kl : 0.0;
+}
+
+/* ========================================================================== */
+/* Stable-type signature management (Proposal #2)                                */
+/* ========================================================================== */
+
+void vtx_tf_call_site_update_signature(vtx_tf_call_site_t *site,
+                                        vtx_typeid_t receiver,
+                                        vtx_typeid_t result)
+{
+    if (site == NULL) return;
+
+    vtx_type_signature_t *sig = &site->stable_signature;
+
+    /* Build the new signature: [receiver, result] */
+    vtx_typeid_t new_types[2] = { receiver, result };
+    uint32_t new_count = 2;
+
+    /* Check if the new observation matches the existing signature */
+    bool matches = true;
+    if (sig->slot_count != new_count || sig->slot_count == 0) {
+        matches = false;
+    } else {
+        for (uint32_t i = 0; i < new_count && i < VTX_TYPE_SIGNATURE_MAX_SLOTS; i++) {
+            if (sig->types[i] != new_types[i]) {
+                matches = false;
+                break;
+            }
+        }
+    }
+
+    if (matches) {
+        /* Signature matches — increment stability counter (saturating) */
+        if (sig->stability_count < UINT32_MAX) {
+            sig->stability_count++;
+        }
+        /* Check for hyper-stability */
+        if (sig->stability_count >= VTX_TYPE_STABILITY_WINDOW) {
+            sig->is_hyper_stable = true;
+        }
+    } else {
+        /* Signature changed — reset stability and update the signature */
+        for (uint32_t i = 0; i < new_count && i < VTX_TYPE_SIGNATURE_MAX_SLOTS; i++) {
+            sig->types[i] = new_types[i];
+        }
+        sig->slot_count = new_count;
+        sig->stability_count = 1;
+        sig->is_hyper_stable = false;
+    }
+}
+
+bool vtx_tf_call_site_is_hyper_stable(const vtx_tf_call_site_t *site)
+{
+    if (site == NULL) return false;
+    return site->stable_signature.is_hyper_stable;
+}
+
+const vtx_type_signature_t *vtx_tf_call_site_get_signature(
+    const vtx_tf_call_site_t *site)
+{
+    if (site == NULL) return NULL;
+    if (site->stable_signature.slot_count == 0) return NULL;
+    return &site->stable_signature;
+}
+
+uint64_t vtx_type_signature_hash(const vtx_type_signature_t *sig)
+{
+    if (sig == NULL || sig->slot_count == 0) return 0;
+
+    /* FNV-1a hash over the type IDs */
+    uint64_t h = 14695981039346656037ULL;
+    for (uint32_t i = 0; i < sig->slot_count && i < VTX_TYPE_SIGNATURE_MAX_SLOTS; i++) {
+        uint32_t tid = sig->types[i];
+        h ^= (uint64_t)(tid & 0xFF);
+        h *= 1099511628211ULL;
+        h ^= (uint64_t)((tid >> 8) & 0xFF);
+        h *= 1099511628211ULL;
+        h ^= (uint64_t)((tid >> 16) & 0xFF);
+        h *= 1099511628211ULL;
+        h ^= (uint64_t)((tid >> 24) & 0xFF);
+        h *= 1099511628211ULL;
+    }
+    return h;
 }

@@ -31,6 +31,7 @@ void vtx_reconstructed_stack_destroy(vtx_reconstructed_stack_t *stack)
     for (uint32_t i = 0; i < stack->frame_count; i++) {
         free(stack->frames[i].locals);
         free(stack->frames[i].stack);
+        free(stack->frames[i].compressed_snapshot);
     }
     free(stack->frames);
     free(stack);
@@ -61,6 +62,16 @@ int vtx_reconstructed_stack_add_frame(
     slot->stack_count = frame->stack_count;
     slot->original_kind = frame->original_kind;
     slot->is_inlined = frame->is_inlined;
+    slot->is_materialized = frame->is_materialized;
+    slot->snapshot_size = frame->snapshot_size;
+
+    if (frame->compressed_snapshot != NULL && frame->snapshot_size > 0) {
+        slot->compressed_snapshot = (uint8_t *)malloc(frame->snapshot_size);
+        if (!slot->compressed_snapshot) return -1;
+        memcpy(slot->compressed_snapshot, frame->compressed_snapshot, frame->snapshot_size);
+    } else {
+        slot->compressed_snapshot = NULL;
+    }
 
     if (frame->local_count > 0) {
         slot->locals = calloc(frame->local_count, sizeof(vtx_value_t));
@@ -553,4 +564,146 @@ vtx_reconstructed_stack_t *vtx_stack_walk(
 
 done:
     return stack;
+}
+
+/* ========================================================================== */
+/* Lazy frame materialization (Proposal #8)                                      */
+/* ========================================================================== */
+
+/**
+ * RLE entry: a value followed by a count of consecutive occurrences.
+ * For vtx_value_t (which is uint64_t / NaN-boxed), we store each value
+ * and its repetition count as 8 + 4 = 12 bytes.
+ */
+#define VTX_RLE_VALUE_SIZE 8   /* sizeof(vtx_value_t) */
+#define VTX_RLE_COUNT_SIZE 4   /* uint32_t for count */
+#define VTX_RLE_ENTRY_SIZE (VTX_RLE_VALUE_SIZE + VTX_RLE_COUNT_SIZE)
+
+uint8_t *vtx_frame_compress(const vtx_reconstructed_frame_t *frame)
+{
+    if (!frame) return NULL;
+    if (!frame->locals && !frame->stack) return NULL;
+
+    /* Worst-case size: every value is unique, so we need an entry per value.
+     * Total values = local_count + stack_count.
+     * Each entry = VTX_RLE_ENTRY_SIZE bytes. */
+    uint32_t total_values = frame->local_count + frame->stack_count;
+    if (total_values == 0) return NULL;
+
+    uint32_t max_size = total_values * VTX_RLE_ENTRY_SIZE + 8; /* 8 for header */
+    uint8_t *buf = (uint8_t *)malloc(max_size);
+    if (!buf) return NULL;
+
+    uint32_t pos = 0;
+
+    /* Header: local_count (4 bytes) + stack_count (4 bytes) */
+    memcpy(buf + pos, &frame->local_count, 4); pos += 4;
+    memcpy(buf + pos, &frame->stack_count, 4); pos += 4;
+
+    /* Compress locals + stack as a single RLE stream */
+    vtx_value_t *all = (vtx_value_t *)malloc(total_values * sizeof(vtx_value_t));
+    if (!all) { free(buf); return NULL; }
+
+    uint32_t idx = 0;
+    for (uint32_t i = 0; i < frame->local_count; i++) {
+        all[idx++] = frame->locals[i];
+    }
+    for (uint32_t i = 0; i < frame->stack_count; i++) {
+        all[idx++] = frame->stack[i];
+    }
+
+    /* RLE encode */
+    uint32_t i = 0;
+    while (i < total_values) {
+        vtx_value_t current = all[i];
+        uint32_t count = 1;
+        while (i + count < total_values && all[i + count] == current) {
+            count++;
+        }
+
+        /* Write value (8 bytes) + count (4 bytes) */
+        memcpy(buf + pos, &current, VTX_RLE_VALUE_SIZE); pos += VTX_RLE_VALUE_SIZE;
+        memcpy(buf + pos, &count, VTX_RLE_COUNT_SIZE); pos += VTX_RLE_COUNT_SIZE;
+
+        i += count;
+    }
+
+    free(all);
+
+    /* Shrink to actual size */
+    uint8_t *result = (uint8_t *)realloc(buf, pos);
+    return result ? result : buf;  /* if realloc fails, use original */
+}
+
+int vtx_frame_decompress(vtx_reconstructed_frame_t *frame)
+{
+    if (!frame || !frame->compressed_snapshot || frame->snapshot_size == 0) return -1;
+
+    uint8_t *buf = frame->compressed_snapshot;
+    uint32_t pos = 0;
+
+    /* Read header */
+    uint32_t local_count = 0, stack_count = 0;
+    memcpy(&local_count, buf + pos, 4); pos += 4;
+    memcpy(&stack_count, buf + pos, 4); pos += 4;
+
+    /* Allocate locals and stack */
+    if (local_count > 0) {
+        frame->locals = (vtx_value_t *)malloc(local_count * sizeof(vtx_value_t));
+        if (!frame->locals) return -1;
+    }
+    frame->local_count = local_count;
+
+    if (stack_count > 0) {
+        frame->stack = (vtx_value_t *)malloc(stack_count * sizeof(vtx_value_t));
+        if (!frame->stack) {
+            free(frame->locals);
+            frame->locals = NULL;
+            return -1;
+        }
+    }
+    frame->stack_count = stack_count;
+
+    /* Decode RLE */
+    uint32_t out_idx = 0;
+    vtx_value_t *all = (vtx_value_t *)malloc(
+        (local_count + stack_count) * sizeof(vtx_value_t));
+    if (!all) {
+        free(frame->locals); frame->locals = NULL;
+        free(frame->stack); frame->stack = NULL;
+        return -1;
+    }
+
+    while (pos + VTX_RLE_ENTRY_SIZE <= frame->snapshot_size && out_idx < local_count + stack_count) {
+        vtx_value_t value;
+        uint32_t count;
+        memcpy(&value, buf + pos, VTX_RLE_VALUE_SIZE); pos += VTX_RLE_VALUE_SIZE;
+        memcpy(&count, buf + pos, VTX_RLE_COUNT_SIZE); pos += VTX_RLE_COUNT_SIZE;
+
+        for (uint32_t j = 0; j < count && out_idx < local_count + stack_count; j++) {
+            all[out_idx++] = value;
+        }
+    }
+
+    /* Split into locals and stack */
+    memcpy(frame->locals, all, local_count * sizeof(vtx_value_t));
+    memcpy(frame->stack, all + local_count, stack_count * sizeof(vtx_value_t));
+    free(all);
+
+    frame->is_materialized = true;
+    return 0;
+}
+
+int vtx_frame_materialize_on_demand(vtx_reconstructed_frame_t *frame)
+{
+    if (!frame) return -1;
+
+    if (frame->is_materialized) return 0; /* already done */
+
+    if (frame->compressed_snapshot != NULL && frame->snapshot_size > 0) {
+        return vtx_frame_decompress(frame);
+    }
+
+    /* No data available — can't materialize */
+    return -1;
 }

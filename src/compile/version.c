@@ -434,3 +434,35 @@ bool vtx_version_is_executable(const vtx_code_version_t *version)
     if (!version) return false;
     return version->state == VTX_VERSION_ACTIVE;
 }
+
+/* ========================================================================== */
+/* Tier-based version lookup (Proposal #5)                                       */
+/* ========================================================================== */
+
+vtx_code_version_t *vtx_version_find_tier(vtx_version_manager_t *manager,
+                                             uint32_t method_id,
+                                             vtx_compile_tier_t max_tier)
+{
+    if (!manager) return NULL;
+    if (method_id >= manager->capacity) return NULL;
+
+    vtx_method_versions_t *mv = manager->methods[method_id];
+    if (!mv) return NULL;
+
+    /* Walk the version chain from newest to oldest, looking for
+     * an active version at or below max_tier. */
+    vtx_code_version_t *best = NULL;
+
+    for (vtx_code_version_t *v = mv->newest; v != NULL; v = v->prev_version) {
+        if (v->state != VTX_VERSION_ACTIVE) continue;
+        if ((int)v->tier > (int)max_tier) continue;
+        if (v->compiled == NULL || !v->compiled->is_installed) continue;
+
+        /* Prefer the highest tier that's still within our budget */
+        if (best == NULL || (int)v->tier > (int)best->tier) {
+            best = v;
+        }
+    }
+
+    return best;
+}

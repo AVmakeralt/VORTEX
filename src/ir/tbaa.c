@@ -389,6 +389,13 @@ vtx_alias_result_t vtx_tbaa_alias(const vtx_tbaa_info_t *a, const vtx_tbaa_info_
 /* the load and store access different memory locations.                     */
 /* ========================================================================== */
 
+bool vtx_tbaa_no_alias(vtx_tbaa_kind_t kind_a, vtx_tbaa_kind_t kind_b)
+{
+    vtx_tbaa_info_t a = { .kind = kind_a, .type_id = 0, .field_offset = 0, .is_load = false };
+    vtx_tbaa_info_t b = { .kind = kind_b, .type_id = 0, .field_offset = 0, .is_load = false };
+    return vtx_tbaa_alias(&a, &b) == VTX_ALIAS_NO_ALIAS;
+}
+
 bool vtx_tbaa_can_hoist_load(vtx_tbaa_kind_t load_kind, vtx_tbaa_kind_t store_kind)
 {
     /* ANY or RAW: can't prove no-alias, so can't hoist */

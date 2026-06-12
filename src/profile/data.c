@@ -440,3 +440,108 @@ bool vtx_profile_method_is_hot(const vtx_profile_method_t *method,
 {
     return method && method->invocation_count >= threshold;
 }
+
+/* ========================================================================== */
+/* Trip count stability (Proposal #7)                                           */
+/* ========================================================================== */
+
+void vtx_profile_record_trip_count(vtx_profile_global_t *global,
+                                     uint32_t method_id,
+                                     uint32_t loop_header_pc,
+                                     uint64_t trip_count)
+{
+    if (!global) return;
+
+    vtx_profile_method_t *method = vtx_profile_get_method(global, method_id);
+    if (!method) {
+        method = vtx_profile_add_method(global, method_id);
+        if (!method) return;
+    }
+
+    /* Find or create the loop profile */
+    vtx_loop_profile_t *loop = NULL;
+    for (uint32_t i = 0; i < method->loop_count; i++) {
+        if (method->loops[i].loop_header_pc == loop_header_pc) {
+            loop = &method->loops[i];
+            break;
+        }
+    }
+
+    if (loop == NULL) {
+        /* Create a new loop profile */
+        if (method->loop_count >= method->loop_capacity) {
+            uint32_t new_cap = method->loop_capacity == 0 ? 8 : method->loop_capacity * 2;
+            vtx_loop_profile_t *new_loops = (vtx_loop_profile_t *)realloc(
+                method->loops, new_cap * sizeof(vtx_loop_profile_t));
+            if (!new_loops) return;
+            memset(new_loops + method->loop_count, 0,
+                   (new_cap - method->loop_count) * sizeof(vtx_loop_profile_t));
+            method->loops = new_loops;
+            method->loop_capacity = new_cap;
+        }
+        loop = &method->loops[method->loop_count++];
+        loop->loop_header_pc = loop_header_pc;
+        loop->backedge_count = 0;
+        loop->last_trip_count = 0;
+        loop->trip_stability_count = 0;
+        loop->is_trip_stable = false;
+    }
+
+    /* Update trip count stability */
+    if (loop->last_trip_count == trip_count && trip_count > 0) {
+        if (loop->trip_stability_count < UINT32_MAX) {
+            loop->trip_stability_count++;
+        }
+        if (loop->trip_stability_count >= VTX_TRIP_STABILITY_WINDOW) {
+            loop->is_trip_stable = true;
+        }
+    } else {
+        loop->last_trip_count = trip_count;
+        loop->trip_stability_count = 1;
+        loop->is_trip_stable = false;
+    }
+
+    /* Also increment backedge count (saturating) */
+    if (loop->backedge_count < UINT64_MAX - trip_count) {
+        loop->backedge_count += trip_count;
+    } else {
+        loop->backedge_count = UINT64_MAX;
+    }
+}
+
+bool vtx_profile_is_trip_stable(const vtx_profile_global_t *global,
+                                  uint32_t method_id,
+                                  uint32_t loop_header_pc)
+{
+    if (!global) return false;
+
+    const vtx_profile_method_t *method = vtx_profile_get_method(global, method_id);
+    if (!method) return false;
+
+    for (uint32_t i = 0; i < method->loop_count; i++) {
+        if (method->loops[i].loop_header_pc == loop_header_pc) {
+            return method->loops[i].is_trip_stable;
+        }
+    }
+    return false;
+}
+
+uint64_t vtx_profile_get_stable_trip_count(const vtx_profile_global_t *global,
+                                              uint32_t method_id,
+                                              uint32_t loop_header_pc)
+{
+    if (!global) return 0;
+
+    const vtx_profile_method_t *method = vtx_profile_get_method(global, method_id);
+    if (!method) return 0;
+
+    for (uint32_t i = 0; i < method->loop_count; i++) {
+        if (method->loops[i].loop_header_pc == loop_header_pc) {
+            if (method->loops[i].is_trip_stable) {
+                return method->loops[i].last_trip_count;
+            }
+            return 0;
+        }
+    }
+    return 0;
+}

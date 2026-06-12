@@ -187,4 +187,29 @@ vtx_interp_entry_t vtx_deopt_get_interp_entry(void);
  */
 void *vtx_deopt_runtime_transition(void *jit_rbp, uint32_t native_pc);
 
+/* ========================================================================== */
+/* Tier-aware deoptimization (Proposal #5)                                     */
+/* ========================================================================== */
+
+/**
+ * Configuration for tier-aware deoptimization (Proposal #5).
+ * When a deopt stub is entered, it checks whether a lower-tier compiled
+ * version exists before falling back to the interpreter.
+ */
+typedef struct {
+    bool     prefer_lower_tier;     /* true = try T2 before T0 */
+    bool     require_same_frame_layout; /* true = only use version with matching frame layout */
+} vtx_deopt_tier_config_t;
+
+/**
+ * Default tier-aware deopt configuration.
+ */
+static inline vtx_deopt_tier_config_t vtx_deopt_tier_config_default(void)
+{
+    vtx_deopt_tier_config_t cfg;
+    cfg.prefer_lower_tier = true;
+    cfg.require_same_frame_layout = false; /* T2 frame layout may differ */
+    return cfg;
+}
+
 #endif /* VORTEX_BASELINE_DEOPT_STUBS_H */

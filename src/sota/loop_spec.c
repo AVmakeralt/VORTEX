@@ -1,4 +1,5 @@
 #include "sota/loop_spec.h"
+#include "ir/tbaa.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -292,6 +293,57 @@ static void analyze_loop_body(const vtx_graph_t *graph,
             break; /* use the first array access to determine element size */
         }
     }
+
+    /* Phase 2: TBAA-based alias analysis.
+     * Collect all LoadIndexed/StoreIndexed nodes and their TBAA kinds.
+     * If all pairs have incompatible types (proven no-alias by TBAA),
+     * we can skip the aliasing guard entirely. */
+    {
+        /* Arrays of (node_id, tbaa_kind) for memory accesses */
+        struct { vtx_nodeid_t id; vtx_tbaa_kind_t kind; } accesses[64];
+        uint32_t access_count = 0;
+
+        for (uint32_t i = 0; i < graph->node_table.count; i++) {
+            const vtx_node_t *node = &graph->node_table.nodes[i];
+            if (node->dead) continue;
+            if (node->opcode != VTX_OP_LoadIndexed && node->opcode != VTX_OP_StoreIndexed) continue;
+            if (access_count >= 64) break;
+
+            vtx_tbaa_kind_t kind = vtx_tbaa_classify_node(node, &graph->node_table);
+            accesses[access_count].id = i;
+            accesses[access_count].kind = kind;
+            access_count++;
+        }
+
+        /* Check all pairs for TBAA non-aliasing */
+        bool all_no_alias = true;
+        bool has_store = false;
+        bool has_load = false;
+        for (uint32_t i = 0; i < access_count; i++) {
+            if (graph->node_table.nodes[accesses[i].id].opcode == VTX_OP_StoreIndexed)
+                has_store = true;
+            else
+                has_load = true;
+
+            for (uint32_t j = i + 1; j < access_count; j++) {
+                if (!vtx_tbaa_no_alias(accesses[i].kind, accesses[j].kind)) {
+                    all_no_alias = false;
+                    break;
+                }
+            }
+            if (!all_no_alias) break;
+        }
+
+        if (has_store && has_load && all_no_alias) {
+            /* TBAA proves all accesses are non-aliasing! */
+            result->has_aliased_access = false;
+            result->tbaa_proves_no_alias = true;
+        } else if (has_store && has_load) {
+            /* TBAA can't prove all non-aliasing.
+             * Use XOR checksum guard as a cheaper alternative to full range check. */
+            result->needs_xor_checksum_guard = true;
+        }
+    }
 }
 
 /* ========================================================================== */
@@ -478,8 +530,11 @@ bool vtx_sota_loop_spec_transform(vtx_graph_t *graph,
     }
 
     /* Guard 2: Memory doesn't alias (for loops with both loads and stores).
-     * guard(src_array != dst_array || no_overlap) */
-    if (spec_result->has_aliased_access) {
+     * guard(src_array != dst_array || no_overlap)
+     * Aliasing guard is needed only if TBAA couldn't prove no-alias.
+     * If TBAA proved no-alias, we skip this guard entirely.
+     * If XOR checksum is available, we emit a cheaper guard. */
+    if (spec_result->has_aliased_access && !spec_result->tbaa_proves_no_alias) {
         vtx_nodeid_t alias_guard = vtx_node_create(&graph->node_table, VTX_OP_DeoptGuard);
         if (alias_guard != VTX_NODEID_INVALID) {
             vtx_node_t *ag = vtx_node_get(&graph->node_table, alias_guard);
@@ -487,6 +542,10 @@ bool vtx_sota_loop_spec_transform(vtx_graph_t *graph,
                 ag->flags = VTX_NF_CONTROL | VTX_NF_SIDE_EFFECT;
                 ag->cond = VTX_COND_NE;
                 ag->bytecode_pc = loop->bytecode_pc;
+                /* Mark with XOR checksum metadata if available */
+                if (spec_result->needs_xor_checksum_guard) {
+                    ag->value_number = -1; /* signals XOR checksum guard to lowering */
+                }
             }
         }
     }

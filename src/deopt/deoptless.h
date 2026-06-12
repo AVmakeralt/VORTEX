@@ -65,6 +65,8 @@ struct vtx_deoptless_version {
     uint32_t                version_number;    /* monotonically increasing version */
     uint32_t                guard_branch_offset; /* offset from code_start to JCC rel32 displacement */
     uint8_t                *code_start;        /* base address of the original compiled code */
+    vtx_graph_t         *graph;            /* SoN graph snapshot for this version (for incremental continuation) */
+    vtx_deoptless_version_t *parent_version; /* parent version that this continues from */
 };
 
 /* ========================================================================== */
@@ -82,6 +84,12 @@ typedef struct {
     uint32_t                 version_count;   /* number of active versions */
     void                    *original_code;   /* original compiled code entry */
     vtx_graph_t             *original_graph;  /* original SoN graph (kept for recompilation) */
+    /* Incremental deoptless: track all failed guard IDs across the chain.
+     * This enables O(1) lookup of whether a guard has already been removed
+     * in any active continuation. */
+    vtx_guard_id_t      *failed_guards;      /* array of all failed guard IDs */
+    uint32_t             failed_guard_count;  /* number of failed guards tracked */
+    uint32_t             failed_guard_capacity; /* allocated capacity */
 } vtx_deoptless_table_t;
 
 /* ========================================================================== */
@@ -174,5 +182,57 @@ bool vtx_deoptless_can_deoptless(const vtx_deoptless_table_t *table,
  * Called when the table is full and a new version is needed.
  */
 void vtx_deoptless_evict_oldest(vtx_deoptless_table_t *table);
+
+/* ========================================================================== */
+/* Incremental deoptless continuations (Proposal #3)                            */
+/* ========================================================================== */
+
+/**
+ * Create an incremental continuation: remove a single guard from the
+ * latest version's graph (or the original graph if no versions exist).
+ *
+ * This is the key improvement: instead of generating each continuation
+ * from the original graph (which creates combinatorial explosion), we
+ * chain them: V2 is generated from V1's graph with one more guard removed.
+ *
+ * @param table        The deoptless version table
+ * @param failed_guard_id  The guard that just failed
+ * @param arena        Arena for graph allocations
+ * @return             New graph with the guard removed, or NULL on failure
+ */
+vtx_graph_t *vtx_deoptless_create_incremental_continuation(
+    vtx_deoptless_table_t *table,
+    vtx_guard_id_t failed_guard_id,
+    vtx_arena_t *arena);
+
+/**
+ * Find the latest version in the chain that can be used as a base
+ * for the next incremental continuation.
+ *
+ * @param table  The deoptless version table
+ * @return       The latest version with a graph, or NULL
+ */
+vtx_deoptless_version_t *vtx_deoptless_find_latest_version(
+    const vtx_deoptless_table_t *table);
+
+/**
+ * Check if a guard has already been removed in any active continuation.
+ *
+ * @param table       The deoptless version table
+ * @param guard_id    The guard to check
+ * @return            true if this guard has already been removed
+ */
+bool vtx_deoptless_is_guard_removed(const vtx_deoptless_table_t *table,
+                                      vtx_guard_id_t guard_id);
+
+/**
+ * Record a failed guard ID in the table's tracking array.
+ *
+ * @param table       The deoptless version table
+ * @param guard_id    The guard that failed
+ * @return            0 on success, -1 on failure
+ */
+int vtx_deoptless_record_failed_guard(vtx_deoptless_table_t *table,
+                                        vtx_guard_id_t guard_id);
 
 #endif /* VORTEX_DEOPT_DEOPTLESS_H */

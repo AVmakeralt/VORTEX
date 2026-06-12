@@ -68,6 +68,11 @@ typedef struct {
     uint32_t stride;             /* access stride (1 = sequential, 2 = every other, etc.) */
     uint32_t element_size;       /* size of accessed elements in bytes */
 
+    /* TBAA-based alias analysis result for this loop */
+    bool     tbaa_proves_no_alias;   /* true if TBAA proves all accesses are non-aliasing */
+    bool     needs_xor_checksum_guard; /* true if XOR checksum guard can be used instead of full range check */
+    uint64_t xor_checksum_expected;  /* expected XOR of all array base pointers */
+
     /* Vectorization parameters */
     uint32_t vector_width;       /* number of elements per vector (4 for SSE2 float, etc.) */
     uint32_t peel_count;         /* iterations to peel for alignment */

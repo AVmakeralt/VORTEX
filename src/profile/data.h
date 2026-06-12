@@ -81,6 +81,10 @@ typedef struct {
 typedef struct {
     uint32_t loop_header_pc; /* bytecode PC of the loop header */
     uint64_t backedge_count; /* number of times the back edge was taken */
+    /* Trip count stability tracking (Proposal #7) */
+    uint64_t last_trip_count;         /* trip count from most recent observation */
+    uint32_t trip_stability_count;    /* consecutive observations with same trip count */
+    bool     is_trip_stable;          /* true if stability_count >= VTX_TRIP_STABILITY_WINDOW */
 } vtx_loop_profile_t;
 
 /* ========================================================================== */
@@ -315,5 +319,56 @@ double vtx_profile_branch_probability(const vtx_branch_profile_t *branch);
  */
 bool vtx_profile_method_is_hot(const vtx_profile_method_t *method,
                                 uint64_t threshold);
+
+/* ========================================================================== */
+/* Trip count stability (Proposal #7)                                           */
+/* ========================================================================== */
+
+/**
+ * Number of consecutive consistent trip count observations required
+ * for a loop to be considered trip-stable.
+ */
+#define VTX_TRIP_STABILITY_WINDOW 500
+
+/**
+ * Record a loop trip count observation and update stability tracking.
+ * If the new trip count matches the previous observation, increment
+ * the stability counter. If it differs, reset the counter.
+ *
+ * @param global      Global profile
+ * @param method_id   Method ID
+ * @param loop_header_pc  Bytecode PC of the loop header
+ * @param trip_count  Trip count observed for this entry
+ */
+void vtx_profile_record_trip_count(vtx_profile_global_t *global,
+                                     uint32_t method_id,
+                                     uint32_t loop_header_pc,
+                                     uint64_t trip_count);
+
+/**
+ * Check if a loop is trip-stable (trip count constant for
+ * VTX_TRIP_STABILITY_WINDOW observations).
+ *
+ * @param global         Global profile
+ * @param method_id      Method ID
+ * @param loop_header_pc Loop header PC
+ * @return               true if trip-stable
+ */
+bool vtx_profile_is_trip_stable(const vtx_profile_global_t *global,
+                                  uint32_t method_id,
+                                  uint32_t loop_header_pc);
+
+/**
+ * Get the stable trip count for a trip-stable loop.
+ * Returns 0 if the loop is not trip-stable.
+ *
+ * @param global         Global profile
+ * @param method_id      Method ID
+ * @param loop_header_pc Loop header PC
+ * @return               Stable trip count, or 0
+ */
+uint64_t vtx_profile_get_stable_trip_count(const vtx_profile_global_t *global,
+                                              uint32_t method_id,
+                                              uint32_t loop_header_pc);
 
 #endif /* VORTEX_PROFILE_DATA_H */

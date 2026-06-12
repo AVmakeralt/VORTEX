@@ -1,5 +1,6 @@
 #include "inliner/transform.h"
 #include "deopt/frame_state.h"
+#include "interp/type_feedback.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -655,6 +656,175 @@ vtx_inline_result_t vtx_inline_transform(vtx_graph_t *caller_graph,
 
     /* Clean up */
     nodeid_map_destroy(&id_map);
+
+    return result;
+}
+
+/* ========================================================================== */
+/* Chain inlining for hyper-stable call sites (Proposal #6)                      */
+/* ========================================================================== */
+
+/**
+ * Internal: check if a call site is hyper-stable based on type feedback.
+ *
+ * Uses the type feedback system to check if the call site at the given
+ * bytecode_pc has a stable-type signature that has been consistent for
+ * VTX_TYPE_STABILITY_WINDOW observations.
+ */
+static bool is_call_site_hyper_stable(const vtx_type_feedback_t *type_feedback,
+                                        uint32_t bytecode_pc)
+{
+    if (type_feedback == NULL) return false;
+    if (bytecode_pc >= type_feedback->call_site_count) return false;
+    return vtx_tf_call_site_is_hyper_stable(&type_feedback->call_sites[bytecode_pc]);
+}
+
+/**
+ * Internal: count the number of active (non-dead) nodes in a graph.
+ */
+static uint32_t count_active_nodes(const vtx_graph_t *graph)
+{
+    if (graph == NULL) return 0;
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < graph->node_table.count; i++) {
+        if (!graph->node_table.nodes[i].dead) count++;
+    }
+    return count;
+}
+
+/**
+ * Internal: find all CallVirtual/CallStatic nodes in a subgraph that
+ * could be candidates for further chain inlining.
+ *
+ * Returns an array of NodeIDs and the count. The array is allocated
+ * from the arena.
+ */
+static vtx_nodeid_t *find_chain_candidates(vtx_graph_t *graph,
+                                             const vtx_type_feedback_t *type_feedback,
+                                             vtx_arena_t *arena,
+                                             uint32_t *out_count)
+{
+    if (graph == NULL || type_feedback == NULL || arena == NULL || out_count == NULL) {
+        if (out_count) *out_count = 0;
+        return NULL;
+    }
+
+    /* Count candidates first */
+    uint32_t candidate_count = 0;
+    for (uint32_t i = 0; i < graph->node_table.count; i++) {
+        vtx_node_t *node = &graph->node_table.nodes[i];
+        if (node->dead) continue;
+        if (node->opcode != VTX_OP_CallVirtual && node->opcode != VTX_OP_CallStatic) continue;
+        if (!is_call_site_hyper_stable(type_feedback, node->bytecode_pc)) continue;
+        candidate_count++;
+    }
+
+    if (candidate_count == 0) {
+        *out_count = 0;
+        return NULL;
+    }
+
+    /* Allocate and fill the array */
+    vtx_nodeid_t *candidates = (vtx_nodeid_t *)vtx_arena_alloc(
+        arena, candidate_count * sizeof(vtx_nodeid_t));
+    if (candidates == NULL) {
+        *out_count = 0;
+        return NULL;
+    }
+
+    uint32_t idx = 0;
+    for (uint32_t i = 0; i < graph->node_table.count && idx < candidate_count; i++) {
+        vtx_node_t *node = &graph->node_table.nodes[i];
+        if (node->dead) continue;
+        if (node->opcode != VTX_OP_CallVirtual && node->opcode != VTX_OP_CallStatic) continue;
+        if (!is_call_site_hyper_stable(type_feedback, node->bytecode_pc)) continue;
+        candidates[idx++] = i;
+    }
+
+    *out_count = candidate_count;
+    return candidates;
+}
+
+vtx_chain_inline_result_t vtx_inline_chain(
+    vtx_graph_t *graph,
+    vtx_nodeid_t call_node,
+    const vtx_type_feedback_t *type_feedback,
+    vtx_callee_lookup_fn callee_lookup,
+    void *lookup_context,
+    vtx_arena_t *arena)
+{
+    vtx_chain_inline_result_t result;
+    memset(&result, 0, sizeof(result));
+
+    if (graph == NULL || callee_lookup == NULL || arena == NULL) return result;
+
+    vtx_node_t *node = vtx_node_get(&graph->node_table, call_node);
+    if (node == NULL || node->dead) return result;
+    if (node->opcode != VTX_OP_CallVirtual && node->opcode != VTX_OP_CallStatic) return result;
+
+    /* Only chain-inline hyper-stable sites */
+    if (!is_call_site_hyper_stable(type_feedback, node->bytecode_pc)) return result;
+
+    /* Record the node count before inlining */
+    uint32_t nodes_before = count_active_nodes(graph);
+
+    /* Look up the callee graph */
+    const vtx_graph_t *callee = callee_lookup(node->method_index, lookup_context);
+    if (callee == NULL) return result;
+
+    /* Check if inlining the callee would exceed the budget.
+     * Estimate the inlined size as the callee's active node count. */
+    uint32_t callee_nodes = count_active_nodes(callee);
+    if (result.cumulative_node_count + callee_nodes > VTX_CHAIN_INLINE_BUDGET) {
+        result.budget_exhausted = true;
+        return result;
+    }
+
+    /* Perform the inlining at this level using the existing inline transform.
+     * The vtx_inline_transform function handles node cloning, parameter
+     * replacement, return merging, and FrameState threading. */
+    vtx_inline_result_t inline_result = vtx_inline_transform(
+        graph, call_node, callee, arena);
+
+    if (!inline_result.success) return result;
+
+    result.chain_depth = 1;
+    result.cumulative_node_count = count_active_nodes(graph) - nodes_before + callee_nodes;
+    result.sites_inlined = 1;
+
+    /* Recurse: scan the inlined subgraph for further hyper-stable sites */
+    if (result.chain_depth < VTX_MAX_CHAIN_DEPTH) {
+        uint32_t next_count = 0;
+        vtx_nodeid_t *next_candidates = find_chain_candidates(
+            graph, type_feedback, arena, &next_count);
+
+        for (uint32_t i = 0; i < next_count; i++) {
+            if (result.chain_depth >= VTX_MAX_CHAIN_DEPTH) {
+                result.depth_exhausted = true;
+                break;
+            }
+
+            if (result.cumulative_node_count > VTX_CHAIN_INLINE_BUDGET) {
+                result.budget_exhausted = true;
+                break;
+            }
+
+            /* Recursively chain-inline this candidate */
+            vtx_chain_inline_result_t sub_result = vtx_inline_chain(
+                graph, next_candidates[i], type_feedback,
+                callee_lookup, lookup_context, arena);
+
+            result.chain_depth += sub_result.chain_depth;
+            result.cumulative_node_count += sub_result.cumulative_node_count;
+            result.sites_inlined += sub_result.sites_inlined;
+            result.budget_exhausted = result.budget_exhausted || sub_result.budget_exhausted;
+            result.depth_exhausted = result.depth_exhausted || sub_result.depth_exhausted;
+
+            if (sub_result.chain_depth == 0) break;
+        }
+    } else {
+        result.depth_exhausted = true;
+    }
 
     return result;
 }

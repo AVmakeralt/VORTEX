@@ -267,4 +267,18 @@ uint32_t vtx_version_count(vtx_version_manager_t *manager,
  */
 bool vtx_version_is_executable(const vtx_code_version_t *version);
 
+/**
+ * Find the highest active version for a method at or below the given tier.
+ * Used for direct T3→T2 deoptimization: when a T3 guard fails and deoptless
+ * is unavailable, find a T2 version to jump to instead of the interpreter.
+ *
+ * @param manager   Version manager
+ * @param method_id Method ID
+ * @param max_tier  Maximum tier to consider (e.g., VTX_TIER_OPTIMIZING for T2)
+ * @return          Active version at or below max_tier, or NULL if none found
+ */
+vtx_code_version_t *vtx_version_find_tier(vtx_version_manager_t *manager,
+                                             uint32_t method_id,
+                                             vtx_compile_tier_t max_tier);
+
 #endif /* VORTEX_COMPILE_VERSION_H */

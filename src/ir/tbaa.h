@@ -108,6 +108,12 @@ vtx_tbaa_kind_t vtx_tbaa_classify_node(const vtx_node_t *node,
 vtx_alias_result_t vtx_tbaa_alias(const vtx_tbaa_info_t *a, const vtx_tbaa_info_t *b);
 
 /**
+ * Convenience query: returns true if two TBAA kinds definitely don't alias.
+ * Wrapper around vtx_tbaa_alias() that returns true only for VTX_ALIAS_NO_ALIAS.
+ */
+bool vtx_tbaa_no_alias(vtx_tbaa_kind_t kind_a, vtx_tbaa_kind_t kind_b);
+
+/**
  * Query: can a load of the given kind be hoisted past a store of the
  * given kind?
  *

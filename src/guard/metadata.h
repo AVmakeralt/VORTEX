@@ -80,8 +80,15 @@ typedef struct {
     /* Whether the strength has been upgraded (weakened) since last check */
     bool                strength_changed;
 
-    /* Guard kind (for logging/debugging) */
-    uint32_t            guard_kind;  /* 0=null_check, 1=type_check, 2=bounds_check, etc. */
+    /* Guard kind (for logging/debugging)
+     *   0 = null_check
+     *   1 = type_check
+     *   2 = bounds_check
+     *   3 = composite_type_check  (Proposal #2: checks full type signature)
+     *   4 = shape_check           (Proposal #9: checks object shape ID)
+     *   5 = trip_count_check      (Proposal #7: checks loop trip count)
+     */
+    uint32_t            guard_kind;
 
     /* Bytecode PC that this guard protects (for deopt) */
     uint32_t            bytecode_pc;
@@ -90,6 +97,12 @@ typedef struct {
      * that is less susceptible to noise than the raw rate. Used for
      * strength transition decisions. Alpha = VTX_GUARD_ALPHA (0.1). */
     vtx_ewma_t          failure_rate_ewma;
+
+    /* Composite guard metadata (Proposal #2).
+     * For hyper-stable call sites, a single composite guard checks the
+     * entire type signature at once. */
+    uint64_t            expected_signature_hash; /* expected FNV hash of the type signature */
+    bool                is_composite_guard;      /* true if this is a composite type signature guard */
 } vtx_guard_meta_t;
 
 /* ========================================================================== */

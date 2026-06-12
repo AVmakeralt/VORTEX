@@ -66,6 +66,11 @@ typedef struct {
     uint32_t         stack_count;    /* number of stack values */
     vtx_frame_kind_t original_kind;  /* what kind of frame this was compiled from */
     bool             is_inlined;     /* true if this is a logical frame from inlining */
+
+    /* Lazy frame materialization (Proposal #8) */
+    bool             is_materialized;      /* true if locals/stack are populated */
+    uint8_t         *compressed_snapshot;  /* RLE-compressed frame state data */
+    uint32_t         snapshot_size;        /* size of compressed snapshot in bytes */
 } vtx_reconstructed_frame_t;
 
 /* ========================================================================== */
@@ -223,5 +228,41 @@ int vtx_stack_walk_read_return_addr(void *fp, void **out_return_addr);
 vtx_frame_kind_t vtx_stack_walk_classify_frame(
     const vtx_side_table_registry_t *registry,
     void *fp);
+
+/* ========================================================================== */
+/* Lazy frame materialization (Proposal #8)                                      */
+/* ========================================================================== */
+
+/**
+ * Compress a frame's locals and operand stack into a compact snapshot.
+ * Uses run-length encoding: consecutive identical values are stored as
+ * (value, count). For typical interpreter frames (many nulls and zeros),
+ * this achieves 3-5x compression.
+ *
+ * @param frame  The frame to compress (must have locals/stack populated)
+ * @return       Newly allocated compressed buffer, or NULL on failure.
+ *               Caller must free() the returned buffer.
+ */
+uint8_t *vtx_frame_compress(const vtx_reconstructed_frame_t *frame);
+
+/**
+ * Decompress a snapshot and populate the frame's locals/stack.
+ * This is called on demand when the interpreter needs to return into
+ * a frame that was lazily materialized.
+ *
+ * @param frame  The frame to decompress into (must have compressed_snapshot set)
+ * @return       0 on success, -1 on failure
+ */
+int vtx_frame_decompress(vtx_reconstructed_frame_t *frame);
+
+/**
+ * Materialize a single frame on demand.
+ * If the frame is already materialized, this is a no-op.
+ * If the frame has a compressed snapshot, decompress it.
+ *
+ * @param frame  The frame to materialize
+ * @return       0 on success, -1 on failure
+ */
+int vtx_frame_materialize_on_demand(vtx_reconstructed_frame_t *frame);
 
 #endif /* VORTEX_DEOPT_STACK_WALK_H */

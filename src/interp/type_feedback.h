@@ -88,6 +88,36 @@ typedef struct {
 } vtx_type_freq_t;
 
 /* ========================================================================== */
+/* Stable-type signatures for composite guard optimization (Proposal #2)        */
+/* ========================================================================== */
+
+/**
+ * Maximum number of types in a stable-type signature.
+ * Covers receiver + up to 7 arguments.
+ */
+#define VTX_TYPE_SIGNATURE_MAX_SLOTS 8
+
+/**
+ * A stable-type signature: the tuple (receiver_type, arg1_type, ..., result_type)
+ * observed at a call site. When all types in the signature have been stable
+ * for VTX_TYPE_STABILITY_WINDOW consecutive observations, the site is marked
+ * as hyper-stable and receives a single composite guard.
+ */
+typedef struct {
+    vtx_typeid_t types[VTX_TYPE_SIGNATURE_MAX_SLOTS]; /* type IDs: [0]=receiver, [1..7]=args */
+    uint32_t     slot_count;     /* number of filled slots (1..8) */
+    uint32_t     stability_count; /* consecutive observations matching this signature */
+    bool         is_hyper_stable; /* true if stability_count >= VTX_TYPE_STABILITY_WINDOW */
+} vtx_type_signature_t;
+
+/**
+ * Window of consecutive consistent observations required for hyper-stability.
+ * After this many observations of the same type signature, the call site is
+ * considered hyper-stable and receives a composite guard.
+ */
+#define VTX_TYPE_STABILITY_WINDOW 1000
+
+/* ========================================================================== */
 /* Per-site feedback structures                                                */
 /* ========================================================================== */
 
@@ -105,6 +135,10 @@ typedef struct {
      * while the frequency table captures cumulative counts per type
      * (for accurate KL divergence). */
     vtx_type_freq_t type_freq;
+
+    /* Stable-type signature for composite guard optimization.
+     * Tracks the full (receiver, args..., result) type tuple. */
+    vtx_type_signature_t stable_signature;
 } vtx_tf_call_site_t;
 
 /**
@@ -114,6 +148,10 @@ typedef struct {
     vtx_tf_field_observation_t observations[VTX_TYPE_FEEDBACK_BUFFER_SIZE];
     uint8_t  write_index;
     uint8_t  count;
+    /* Shape stability tracking (Proposal #9) */
+    vtx_shapeid_t       last_shapeid;       /* shape from most recent observation */
+    uint32_t            shape_stability_count; /* consecutive observations with same shape */
+    bool                is_shape_stable;     /* true if stability >= VTX_SHAPE_STABILITY_WINDOW */
 } vtx_tf_field_site_t;
 
 /**
@@ -259,5 +297,50 @@ const vtx_type_freq_t *vtx_type_feedback_get_type_freq(
  */
 double vtx_type_freq_kl_divergence(const vtx_type_freq_t *current,
                                      const vtx_type_freq_t *compiled);
+
+/* ========================================================================== */
+/* Stable-type signature management                                             */
+/* ========================================================================== */
+
+/**
+ * Update the stable-type signature for a call site with a new observation.
+ * If the new observation matches the existing signature, increment stability.
+ * If it differs, reset the signature and stability counter.
+ *
+ * @param site       The call site to update
+ * @param receiver   Receiver type ID
+ * @param result     Result type ID
+ */
+void vtx_tf_call_site_update_signature(vtx_tf_call_site_t *site,
+                                        vtx_typeid_t receiver,
+                                        vtx_typeid_t result);
+
+/**
+ * Check if a call site is hyper-stable (signature stable for
+ * VTX_TYPE_STABILITY_WINDOW observations).
+ *
+ * @param site  The call site
+ * @return      true if hyper-stable
+ */
+bool vtx_tf_call_site_is_hyper_stable(const vtx_tf_call_site_t *site);
+
+/**
+ * Get the stable-type signature for a call site.
+ * Returns NULL if the site has no observations yet.
+ *
+ * @param site  The call site
+ * @return      Pointer to the signature, or NULL
+ */
+const vtx_type_signature_t *vtx_tf_call_site_get_signature(
+    const vtx_tf_call_site_t *site);
+
+/**
+ * Compute a 64-bit hash of a type signature for fast comparison.
+ * Used by composite guards to check the entire signature in one CMP.
+ *
+ * @param sig   The type signature
+ * @return      64-bit hash value
+ */
+uint64_t vtx_type_signature_hash(const vtx_type_signature_t *sig);
 
 #endif /* VORTEX_TYPE_FEEDBACK_H */

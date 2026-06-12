@@ -345,6 +345,9 @@ void vtx_deoptless_table_destroy(vtx_deoptless_table_t *table)
         v = next;
     }
 
+    /* Free failed guard tracking array (Proposal #3) */
+    free(table->failed_guards);
+
     memset(table, 0, sizeof(*table));
 }
 
@@ -394,6 +397,10 @@ vtx_deoptless_version_t *vtx_deoptless_add_version(
     v->continuation_code = continuation_code;
     v->continuation_size = continuation_size;
     v->version_number = table->version_count;
+
+    /* Store graph and parent for incremental continuation (Proposal #3) */
+    v->graph = NULL;  /* graph is set separately after compilation */
+    v->parent_version = table->versions;  /* current newest is our parent */
 
     /* Prepend to linked list (newest first) */
     v->next_version = table->versions;
@@ -449,5 +456,106 @@ void vtx_deoptless_evict_oldest(vtx_deoptless_table_t *table)
     oldest->continuation_code = NULL;
     oldest->continuation_size = 0;
 
+    /* Destroy the version's graph snapshot if present (Proposal #3) */
+    if (oldest->graph != NULL) {
+        vtx_graph_destroy(oldest->graph);
+        oldest->graph = NULL;
+    }
+
     free(oldest);
+}
+
+/* ========================================================================== */
+/* Incremental deoptless continuations (Proposal #3)                            */
+/* ========================================================================== */
+
+vtx_deoptless_version_t *vtx_deoptless_find_latest_version(
+    const vtx_deoptless_table_t *table)
+{
+    if (!table || !table->versions) return NULL;
+
+    /* The versions list is prepend-only (newest first).
+     * Walk to find the first version that has a graph. */
+    for (vtx_deoptless_version_t *v = table->versions; v != NULL; v = v->next_version) {
+        if (v->graph != NULL) return v;
+    }
+    return NULL;
+}
+
+bool vtx_deoptless_is_guard_removed(const vtx_deoptless_table_t *table,
+                                      vtx_guard_id_t guard_id)
+{
+    if (!table) return false;
+
+    for (uint32_t i = 0; i < table->failed_guard_count; i++) {
+        if (table->failed_guards[i] == guard_id) return true;
+    }
+    return false;
+}
+
+int vtx_deoptless_record_failed_guard(vtx_deoptless_table_t *table,
+                                        vtx_guard_id_t guard_id)
+{
+    if (!table) return -1;
+
+    /* Check if already recorded */
+    if (vtx_deoptless_is_guard_removed(table, guard_id)) return 0;
+
+    /* Grow the array if needed */
+    if (table->failed_guard_count >= table->failed_guard_capacity) {
+        uint32_t new_cap = table->failed_guard_capacity == 0 ? 16 : table->failed_guard_capacity * 2;
+        vtx_guard_id_t *new_arr = (vtx_guard_id_t *)realloc(
+            table->failed_guards, new_cap * sizeof(vtx_guard_id_t));
+        if (!new_arr) return -1;
+        table->failed_guards = new_arr;
+        table->failed_guard_capacity = new_cap;
+    }
+
+    table->failed_guards[table->failed_guard_count++] = guard_id;
+    return 0;
+}
+
+vtx_graph_t *vtx_deoptless_create_incremental_continuation(
+    vtx_deoptless_table_t *table,
+    vtx_guard_id_t failed_guard_id,
+    vtx_arena_t *arena)
+{
+    if (!table || failed_guard_id == VTX_GUARD_ID_INVALID || !arena) {
+        return NULL;
+    }
+
+    /* If this guard has already been removed, find the existing version */
+    if (vtx_deoptless_is_guard_removed(table, failed_guard_id)) {
+        /* The guard is already removed in some version — find and return
+         * that version's graph (or NULL if the graph is gone). */
+        for (vtx_deoptless_version_t *v = table->versions; v != NULL; v = v->next_version) {
+            if (v->failed_guard_id == failed_guard_id && v->graph != NULL) {
+                /* This guard already removed — caller should use existing version */
+                return NULL;
+            }
+        }
+    }
+
+    /* Find the base graph for incremental continuation.
+     * Use the latest version's graph, falling back to the original. */
+    vtx_graph_t *base_graph = NULL;
+    vtx_deoptless_version_t *latest = vtx_deoptless_find_latest_version(table);
+    if (latest != NULL && latest->graph != NULL) {
+        base_graph = latest->graph;
+    } else if (table->original_graph != NULL) {
+        base_graph = table->original_graph;
+    }
+
+    if (base_graph == NULL) return NULL;
+
+    /* Create the continuation by removing one guard from the base graph.
+     * Reuse the existing vtx_deoptless_create_continuation() function
+     * which already handles graph cloning and guard removal. */
+    vtx_graph_t *new_graph = vtx_deoptless_create_continuation(
+        base_graph, failed_guard_id, arena);
+
+    /* Record the failed guard */
+    vtx_deoptless_record_failed_guard(table, failed_guard_id);
+
+    return new_graph;
 }
