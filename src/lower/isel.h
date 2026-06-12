@@ -168,6 +168,8 @@ typedef struct {
 #define VTX_INST_FLAG_FUSED     (1u << 19) /* P6: CMP+JCC fused pair — scheduler must keep adjacent */
 #define VTX_INST_FLAG_IS_SSE    (1u << 20) /* SSE/XMM instruction — uses XMM registers */
 #define VTX_INST_FLAG_IS_SAFEPOINT (1u << 21) /* safepoint poll (loop back-edge) */
+#define VTX_INST_FLAG_IMPLICIT_NULL (1u << 22) /* implicit null check — SIGSEGV catches null, no explicit TEST+JCC */
+#define VTX_INST_FLAG_VALUE_GUARD   (1u << 23) /* value speculation guard — constant fold via guard page */
 
 typedef struct {
     vtx_x86_opcode_t opcode;

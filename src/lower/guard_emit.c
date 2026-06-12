@@ -573,3 +573,122 @@ int vtx_guard_emit_predicated(const vtx_guard_desc_t *guard,
 
     return 1;  /* 1 byte emitted */
 }
+
+/* ========================================================================== */
+/* Implicit null check emission (zero-cost deopt)                              */
+/* ========================================================================== */
+
+int vtx_guard_emit_implicit_null(vtx_guard_desc_t *guard,
+                                   uint8_t *code_buf,
+                                   uint32_t buf_size)
+{
+    if (!guard) return -1;
+
+    /* Implicit null check: NO code is emitted on the hot path.
+     *
+     * Instead of the traditional pattern:
+     *   test rax, rax          ; 3 bytes
+     *   jz   deopt_stub        ; 6 bytes
+     *
+     * We emit NOTHING. The null check is performed by the hardware:
+     * the next instruction that loads from the checked register (e.g.,
+     * a field load like `mov rax, [rbx + offset]`) will trigger SIGSEGV
+     * if the register is null. The signal handler catches the fault and
+     * performs deoptimization.
+     *
+     * This eliminates 9 bytes of code and 2 uops per null check.
+     * For a typical method with 5-10 null checks, this saves 45-90 bytes
+     * of instruction cache and 10-20 uops per invocation.
+     *
+     * We mark the guard as implicit_null so the guard emission pipeline
+     * knows there's no JCC to patch. The jcc_native_offset is set to
+     * UINT32_MAX to signal "no JCC present". */
+
+    guard->is_implicit_null = true;
+    guard->jcc_native_offset = UINT32_MAX;  /* no JCC to patch */
+
+    (void)code_buf;
+    (void)buf_size;
+    return 0;  /* 0 bytes emitted — the guard is implicit */
+}
+
+/* ========================================================================== */
+/* Value guard emission (speculative constant folding)                         */
+/* ========================================================================== */
+
+int vtx_guard_emit_value_guard(const vtx_guard_desc_t *guard,
+                                 uint8_t *code_buf,
+                                 uint32_t buf_size)
+{
+    if (!guard || !code_buf) return -1;
+    if (!guard->is_value_guard) return -1;
+
+    /* Value speculation guard: verify that a loaded value matches the
+     * expected constant.
+     *
+     * Current emission (CMP+JCC):
+     *   cmp rax, <expected_value>   ; REX.W + 81 /7 + imm32 (8 bytes for 32-bit value)
+     *   jne deopt_stub              ; 0F 85 + rel32 (6 bytes)
+     *
+     * For 64-bit expected values that fit in 32 bits (sign-extended):
+     *   cmp rax, imm32              ; 48 83 F8 xx (4 bytes with imm8) or
+     *                                ; 48 81 F8 xxxxxxxx (8 bytes with imm32)
+     *
+     * For 64-bit values that don't fit in 32 bits:
+     *   mov rcx, imm64              ; 48 B9 + 8 bytes (10 bytes)
+     *   cmp rax, rcx                ; 48 39 C8 (3 bytes)
+     *   jne deopt_stub              ; 0F 85 + rel32 (6 bytes)
+     *
+     * We choose the smallest encoding that can represent the value.
+     *
+     * Future: When guard-page type checking is implemented, this will
+     * become a single MOV from a guard page indexed by the value,
+     * eliminating the CMP+JCC entirely. */
+
+    int64_t val = (int64_t)guard->expected_value;
+    uint32_t pos = 0;
+
+    if (val >= INT8_MIN && val <= INT8_MAX) {
+        /* CMP r64, imm8 — shortest encoding */
+        if (buf_size < 10) return -1;  /* need 4 (cmp imm8) + 6 (jne) */
+        code_buf[pos++] = 0x48;  /* REX.W */
+        code_buf[pos++] = 0x83;  /* CMP r/m64, imm8 */
+        code_buf[pos++] = 0xF8;  /* ModR/M: reg=/7 (CMP), r/m=0 (RAX) */
+        code_buf[pos++] = (uint8_t)(val & 0xFF);
+    } else if (val >= INT32_MIN && val <= INT32_MAX) {
+        /* CMP r64, imm32 */
+        if (buf_size < 14) return -1;  /* need 8 (cmp imm32) + 6 (jne) */
+        code_buf[pos++] = 0x48;  /* REX.W */
+        code_buf[pos++] = 0x81;  /* CMP r/m64, imm32 */
+        code_buf[pos++] = 0xF8;  /* ModR/M: reg=/7 (CMP), r/m=0 (RAX) */
+        uint32_t imm32 = (uint32_t)val;
+        code_buf[pos++] = (uint8_t)(imm32 & 0xFF);
+        code_buf[pos++] = (uint8_t)((imm32 >> 8) & 0xFF);
+        code_buf[pos++] = (uint8_t)((imm32 >> 16) & 0xFF);
+        code_buf[pos++] = (uint8_t)((imm32 >> 24) & 0xFF);
+    } else {
+        /* 64-bit value: MOV rcx, imm64; CMP rax, rcx */
+        if (buf_size < 19) return -1;  /* 10 (mov imm64) + 3 (cmp rr) + 6 (jne) */
+        /* mov rcx, imm64 */
+        code_buf[pos++] = 0x48;  /* REX.W */
+        code_buf[pos++] = 0xB9;  /* MOV r64, imm64 (RCX = 1) */
+        uint64_t uval = guard->expected_value;
+        for (int i = 0; i < 8; i++) {
+            code_buf[pos++] = (uint8_t)((uval >> (i * 8)) & 0xFF);
+        }
+        /* cmp rax, rcx */
+        code_buf[pos++] = 0x48;  /* REX.W */
+        code_buf[pos++] = 0x39;  /* CMP r/m64, r64 */
+        code_buf[pos++] = 0xC8;  /* ModR/M: reg=1 (RCX), r/m=0 (RAX) */
+    }
+
+    /* JNE rel32 — placeholder displacement (will be patched by guard_emit_patch) */
+    code_buf[pos++] = 0x0F;
+    code_buf[pos++] = 0x85;
+    code_buf[pos++] = 0x00;  /* disp32 placeholder */
+    code_buf[pos++] = 0x00;
+    code_buf[pos++] = 0x00;
+    code_buf[pos++] = 0x00;
+
+    return (int)pos;
+}

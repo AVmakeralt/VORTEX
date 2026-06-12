@@ -156,6 +156,7 @@ add_library(vortex_guard STATIC
     guard/ewma.c
     guard/hoist.c
     guard/merge.c
+    guard/value_profile.c
 )
 target_include_directories(vortex_guard PUBLIC ${VORTEX_INCLUDE_DIRS})
 target_link_libraries(vortex_guard PUBLIC vortex_ir vortex_deopt)

@@ -225,6 +225,66 @@ void vtx_guard_meta_update(vtx_guard_meta_t *meta, bool failed);
  */
 void vtx_guard_meta_update_sampled(vtx_guard_meta_t *meta, bool failed);
 
+/* ========================================================================== */
+/* Hot-path inline update (zero-cost deopt)                                    */
+/* ========================================================================== */
+
+/**
+ * Hot-path inline guard metadata update for JIT-compiled code.
+ *
+ * This is the function that JIT code should call on every guard execution.
+ * It provides the zero-cost deopt hot path:
+ *   1. Increment sampled_executions (integer add)
+ *   2. If failed: increment sampled_failures, shorten interval
+ *   3. Decrement sample_counter
+ *   4. If counter == 0: call the slow path (vtx_guard_meta_update_sampled_slow)
+ *
+ * The hot-path cost is ~1 cycle (decrement + predicted branch) when the
+ * guard passes and the counter hasn't reached zero. The branch on
+ * counter == 0 is taken with probability 1/interval (highly predictable).
+ *
+ * On failure, the interval is immediately shortened to UNSTABLE (256)
+ * to ensure rapid detection of instability.
+ *
+ * This function is designed to be callable from JIT-compiled code via
+ * a function pointer stored in a global or per-guard stub.
+ *
+ * @param meta    Guard metadata to update
+ * @param failed  Whether this execution resulted in a guard failure
+ */
+static inline void vtx_guard_meta_update_hot(vtx_guard_meta_t *meta, bool failed)
+{
+    if (meta == NULL) return;
+
+    /* Increment sampled execution counter */
+    if (meta->sampled_executions < UINT64_MAX) {
+        meta->sampled_executions++;
+    }
+
+    /* Track failures */
+    if (failed) {
+        if (meta->sampled_failures < UINT64_MAX) {
+            meta->sampled_failures++;
+        }
+        /* Shorten interval on failure for rapid instability detection */
+        if (meta->sample_interval > VTX_GUARD_SAMPLE_INTERVAL_UNSTABLE) {
+            meta->sample_interval = VTX_GUARD_SAMPLE_INTERVAL_UNSTABLE;
+            if (meta->sample_counter > VTX_GUARD_SAMPLE_INTERVAL_UNSTABLE) {
+                meta->sample_counter = VTX_GUARD_SAMPLE_INTERVAL_UNSTABLE;
+            }
+        }
+    }
+
+    /* Decrement counter — the branch on zero is highly predictable */
+    if (__builtin_expect(meta->sample_counter > 1, 1)) {
+        meta->sample_counter--;
+        return;
+    }
+
+    /* Sample boundary reached — call the slow path */
+    vtx_guard_meta_update_sampled(meta, failed);
+}
+
 /**
  * Default sampling interval for guard metadata updates.
  * Only update the EWMA every Nth execution to reduce hot-path overhead.

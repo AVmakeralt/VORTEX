@@ -23,8 +23,9 @@
 #define VTX_SMI_MAX ((1LL << 46) - 1)
 #define VTX_SMI_MIN (-(1LL << 46))
 
-/* Polymorphic IC: >4 types is slower than megamorphic */
-#define VTX_POLY_LIMIT 4
+/* Polymorphic IC: extended to 8 for probability-ordered dispatch.
+ * >8 types is slower than megamorphic (inline cache miss). */
+#define VTX_POLY_LIMIT 8
 
 /* Trace length and depth limits */
 #define VTX_MAX_TRACE_LENGTH 512
@@ -45,6 +46,16 @@
 #define VTX_GUARD_ALPHA 0.1
 #define VTX_GUARD_WEAKEN_THRESHOLD 0.01
 #define VTX_GUARD_ABANDON_THRESHOLD 0.25
+
+/* Value speculation configuration (P1 — zero-cost deopt) */
+#define VTX_VALUE_STABILITY_THRESHOLD 0.95
+#define VTX_VALUE_MIN_OBSERVATIONS 100
+#define VTX_VALUE_SAMPLE_INTERVAL_DEFAULT 64
+#define VTX_VALUE_SAMPLE_INTERVAL_STABLE 256
+#define VTX_VALUE_SAMPLE_INTERVAL_UNSTABLE 16
+
+/* Implicit null check configuration (P0 — zero-cost deopt) */
+#define VTX_NULL_PAGE_LIMIT 0x10000UL  /* 64KB — covers null + small offsets */
 
 /* Profile and recompilation */
 #define VTX_PROFILE_DIVERGENCE_THRESHOLD 0.5
