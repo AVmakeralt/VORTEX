@@ -350,7 +350,8 @@ static uint32_t resolve_virtual_phis(vtx_graph_t *graph,
 /* ========================================================================== */
 
 static uint32_t rewrite_virtual_field_accesses(vtx_graph_t *graph,
-                                                 vtx_virtual_result_t *result)
+                                                 vtx_virtual_result_t *result,
+                                                 vtx_arena_t *arena)
 {
     vtx_node_table_t *table = &graph->node_table;
     uint32_t rewritten = 0;
@@ -430,25 +431,30 @@ static uint32_t rewrite_virtual_field_accesses(vtx_graph_t *graph,
             }
 
             if (!found) {
-                /* New field — grow the array if needed */
-                if (vobj->field_count >= vobj->field_capacity) {
-                    uint32_t new_cap = vobj->field_capacity * 2;
-                    uint32_t *new_offsets = realloc(vobj->field_offsets,
-                        new_cap * sizeof(uint32_t));
-                    vtx_nodeid_t *new_values = realloc(vobj->field_values,
-                        new_cap * sizeof(vtx_nodeid_t));
-                    if (!new_offsets || !new_values) {
-                        free(new_offsets);
-                        free(new_values);
-                        /* Can't add the field — skip to avoid buffer overflow */
-                        node->dead = true;
-                        rewritten++;
-                        continue;
-                    }
-                    vobj->field_offsets = new_offsets;
-                    vobj->field_values = new_values;
-                    vobj->field_capacity = new_cap;
+                /* D4 fix: New field — use arena allocation instead of realloc.
+                 * The field arrays were originally allocated from the arena,
+                 * so using realloc on arena memory is undefined behavior.
+                 * We allocate new arrays from the arena and copy the data. */
+                uint32_t new_cap = vobj->field_capacity * 2;
+                uint32_t *new_offsets = vtx_arena_alloc(arena,
+                    new_cap * sizeof(uint32_t));
+                vtx_nodeid_t *new_values = vtx_arena_alloc(arena,
+                    new_cap * sizeof(vtx_nodeid_t));
+                if (!new_offsets || !new_values) {
+                    /* Can't add the field — skip to avoid buffer overflow */
+                    node->dead = true;
+                    rewritten++;
+                    continue;
                 }
+                if (vobj->field_offsets && vobj->field_count > 0) {
+                    memcpy(new_offsets, vobj->field_offsets,
+                           vobj->field_count * sizeof(uint32_t));
+                    memcpy(new_values, vobj->field_values,
+                           vobj->field_count * sizeof(vtx_nodeid_t));
+                }
+                vobj->field_offsets = new_offsets;
+                vobj->field_values = new_values;
+                vobj->field_capacity = new_cap;
                 vobj->field_offsets[vobj->field_count] = node->field_offset;
                 vobj->field_values[vobj->field_count]  = value_id;
                 vobj->field_count++;
@@ -563,7 +569,7 @@ vtx_virtual_result_t *vtx_virtual_run(vtx_graph_t *graph,
 
     /* Step 4: Rewrite field accesses */
     result->field_accesses_rewritten = rewrite_virtual_field_accesses(
-        graph, result);
+        graph, result, arena);
 
     /* Step 5: Eliminate virtual allocation nodes */
     eliminate_virtual_allocations(graph, result);

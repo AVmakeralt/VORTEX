@@ -21,8 +21,9 @@
  */
 typedef struct {
     const vtx_method_desc_t *method;        /* the compiled method */
-    uint32_t                *pc_map;         /* sorted: native_offset → bytecode_pc */
-    uint32_t                 pc_map_count;   /* number of entries in pc_map */
+    uint32_t                *native_offsets; /* sorted array of native PC offsets */
+    uint32_t                *pc_map;         /* parallel array: bytecode_pc for each native_offset */
+    uint32_t                 pc_map_count;   /* number of entries in pc_map/native_offsets */
     uint32_t                *stack_depth_map;/* stack depth at each native_offset */
 } vtx_deopt_info_t;
 

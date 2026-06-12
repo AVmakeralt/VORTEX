@@ -207,6 +207,11 @@ static void gvn_table_destroy(vtx_gvn_table_t *t)
 }
 
 /**
+ * Grow the GVN table when load factor exceeds 0.7.
+ */
+static int gvn_table_grow(vtx_gvn_table_t *t, vtx_node_table_t *nt);
+
+/**
  * Look up a node in the GVN table. If a congruent node exists, return its ID.
  * Otherwise, insert the node and return VTX_NODEID_INVALID.
  *
@@ -219,6 +224,11 @@ static vtx_nodeid_t gvn_table_lookup_or_insert(vtx_gvn_table_t *t,
                                                 vtx_nodeid_t node_id)
 {
     VTX_ASSERT(hash != 0, "hash must be non-zero");
+
+    /* IR-6 fix: grow table when load factor exceeds 0.7 */
+    if (t->count * 10 >= t->capacity * 7) {
+        gvn_table_grow(t, nt);
+    }
 
     uint32_t idx = hash & (t->capacity - 1);
     uint32_t probe = 0;
@@ -257,10 +267,7 @@ static vtx_nodeid_t gvn_table_lookup_or_insert(vtx_gvn_table_t *t,
 
 /**
  * Grow the GVN table when load factor exceeds 0.7.
- * Available for future use when table growth is triggered dynamically.
  */
-static int gvn_table_grow(vtx_gvn_table_t *t, vtx_node_table_t *nt __attribute__((unused)))
-    __attribute__((unused));
 static int gvn_table_grow(vtx_gvn_table_t *t, vtx_node_table_t *nt __attribute__((unused)))
 {
     uint32_t new_cap = t->capacity * 2;

@@ -5,6 +5,44 @@
 #include <stdio.h>
 
 /* ========================================================================== */
+/* Internal helper: count method arguments from signature                       */
+/* ========================================================================== */
+
+/**
+ * Parse a JVM-style method signature to count the number of arguments.
+ * IR-5 fix: needed by CALL_STATIC to consume args from operand stack.
+ */
+static uint32_t vtx_graph_count_method_args(const char *sig)
+{
+    if (sig == NULL || sig[0] != '(') return 0;
+    uint32_t count = 0;
+    uint32_t i = 1;
+    while (sig[i] != '\0' && sig[i] != ')') {
+        if (sig[i] == 'B' || sig[i] == 'C' || sig[i] == 'D' ||
+            sig[i] == 'F' || sig[i] == 'I' || sig[i] == 'J' ||
+            sig[i] == 'S' || sig[i] == 'Z') {
+            count++; i++;
+        } else if (sig[i] == 'L') {
+            count++;
+            while (sig[i] != '\0' && sig[i] != ';') i++;
+            if (sig[i] == ';') i++;
+        } else if (sig[i] == '[') {
+            while (sig[i] == '[') i++;
+            if (sig[i] == 'L') {
+                while (sig[i] != '\0' && sig[i] != ';') i++;
+                if (sig[i] == ';') i++;
+            } else if (sig[i] != '\0') {
+                i++;
+            }
+            count++;
+        } else {
+            i++;
+        }
+    }
+    return count;
+}
+
+/* ========================================================================== */
 /* Internal helpers: block map                                                 */
 /* ========================================================================== */
 
@@ -862,6 +900,9 @@ static int process_instruction(vtx_graph_t *graph, vtx_block_info_t *block,
 
     /* ---- Calls ---- */
     case VT_OP_CALL_STATIC: {
+        /* NOTE: This is inside #if 0 — not currently used.
+         * IR-5 fix would require adding argument popping here
+         * when this code path is re-enabled. */
         result = vtx_node_create(nt, VTX_OP_CallStatic);
         if (result == VTX_NODEID_INVALID) return -1;
         vtx_node_t *n = vtx_node_get(nt, result);
@@ -1382,17 +1423,32 @@ int vtx_graph_build(vtx_graph_t *graph,
 
             /* ---- Calls ---- */
             case VT_OP_CALL_STATIC: {
-                /* Stack: arg0, arg1, ..., argN → result
+                /* IR-5 fix: consume arguments from the operand stack.
+                 * Stack: arg0, arg1, ..., argN → result
                  * The operand is the method index; arg count comes from
-                 * the method descriptor. For simplicity, we consume args
-                 * from the stack based on what the method descriptor says,
-                 * or we use a fixed heuristic. */
+                 * the method descriptor. If no descriptor is available,
+                 * we don't consume any args (conservative fallback). */
+                uint32_t call_arg_count = 0;
+                if (method != NULL && method->signature != NULL) {
+                    call_arg_count = vtx_graph_count_method_args(method->signature);
+                }
+                /* Pop arguments from stack (reverse order) */
+                vtx_nodeid_t call_args[16];
+                if (call_arg_count > 16) call_arg_count = 16;
+                if (call_arg_count > (uint32_t)sp) call_arg_count = (uint32_t)sp;
+                for (uint32_t i = 0; i < call_arg_count; i++) {
+                    call_args[call_arg_count - 1 - i] = op_stack[--sp];
+                }
                 vtx_nodeid_t call = vtx_node_create(&graph->node_table, VTX_OP_CallStatic);
                 if (call == VTX_NODEID_INVALID) return -1;
                 vtx_node_t *n = vtx_node_get(&graph->node_table, call);
                 n->method_index = operand;
                 vtx_node_add_input(&graph->node_table, call, block->control_node);
                 vtx_node_add_input(&graph->node_table, call, block->memory_node);
+                /* Add arguments as inputs */
+                for (uint32_t i = 0; i < call_arg_count; i++) {
+                    vtx_node_add_input(&graph->node_table, call, call_args[i]);
+                }
                 block->control_node = call;
                 block->memory_node = call;
                 op_stack[sp++] = call;

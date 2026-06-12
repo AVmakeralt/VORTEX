@@ -51,6 +51,7 @@ void vtx_compiled_code_destroy(vtx_compiled_code_t *code)
     if (code->bc_pc_map) { free(code->bc_pc_map); code->bc_pc_map = NULL; }
     if (code->native_to_bc_pc) { free(code->native_to_bc_pc); code->native_to_bc_pc = NULL; }
     if (code->deopt_info) {
+        if (code->deopt_info->native_offsets) free(code->deopt_info->native_offsets);
         if (code->deopt_info->pc_map) free(code->deopt_info->pc_map);
         if (code->deopt_info->stack_depth_map) free(code->deopt_info->stack_depth_map);
         free(code->deopt_info);
@@ -2642,16 +2643,18 @@ vtx_compiled_code_t *vtx_baseline_compile(const vtx_method_desc_t *method,
     result->native_to_bc_pc = ctx.native_to_bc;
     result->native_to_bc_pc_count = ctx.native_to_bc_count;
 
-    /* Build deopt info */
+    /* Build deopt info — BS-2 fix: store both native offsets AND bytecode PCs */
     result->deopt_info = (vtx_deopt_info_t *)malloc(sizeof(vtx_deopt_info_t));
     if (result->deopt_info) {
         result->deopt_info->method = method;
         result->deopt_info->pc_map_count = ctx.pc_map_count;
+        result->deopt_info->native_offsets = (uint32_t *)malloc(ctx.pc_map_count * sizeof(uint32_t));
         result->deopt_info->pc_map = (uint32_t *)malloc(ctx.pc_map_count * sizeof(uint32_t));
         result->deopt_info->stack_depth_map = (uint32_t *)malloc(ctx.pc_map_count * sizeof(uint32_t));
-        if (result->deopt_info->pc_map && result->deopt_info->stack_depth_map) {
+        if (result->deopt_info->native_offsets && result->deopt_info->pc_map && result->deopt_info->stack_depth_map) {
             for (uint32_t i = 0; i < ctx.pc_map_count; i++) {
-                result->deopt_info->pc_map[i] = ctx.pc_map[i].native_offset;
+                result->deopt_info->native_offsets[i] = ctx.pc_map[i].native_offset;
+                result->deopt_info->pc_map[i] = ctx.pc_map[i].bytecode_pc;
                 result->deopt_info->stack_depth_map[i] = 0; /* would need tracking */
             }
         }

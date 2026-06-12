@@ -163,10 +163,11 @@ vtx_nodetype_t vtx_node_default_type(vtx_node_opcode_t opcode)
     case VTX_OP_InstanceOf:
         return VTX_TYPE_Int;
 
-    /* Float-producing nodes */
+    /* Float comparison results are Int (boolean), not Float.
+     * IR-4 fix: CmpF and CmpD produce an Int result (0, 1, or -1). */
     case VTX_OP_CmpF:
     case VTX_OP_CmpD:
-        return VTX_TYPE_Float;
+        return VTX_TYPE_Int;
 
     /* Pointer-producing nodes */
     case VTX_OP_Load:
@@ -227,7 +228,17 @@ bool vtx_constval_equal(vtx_constval_t a, vtx_constval_t b)
     if (a.kind != b.kind) return false;
     switch (a.kind) {
     case VTX_TYPE_Int:   return a.as.int_val   == b.as.int_val;
-    case VTX_TYPE_Float: return a.as.float_val  == b.as.float_val;
+    case VTX_TYPE_Float: {
+        /* IR-12 fix: use bitwise comparison for floats.
+         * == returns false for NaN (NaN != NaN by IEEE 754), but
+         * GVN needs to detect that two NaN constants are the same
+         * node. Also, -0.0 == +0.0 but they have different bit
+         * patterns and should NOT be considered equal for GVN. */
+        union { double d; uint64_t u; } ua, ub;
+        ua.d = a.as.float_val;
+        ub.d = b.as.float_val;
+        return ua.u == ub.u;
+    }
     case VTX_TYPE_Ptr:   return a.as.ptr_val    == b.as.ptr_val;
     case VTX_TYPE_Void:  return true;
     default:             return false;

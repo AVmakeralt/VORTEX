@@ -137,12 +137,18 @@ static void emit_mov_reg_imm64(vtx_code_buffer_t *buf, vtx_reg_t reg, uint64_t i
 /**
  * Emit: jmp rel32 (relative jump to absolute address)
  */
-static void emit_jmp_rel32(vtx_code_buffer_t *buf, uint64_t target_addr)
+static void emit_jmp_rel32(vtx_code_buffer_t *buf, uint8_t *code_start,
+                              uint64_t target_addr)
 {
     vtx_code_buffer_emit_byte(buf, 0xE9);
-    /* The offset is relative to the instruction after the jmp (5 bytes) */
+    /* The offset is relative to the instruction after the jmp (5 bytes).
+     * We need absolute addresses for both source and target.
+     * current_pos is the buffer offset of the displacement field;
+     * the absolute address is code_start + current_pos.
+     * The instruction after jmp is at current_pos + 4. */
     uint32_t current_pos = vtx_code_buffer_position(buf);
-    int32_t rel32 = (int32_t)(target_addr - (uint64_t)(current_pos + 4));
+    uint64_t source_addr = (uint64_t)(uintptr_t)(code_start + current_pos + 4);
+    int32_t rel32 = (int32_t)(target_addr - source_addr);
     vtx_code_buffer_emit_dword(buf, (uint32_t)rel32);
 }
 
@@ -326,8 +332,8 @@ const vtx_deopt_stub_t *vtx_deopt_stub_emit(vtx_deopt_context_t *ctx,
         vtx_code_buffer_emit_byte(buf, 0x89);
         vtx_code_buffer_emit_byte(buf, modrm(3, VTX_REG_RAX, VTX_REG_RBP));
 
-        /* jmp to interpreter entry */
-        emit_jmp_rel32(buf, (uint64_t)(uintptr_t)g_interp_entry);
+        /* jmp to interpreter entry — BS-1 fix: pass code_start for proper absolute address calculation */
+        emit_jmp_rel32(buf, ctx->code_start, (uint64_t)(uintptr_t)g_interp_entry);
     } else {
         /* No interpreter entry set — this shouldn't happen in production.
          * Emit a trap (ud2) to catch the error. */
@@ -443,16 +449,20 @@ void *vtx_deopt_runtime_transition(void *jit_rbp, uint32_t native_pc)
         return NULL;
     }
 
-    /* Look up the bytecode PC for this native PC offset */
+    /* Look up the bytecode PC for this native PC offset.
+     * BS-2 fix: native_offsets is the sorted array for binary search,
+     * pc_map is the parallel array of bytecode PCs. */
     uint32_t bytecode_pc = 0;
     uint32_t stack_depth = 0;
     bool found = false;
 
-    /* Binary search in the pc_map (sorted by native_offset) */
+    /* Binary search in the native_offsets array (sorted by native_offset) */
     uint32_t lo = 0, hi = deopt_info->pc_map_count;
     while (lo < hi) {
         uint32_t mid = lo + (hi - lo) / 2;
-        if (deopt_info->pc_map[mid] <= native_pc) {
+        uint32_t mid_native = (deopt_info->native_offsets != NULL) ?
+            deopt_info->native_offsets[mid] : deopt_info->pc_map[mid];
+        if (mid_native <= native_pc) {
             bytecode_pc = deopt_info->pc_map[mid];
             if (deopt_info->stack_depth_map) {
                 stack_depth = deopt_info->stack_depth_map[mid];

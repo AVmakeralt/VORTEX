@@ -508,7 +508,11 @@ static void perform_merge(vtx_graph_t *graph,
             vtx_node_t *lg = vtx_node_get(&graph->node_table, lower_guard);
             if (lg != NULL) {
                 lg->flags = VTX_NF_CONTROL | VTX_NF_SIDE_EFFECT;
-                lg->cond = VTX_COND_GE; /* guard passes when min >= 0, deopts when min < 0 */
+                /* G7 fix: guard condition is about the comparison RESULT.
+                 * lower_cmp computes (min >= 0) as a boolean; the guard
+                 * should deopt when the result is falsy (== 0), i.e.,
+                 * VTX_COND_NE means "assert result != 0 (pass if truthy)". */
+                lg->cond = VTX_COND_NE; /* deopts when comparison result is 0 (falsy) */
                 lg->bytecode_pc = a->bytecode_pc;
                 lg->frame_state = a->frame_state;
                 vtx_node_add_input(&graph->node_table, lower_guard, a->inputs[0]);
@@ -535,7 +539,11 @@ static void perform_merge(vtx_graph_t *graph,
             vtx_node_t *ug = vtx_node_get(&graph->node_table, upper_guard);
             if (ug != NULL) {
                 ug->flags = VTX_NF_CONTROL | VTX_NF_SIDE_EFFECT;
-                ug->cond = VTX_COND_LT;
+                /* G7 fix: guard condition is about the comparison RESULT.
+                 * upper_cmp computes (max < len) as a boolean; the guard
+                 * should deopt when the result is falsy (== 0), i.e.,
+                 * VTX_COND_NE means "assert result != 0 (pass if truthy)". */
+                ug->cond = VTX_COND_NE; /* deopts when comparison result is 0 (falsy) */
                 ug->bytecode_pc = b->bytecode_pc;
                 ug->frame_state = b->frame_state;
                 vtx_node_add_input(&graph->node_table, upper_guard, a->inputs[0]);
