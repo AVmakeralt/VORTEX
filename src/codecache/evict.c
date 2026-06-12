@@ -73,7 +73,7 @@ int vtx_evict_method(vtx_code_cache_t *cache,
 
     /* Set the method's code pointer to NULL with release store */
     if (method->method_desc) {
-        __atomic_store_n(&method->method_desc->bytecode, NULL, __ATOMIC_RELEASE);
+        __atomic_store_n(&method->method_desc->compiled_code, NULL, __ATOMIC_RELEASE);
     }
 
     /* Free the code in the cache segment */

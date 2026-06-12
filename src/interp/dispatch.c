@@ -163,6 +163,44 @@ static inline vtx_shapeid_t value_shapeid(vtx_value_t v)
 }
 
 /* ========================================================================== */
+/* Method argument counting from signature                                     */
+/* ========================================================================== */
+
+/**
+ * Count the number of arguments from a method signature string.
+ * Signatures are like "(II)I" or "(Ljava/lang/String;F)V".
+ * Returns 0 if signature is NULL or has no args.
+ */
+static uint32_t count_method_args(const char *signature)
+{
+    if (!signature) return 0;
+    uint32_t count = 0;
+    const char *p = strchr(signature, '(');
+    if (!p) return 0;
+    p++; /* skip '(' */
+    while (*p && *p != ')') {
+        count++;
+        if (*p == 'L') {
+            /* Object type: skip to ';' */
+            while (*p && *p != ';') p++;
+            if (*p) p++;
+        } else if (*p == '[') {
+            /* Array type: skip '[' markers, then count the element type */
+            while (*p == '[') p++;
+            if (*p == 'L') {
+                while (*p && *p != ';') p++;
+                if (*p) p++;
+            } else {
+                p++; /* primitive element type */
+            }
+        } else {
+            p++; /* primitive type (I, F, D, J, etc.) */
+        }
+    }
+    return count;
+}
+
+/* ========================================================================== */
 /* Method IC storage management                                                */
 /* ========================================================================== */
 
@@ -406,9 +444,13 @@ vtx_value_t vtx_interp_run(vtx_interp_t *interp,
 
 #if VTX_USE_COMPUTED_GOTO
     static void *local_dispatch_table[VT_OP_COUNT] = { NULL };
-    static bool dispatch_table_built = false;
+    static volatile bool dispatch_table_built = false;
 
-    if (!dispatch_table_built) {
+    /* Bug #6 fix: Use atomic CAS to prevent race condition when two threads
+     * enter vtx_interp_run concurrently and both try to build the table. */
+    bool expected = false;
+    if (__atomic_compare_exchange_n(&dispatch_table_built, &expected, true,
+                                     false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
 #define DISPATCH_LABEL(op) &&dispatch_##op
         local_dispatch_table[VT_OP_HALT]           = DISPATCH_LABEL(VT_OP_HALT);
         local_dispatch_table[VT_OP_NOP]            = DISPATCH_LABEL(VT_OP_NOP);
@@ -475,8 +517,8 @@ vtx_value_t vtx_interp_run(vtx_interp_t *interp,
         local_dispatch_table[VT_OP_SWAP]           = DISPATCH_LABEL(VT_OP_SWAP);
         local_dispatch_table[VT_OP_ISNULL]         = DISPATCH_LABEL(VT_OP_ISNULL);
         local_dispatch_table[VT_OP_TYPEOF]         = DISPATCH_LABEL(VT_OP_TYPEOF);
+        local_dispatch_table[VT_OP_CALL_RUNTIME]   = DISPATCH_LABEL(VT_OP_CALL_RUNTIME);
 #undef DISPATCH_LABEL
-        dispatch_table_built = true;
     }
 
     /* Copy dispatch table to interpreter instance */
@@ -788,7 +830,10 @@ dispatch_VT_OP_IDIV:
         int64_t ib_smi = vtx_smi_value(b);
         VTX_ASSERT(ib_smi != 0, "integer division by zero");
         if (VTX_UNLIKELY(ia_smi == INT64_MIN && ib_smi == -1)) {
-            *sp++ = vtx_make_double((double)INT64_MAX);
+            /* Bug #3 fix: INT64_MIN / -1 = 2^63 which overflows int64_t.
+             * The correct result as a double is -(double)INT64_MIN = 2^63.0,
+             * not (double)INT64_MAX which is 2^63 - 1. */
+            *sp++ = vtx_make_double(-(double)INT64_MIN);
         } else {
             int64_t result_i = ia_smi / ib_smi;
             *sp++ = vtx_make_smi(result_i);
@@ -868,45 +913,76 @@ dispatch_VT_OP_FDIV:
 dispatch_VT_OP_ISHL:
     b = *--sp;
     a = *--sp;
-    ia = vtx_smi_value(a);
-    ib = vtx_smi_value(b);
-    *sp++ = vtx_make_smi(ia << (ib & 63));
+    /* Bug #4 fix: Add SMI type check with slow path for non-SMI values */
+    if (VTX_LIKELY(vtx_is_smi(a) && vtx_is_smi(b))) {
+        ia = vtx_smi_value(a);
+        ib = vtx_smi_value(b);
+        *sp++ = vtx_make_smi(ia << (ib & 63));
+    } else {
+        int64_t va = vtx_is_smi(a) ? vtx_smi_value(a) : (vtx_is_double(a) ? (int64_t)vtx_double_value(a) : 0);
+        int64_t vb = vtx_is_smi(b) ? vtx_smi_value(b) : (vtx_is_double(b) ? (int64_t)vtx_double_value(b) : 0);
+        *sp++ = vtx_make_smi(va << (vb & 63));
+    }
     DISPATCH_NEXT();
 
     /* ---- VT_OP_ISHR ---- */
 dispatch_VT_OP_ISHR:
     b = *--sp;
     a = *--sp;
-    ia = vtx_smi_value(a);
-    ib = vtx_smi_value(b);
-    *sp++ = vtx_make_smi(ia >> (ib & 63));
+    if (VTX_LIKELY(vtx_is_smi(a) && vtx_is_smi(b))) {
+        ia = vtx_smi_value(a);
+        ib = vtx_smi_value(b);
+        *sp++ = vtx_make_smi(ia >> (ib & 63));
+    } else {
+        int64_t va = vtx_is_smi(a) ? vtx_smi_value(a) : (vtx_is_double(a) ? (int64_t)vtx_double_value(a) : 0);
+        int64_t vb = vtx_is_smi(b) ? vtx_smi_value(b) : (vtx_is_double(b) ? (int64_t)vtx_double_value(b) : 0);
+        *sp++ = vtx_make_smi(va >> (vb & 63));
+    }
     DISPATCH_NEXT();
 
     /* ---- VT_OP_IAND ---- */
 dispatch_VT_OP_IAND:
     b = *--sp;
     a = *--sp;
-    ia = vtx_smi_value(a);
-    ib = vtx_smi_value(b);
-    *sp++ = vtx_make_smi(ia & ib);
+    if (VTX_LIKELY(vtx_is_smi(a) && vtx_is_smi(b))) {
+        ia = vtx_smi_value(a);
+        ib = vtx_smi_value(b);
+        *sp++ = vtx_make_smi(ia & ib);
+    } else {
+        int64_t va = vtx_is_smi(a) ? vtx_smi_value(a) : (vtx_is_double(a) ? (int64_t)vtx_double_value(a) : 0);
+        int64_t vb = vtx_is_smi(b) ? vtx_smi_value(b) : (vtx_is_double(b) ? (int64_t)vtx_double_value(b) : 0);
+        *sp++ = vtx_make_smi(va & vb);
+    }
     DISPATCH_NEXT();
 
     /* ---- VT_OP_IOR ---- */
 dispatch_VT_OP_IOR:
     b = *--sp;
     a = *--sp;
-    ia = vtx_smi_value(a);
-    ib = vtx_smi_value(b);
-    *sp++ = vtx_make_smi(ia | ib);
+    if (VTX_LIKELY(vtx_is_smi(a) && vtx_is_smi(b))) {
+        ia = vtx_smi_value(a);
+        ib = vtx_smi_value(b);
+        *sp++ = vtx_make_smi(ia | ib);
+    } else {
+        int64_t va = vtx_is_smi(a) ? vtx_smi_value(a) : (vtx_is_double(a) ? (int64_t)vtx_double_value(a) : 0);
+        int64_t vb = vtx_is_smi(b) ? vtx_smi_value(b) : (vtx_is_double(b) ? (int64_t)vtx_double_value(b) : 0);
+        *sp++ = vtx_make_smi(va | vb);
+    }
     DISPATCH_NEXT();
 
     /* ---- VT_OP_IXOR ---- */
 dispatch_VT_OP_IXOR:
     b = *--sp;
     a = *--sp;
-    ia = vtx_smi_value(a);
-    ib = vtx_smi_value(b);
-    *sp++ = vtx_make_smi(ia ^ ib);
+    if (VTX_LIKELY(vtx_is_smi(a) && vtx_is_smi(b))) {
+        ia = vtx_smi_value(a);
+        ib = vtx_smi_value(b);
+        *sp++ = vtx_make_smi(ia ^ ib);
+    } else {
+        int64_t va = vtx_is_smi(a) ? vtx_smi_value(a) : (vtx_is_double(a) ? (int64_t)vtx_double_value(a) : 0);
+        int64_t vb = vtx_is_smi(b) ? vtx_smi_value(b) : (vtx_is_double(b) ? (int64_t)vtx_double_value(b) : 0);
+        *sp++ = vtx_make_smi(va ^ vb);
+    }
     DISPATCH_NEXT();
 
     /* ---- VT_OP_INEG ---- */
@@ -925,8 +1001,13 @@ dispatch_VT_OP_INEG:
     /* ---- VT_OP_INOT ---- */
 dispatch_VT_OP_INOT:
     a = *--sp;
-    ia = vtx_smi_value(a);
-    *sp++ = vtx_make_smi(~ia);
+    if (VTX_LIKELY(vtx_is_smi(a))) {
+        ia = vtx_smi_value(a);
+        *sp++ = vtx_make_smi(~ia);
+    } else {
+        int64_t va = vtx_is_double(a) ? (int64_t)vtx_double_value(a) : 0;
+        *sp++ = vtx_make_smi(~va);
+    }
     DISPATCH_NEXT();
 
     /* ===================================================================
@@ -936,78 +1017,67 @@ dispatch_VT_OP_INOT:
 dispatch_VT_OP_ICMP_EQ:
     b = *--sp; a = *--sp;
     if (VTX_LIKELY(vtx_is_smi(a) && vtx_is_smi(b))) {
-        int64_t result = (vtx_smi_value(a) == vtx_smi_value(b)) ? 1 : 0;
-        *sp++ = vtx_make_smi(result);
+        /* Bug #5 fix: Use vtx_make_bool for consistency with FCMP */
+        *sp++ = vtx_make_bool(vtx_smi_value(a) == vtx_smi_value(b));
     } else {
         double da = vtx_is_double(a) ? vtx_double_value(a) : (vtx_is_smi(a) ? (double)vtx_smi_value(a) : 0.0);
         double db = vtx_is_double(b) ? vtx_double_value(b) : (vtx_is_smi(b) ? (double)vtx_smi_value(b) : 0.0);
-        int64_t result = (da == db) ? 1 : 0;
-        *sp++ = vtx_make_smi(result);
+        *sp++ = vtx_make_bool(da == db);
     }
     DISPATCH_NEXT();
 
 dispatch_VT_OP_ICMP_NE:
     b = *--sp; a = *--sp;
     if (VTX_LIKELY(vtx_is_smi(a) && vtx_is_smi(b))) {
-        int64_t result = (vtx_smi_value(a) != vtx_smi_value(b)) ? 1 : 0;
-        *sp++ = vtx_make_smi(result);
+        *sp++ = vtx_make_bool(vtx_smi_value(a) != vtx_smi_value(b));
     } else {
         double da = vtx_is_double(a) ? vtx_double_value(a) : (vtx_is_smi(a) ? (double)vtx_smi_value(a) : 0.0);
         double db = vtx_is_double(b) ? vtx_double_value(b) : (vtx_is_smi(b) ? (double)vtx_smi_value(b) : 0.0);
-        int64_t result = (da != db) ? 1 : 0;
-        *sp++ = vtx_make_smi(result);
+        *sp++ = vtx_make_bool(da != db);
     }
     DISPATCH_NEXT();
 
 dispatch_VT_OP_ICMP_LT:
     b = *--sp; a = *--sp;
     if (VTX_LIKELY(vtx_is_smi(a) && vtx_is_smi(b))) {
-        int64_t result = (vtx_smi_value(a) < vtx_smi_value(b)) ? 1 : 0;
-        *sp++ = vtx_make_smi(result);
+        *sp++ = vtx_make_bool(vtx_smi_value(a) < vtx_smi_value(b));
     } else {
         double da = vtx_is_double(a) ? vtx_double_value(a) : (vtx_is_smi(a) ? (double)vtx_smi_value(a) : 0.0);
         double db = vtx_is_double(b) ? vtx_double_value(b) : (vtx_is_smi(b) ? (double)vtx_smi_value(b) : 0.0);
-        int64_t result = (da < db) ? 1 : 0;
-        *sp++ = vtx_make_smi(result);
+        *sp++ = vtx_make_bool(da < db);
     }
     DISPATCH_NEXT();
 
 dispatch_VT_OP_ICMP_LE:
     b = *--sp; a = *--sp;
     if (VTX_LIKELY(vtx_is_smi(a) && vtx_is_smi(b))) {
-        int64_t result = (vtx_smi_value(a) <= vtx_smi_value(b)) ? 1 : 0;
-        *sp++ = vtx_make_smi(result);
+        *sp++ = vtx_make_bool(vtx_smi_value(a) <= vtx_smi_value(b));
     } else {
         double da = vtx_is_double(a) ? vtx_double_value(a) : (vtx_is_smi(a) ? (double)vtx_smi_value(a) : 0.0);
         double db = vtx_is_double(b) ? vtx_double_value(b) : (vtx_is_smi(b) ? (double)vtx_smi_value(b) : 0.0);
-        int64_t result = (da <= db) ? 1 : 0;
-        *sp++ = vtx_make_smi(result);
+        *sp++ = vtx_make_bool(da <= db);
     }
     DISPATCH_NEXT();
 
 dispatch_VT_OP_ICMP_GT:
     b = *--sp; a = *--sp;
     if (VTX_LIKELY(vtx_is_smi(a) && vtx_is_smi(b))) {
-        int64_t result = (vtx_smi_value(a) > vtx_smi_value(b)) ? 1 : 0;
-        *sp++ = vtx_make_smi(result);
+        *sp++ = vtx_make_bool(vtx_smi_value(a) > vtx_smi_value(b));
     } else {
         double da = vtx_is_double(a) ? vtx_double_value(a) : (vtx_is_smi(a) ? (double)vtx_smi_value(a) : 0.0);
         double db = vtx_is_double(b) ? vtx_double_value(b) : (vtx_is_smi(b) ? (double)vtx_smi_value(b) : 0.0);
-        int64_t result = (da > db) ? 1 : 0;
-        *sp++ = vtx_make_smi(result);
+        *sp++ = vtx_make_bool(da > db);
     }
     DISPATCH_NEXT();
 
 dispatch_VT_OP_ICMP_GE:
     b = *--sp; a = *--sp;
     if (VTX_LIKELY(vtx_is_smi(a) && vtx_is_smi(b))) {
-        int64_t result = (vtx_smi_value(a) >= vtx_smi_value(b)) ? 1 : 0;
-        *sp++ = vtx_make_smi(result);
+        *sp++ = vtx_make_bool(vtx_smi_value(a) >= vtx_smi_value(b));
     } else {
         double da = vtx_is_double(a) ? vtx_double_value(a) : (vtx_is_smi(a) ? (double)vtx_smi_value(a) : 0.0);
         double db = vtx_is_double(b) ? vtx_double_value(b) : (vtx_is_smi(b) ? (double)vtx_smi_value(b) : 0.0);
-        int64_t result = (da >= db) ? 1 : 0;
-        *sp++ = vtx_make_smi(result);
+        *sp++ = vtx_make_bool(da >= db);
     }
     DISPATCH_NEXT();
 
@@ -1173,6 +1243,14 @@ dispatch_VT_OP_CALL_STATIC:
         vtx_profiler_record_call_type(&interp->profiler, frame->method,
                                        (uint32_t)pc, receiver_tid);
 
+        /* Bug #1 fix: Pop arguments from caller's stack and copy to callee locals */
+        uint32_t arg_count = count_method_args(target_method->signature);
+        vtx_value_t call_args[16];
+        if (arg_count > 16) arg_count = 16;
+        for (uint32_t ai = arg_count; ai > 0; ai--) {
+            call_args[ai - 1] = *--sp;
+        }
+
         /* Create new frame for the callee */
         vtx_frame_t *callee_frame = vtx_frame_create(
             target_method, frame, (uint32_t)(pc + vtx_bytecode_insn_length(bc, pc)),
@@ -1180,6 +1258,11 @@ dispatch_VT_OP_CALL_STATIC:
         if (callee_frame == NULL) {
             *sp++ = VTX_VALUE_UNDEFINED;
             DISPATCH_NEXT();
+        }
+
+        /* Copy arguments into callee's locals */
+        for (uint32_t ai = 0; ai < arg_count && ai < callee_frame->locals_count; ai++) {
+            callee_frame->locals[ai] = call_args[ai];
         }
 
         /* Switch to the callee frame */
@@ -1240,6 +1323,14 @@ dispatch_VT_OP_CALL_VIRTUAL:
         /* Record invocation */
         vtx_profiler_record_invocation(&interp->profiler, target_method);
 
+        /* Bug #1 fix: Pop arguments from caller's stack and copy to callee locals */
+        uint32_t varg_count = count_method_args(target_method->signature);
+        vtx_value_t vcall_args[16];
+        if (varg_count > 16) varg_count = 16;
+        for (uint32_t ai = varg_count; ai > 0; ai--) {
+            vcall_args[ai - 1] = *--sp;
+        }
+
         /* Create new frame for the callee */
         vtx_frame_t *callee_frame = vtx_frame_create(
             target_method, frame, (uint32_t)(pc + vtx_bytecode_insn_length(bc, pc)),
@@ -1247,6 +1338,11 @@ dispatch_VT_OP_CALL_VIRTUAL:
         if (callee_frame == NULL) {
             *sp++ = VTX_VALUE_UNDEFINED;
             DISPATCH_NEXT();
+        }
+
+        /* Copy arguments into callee's locals */
+        for (uint32_t ai = 0; ai < varg_count && ai < callee_frame->locals_count; ai++) {
+            callee_frame->locals[ai] = vcall_args[ai];
         }
 
         /* Switch to the callee frame */
@@ -1307,12 +1403,25 @@ dispatch_VT_OP_CALL_INTERFACE:
 
         vtx_profiler_record_invocation(&interp->profiler, target_method);
 
+        /* Bug #1 fix: Pop arguments from caller's stack and copy to callee locals */
+        uint32_t iarg_count = count_method_args(target_method->signature);
+        vtx_value_t icall_args[16];
+        if (iarg_count > 16) iarg_count = 16;
+        for (uint32_t ai = iarg_count; ai > 0; ai--) {
+            icall_args[ai - 1] = *--sp;
+        }
+
         vtx_frame_t *callee_frame = vtx_frame_create(
             target_method, frame, (uint32_t)(pc + vtx_bytecode_insn_length(bc, pc)),
             &interp->frame_stack);
         if (callee_frame == NULL) {
             *sp++ = VTX_VALUE_UNDEFINED;
             DISPATCH_NEXT();
+        }
+
+        /* Copy arguments into callee's locals */
+        for (uint32_t ai = 0; ai < iarg_count && ai < callee_frame->locals_count; ai++) {
+            callee_frame->locals[ai] = icall_args[ai];
         }
 
         SYNC_SP();
@@ -1642,6 +1751,21 @@ dispatch_VT_OP_TYPEOF:
         vtx_typeid_t tid = value_typeid(a);
         *sp++ = vtx_make_smi((int64_t)tid);
     }
+    DISPATCH_NEXT();
+
+    /* ===================================================================
+     * RUNTIME CALLS
+     * =================================================================== */
+
+    /* ---- VT_OP_CALL_RUNTIME ---- */
+dispatch_VT_OP_CALL_RUNTIME:
+    operand = read_operand(code, pc);
+    /* Bug #2 fix: CALL_RUNTIME handler — placeholder that pushes undefined.
+     * A full implementation would dispatch to the runtime function identified
+     * by the operand. For now, we just consume the operand and push undefined
+     * to avoid a NULL dispatch table entry and segfault. */
+    (void)operand;
+    *sp++ = VTX_VALUE_UNDEFINED;
     DISPATCH_NEXT();
 
     /* ===================================================================

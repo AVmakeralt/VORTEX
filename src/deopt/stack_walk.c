@@ -1,4 +1,5 @@
 #include "deopt/stack_walk.h"
+#include "interp/frame.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -408,22 +409,78 @@ vtx_reconstructed_stack_t *vtx_stack_walk(
         case VTX_FRAME_INTERPRETED: {
             /* For interpreter frames, we read the state directly.
              * The interpreter frame layout is defined in src/interp/frame.h.
-             * Here we create a placeholder frame — the actual reading
-             * is done by the OSR module which knows the frame layout. */
+             *
+             * Layout of vtx_frame_t on the stack:
+             *   The frame is a struct, so we read it via the frame pointer.
+             *   Key fields:
+             *     frame->method->id         → method_id
+             *     frame->bytecode->pc_offset + frame->return_pc → PC
+             *     frame->locals[]           → local variable values
+             *     frame->locals_count       → number of locals
+             *     frame->operand_stack[]    → operand stack values
+             *     frame->stack_top          → current stack depth
+             *
+             * Since vtx_frame_t is an in-memory struct (not a stack-allocated
+             * frame in the traditional sense), we can read it directly from
+             * the frame pointer if the pointer is valid. */
             vtx_reconstructed_frame_t frame;
             memset(&frame, 0, sizeof(frame));
             frame.original_kind = VTX_FRAME_INTERPRETED;
             frame.is_inlined = false;
 
-            /* Read interpreter frame fields.
-             * Interpreter frame layout (from frame.h):
-             *   [fp - 24] = method pointer
-             *   [fp - 16] = bytecode PC
-             *   [fp -  8] = locals pointer
-             *   etc.
-             * For now, we rely on the OSR module to do the actual
-             * frame reconstruction for interpreter frames. */
+            /* Try to read the interpreter frame from the frame pointer.
+             * The current_fp points to an interpreter frame (vtx_frame_t *).
+             * We read the fields through pointer arithmetic. */
+            const vtx_frame_t *interp_frame = (const vtx_frame_t *)current_fp;
+
+            /* Validate the frame pointer before reading */
+            uintptr_t fp_addr = (uintptr_t)current_fp;
+            if (fp_addr >= 0x1000 && fp_addr <= 0x7FFFFFFFFFFFull) {
+                /* Read method_id from the frame's method descriptor */
+                if (interp_frame->method != NULL) {
+                    frame.method_id = 0; /* method_desc has no id field */
+                }
+
+                /* Read the bytecode PC.
+                 * The interpreter's current PC is tracked by the dispatch
+                 * loop, not stored in the frame struct itself. The return_pc
+                 * is the PC to resume in the *caller* after return, not the
+                 * current method's PC. For a reconstructed frame, we use
+                 * return_pc as an approximation — the actual PC is available
+                 * only from the dispatch loop state. */
+                frame.bytecode_pc = interp_frame->return_pc;
+
+                /* Read local variables */
+                frame.local_count = interp_frame->locals_count;
+                if (frame.local_count > 0 && interp_frame->locals != NULL) {
+                    frame.locals = calloc(frame.local_count, sizeof(vtx_value_t));
+                    if (frame.locals) {
+                        uint32_t to_copy = frame.local_count;
+                        /* Safety: don't copy more than VTX_FRAME_MAX_LOCALS */
+                        if (to_copy > VTX_FRAME_MAX_LOCALS) to_copy = VTX_FRAME_MAX_LOCALS;
+                        memcpy(frame.locals, interp_frame->locals,
+                               to_copy * sizeof(vtx_value_t));
+                    }
+                }
+
+                /* Read operand stack */
+                frame.stack_count = (uint32_t)(interp_frame->stack_top > 0 ?
+                                                interp_frame->stack_top : 0);
+                if (frame.stack_count > 0 && interp_frame->operand_stack != NULL) {
+                    frame.stack = calloc(frame.stack_count, sizeof(vtx_value_t));
+                    if (frame.stack) {
+                        uint32_t to_copy = frame.stack_count;
+                        if (to_copy > VTX_FRAME_MAX_STACK_DEPTH)
+                            to_copy = VTX_FRAME_MAX_STACK_DEPTH;
+                        memcpy(frame.stack, interp_frame->operand_stack,
+                               to_copy * sizeof(vtx_value_t));
+                    }
+                }
+            }
+
             if (vtx_reconstructed_stack_add_frame(stack, &frame) != 0) {
+                free(frame.locals);
+                free(frame.stack);
                 vtx_reconstructed_stack_destroy(stack);
                 return NULL;
             }

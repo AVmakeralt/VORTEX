@@ -49,6 +49,7 @@ typedef enum {
     VTX_EXIT_TYPE_CHECK_FAILED,     /* guard on receiver type failed */
     VTX_EXIT_NULL_CHECK_FAILED,     /* guard on non-null failed */
     VTX_EXIT_BOUNDS_CHECK_FAILED,   /* array bounds check failed */
+    VTX_EXIT_DIVISION_BY_ZERO,     /* integer division by zero guard failed */
     VTX_EXIT_LOOP_BACK_EDGE,        /* loop back-edge (re-entry) */
     VTX_EXIT_UNKNOWN                /* catch-all */
 } vtx_side_exit_reason_t;

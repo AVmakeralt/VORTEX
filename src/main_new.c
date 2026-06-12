@@ -473,6 +473,7 @@ static int run_self_test(void)
                 .name = "fib",
                 .signature = "(I)I",
                 .bytecode = bc,
+                .compiled_code = NULL,
                 .vtable_index = 0,
                 .is_virtual = false
             };
@@ -697,7 +698,8 @@ static int run_self_test(void)
 
 static int run_benchmarks(void)
 {
-    printf("=== VORTEX Benchmarks ===\n\n");
+    printf("=== VORTEX Benchmarks (Honest Methodology) ===\n\n");
+    printf("Methodology: varying inputs, consumed results, 1M+ iterations\n\n");
 
     vtx_arena_t arena;
     vtx_arena_init(&arena);
@@ -708,7 +710,11 @@ static int run_benchmarks(void)
     vtx_gc_t gc;
     vtx_gc_init(&gc, &ts, VTX_GC_GENERATIONAL);
 
-    /* Benchmark: Interpreter fibonacci */
+    /* Global accumulator to prevent dead code elimination */
+    volatile int64_t result_sink = 0;
+    int64_t accum = 0;
+
+    /* Benchmark: Interpreter fibonacci with varying inputs */
     {
         vtx_bytecode_t *bc = build_fib_bytecode(&arena);
         if (!bc) {
@@ -723,6 +729,7 @@ static int run_benchmarks(void)
             .name = "fib",
             .signature = "(I)I",
             .bytecode = bc,
+            .compiled_code = NULL,
             .vtable_index = 0,
             .is_virtual = false
         };
@@ -736,50 +743,60 @@ static int run_benchmarks(void)
             vtx_interp_run(&interp, &method, &arg, 1);
         }
 
-        /* Measure */
+        /* Measure with varying inputs to prevent constant folding */
         struct timespec start, end;
         clock_gettime(CLOCK_MONOTONIC, &start);
 
         for (int i = 0; i < VTX_BENCH_ITERATIONS; i++) {
-            vtx_value_t arg = vtx_make_smi(20);
-            vtx_interp_run(&interp, &method, &arg, 1);
+            /* Vary input between 18..22 to prevent constant folding */
+            int n = 18 + (i % 5);
+            vtx_value_t arg = vtx_make_smi(n);
+            vtx_value_t result = vtx_interp_run(&interp, &method, &arg, 1);
+            /* Consume result */
+            if (vtx_is_smi(result)) {
+                accum += vtx_smi_value(result);
+            }
         }
 
         clock_gettime(CLOCK_MONOTONIC, &end);
         double elapsed_ns = (end.tv_sec - start.tv_sec) * 1e9 + (end.tv_nsec - start.tv_nsec);
         double per_call_ns = elapsed_ns / VTX_BENCH_ITERATIONS;
 
-        printf("fib(20) T0 interpreter: %.0f ns/call\n", per_call_ns);
+        printf("fib(18..22) T0 interpreter: %.1f ns/call  (accum=%ld)\n", per_call_ns, (long)accum);
 
         vtx_interp_destroy(&interp);
     }
 
-    /* Benchmark: Native C fibonacci for comparison */
+    /* Benchmark: Native C fibonacci for comparison — honest methodology */
     {
         volatile int64_t sink;
+        int64_t native_accum = 0;
         /* Warmup */
         for (int i = 0; i < VTX_BENCH_WARMUP; i++) {
-            int64_t a = 0, b = 1, n = 20;
-            while (n > 0) { int64_t t = a + b; a = b; b = t; n--; }
+            int n = 18 + (i % 5);
+            int64_t a = 0, b = 1;
+            for (int j = 2; j <= n; j++) { int64_t t = a + b; a = b; b = t; }
             sink = a;
         }
-
-        struct timespec start, end;
-        clock_gettime(CLOCK_MONOTONIC, &start);
-
+        struct timespec n_start, n_end;
+        clock_gettime(CLOCK_MONOTONIC, &n_start);
         for (int i = 0; i < VTX_BENCH_ITERATIONS; i++) {
-            int64_t a = 0, b = 1, n = 20;
-            while (n > 0) { int64_t t = a + b; a = b; b = t; n--; }
-            sink = a;
+            /* Vary input to match interpreter benchmark */
+            int n = 18 + (i % 5);
+            int64_t a = 0, b = 1;
+            for (int j = 2; j <= n; j++) { int64_t t = a + b; a = b; b = t; }
+            native_accum += a; /* consume result */
         }
-
-        clock_gettime(CLOCK_MONOTONIC, &end);
-        double elapsed_ns = (end.tv_sec - start.tv_sec) * 1e9 + (end.tv_nsec - start.tv_nsec);
+        clock_gettime(CLOCK_MONOTONIC, &n_end);
+        double elapsed_ns = (n_end.tv_sec - n_start.tv_sec) * 1e9 + (n_end.tv_nsec - n_start.tv_nsec);
         double per_call_ns = elapsed_ns / VTX_BENCH_ITERATIONS;
-
-        printf("fib(20) native C:       %.0f ns/call\n", per_call_ns);
+        printf("fib(18..22) native C:       %.1f ns/call  (accum=%ld)\n", per_call_ns, (long)native_accum);
         (void)sink;
     }
+
+    /* Print final accumulator to prevent dead code elimination */
+    printf("\nAccumulator total: %ld (prevents dead code elimination)\n", (long)accum);
+    (void)result_sink;
 
     vtx_gc_destroy(&gc);
     vtx_type_system_destroy(&ts);
@@ -1164,6 +1181,7 @@ static int run_benchmarks_v2(void)
             .name = "fib",
             .signature = "(I)I",
             .bytecode = bc,
+            .compiled_code = NULL,
             .vtable_index = 0,
             .is_virtual = false
         };
@@ -1274,6 +1292,7 @@ static int run_benchmarks_v2(void)
             .name = "sum",
             .signature = "(I)I",
             .bytecode = bc,
+            .compiled_code = NULL,
             .vtable_index = 0,
             .is_virtual = false
         };
@@ -1374,6 +1393,7 @@ static int run_benchmarks_v2(void)
             .name = "array_sum",
             .signature = "(I)I",
             .bytecode = bc,
+            .compiled_code = NULL,
             .vtable_index = 0,
             .is_virtual = false
         };
@@ -1465,6 +1485,7 @@ static int run_benchmarks_v2(void)
             .name = "nested",
             .signature = "(I)I",
             .bytecode = bc,
+            .compiled_code = NULL,
             .vtable_index = 0,
             .is_virtual = false
         };
@@ -1742,6 +1763,7 @@ int main(int argc, char *argv[])
             .name = "main",
             .signature = "()V",
             .bytecode = bc,
+            .compiled_code = NULL,
             .vtable_index = 0,
             .is_virtual = false
         };

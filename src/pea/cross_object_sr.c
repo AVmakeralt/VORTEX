@@ -53,6 +53,7 @@ static int alloc_graph_add_edge(vtx_alloc_graph_t *g, vtx_arena_t *arena,
     edge->field_offset  = field_offset;
     edge->store_node_id = store_node_id;
     edge->next          = NULL;
+    edge->rev_next      = NULL;
 
     /* Add to forward adjacency list */
     if (container_id < g->edge_array_size) {
@@ -62,9 +63,8 @@ static int alloc_graph_add_edge(vtx_alloc_graph_t *g, vtx_arena_t *arena,
 
     /* Add to reverse adjacency list */
     if (value_id < g->reverse_array_size) {
-        /* For reverse edges, we reuse the same edge struct but link via
-         * a separate list head. Since we can't have two 'next' pointers,
-         * we scan the all_edges array for reverse lookups instead. */
+        edge->rev_next = g->reverse_edges[value_id];
+        g->reverse_edges[value_id] = edge;
     }
 
     g->edge_count++;
@@ -126,16 +126,8 @@ static int build_alloc_graph(vtx_graph_t *graph, vtx_alloc_graph_t *g,
         }
     }
 
-    /* Build reverse adjacency lists */
-    for (uint32_t e = 0; e < g->edge_count; e++) {
-        vtx_alloc_edge_t *edge = &g->all_edges[e];
-        if (edge->value_id < g->reverse_array_size) {
-            /* Prepend to reverse list — we use a simple approach:
-             * store as a linked list by repurposing:
-             * We need a separate next pointer for reverse, so we'll
-             * just scan all_edges for reverse lookups. */
-        }
-    }
+    /* Reverse adjacency lists are now populated in alloc_graph_add_edge()
+     * as edges are added, so no separate build pass is needed. */
 
     return 0;
 }

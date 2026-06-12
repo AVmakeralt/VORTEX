@@ -269,11 +269,10 @@ int vtx_threadpool_submit(vtx_threadpool_t *pool,
     task.heat    = (uint32_t)(priority > 0 ? priority : 0);
     task.tier    = VTX_TIER_T2; /* default tier */
 
-    int ret = vtx_threadpool_submit_task(pool, &task);
+    /* vtx_threadpool_submit_task already increments total_tasks_submitted,
+     * so we must not double-count here. */
 
-    __atomic_fetch_add(&pool->total_tasks_submitted, 1, __ATOMIC_RELAXED);
-
-    return ret;
+    return vtx_threadpool_submit_task(pool, &task);
 }
 
 int vtx_threadpool_submit_task(vtx_threadpool_t *pool,

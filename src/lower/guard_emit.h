@@ -37,6 +37,13 @@ typedef struct {
     uint32_t        frame_state_index; /* index into FrameState array */
     uint32_t        type_id;        /* TypeID this guard depends on (0 = none) */
     uint32_t        shape_id;       /* ShapeID this guard depends on (0 = none) */
+
+    /* Native code offsets, filled during guard emission pipeline:
+     *   vtx_guard_emit_lower   -> jcc_native_offset
+     *   vtx_guard_emit_deopt_stubs -> deopt_stub_offset
+     *   vtx_guard_emit_patch   -> uses both to compute rel32 displacement */
+    uint32_t        jcc_native_offset;   /* native offset of the JCC instruction (6 bytes: 0F 8x cd) */
+    uint32_t        deopt_stub_offset;   /* native offset of the deopt stub for this guard */
 } vtx_guard_desc_t;
 
 /* ========================================================================== */
@@ -127,5 +134,29 @@ int vtx_guard_emit_patch(vtx_guard_desc_array_t *guards,
                           vtx_x86_emit_t *emit,
                           uint8_t *code_start,
                           vtx_arena_t *arena);
+
+/* ========================================================================== */
+/* Deopt handler configuration                                                 */
+/* ========================================================================== */
+
+/**
+ * Set the global deopt handler function pointer.
+ *
+ * The deopt handler is called when a guard fails. It receives:
+ *   - RDI = frame_state_index (which FrameState to use for reconstitution)
+ *   - RSI = native_pc_offset (where in the compiled code the failure occurred)
+ *
+ * If no handler is set, a default stub is used that prints diagnostic
+ * information and calls abort().
+ *
+ * @param handler  Function pointer for the deopt handler
+ */
+void vtx_guard_emit_set_deopt_handler(void *handler);
+
+/**
+ * Get the current deopt handler function pointer.
+ * Returns NULL if no handler has been set (the default stub will be used).
+ */
+void *vtx_guard_emit_get_deopt_handler(void);
 
 #endif /* VORTEX_LOWER_GUARD_EMIT_H */

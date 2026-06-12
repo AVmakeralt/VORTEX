@@ -204,28 +204,11 @@ static vtx_live_interval_t *compute_live_intervals(vtx_inst_stream_t *stream,
         }
     }
 
-    /* Remove intervals that were never defined/used (start > end) */
-    uint32_t valid_count = 0;
-    for (uint32_t v = 0; v < vreg_count; v++) {
-        if (intervals[v].start <= intervals[v].end) {
-            valid_count++;
-        }
-    }
-
-    /* Compact the intervals array */
-    vtx_live_interval_t *valid_intervals = (vtx_live_interval_t *)vtx_arena_alloc(
-        arena, valid_count * sizeof(vtx_live_interval_t));
-    if (!valid_intervals && valid_count > 0) return NULL;
-
-    uint32_t idx = 0;
-    for (uint32_t v = 0; v < vreg_count; v++) {
-        if (intervals[v].start <= intervals[v].end) {
-            valid_intervals[idx++] = intervals[v];
-        }
-    }
-
-    *out_count = valid_count;
-    return valid_intervals;
+    /* Remove intervals that were never defined/used (start > end).
+     * We do NOT compact the array here — compaction happens after
+     * coalescing so that coalesce_copies can index by vreg number. */
+    *out_count = vreg_count;
+    return intervals;
 }
 
 /* ========================================================================== */
@@ -395,22 +378,51 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
     if (!result) return NULL;
     memset(result, 0, sizeof(*result));
 
-    /* Compute live intervals */
+    /* Compute live intervals — returns vreg-indexed array (not compacted) */
     uint32_t interval_count = 0;
+    uint32_t vreg_count = stream->vreg_count;
     vtx_live_interval_t *intervals = compute_live_intervals(stream, &interval_count, arena);
 
-    result->intervals = intervals;
-    result->interval_count = interval_count;
-
-    /* Perform register coalescing before sorting */
-    uint32_t vreg_count = stream->vreg_count;
+    /* Perform register coalescing on the vreg-indexed array before compaction.
+     * coalesce_copies indexes the intervals array by vreg number, so the
+     * array must still be vreg-indexed at this point. */
     if (intervals && vreg_count > 0) {
         coalesce_copies(stream, intervals, vreg_count);
     }
 
+    /* Now compact the intervals: remove entries where start > end
+     * (intervals that were never defined/used, or were coalesced away). */
+    uint32_t valid_count = 0;
+    if (intervals) {
+        for (uint32_t v = 0; v < vreg_count; v++) {
+            if (intervals[v].start <= intervals[v].end &&
+                intervals[v].coalesce_src == VTX_VREG_INVALID) {
+                valid_count++;
+            }
+        }
+    }
+
+    vtx_live_interval_t *valid_intervals = NULL;
+    if (valid_count > 0) {
+        valid_intervals = (vtx_live_interval_t *)vtx_arena_alloc(
+            arena, valid_count * sizeof(vtx_live_interval_t));
+        if (!valid_intervals) return NULL;
+
+        uint32_t idx = 0;
+        for (uint32_t v = 0; v < vreg_count; v++) {
+            if (intervals[v].start <= intervals[v].end &&
+                intervals[v].coalesce_src == VTX_VREG_INVALID) {
+                valid_intervals[idx++] = intervals[v];
+            }
+        }
+    }
+
+    result->intervals = valid_intervals;
+    result->interval_count = valid_count;
+
     /* Sort intervals by start position */
-    if (intervals && interval_count > 0) {
-        qsort(intervals, interval_count, sizeof(vtx_live_interval_t), cmp_intervals_by_start);
+    if (valid_intervals && valid_count > 0) {
+        qsort(valid_intervals, valid_count, sizeof(vtx_live_interval_t), cmp_intervals_by_start);
     }
 
     /* Allocate vreg → phys_reg mapping */
@@ -530,8 +542,9 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
                 continue;
             }
 
-            uint8_t reg = 0;
-            while ((1u << reg) != reg_bit) reg++;
+            /* Use __builtin_ctz for O(1) register number extraction from bitmask,
+             * instead of O(N) loop counting bits. */
+            uint8_t reg = (uint8_t)__builtin_ctz(reg_bit);
 
             current->phys_reg = reg;
             free_regs &= ~reg_bit;
@@ -644,12 +657,16 @@ int vtx_regalloc_apply(vtx_inst_stream_t *stream,
                     inst->mem.base_vreg < result->vreg_to_phys_count) {
                     uint8_t phys = result->vreg_to_phys[inst->mem.base_vreg];
                     if (phys != 0xFF) {
-                        inst->mem.base_vreg = VTX_VREG_INVALID;
-                        /* We need a separate field for physical register base.
-                         * For now, encode it as a special marker. */
-                        /* Store the physical register in the displacement's
-                         * upper bits (hack for this implementation) */
-                        inst->mem.disp = (int32_t)phys; /* Temp: will be resolved in emission */
+                        inst->mem.base_phys = phys;    /* Store physical register in the proper field */
+                        inst->mem.base_vreg = VTX_VREG_INVALID; /* Mark as resolved */
+                    }
+                }
+                if (inst->mem.index_vreg != VTX_VREG_INVALID &&
+                    inst->mem.index_vreg < result->vreg_to_phys_count) {
+                    uint8_t phys = result->vreg_to_phys[inst->mem.index_vreg];
+                    if (phys != 0xFF) {
+                        inst->mem.index_phys = phys;   /* Store physical register in the proper field */
+                        inst->mem.index_vreg = VTX_VREG_INVALID; /* Mark as resolved */
                     }
                 }
             }

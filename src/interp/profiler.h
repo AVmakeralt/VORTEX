@@ -89,10 +89,21 @@ typedef struct {
  * The profiler holds an array of profile data, one per method.
  * Methods are identified by their vtx_method_desc_t pointer.
  */
+/* LRU cache size for method lookups — avoids O(N) linear search on hot path */
+#define VTX_PROFILER_LRU_SIZE 8
+
 typedef struct {
     vtx_profile_data_t *data;       /* array of profile data entries */
     uint32_t            count;      /* number of methods being profiled */
     uint32_t            capacity;   /* capacity of the data array */
+
+    /* LRU cache: most recently used method→profile_data mappings.
+     * Checked before the linear scan on every lookup.
+     * On a hit, the entry is moved to slot 0 (MRU position). */
+    struct {
+        const vtx_method_desc_t *method;
+        vtx_profile_data_t      *pd;
+    } lru[VTX_PROFILER_LRU_SIZE];
 } vtx_profiler_t;
 
 /**

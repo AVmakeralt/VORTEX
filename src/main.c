@@ -235,7 +235,12 @@ static vtx_value_t interp_run(vtx_interp_t *interp)
         case VT_OP_IADD: {
             int64_t b = vtx_smi_value(frame_pop(frame));
             int64_t a = vtx_smi_value(frame_pop(frame));
-            frame_push(frame, vtx_make_smi(a + b));
+            int64_t result = a + b;
+            if (result > VTX_SMI_MAX || result < VTX_SMI_MIN) {
+                frame_push(frame, vtx_make_double((double)result));
+            } else {
+                frame_push(frame, vtx_make_smi(result));
+            }
             frame->pc += 1;
             break;
         }
@@ -243,7 +248,12 @@ static vtx_value_t interp_run(vtx_interp_t *interp)
         case VT_OP_ISUB: {
             int64_t b = vtx_smi_value(frame_pop(frame));
             int64_t a = vtx_smi_value(frame_pop(frame));
-            frame_push(frame, vtx_make_smi(a - b));
+            int64_t result = a - b;
+            if (result > VTX_SMI_MAX || result < VTX_SMI_MIN) {
+                frame_push(frame, vtx_make_double((double)result));
+            } else {
+                frame_push(frame, vtx_make_smi(result));
+            }
             frame->pc += 1;
             break;
         }
@@ -251,7 +261,12 @@ static vtx_value_t interp_run(vtx_interp_t *interp)
         case VT_OP_IMUL: {
             int64_t b = vtx_smi_value(frame_pop(frame));
             int64_t a = vtx_smi_value(frame_pop(frame));
-            frame_push(frame, vtx_make_smi(a * b));
+            int64_t result = a * b;
+            if (result > VTX_SMI_MAX || result < VTX_SMI_MIN) {
+                frame_push(frame, vtx_make_double((double)result));
+            } else {
+                frame_push(frame, vtx_make_smi(result));
+            }
             frame->pc += 1;
             break;
         }
@@ -458,9 +473,10 @@ static vtx_value_t interp_run(vtx_interp_t *interp)
 
         case VT_OP_GOTO: {
             uint16_t target = vtx_bytecode_read_operand(bc, frame->pc);
+            size_t old_pc = frame->pc;
             frame->pc = target;
             /* Check safepoint on backward branches */
-            if (target < frame->pc) {
+            if (target < old_pc) {
                 vtx_gc_safepoint(interp->gc);
             }
             break;
@@ -531,6 +547,14 @@ static vtx_value_t interp_run(vtx_interp_t *interp)
             vtx_value_t size_val = frame_pop(frame);
             int64_t arr_size = vtx_is_smi(size_val) ? vtx_smi_value(size_val) : 0;
             if (arr_size < 0) arr_size = 0;
+
+            /* Check for overflow before adding 1 for the length field */
+            if ((uint64_t)arr_size > (uint64_t)UINT32_MAX - 1) {
+                fprintf(stderr, "VORTEX: array size overflow\n");
+                frame_push(frame, vtx_make_null());
+                frame->pc += 3;
+                break;
+            }
 
             /* Allocate: header + length field + element fields */
             uint32_t total_fields = (uint32_t)arr_size + 1; /* +1 for length */

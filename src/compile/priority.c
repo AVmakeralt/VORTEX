@@ -33,10 +33,31 @@ static uint64_t now_ns(void)
 /* Internal: heap operations                                                   */
 /* ========================================================================== */
 
-static int64_t task_priority(const vtx_compile_task_t *task,
-                              uint64_t starvation_threshold_ns)
+static int64_t task_priority_cached(const vtx_compile_task_t *task,
+                                      uint64_t starvation_threshold_ns,
+                                      uint64_t now)
 {
-    return vtx_pq_task_priority(task, starvation_threshold_ns);
+    VTX_ASSERT(task != NULL, "task must not be NULL");
+
+    int64_t priority = 0;
+
+    /* Tier weight: dominant factor */
+    priority += (int64_t)task->tier * VTX_TIER_WEIGHT;
+
+    /* Heat weight: secondary factor */
+    priority += (int64_t)task->heat * VTX_HEAT_WEIGHT;
+
+    /* Starvation boost: tasks waiting too long get a priority increase */
+    if (task->submit_time > 0 && now > task->submit_time) {
+        uint64_t wait_time = now - task->submit_time;
+        if (wait_time > starvation_threshold_ns) {
+            uint64_t excess = wait_time - starvation_threshold_ns;
+            int64_t boost = (int64_t)(excess / VTX_STARVATION_DIVISOR);
+            priority += boost;
+        }
+    }
+
+    return priority;
 }
 
 static void swap_tasks(vtx_compile_task_t *a, vtx_compile_task_t *b)
@@ -49,12 +70,15 @@ static void swap_tasks(vtx_compile_task_t *a, vtx_compile_task_t *b)
 /* Sift up: restore heap property after insert */
 static void sift_up(vtx_priority_queue_t *pq, uint32_t index)
 {
+    /* Cache current time once for all comparisons in this operation */
+    uint64_t now = now_ns();
+
     while (index > 0) {
         uint32_t parent = (index - 1) / 2;
-        int64_t idx_pri = task_priority(&pq->tasks[index],
-                                         pq->starvation_threshold_ns);
-        int64_t par_pri = task_priority(&pq->tasks[parent],
-                                         pq->starvation_threshold_ns);
+        int64_t idx_pri = task_priority_cached(&pq->tasks[index],
+                                                pq->starvation_threshold_ns, now);
+        int64_t par_pri = task_priority_cached(&pq->tasks[parent],
+                                                pq->starvation_threshold_ns, now);
 
         if (idx_pri > par_pri) {
             swap_tasks(&pq->tasks[index], &pq->tasks[parent]);
@@ -68,17 +92,20 @@ static void sift_up(vtx_priority_queue_t *pq, uint32_t index)
 /* Sift down: restore heap property after pop */
 static void sift_down(vtx_priority_queue_t *pq, uint32_t index)
 {
+    /* Cache current time once for all comparisons in this operation */
+    uint64_t now = now_ns();
+
     while (true) {
         uint32_t largest = index;
         uint32_t left    = 2 * index + 1;
         uint32_t right   = 2 * index + 2;
 
-        int64_t largest_pri = task_priority(&pq->tasks[largest],
-                                             pq->starvation_threshold_ns);
+        int64_t largest_pri = task_priority_cached(&pq->tasks[largest],
+                                                    pq->starvation_threshold_ns, now);
 
         if (left < pq->count) {
-            int64_t left_pri = task_priority(&pq->tasks[left],
-                                              pq->starvation_threshold_ns);
+            int64_t left_pri = task_priority_cached(&pq->tasks[left],
+                                                     pq->starvation_threshold_ns, now);
             if (left_pri > largest_pri) {
                 largest = left;
                 largest_pri = left_pri;
@@ -86,8 +113,8 @@ static void sift_down(vtx_priority_queue_t *pq, uint32_t index)
         }
 
         if (right < pq->count) {
-            int64_t right_pri = task_priority(&pq->tasks[right],
-                                               pq->starvation_threshold_ns);
+            int64_t right_pri = task_priority_cached(&pq->tasks[right],
+                                                      pq->starvation_threshold_ns, now);
             if (right_pri > largest_pri) {
                 largest = right;
             }
@@ -256,25 +283,8 @@ int64_t vtx_pq_task_priority(const vtx_compile_task_t *task,
                                uint64_t starvation_threshold_ns)
 {
     VTX_ASSERT(task != NULL, "task must not be NULL");
-
-    int64_t priority = 0;
-
-    /* Tier weight: dominant factor */
-    priority += (int64_t)task->tier * VTX_TIER_WEIGHT;
-
-    /* Heat weight: secondary factor */
-    priority += (int64_t)task->heat * VTX_HEAT_WEIGHT;
-
-    /* Starvation boost: tasks waiting too long get a priority increase */
-    uint64_t now = now_ns();
-    if (task->submit_time > 0 && now > task->submit_time) {
-        uint64_t wait_time = now - task->submit_time;
-        if (wait_time > starvation_threshold_ns) {
-            uint64_t excess = wait_time - starvation_threshold_ns;
-            int64_t boost = (int64_t)(excess / VTX_STARVATION_DIVISOR);
-            priority += boost;
-        }
-    }
-
-    return priority;
+    /* Use cached time version with current time — this is the public API
+     * used outside of heap operations. For internal heap operations,
+     * task_priority_cached() is used instead to avoid repeated clock_gettime. */
+    return task_priority_cached(task, starvation_threshold_ns, now_ns());
 }

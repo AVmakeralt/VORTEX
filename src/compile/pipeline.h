@@ -24,6 +24,11 @@
 #include "runtime/arena.h"
 #include "vortex_config.h"
 
+/* Callee graph lookup callback for inlining.
+ * Given a method_index (from the call node), returns the callee's SoN graph
+ * or NULL if the callee is not available for inlining. */
+typedef const vtx_graph_t *(*vtx_callee_lookup_fn)(uint32_t method_index, void *context);
+
 /* Pipeline configuration */
 typedef struct {
     bool run_gvn;               /* Global Value Numbering */
@@ -34,9 +39,16 @@ typedef struct {
     bool run_pea;               /* Partial Escape Analysis */
     bool run_inlining;          /* ML-guided inlining */
     bool run_verify;            /* IR verification between passes */
+    bool run_speculative;       /* Speculative guard insertion (T3 only) */
     int  gvn_iterations;        /* Max GVN iterations */
     int  sccp_iterations;       /* Max SCCP iterations */
     int  dce_iterations;        /* Max DCE iterations */
+    int  inline_size_limit;     /* Max callee node count for inlining (0 = default) */
+
+    /* Callee graph lookup for inlining.
+     * If NULL, inlining decisions are recorded but the transform is skipped. */
+    vtx_callee_lookup_fn  callee_lookup;
+    void                 *callee_lookup_context;
 } vtx_pipeline_config_t;
 
 /* Pipeline statistics */
@@ -48,6 +60,7 @@ typedef struct {
     uint32_t bounds_checks_eliminated;
     uint32_t pea_allocs_eliminated;
     uint32_t inlining_decisions;
+    uint32_t inlines_performed;   /* number of call sites actually inlined */
     int64_t  total_pipeline_time_ns;
     int64_t  gvn_time_ns;
     int64_t  sccp_time_ns;

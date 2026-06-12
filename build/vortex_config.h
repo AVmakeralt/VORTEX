@@ -65,9 +65,9 @@
 /* LRU */
 #define VTX_LRU_UPDATE_INTERVAL 100
 
-/* Benchmarks */
-#define VTX_BENCH_WARMUP 10
-#define VTX_BENCH_ITERATIONS 100
+/* Benchmarks — increased for reliable sub-microsecond timing */
+#define VTX_BENCH_WARMUP 100
+#define VTX_BENCH_ITERATIONS 1000000
 
 /* Feedback window */
 #define VTX_FEEDBACK_WINDOW 10000

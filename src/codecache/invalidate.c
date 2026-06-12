@@ -142,11 +142,14 @@ int vtx_inverted_index_add(vtx_inverted_index_t *index,
     return add_to_dep_set(&entry->dep_set, method_id);
 }
 
+#define VTX_SHAPE_KEY_OFFSET 0x40000000u
+
 int vtx_inverted_index_add_shape(vtx_inverted_index_t *index,
                                   uint32_t shapeid, uint32_t method_id)
 {
-    /* Shape IDs use a different key space: offset by 0x80000000 */
-    return vtx_inverted_index_add(index, shapeid | 0x80000000u, method_id);
+    /* Shape IDs use a different key space: offset by VTX_SHAPE_KEY_OFFSET
+     * to avoid collision with TypeIDs that have the high bit set. */
+    return vtx_inverted_index_add(index, shapeid + VTX_SHAPE_KEY_OFFSET, method_id);
 }
 
 /* ========================================================================== */
@@ -230,7 +233,7 @@ int vtx_invalidate_dependencies(uint32_t typeid_,
 
         /* Set the method's code pointer to NULL atomically */
         if (cm->method_desc) {
-            __atomic_store_n(&cm->method_desc->bytecode, NULL, __ATOMIC_RELEASE);
+            __atomic_store_n(&cm->method_desc->compiled_code, NULL, __ATOMIC_RELEASE);
         }
 
         /* Free the code in the cache */
@@ -276,8 +279,8 @@ int vtx_invalidate_shape(vtx_shapeid_t shapeid,
                           vtx_method_registry_t *registry,
                           vtx_inverted_index_t *index)
 {
-    /* Shape IDs are stored with the high bit set */
-    return vtx_invalidate_dependencies(shapeid | 0x80000000u,
+    /* Shape IDs are stored with VTX_SHAPE_KEY_OFFSET to avoid TypeID collision */
+    return vtx_invalidate_dependencies(shapeid + VTX_SHAPE_KEY_OFFSET,
                                         cache, registry, index);
 }
 

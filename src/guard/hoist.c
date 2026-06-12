@@ -135,18 +135,51 @@ vtx_hoist_result_t vtx_hoist_guards(vtx_graph_t *graph,
         uint32_t preheader_idx = (uint32_t)-1;
 
         /* Walk up to find the loop header for this block.
-         * The loop header is the nearest ancestor block with is_loop_header=true
-         * and the same loop_depth as this block, or the block itself if it is
-         * the loop header. For simplicity, we search for the loop header that
-         * dominates this block by checking all loop headers. */
+         * The loop header must DOMINATE this block — i.e., the block
+         * must be reachable from the header. Sibling loops at the same
+         * depth must not be matched. We verify dominance by doing a
+         * forward BFS from the candidate header, staying within blocks
+         * of the same loop depth, and checking if we can reach the
+         * current block. */
         for (uint32_t h = 0; h < schedule->count; h++) {
             if (schedule->blocks[h].is_loop_header &&
                 schedule->blocks[h].loop_depth == block->loop_depth) {
-                /* Check if this loop header dominates our block.
-                 * Simplified check: if the block's loop_depth matches,
-                 * it's in this loop's body. A more precise check would
-                 * use dominator tree, but this approximation works for
-                 * structured loops. */
+                /* Check dominance: the header must reach this block
+                 * via forward edges within the same loop depth. */
+                bool dominates = false;
+                /* Simple BFS from the candidate header */
+                uint32_t *queue = (uint32_t *)vtx_arena_alloc(
+                    arena, schedule->count * sizeof(uint32_t));
+                bool *visited = (bool *)vtx_arena_alloc(
+                    arena, schedule->count * sizeof(bool));
+                if (queue && visited) {
+                    memset(visited, 0, schedule->count * sizeof(bool));
+                    uint32_t qhead = 0, qtail = 0;
+                    queue[qtail++] = h;
+                    visited[h] = true;
+                    while (qhead < qtail && !dominates) {
+                        uint32_t cur = queue[qhead++];
+                        const vtx_schedule_block_t *cur_block = &schedule->blocks[cur];
+                        for (uint32_t s = 0; s < cur_block->succ_count; s++) {
+                            uint32_t succ = cur_block->succ_blocks[s];
+                            if (succ >= schedule->count || visited[succ]) continue;
+                            /* Only follow edges within the same loop or
+                             * to inner loops (not to sibling loops). A
+                             * successor is in the same loop if its
+                             * loop_depth >= header's loop_depth. */
+                            if (schedule->blocks[succ].loop_depth <
+                                schedule->blocks[h].loop_depth) continue;
+                            visited[succ] = true;
+                            if (succ == block_idx) {
+                                dominates = true;
+                                break;
+                            }
+                            queue[qtail++] = succ;
+                        }
+                    }
+                }
+                if (!dominates) continue;
+
                 preheader_idx = vtx_hoist_find_preheader(schedule, h);
                 if (preheader_idx != (uint32_t)-1) break;
             }

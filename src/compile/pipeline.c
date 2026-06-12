@@ -111,19 +111,29 @@ vtx_pipeline_config_t vtx_pipeline_config_t2(void)
     cfg.run_bounds_check  = true;
     cfg.run_pea           = true;
     cfg.run_inlining      = true;
+    cfg.run_speculative   = false;  /* no speculation in T2 */
     cfg.run_verify        = false;  /* disabled by default for performance */
     cfg.gvn_iterations    = 3;
     cfg.sccp_iterations   = 3;
     cfg.dce_iterations    = 3;
+    cfg.inline_size_limit = 0;      /* use default VTX_INLINE_SIZE_LIMIT */
+    cfg.callee_lookup     = NULL;
+    cfg.callee_lookup_context = NULL;
     return cfg;
 }
 
 vtx_pipeline_config_t vtx_pipeline_config_t3(void)
 {
     /* T3 — Speculative JIT: full pipeline + speculative guards.
-     * Same as T2 but with verification enabled and more iterations
-     * for aggressive optimization. Used for very hot code with
-     * speculation support. */
+     * Same as T2 but with verification enabled, more iterations
+     * for aggressive optimization, and speculative guard insertion.
+     * Used for very hot code with speculation support.
+     *
+     * T3 differs from T2 in three ways:
+     *   1. Speculative guard insertion: type-check guards at call sites
+     *      based on profiling data, enabling deoptimization on type change.
+     *   2. More aggressive inlining: higher size limit for inlined callees.
+     *   3. More optimization iterations (5 vs 3). */
     vtx_pipeline_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.run_gvn           = true;
@@ -133,10 +143,14 @@ vtx_pipeline_config_t vtx_pipeline_config_t3(void)
     cfg.run_bounds_check  = true;
     cfg.run_pea           = true;
     cfg.run_inlining      = true;
+    cfg.run_speculative   = true;   /* enable speculative guard insertion */
     cfg.run_verify        = true;   /* verify aggressively in speculative tier */
     cfg.gvn_iterations    = 5;
     cfg.sccp_iterations   = 5;
     cfg.dce_iterations    = 5;
+    cfg.inline_size_limit = 512;    /* more aggressive: 2x the default limit */
+    cfg.callee_lookup     = NULL;
+    cfg.callee_lookup_context = NULL;
     return cfg;
 }
 
@@ -241,11 +255,13 @@ static uint32_t run_dce_pass(vtx_graph_t *graph,
  * Returns the number of inlining decisions made (both inline and no-inline).
  */
 static uint32_t run_inlining_pass(vtx_graph_t *graph,
+                                   const vtx_pipeline_config_t *config,
                                    vtx_arena_t *arena,
                                    int64_t *time_ns)
 {
     int64_t start = now_ns();
     uint32_t decisions = 0;
+    uint32_t inlined = 0;
 
     /* Initialize the GBDT model with default conservative weights */
     vtx_gbdt_model_t model;
@@ -259,6 +275,11 @@ static uint32_t run_inlining_pass(vtx_graph_t *graph,
         *time_ns = elapsed_ns(start);
         return 0;
     }
+
+    /* Determine the effective inline size limit */
+    uint32_t effective_size_limit = (config && config->inline_size_limit > 0)
+                                    ? (uint32_t)config->inline_size_limit
+                                    : VTX_INLINE_SIZE_LIMIT;
 
     /* Scan the graph for call nodes and make inlining decisions.
      *
@@ -292,9 +313,8 @@ static uint32_t run_inlining_pass(vtx_graph_t *graph,
     }
 
     /* Attempt inlining for each call site.
-     * In a real implementation, we'd look up the callee graph from
-     * a method registry. For now, we record the decision but skip
-     * the actual transform if no callee graph is available. */
+     * If a callee graph lookup callback is provided, we look up the
+     * callee graph, check can_inline(), and call vtx_inline_transform(). */
     for (uint32_t c = 0; c < call_count; c++) {
         vtx_nodeid_t call_id = call_nodes[c];
         vtx_node_t *call_node = vtx_graph_node(graph, call_id);
@@ -348,20 +368,35 @@ static uint32_t run_inlining_pass(vtx_graph_t *graph,
         decisions++;
 
         if (vtx_gbdt_should_inline(score)) {
-            /* In a real implementation, we would:
-             *   1. Look up the callee graph from the method registry
-             *   2. Check vtx_inline_can_inline()
-             *   3. Call vtx_inline_transform()
-             *   4. Record the decision in the feedback tracker
-             *
-             * For now, the decision is recorded but the actual transform
-             * requires a callee graph, which is provided externally. */
+            /* Look up the callee graph via the callback, if provided */
+            const vtx_graph_t *callee_graph = NULL;
+            if (config && config->callee_lookup) {
+                callee_graph = config->callee_lookup(
+                    call_node->method_index,
+                    config->callee_lookup_context);
+            }
+
+            if (callee_graph != NULL) {
+                /* Check if inlining is legal */
+                if (callee_graph->node_table.count <= effective_size_limit &&
+                    vtx_inline_can_inline(graph, call_id, callee_graph, 1)) {
+                    /* Perform the inlining transform */
+                    vtx_inline_result_t iresult = vtx_inline_transform(
+                        graph, call_id, callee_graph, arena);
+                    if (iresult.success) {
+                        inlined++;
+                    }
+                }
+            }
+            /* If no callee graph is available, the decision is recorded
+             * but the actual transform is deferred until a callee graph
+             * is provided (e.g., via a method registry at runtime). */
         }
     }
 
     vtx_gbdt_model_destroy(&model);
     *time_ns = elapsed_ns(start);
-    return decisions;
+    return (decisions << 16) | inlined;  /* pack decisions + inlined count */
 }
 
 /* ========================================================================== */
@@ -524,6 +559,12 @@ static int run_lowering_pipeline(vtx_graph_t *graph,
     vtx_x86_emit_prologue(&emitter, ra_result->frame_size,
                            ra_result->callee_saved_mask);
 
+    /* Note: Epilogue is emitted by the RET instruction handler in
+     * emit_single_inst(), which calls vtx_x86_emit_epilogue() to
+     * restore callee-saved registers before the ret instruction.
+     * This correctly handles functions with multiple return points.
+     * We do NOT emit a separate epilogue at the end of the function. */
+
     /* Emit the function body */
     if (vtx_x86_emit_function(&emitter, inst_stream, ra_result, arena) != 0) {
         fprintf(stderr, "[pipeline] code emission failed\n");
@@ -532,8 +573,10 @@ static int run_lowering_pipeline(vtx_graph_t *graph,
         return -1;
     }
 
-    /* Emit epilogue */
-    vtx_x86_emit_epilogue(&emitter, ra_result->callee_saved_mask);
+    /* Epilogue is now emitted by each RET instruction in the function body.
+     * We no longer emit a separate epilogue at the end because the RET
+     * handler in emit_single_inst() calls vtx_x86_emit_epilogue() which
+     * restores callee-saved registers and emits the ret instruction. */
 
     /* Copy the emitted code into the result.
      * We use malloc here (not arena) because the native code must outlive
@@ -654,8 +697,10 @@ int vtx_pipeline_run(vtx_graph_t *graph,
     /* optimizations across the call boundary.                            */
     /* ================================================================== */
     if (config->run_inlining) {
-        stats.inlining_decisions = run_inlining_pass(
-            graph, arena, &stats.inlining_time_ns);
+        uint32_t inline_result = run_inlining_pass(
+            graph, config, arena, &stats.inlining_time_ns);
+        stats.inlining_decisions = inline_result >> 16;
+        stats.inlines_performed = inline_result & 0xFFFF;
 
         if (verify_between_passes(graph, config, "Inlining") != 0) {
             result->stats = stats;
@@ -808,6 +853,73 @@ int vtx_pipeline_run(vtx_graph_t *graph,
             graph, &schedule, arena, &stats.bounds_check_time_ns);
 
         if (verify_between_passes(graph, config, "BoundsCheck") != 0) {
+            result->stats = stats;
+            return -1;
+        }
+    }
+
+    /* ================================================================== */
+    /* Phase 9.5: Speculative Guard Insertion (T3 only)                   */
+    /*                                                                    */
+    /* Inserts type-check guards at virtual call sites based on profiling  */
+    /* data. If a dominant type is observed, a guard checks the receiver  */
+    /* type and deoptimizes on mismatch. This enables speculative          */
+    /* devirtualization and more aggressive inlining in the T3 tier.       */
+    /* ================================================================== */
+    if (config->run_speculative) {
+        /* Scan for virtual call sites and insert type guards.
+         * For each CallVirtual/CallInterface, if profiling data shows
+         * a dominant receiver type, insert a DeoptGuard that checks
+         * the receiver's type_id against the observed dominant type.
+         * On type mismatch, execution falls back to the interpreter. */
+        vtx_node_table_t *ntable = &graph->node_table;
+        for (uint32_t i = 0; i < ntable->count; i++) {
+            vtx_node_t *node = &ntable->nodes[i];
+            if (node->dead) continue;
+            if (node->opcode != VTX_OP_CallVirtual &&
+                node->opcode != VTX_OP_CallInterface) continue;
+            if (node->input_count < 1) continue;
+
+            /* The receiver is the first data input (after control+memory).
+             * For now, we insert a DeoptGuard that checks the receiver
+             * type_id against a speculated dominant type. Since we don't
+             * have runtime type feedback in the pipeline, we use the
+             * node's type_id as a speculative hint. */
+            /* TODO: Integrate with vtx_type_feedback_t to get the actual
+             * dominant receiver type from profiling data. When available,
+             * use vtx_type_feedback_get_dominant_call_type() to determine
+             * the speculated type. */
+            vtx_nodeid_t receiver_id = VTX_NODEID_INVALID;
+            for (uint32_t inp = 0; inp < node->input_count; inp++) {
+                const vtx_node_t *inp_node = vtx_node_get_const(ntable, node->inputs[inp]);
+                if (inp_node && vtx_nf_has(inp_node->flags, VTX_NF_DATA)) {
+                    receiver_id = node->inputs[inp];
+                    break;
+                }
+            }
+
+            if (receiver_id != VTX_NODEID_INVALID && node->type_id != 0) {
+                /* Insert a DeoptGuard before this call:
+                 * Guard(receiver_type == speculated_type)
+                 * On failure, deoptimize to interpreter. */
+                vtx_nodeid_t guard_id = vtx_node_create(ntable, VTX_OP_DeoptGuard);
+                if (guard_id != VTX_NODEID_INVALID) {
+                    vtx_node_t *guard = vtx_node_get(ntable, guard_id);
+                    if (guard) {
+                        guard->cond = VTX_COND_EQ;
+                        guard->type_id = node->type_id;
+                        guard->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+                        guard->bytecode_pc = node->bytecode_pc;
+                        /* Add the receiver as input */
+                        vtx_node_add_input(ntable, guard_id, receiver_id);
+                        /* Mark this as a speculative guard for T3 */
+                        guard->frame_state = node->frame_state;
+                    }
+                }
+            }
+        }
+
+        if (verify_between_passes(graph, config, "SpeculativeGuards") != 0) {
             result->stats = stats;
             return -1;
         }

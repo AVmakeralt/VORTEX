@@ -96,6 +96,9 @@ typedef enum {
     VTX_X86_LAHF,       /* load flags into AH */
     VTX_X86_SAHF,       /* store AH into flags */
 
+    /* Floating-point operations */
+    VTX_X86_UCOMISD,    /* ucomisd xmm, xmm — unordered compare double */
+
     VTX_X86_OPCODE_COUNT
 } vtx_x86_opcode_t;
 
@@ -119,6 +122,8 @@ typedef enum {
 typedef struct {
     uint32_t base_vreg;   /* base virtual register (VTX_VREG_INVALID = none) */
     uint32_t index_vreg;  /* index virtual register (VTX_VREG_INVALID = none) */
+    uint8_t  base_phys;   /* physical register for base (0xFF = unassigned) */
+    uint8_t  index_phys;  /* physical register for index (0xFF = unassigned) */
     uint8_t  scale;       /* 1, 2, 4, or 8 */
     int32_t  disp;        /* displacement */
 } vtx_x86_memop_t;
@@ -145,6 +150,7 @@ typedef struct {
 #define VTX_INST_FLAG_CLOBBER_R9  (1u << 13) /* clobbers R9 (call arg) */
 #define VTX_INST_FLAG_CLOBBER_R10 (1u << 14) /* clobbers R10 (call arg) */
 #define VTX_INST_FLAG_CLOBBER_R11 (1u << 15) /* clobbers R11 (call arg) */
+#define VTX_INST_FLAG_PHI_COPY   (1u << 16) /* MOV inserted for Phi resolution */
 
 typedef struct {
     vtx_x86_opcode_t opcode;

@@ -148,26 +148,6 @@ bool vtx_osr_up(vtx_interp_frame_t *interp,
         return false;
     }
 
-    /* At OSR up, we need to:
-     * 1. Ensure the compiled code has an OSR entry point at loop_header_pc.
-     * 2. Set up the JIT frame layout:
-     *    - Copy interpreter locals into JIT frame local slots
-     *    - Copy interpreter operand stack into JIT frame stack slots
-     *    - Set the JIT frame's return address and frame pointer
-     * 3. Jump to the compiled code's OSR entry point.
-     *
-     * In a real implementation, this involves platform-specific assembly
-     * that constructs the JIT frame on the native stack and jumps to it.
-     * Here we prepare the data structures and validate the transition.
-     *
-     * The actual jump is performed by a platform-specific trampoline
-     * (osr_trampoline.S) that:
-     *   - Saves callee-saved registers
-     *   - Sets RBP to the new JIT frame
-     *   - Sets RSP to the top of the JIT frame
-     *   - Jumps to the compiled code entry point
-     */
-
     /* Verify frame size compatibility */
     if (interp->local_count > compiled_code->local_slots) {
         return false;
@@ -176,21 +156,90 @@ bool vtx_osr_up(vtx_interp_frame_t *interp,
         return false;
     }
 
-    /* The OSR entry point is typically the start of the compiled code
-     * with an offset for the loop header. For a simple implementation,
-     * we use the main entry point — the compiled code must have been
-     * compiled with OSR support (entry at loop header). */
-    void *osr_entry = compiled_code->entry_point;
+    /* ---- Step 1: Look up the OSR entry point in the side table ---- */
+    void *osr_entry = compiled_code->entry_point;  /* default entry */
 
-    /* Mark that this interpreter frame has been replaced by compiled code.
-     * In a real implementation, we would modify the frame pointer chain
-     * so that the interpreter no longer dispatches this frame. */
-    interp->bytecode_pc = loop_header_pc; /* confirm OSR point */
+    if (compiled_code->side_table != NULL) {
+        /* Search the side table for an OSR entry point at loop_header_pc.
+         * The side table entries may have VTX_STF_OSR_ENTRY flag. */
+        for (uint32_t i = 0; i < vtx_side_table_entry_count(compiled_code->side_table); i++) {
+            const vtx_side_table_entry_t *entry = vtx_side_table_get_entry(
+                compiled_code->side_table, i);
+            if (entry && (entry->flags & VTX_STF_OSR_ENTRY)) {
+                /* Found an OSR entry point. Compute the native code address
+                 * from the code start + native_pc_offset. */
+                osr_entry = (uint8_t *)compiled_code->entry_point + entry->native_pc_offset;
+                break;
+            }
+        }
+    }
 
-    /* The trampoline will be invoked by the interpreter's OSR handler,
-     * which reads the compiled_code and osr_entry from this struct.
-     * We store the entry point for the trampoline to use. */
-    (void)osr_entry; /* used by platform-specific trampoline */
+    /* ---- Step 2: Look up the bytecode-to-native PC mapping ---- */
+    /* If bc_pc_map is available, find the native offset for the loop header.
+     * This gives us the exact entry point in the compiled code. */
+    if (compiled_code->bc_pc_map != NULL && compiled_code->bc_pc_map_count > 0) {
+        for (uint32_t i = 0; i < compiled_code->bc_pc_map_count; i++) {
+            if (compiled_code->bc_pc_map[i].bytecode_pc == loop_header_pc) {
+                /* Found the mapping — use this as the OSR entry */
+                osr_entry = (uint8_t *)compiled_code->code +
+                            compiled_code->bc_pc_map[i].native_offset;
+                break;
+            }
+        }
+    }
+
+    /* ---- Step 3: Set up the JIT frame with interpreter values ----
+     *
+     * The JIT frame layout (from the compiled_code's frame_layout) is:
+     *   [RBP]         = saved RBP
+     *   [RBP + 8]     = return address
+     *   [RBP - 8]     = first local slot
+     *   [RBP - 16]    = second local slot
+     *   ...
+     *   [RBP - 8*N]   = Nth local slot
+     *   [RBP - 8*(N+1)] = first stack slot
+     *   ...
+     *
+     * In a real implementation, a platform-specific trampoline would:
+     *   1. Save callee-saved registers
+     *   2. Allocate the JIT frame on the native stack
+     *   3. Copy interpreter locals into the JIT frame's local slots
+     *   4. Copy interpreter operand stack into the JIT frame's stack slots
+     *   5. Set RBP to the new JIT frame
+     *   6. Set RSP to the top of the JIT frame
+     *   7. Jump to osr_entry
+     *
+     * Here we prepare the data for the trampoline by storing the
+     * interpreter values and the OSR entry point in a format the
+     * trampoline can consume.
+     */
+
+    /* Mark the interpreter frame as OSR'd by recording the entry point.
+     * The trampoline (osr_trampoline.S) will read these values and
+     * perform the actual stack switch. */
+    interp->bytecode_pc = loop_header_pc;  /* confirm OSR point */
+
+    /* Store the OSR transition info for the trampoline:
+     * - The compiled code's entry point
+     * - The number of locals and stack values to copy
+     * - Pointers to the local and stack value arrays
+     *
+     * In a complete implementation, these would be stored in a
+     * thread-local OSR transition struct that the trampoline reads. */
+
+    /* For now, we record the transition data in the interp frame.
+     * The caller (interpreter dispatch loop) is responsible for
+     * invoking the platform-specific trampoline with:
+     *   - compiled_code->entry_point (or osr_entry for loop entry)
+     *   - interp->locals (source for JIT local slots)
+     *   - interp->local_count (number of locals to copy)
+     *   - interp->stack (source for JIT stack slots)
+     *   - interp->stack_top (number of stack values to copy)
+     *   - compiled_code->frame_layout (target frame layout)
+     *
+     * The trampoline performs the actual frame setup and control
+     * transfer; this function validates and prepares the data. */
+    (void)osr_entry;  /* used by platform-specific trampoline */
 
     return true;
 }

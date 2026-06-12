@@ -184,14 +184,23 @@ int vtx_safepoint_check(vtx_safepoint_manager_t *manager, void *interp)
         return 0;
     }
 
-    /* Slow path: process pending work */
+    /* Slow path: process pending work.
+     *
+     * Atomically exchange the state to VTX_SP_CLEAR before processing.
+     * This ensures that any new requests that arrive during processing
+     * will set the flag again and will not be lost. If we cleared
+     * unconditionally after processing, requests arriving between
+     * the initial load and the clear would be discarded. */
+    vtx_safepoint_state_t orig_state =
+        __atomic_exchange_n(&manager->state, VTX_SP_CLEAR, __ATOMIC_ACQ_REL);
+
     struct timespec start, end;
     clock_gettime(CLOCK_MONOTONIC, &start);
 
     int result = 0;
 
     /* Process installations */
-    if (state & VTX_SP_INSTALL_PENDING) {
+    if (orig_state & VTX_SP_INSTALL_PENDING) {
         uint32_t installed = process_installations(manager);
         manager->total_installations += installed;
         if (installed > 0) {
@@ -200,16 +209,13 @@ int vtx_safepoint_check(vtx_safepoint_manager_t *manager, void *interp)
     }
 
     /* Process invalidations */
-    if (state & VTX_SP_INVALIDATE_PENDING) {
+    if (orig_state & VTX_SP_INVALIDATE_PENDING) {
         uint32_t invalidated = process_invalidations(manager);
         manager->total_invalidations += invalidated;
         if (invalidated > 0) {
             result = -1; /* signal that deopt may be needed */
         }
     }
-
-    /* Clear the global flag */
-    __atomic_store_n(&manager->state, VTX_SP_CLEAR, __ATOMIC_RELEASE);
 
     clock_gettime(CLOCK_MONOTONIC, &end);
     uint64_t elapsed_ns =

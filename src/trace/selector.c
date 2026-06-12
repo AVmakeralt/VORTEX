@@ -125,21 +125,16 @@ static int vtx_trace_selector_scan_profiler(
          * to find the PC of the backward branch instruction. */
         loop.loop_header_pc = 0; /* will be refined below */
 
-        /* Search the branch array for backward branches */
-        bool found_header = false;
-        for (uint32_t j = 0; j < pd->branch_array_size; j++) {
-            if (pd->branch_taken_counts[j] == 0) continue;
-
-            /* This is a branch that was taken. Check if it's a backward branch
-             * by reading the bytecode at this PC to get the target.
-             * Since we don't have the bytecode here, we approximate:
-             * the loop header PC is stored as 0, and the recorder
-             * will use the global profile's loop data to find it. */
-            if (!found_header) {
-                loop.loop_header_pc = j;
-                found_header = true;
-            }
-        }
+        /* Search the branch array for backward branches.
+         * NOTE: We cannot determine the actual loop header PC here
+         * because we don't have the bytecode to decode branch targets.
+         * The branch_taken_counts[j] == 0 check only tells us that
+         * a branch at PC j was taken, not that j is the loop header.
+         * The loop header is the TARGET of the backward branch, not
+         * the PC of the branch instruction itself.
+         * We leave loop_header_pc as 0; the global profile scan
+         * (Phase 2) provides the correct loop_header_pc from
+         * lp->loop_header_pc. */
 
         /* If we couldn't find a specific loop header from branches,
          * we still add the method as a hot loop candidate with PC=0.
@@ -192,15 +187,12 @@ static int vtx_trace_selector_scan_global_profile(
             }
 
             if (!duplicate) {
-                vtx_hot_loop_t loop;
-                loop.method = NULL; /* resolved later from method_id */
-                loop.loop_header_pc = lp->loop_header_pc;
-                loop.heat = lp->backedge_count;
-                loop.method_id = mp->method_id;
-
-                if (vtx_hot_loop_list_append(&selector->hot_loops, &loop) != 0) {
-                    return -1;
-                }
+                /* Skip global profile entries where method is NULL.
+                 * Without a method pointer, the recorder would
+                 * NULL-dereference when trying to access method data.
+                 * Only add entries that refine existing profiler
+                 * entries (handled by the duplicate path above). */
+                continue;
             }
         }
     }

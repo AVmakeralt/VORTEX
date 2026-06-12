@@ -54,6 +54,9 @@ typedef struct {
 
     /* Whether recording should stop */
     bool                stopped;
+
+    /* Whether a stack overflow occurred during recording */
+    bool                stack_overflow;
 } vtx_record_state_t;
 
 /* ========================================================================== */
@@ -71,13 +74,16 @@ static int vtx_record_stack_init(vtx_record_state_t *state, uint16_t max_stack)
     return 0;
 }
 
-static void vtx_record_stack_push(vtx_record_state_t *state, vtx_nodeid_t node)
+static int vtx_record_stack_push(vtx_record_state_t *state, vtx_nodeid_t node)
 {
     VTX_ASSERT(state->stack_top < state->stack_capacity,
                "operand stack overflow during trace recording");
-    if (state->stack_top < state->stack_capacity) {
-        state->stack[state->stack_top++] = node;
+    if (state->stack_top >= state->stack_capacity) {
+        state->stack_overflow = true;
+        return -1;
     }
+    state->stack[state->stack_top++] = node;
+    return 0;
 }
 
 static vtx_nodeid_t vtx_record_stack_pop(vtx_record_state_t *state)
@@ -175,6 +181,57 @@ static bool vtx_record_branch_is_taken(vtx_record_state_t *state, uint32_t pc)
 
     /* Default: assume branch is not taken (fall-through is hot) */
     return false;
+}
+
+/* ========================================================================== */
+/* Helper: count method arguments from signature string                        */
+/* ========================================================================== */
+
+/**
+ * Parse a JVM-style method signature to count the number of arguments.
+ * Signature format: "(ArgDescriptors)ReturnDescriptor"
+ * e.g., "(II)I" has 2 args, "(Ljava/lang/String;I)V" has 2 args,
+ *       "([I[D)V" has 2 args (int[] and double[]).
+ *
+ * Returns the number of arguments, or 0 if the signature is NULL/invalid.
+ */
+static uint32_t vtx_count_method_args_from_sig(const char *sig)
+{
+    if (sig == NULL || sig[0] != '(') return 0;
+
+    uint32_t count = 0;
+    uint32_t i = 1; /* skip '(' */
+
+    while (sig[i] != '\0' && sig[i] != ')') {
+        if (sig[i] == 'B' || sig[i] == 'C' || sig[i] == 'D' ||
+            sig[i] == 'F' || sig[i] == 'I' || sig[i] == 'J' ||
+            sig[i] == 'S' || sig[i] == 'Z') {
+            /* Primitive type — one argument */
+            count++;
+            i++;
+        } else if (sig[i] == 'L') {
+            /* Object type: Lclassname; — skip to ';' */
+            count++;
+            while (sig[i] != '\0' && sig[i] != ';') i++;
+            if (sig[i] == ';') i++;
+        } else if (sig[i] == '[') {
+            /* Array type: skip all '[' then process the element type */
+            while (sig[i] == '[') i++;
+            /* Now process the element type (without incrementing count) */
+            if (sig[i] == 'L') {
+                while (sig[i] != '\0' && sig[i] != ';') i++;
+                if (sig[i] == ';') i++;
+            } else if (sig[i] != '\0') {
+                i++; /* primitive element type */
+            }
+            count++;
+        } else {
+            /* Unknown character — skip */
+            i++;
+        }
+    }
+
+    return count;
 }
 
 /* ========================================================================== */
@@ -319,6 +376,8 @@ static int vtx_record_instruction(vtx_record_state_t *state)
 
     /* ---- Field access ---- */
     case VT_OP_LOAD_FIELD: {
+        /* Capture stack depth before consuming inputs (Bug 1 fix) */
+        uint32_t pre_sp = state->stack_top;
         vtx_nodeid_t obj = vtx_record_stack_pop(state);
         if (obj == VTX_NODEID_INVALID) return -1;
 
@@ -335,12 +394,15 @@ static int vtx_record_instruction(vtx_record_state_t *state)
         vtx_side_exit_t *exit = vtx_side_exit_create(
             state->exit_table, state->arena,
             state->pc, /* target PC: re-execute this instruction in interpreter */
-            state->stack, state->stack_top,
+            state->stack, pre_sp,
             state->locals, state->max_locals,
             VTX_EXIT_NULL_CHECK_FAILED, guard_nid, state->trace->trace_id);
         if (exit != NULL) {
             vtx_record_add_side_exit(state, exit);
         }
+
+        /* Update control chain (Bug 7 fix) */
+        state->control = guard_nid;
 
         /* Emit the field load */
         vtx_nodeid_t nid = vtx_record_emit_node(state, VTX_OP_LoadField);
@@ -358,6 +420,8 @@ static int vtx_record_instruction(vtx_record_state_t *state)
         break;
     }
     case VT_OP_STORE_FIELD: {
+        /* Capture stack depth before consuming inputs (Bug 1 fix) */
+        uint32_t pre_sp = state->stack_top;
         vtx_nodeid_t val = vtx_record_stack_pop(state);
         vtx_nodeid_t obj = vtx_record_stack_pop(state);
         if (val == VTX_NODEID_INVALID || obj == VTX_NODEID_INVALID) return -1;
@@ -374,12 +438,15 @@ static int vtx_record_instruction(vtx_record_state_t *state)
         vtx_side_exit_t *exit = vtx_side_exit_create(
             state->exit_table, state->arena,
             state->pc,
-            state->stack, state->stack_top,
+            state->stack, pre_sp,
             state->locals, state->max_locals,
             VTX_EXIT_NULL_CHECK_FAILED, guard_nid, state->trace->trace_id);
         if (exit != NULL) {
             vtx_record_add_side_exit(state, exit);
         }
+
+        /* Update control chain (Bug 7 fix) */
+        state->control = guard_nid;
 
         /* Emit the field store */
         vtx_nodeid_t nid = vtx_record_emit_node(state, VTX_OP_StoreField);
@@ -437,9 +504,33 @@ static int vtx_record_instruction(vtx_record_state_t *state)
         break;
     }
     case VT_OP_IDIV: {
+        /* Capture stack depth before consuming inputs (Bug 1 fix) */
+        uint32_t pre_sp = state->stack_top;
         vtx_nodeid_t b = vtx_record_stack_pop(state);
         vtx_nodeid_t a = vtx_record_stack_pop(state);
         if (a == VTX_NODEID_INVALID || b == VTX_NODEID_INVALID) return -1;
+
+        /* Bug 4 fix: Emit divide-by-zero guard */
+        vtx_nodeid_t dz_guard = vtx_record_emit_node(state, VTX_OP_Guard);
+        if (dz_guard == VTX_NODEID_INVALID) return -1;
+        vtx_node_t *dz_guard_node = vtx_node_get(&state->graph->node_table, dz_guard);
+        if (dz_guard_node) dz_guard_node->cond = VTX_COND_NE;
+        vtx_node_add_input(&state->graph->node_table, dz_guard, b);
+        vtx_node_add_input(&state->graph->node_table, dz_guard, state->control);
+
+        vtx_side_exit_t *dz_exit = vtx_side_exit_create(
+            state->exit_table, state->arena,
+            state->pc,
+            state->stack, pre_sp,
+            state->locals, state->max_locals,
+            VTX_EXIT_DIVISION_BY_ZERO, dz_guard, state->trace->trace_id);
+        if (dz_exit != NULL) {
+            vtx_record_add_side_exit(state, dz_exit);
+        }
+
+        /* Update control chain (Bug 7 fix) */
+        state->control = dz_guard;
+
         vtx_nodeid_t nid = vtx_record_emit_node(state, VTX_OP_Div);
         if (nid == VTX_NODEID_INVALID) return -1;
         vtx_node_add_input(&state->graph->node_table, nid, a);
@@ -450,9 +541,33 @@ static int vtx_record_instruction(vtx_record_state_t *state)
         break;
     }
     case VT_OP_IMOD: {
+        /* Capture stack depth before consuming inputs (Bug 1 fix) */
+        uint32_t pre_sp = state->stack_top;
         vtx_nodeid_t b = vtx_record_stack_pop(state);
         vtx_nodeid_t a = vtx_record_stack_pop(state);
         if (a == VTX_NODEID_INVALID || b == VTX_NODEID_INVALID) return -1;
+
+        /* Bug 4 fix: Emit divide-by-zero guard */
+        vtx_nodeid_t dz_guard = vtx_record_emit_node(state, VTX_OP_Guard);
+        if (dz_guard == VTX_NODEID_INVALID) return -1;
+        vtx_node_t *dz_guard_node = vtx_node_get(&state->graph->node_table, dz_guard);
+        if (dz_guard_node) dz_guard_node->cond = VTX_COND_NE;
+        vtx_node_add_input(&state->graph->node_table, dz_guard, b);
+        vtx_node_add_input(&state->graph->node_table, dz_guard, state->control);
+
+        vtx_side_exit_t *dz_exit = vtx_side_exit_create(
+            state->exit_table, state->arena,
+            state->pc,
+            state->stack, pre_sp,
+            state->locals, state->max_locals,
+            VTX_EXIT_DIVISION_BY_ZERO, dz_guard, state->trace->trace_id);
+        if (dz_exit != NULL) {
+            vtx_record_add_side_exit(state, dz_exit);
+        }
+
+        /* Update control chain (Bug 7 fix) */
+        state->control = dz_guard;
+
         vtx_nodeid_t nid = vtx_record_emit_node(state, VTX_OP_Mod);
         if (nid == VTX_NODEID_INVALID) return -1;
         vtx_node_add_input(&state->graph->node_table, nid, a);
@@ -658,16 +773,21 @@ static int vtx_record_instruction(vtx_record_state_t *state)
     case VT_OP_GOTO: {
         uint32_t target_pc = operand;
 
-        /* Check for backward branch (loop back-edge) */
-        if (target_pc <= state->trace->entry_pc) {
-            /* This is a loop back-edge to the entry — closed trace */
-            if (target_pc == state->trace->entry_pc) {
-                state->trace->kind = VTX_TRACE_CLOSED;
-                state->trace->exit_pc = state->pc;
-                state->stopped = true;
-                return 1;
-            }
-            /* Backward branch to before entry — also close */
+        /* Check for backward branch (loop back-edge).
+         * A backward GOTO is a loop back-edge if the target PC is
+         * between entry_pc (inclusive) and the current PC (exclusive).
+         * The original code only checked target_pc <= entry_pc, which
+         * missed backward branches to PCs between entry_pc and current_pc. */
+        if (target_pc >= state->trace->entry_pc && target_pc < state->pc) {
+            /* Loop back-edge within the trace — closed trace */
+            state->trace->kind = VTX_TRACE_CLOSED;
+            state->trace->exit_pc = state->pc;
+            state->stopped = true;
+            return 1;
+        }
+
+        /* Backward branch to before entry — also close */
+        if (target_pc < state->trace->entry_pc) {
             state->trace->kind = VTX_TRACE_CLOSED;
             state->trace->exit_pc = state->pc;
             state->stopped = true;
@@ -680,6 +800,8 @@ static int vtx_record_instruction(vtx_record_state_t *state)
     }
 
     case VT_OP_IF_TRUE: {
+        /* Capture stack depth before consuming condition (Bug 1 fix) */
+        uint32_t pre_sp = state->stack_top;
         vtx_nodeid_t cond = vtx_record_stack_pop(state);
         if (cond == VTX_NODEID_INVALID) return -1;
 
@@ -702,12 +824,15 @@ static int vtx_record_instruction(vtx_record_state_t *state)
             vtx_side_exit_t *exit = vtx_side_exit_create(
                 state->exit_table, state->arena,
                 fall_through, /* cold path starts at fall-through PC */
-                state->stack, state->stack_top,
+                state->stack, pre_sp,
                 state->locals, state->max_locals,
                 VTX_EXIT_BRANCH_NOT_TAKEN, guard_nid, state->trace->trace_id);
             if (exit != NULL) {
                 vtx_record_add_side_exit(state, exit);
             }
+
+            /* Update control chain (Bug 7 fix) */
+            state->control = guard_nid;
 
             state->pc = branch_target;
             return 0; /* PC already set */
@@ -725,12 +850,15 @@ static int vtx_record_instruction(vtx_record_state_t *state)
             vtx_side_exit_t *exit = vtx_side_exit_create(
                 state->exit_table, state->arena,
                 branch_target, /* cold path starts at branch target PC */
-                state->stack, state->stack_top,
+                state->stack, pre_sp,
                 state->locals, state->max_locals,
                 VTX_EXIT_BRANCH_NOT_TAKEN, guard_nid, state->trace->trace_id);
             if (exit != NULL) {
                 vtx_record_add_side_exit(state, exit);
             }
+
+            /* Update control chain (Bug 7 fix) */
+            state->control = guard_nid;
 
             /* Fall through — just advance PC normally */
             break;
@@ -738,6 +866,8 @@ static int vtx_record_instruction(vtx_record_state_t *state)
     }
 
     case VT_OP_IF_FALSE: {
+        /* Capture stack depth before consuming condition (Bug 1 fix) */
+        uint32_t pre_sp = state->stack_top;
         vtx_nodeid_t cond = vtx_record_stack_pop(state);
         if (cond == VTX_NODEID_INVALID) return -1;
 
@@ -760,12 +890,15 @@ static int vtx_record_instruction(vtx_record_state_t *state)
             vtx_side_exit_t *exit = vtx_side_exit_create(
                 state->exit_table, state->arena,
                 fall_through,
-                state->stack, state->stack_top,
+                state->stack, pre_sp,
                 state->locals, state->max_locals,
                 VTX_EXIT_BRANCH_NOT_TAKEN, guard_nid, state->trace->trace_id);
             if (exit != NULL) {
                 vtx_record_add_side_exit(state, exit);
             }
+
+            /* Update control chain (Bug 7 fix) */
+            state->control = guard_nid;
 
             state->pc = branch_target;
             return 0;
@@ -783,12 +916,15 @@ static int vtx_record_instruction(vtx_record_state_t *state)
             vtx_side_exit_t *exit = vtx_side_exit_create(
                 state->exit_table, state->arena,
                 branch_target,
-                state->stack, state->stack_top,
+                state->stack, pre_sp,
                 state->locals, state->max_locals,
                 VTX_EXIT_BRANCH_NOT_TAKEN, guard_nid, state->trace->trace_id);
             if (exit != NULL) {
                 vtx_record_add_side_exit(state, exit);
             }
+
+            /* Update control chain (Bug 7 fix) */
+            state->control = guard_nid;
 
             break;
         }
@@ -796,8 +932,28 @@ static int vtx_record_instruction(vtx_record_state_t *state)
 
     /* ---- Calls ---- */
     case VT_OP_CALL_STATIC: {
-        /* For a static call, we don't pop receiver, but we need to
-         * handle arguments. For simplicity, treat as a call node. */
+        /* Capture stack depth for side exits (Bug 1 fix) */
+        uint32_t pre_sp = state->stack_top;
+
+        /* Bug 6 fix: Determine argument count and pop arguments from stack */
+        uint32_t arg_count = 0;
+        if (state->profiler != NULL && state->method != NULL) {
+            const vtx_call_site_profile_t *csp = vtx_profiler_get_call_site_profile(
+                state->profiler, state->method, state->pc);
+            if (csp != NULL && csp->count > 0 && csp->entries[0].method != NULL) {
+                arg_count = vtx_count_method_args_from_sig(csp->entries[0].method->signature);
+            }
+        }
+
+        /* Pop arguments from stack (in reverse order) and connect to Call node */
+        vtx_nodeid_t args[16]; /* max 16 args */
+        if (arg_count > 16) arg_count = 16;
+        for (uint32_t i = 0; i < arg_count; i++) {
+            vtx_nodeid_t arg = vtx_record_stack_pop(state);
+            if (arg == VTX_NODEID_INVALID) return -1;
+            args[arg_count - 1 - i] = arg; /* reverse to get correct order */
+        }
+
         vtx_nodeid_t nid = vtx_record_emit_node(state, VTX_OP_CallStatic);
         if (nid == VTX_NODEID_INVALID) return -1;
         vtx_node_t *node = vtx_node_get(&state->graph->node_table, nid);
@@ -809,6 +965,11 @@ static int vtx_record_instruction(vtx_record_state_t *state)
         vtx_node_add_input(&state->graph->node_table, nid, state->control);
         vtx_node_add_input(&state->graph->node_table, nid, state->memory);
 
+        /* Bug 6 fix: Add arguments as inputs to the Call node */
+        for (uint32_t i = 0; i < arg_count; i++) {
+            vtx_node_add_input(&state->graph->node_table, nid, args[i]);
+        }
+
         /* Emit FrameState for deopt at call */
         vtx_nodeid_t fs_nid = vtx_record_emit_node(state, VTX_OP_FrameState);
         if (fs_nid != VTX_NODEID_INVALID) {
@@ -818,10 +979,66 @@ static int vtx_record_instruction(vtx_record_state_t *state)
         }
 
         state->memory = nid;
+        state->control = nid;
         vtx_record_stack_push(state, nid);
         break;
     }
     case VT_OP_CALL_VIRTUAL: {
+        /* Capture stack depth for side exits (Bug 1 fix) */
+        uint32_t pre_sp = state->stack_top;
+
+        /* Bug 6 fix: Determine argument count (including receiver) and pop from stack */
+        uint32_t arg_count = 1; /* at minimum the receiver */
+        const vtx_call_site_profile_t *csp = NULL;
+        if (state->profiler != NULL && state->method != NULL) {
+            csp = vtx_profiler_get_call_site_profile(
+                state->profiler, state->method, state->pc);
+            if (csp != NULL && csp->count > 0 && csp->entries[0].method != NULL) {
+                arg_count = vtx_count_method_args_from_sig(csp->entries[0].method->signature) + 1;
+            }
+        }
+
+        /* Pop arguments from stack (in reverse order: last arg first) */
+        vtx_nodeid_t args[16]; /* max 16 args including receiver */
+        if (arg_count > 16) arg_count = 16;
+        for (uint32_t i = 0; i < arg_count; i++) {
+            vtx_nodeid_t arg = vtx_record_stack_pop(state);
+            if (arg == VTX_NODEID_INVALID) return -1;
+            args[arg_count - 1 - i] = arg; /* reverse: args[0]=receiver, args[1..]=arguments */
+        }
+
+        /* Bug 2 fix: Emit type-check guard BEFORE the call, with proper connections */
+        if (csp != NULL && csp->count > 0) {
+            /* Monomorphic guard on the first observed type */
+            vtx_typeid_t expected_type = csp->entries[0].typeid_;
+            vtx_nodeid_t guard_nid = vtx_record_emit_node(state, VTX_OP_Guard);
+            if (guard_nid != VTX_NODEID_INVALID) {
+                vtx_node_t *guard = vtx_node_get(&state->graph->node_table, guard_nid);
+                if (guard) {
+                    guard->cond = VTX_COND_EQ;
+                    guard->type_id = expected_type;
+                }
+                /* Bug 2 fix: Connect receiver as input to the guard */
+                vtx_node_add_input(&state->graph->node_table, guard_nid, args[0]);
+                /* Bug 2 fix: Connect guard to control flow */
+                vtx_node_add_input(&state->graph->node_table, guard_nid, state->control);
+
+                /* Bug 2 fix: Create side exit for type check failure */
+                vtx_side_exit_t *exit = vtx_side_exit_create(
+                    state->exit_table, state->arena,
+                    state->pc,
+                    state->stack, pre_sp,
+                    state->locals, state->max_locals,
+                    VTX_EXIT_TYPE_CHECK_FAILED, guard_nid, state->trace->trace_id);
+                if (exit != NULL) {
+                    vtx_record_add_side_exit(state, exit);
+                }
+
+                /* Bug 7 fix: Update control chain */
+                state->control = guard_nid;
+            }
+        }
+
         vtx_nodeid_t nid = vtx_record_emit_node(state, VTX_OP_CallVirtual);
         if (nid == VTX_NODEID_INVALID) return -1;
         vtx_node_t *node = vtx_node_get(&state->graph->node_table, nid);
@@ -833,22 +1050,9 @@ static int vtx_record_instruction(vtx_record_state_t *state)
         vtx_node_add_input(&state->graph->node_table, nid, state->control);
         vtx_node_add_input(&state->graph->node_table, nid, state->memory);
 
-        /* Emit a type-check guard using profile data if available */
-        if (state->profiler != NULL && state->method != NULL) {
-            const vtx_call_site_profile_t *csp = vtx_profiler_get_call_site_profile(
-                state->profiler, state->method, state->pc);
-            if (csp != NULL && csp->count > 0) {
-                /* Monomorphic guard on the first observed type */
-                vtx_typeid_t expected_type = csp->entries[0].typeid_;
-                vtx_nodeid_t guard_nid = vtx_record_emit_node(state, VTX_OP_Guard);
-                if (guard_nid != VTX_NODEID_INVALID) {
-                    vtx_node_t *guard = vtx_node_get(&state->graph->node_table, guard_nid);
-                    if (guard) {
-                        guard->cond = VTX_COND_EQ;
-                        guard->type_id = expected_type;
-                    }
-                }
-            }
+        /* Bug 6 fix: Add receiver and arguments as inputs to the Call node */
+        for (uint32_t i = 0; i < arg_count; i++) {
+            vtx_node_add_input(&state->graph->node_table, nid, args[i]);
         }
 
         vtx_nodeid_t fs_nid = vtx_record_emit_node(state, VTX_OP_FrameState);
@@ -859,10 +1063,33 @@ static int vtx_record_instruction(vtx_record_state_t *state)
         }
 
         state->memory = nid;
+        state->control = nid;
         vtx_record_stack_push(state, nid);
         break;
     }
     case VT_OP_CALL_INTERFACE: {
+        /* Capture stack depth for side exits (Bug 1 fix) */
+        uint32_t pre_sp = state->stack_top;
+
+        /* Bug 6 fix: Determine argument count (including receiver) and pop from stack */
+        uint32_t arg_count = 1; /* at minimum the receiver */
+        if (state->profiler != NULL && state->method != NULL) {
+            const vtx_call_site_profile_t *csp = vtx_profiler_get_call_site_profile(
+                state->profiler, state->method, state->pc);
+            if (csp != NULL && csp->count > 0 && csp->entries[0].method != NULL) {
+                arg_count = vtx_count_method_args_from_sig(csp->entries[0].method->signature) + 1;
+            }
+        }
+
+        /* Pop arguments from stack (in reverse order: last arg first) */
+        vtx_nodeid_t args[16]; /* max 16 args including receiver */
+        if (arg_count > 16) arg_count = 16;
+        for (uint32_t i = 0; i < arg_count; i++) {
+            vtx_nodeid_t arg = vtx_record_stack_pop(state);
+            if (arg == VTX_NODEID_INVALID) return -1;
+            args[arg_count - 1 - i] = arg; /* reverse: args[0]=receiver, args[1..]=arguments */
+        }
+
         vtx_nodeid_t nid = vtx_record_emit_node(state, VTX_OP_CallInterface);
         if (nid == VTX_NODEID_INVALID) return -1;
         vtx_node_t *node = vtx_node_get(&state->graph->node_table, nid);
@@ -874,6 +1101,11 @@ static int vtx_record_instruction(vtx_record_state_t *state)
         vtx_node_add_input(&state->graph->node_table, nid, state->control);
         vtx_node_add_input(&state->graph->node_table, nid, state->memory);
 
+        /* Bug 6 fix: Add receiver and arguments as inputs to the Call node */
+        for (uint32_t i = 0; i < arg_count; i++) {
+            vtx_node_add_input(&state->graph->node_table, nid, args[i]);
+        }
+
         vtx_nodeid_t fs_nid = vtx_record_emit_node(state, VTX_OP_FrameState);
         if (fs_nid != VTX_NODEID_INVALID) {
             vtx_node_t *fs = vtx_node_get(&state->graph->node_table, fs_nid);
@@ -882,6 +1114,7 @@ static int vtx_record_instruction(vtx_record_state_t *state)
         }
 
         state->memory = nid;
+        state->control = nid;
         vtx_record_stack_push(state, nid);
         break;
     }
@@ -952,6 +1185,8 @@ static int vtx_record_instruction(vtx_record_state_t *state)
 
     /* ---- Type checks ---- */
     case VT_OP_CHECKCAST: {
+        /* Capture stack depth before consuming inputs (Bug 1 fix) */
+        uint32_t pre_sp = state->stack_top;
         vtx_nodeid_t obj = vtx_record_stack_pop(state);
         if (obj == VTX_NODEID_INVALID) return -1;
 
@@ -979,10 +1214,13 @@ static int vtx_record_instruction(vtx_record_state_t *state)
             vtx_side_exit_t *exit = vtx_side_exit_create(
                 state->exit_table, state->arena,
                 state->pc,
-                state->stack, state->stack_top,
+                state->stack, pre_sp,
                 state->locals, state->max_locals,
                 VTX_EXIT_TYPE_CHECK_FAILED, guard_nid, state->trace->trace_id);
             if (exit != NULL) vtx_record_add_side_exit(state, exit);
+
+            /* Bug 7 fix: Update control chain */
+            state->control = guard_nid;
         }
 
         vtx_record_stack_push(state, nid);
@@ -1006,6 +1244,8 @@ static int vtx_record_instruction(vtx_record_state_t *state)
 
     /* ---- Array operations ---- */
     case VT_OP_ARRAY_LOAD: {
+        /* Capture stack depth before consuming inputs (Bug 1 fix) */
+        uint32_t pre_sp = state->stack_top;
         vtx_nodeid_t idx = vtx_record_stack_pop(state);
         vtx_nodeid_t arr = vtx_record_stack_pop(state);
         if (arr == VTX_NODEID_INVALID || idx == VTX_NODEID_INVALID) return -1;
@@ -1021,10 +1261,13 @@ static int vtx_record_instruction(vtx_record_state_t *state)
         vtx_side_exit_t *exit = vtx_side_exit_create(
             state->exit_table, state->arena,
             state->pc,
-            state->stack, state->stack_top,
+            state->stack, pre_sp,
             state->locals, state->max_locals,
             VTX_EXIT_BOUNDS_CHECK_FAILED, guard_nid, state->trace->trace_id);
         if (exit != NULL) vtx_record_add_side_exit(state, exit);
+
+        /* Bug 7 fix: Update control chain */
+        state->control = guard_nid;
 
         vtx_nodeid_t nid = vtx_record_emit_node(state, VTX_OP_LoadIndexed);
         if (nid == VTX_NODEID_INVALID) return -1;
@@ -1037,6 +1280,8 @@ static int vtx_record_instruction(vtx_record_state_t *state)
         break;
     }
     case VT_OP_ARRAY_STORE: {
+        /* Capture stack depth before consuming inputs (Bug 1 fix) */
+        uint32_t pre_sp = state->stack_top;
         vtx_nodeid_t val = vtx_record_stack_pop(state);
         vtx_nodeid_t idx = vtx_record_stack_pop(state);
         vtx_nodeid_t arr = vtx_record_stack_pop(state);
@@ -1054,10 +1299,13 @@ static int vtx_record_instruction(vtx_record_state_t *state)
         vtx_side_exit_t *exit = vtx_side_exit_create(
             state->exit_table, state->arena,
             state->pc,
-            state->stack, state->stack_top,
+            state->stack, pre_sp,
             state->locals, state->max_locals,
             VTX_EXIT_BOUNDS_CHECK_FAILED, guard_nid, state->trace->trace_id);
         if (exit != NULL) vtx_record_add_side_exit(state, exit);
+
+        /* Bug 7 fix: Update control chain */
+        state->control = guard_nid;
 
         vtx_nodeid_t nid = vtx_record_emit_node(state, VTX_OP_StoreIndexed);
         if (nid == VTX_NODEID_INVALID) return -1;
@@ -1070,6 +1318,8 @@ static int vtx_record_instruction(vtx_record_state_t *state)
         break;
     }
     case VT_OP_ARRAY_LENGTH: {
+        /* Capture stack depth before consuming inputs (Bug 1 fix) */
+        uint32_t pre_sp = state->stack_top;
         vtx_nodeid_t arr = vtx_record_stack_pop(state);
         if (arr == VTX_NODEID_INVALID) return -1;
 
@@ -1080,6 +1330,20 @@ static int vtx_record_instruction(vtx_record_state_t *state)
         if (guard) guard->cond = VTX_COND_NE;
         vtx_node_add_input(&state->graph->node_table, guard_nid, arr);
         vtx_node_add_input(&state->graph->node_table, guard_nid, state->control);
+
+        /* Bug 3 fix: Add side exit for null check failure */
+        vtx_side_exit_t *exit = vtx_side_exit_create(
+            state->exit_table, state->arena,
+            state->pc,
+            state->stack, pre_sp,
+            state->locals, state->max_locals,
+            VTX_EXIT_NULL_CHECK_FAILED, guard_nid, state->trace->trace_id);
+        if (exit != NULL) {
+            vtx_record_add_side_exit(state, exit);
+        }
+
+        /* Bug 7 fix: Update control chain */
+        state->control = guard_nid;
 
         /* Array length is a field load at a well-known offset */
         vtx_nodeid_t nid = vtx_record_emit_node(state, VTX_OP_LoadField);
@@ -1262,6 +1526,7 @@ vtx_trace_t *vtx_trace_recorder_record(
     state.memory = province;
     state.pc = entry_pc;
     state.stopped = false;
+    state.stack_overflow = false;
     state.max_locals = bytecode->max_locals;
     state.locals = trace->locals;
 
@@ -1274,7 +1539,7 @@ vtx_trace_t *vtx_trace_recorder_record(
     /* Main recording loop */
     while (!state.stopped && state.pc < bytecode->length) {
         int result = vtx_record_instruction(&state);
-        if (result < 0) {
+        if (result < 0 || state.stack_overflow) {
             /* Error during recording — return what we have so far */
             trace->kind = VTX_TRACE_TRUNCATED;
             break;

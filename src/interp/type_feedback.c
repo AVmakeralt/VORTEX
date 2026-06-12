@@ -250,6 +250,55 @@ void vtx_type_feedback_record_branch(vtx_type_feedback_t *feedback,
 }
 
 /* ========================================================================== */
+/* Precomputed decay weights                                                   */
+/* ========================================================================== */
+
+/**
+ * Precomputed exponential decay weights: 0.9^i for i = 0..31.
+ * Avoids calling pow() 32 times per dominant-type query.
+ *
+ * decay_weights[0] = 0.9^0 = 1.0  (distance=0 means most recent for a full buffer)
+ * decay_weights[1] = 0.9^1 = 0.9
+ * decay_weights[2] = 0.9^2 = 0.81
+ * ...
+ * decay_weights[31] = 0.9^31 ≈ 0.0378
+ */
+static const double decay_weights[32] = {
+    1.0,
+    0.9,
+    0.81,
+    0.729,
+    0.6561,
+    0.59049,
+    0.531441,
+    0.4782969,
+    0.43046721,
+    0.387420489,
+    0.3486784401,
+    0.31381059609,
+    0.282429536481,
+    0.2541865828329,
+    0.22876792454961,
+    0.205891132094649,
+    0.1853020188851841,
+    0.1667718169966657,
+    0.1500946352969991,
+    0.1350851717672992,
+    0.1215766545905693,
+    0.1094189891315124,
+    0.0984770902183611,
+    0.0886293811965250,
+    0.0797664430768725,
+    0.0717897987691853,
+    0.0646108188922667,
+    0.0581497370030401,
+    0.0523347633027361,
+    0.0471012869724624,
+    0.0423911582752162,
+    0.0381520424476946
+};
+
+/* ========================================================================== */
 /* Query helpers                                                               */
 /* ========================================================================== */
 
@@ -276,7 +325,12 @@ static double compute_decay_weight(uint8_t write_index, uint8_t obs_index)
         /* Oldest observation in a full buffer */
         distance = VTX_TYPE_FEEDBACK_BUFFER_SIZE;
     }
-    return pow(0.9, (double)distance);
+    /* Use precomputed table instead of pow(0.9, distance) */
+    if (distance >= 0 && distance < 32) {
+        return decay_weights[distance];
+    }
+    /* Fallback for distances beyond table (shouldn't happen with SIZE=32) */
+    return 0.0;
 }
 
 vtx_typeid_t vtx_type_feedback_get_dominant_call_type(

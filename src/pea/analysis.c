@@ -359,30 +359,53 @@ static void transfer_block(vtx_graph_t *graph, uint32_t block_idx,
 
     vtx_block_info_t *block = &graph->blocks[block_idx];
 
-    /* Walk all nodes that belong to this block.
-     * We identify nodes belonging to this block by checking if their
-     * control input is the block's control node, or by walking all
-     * nodes and checking their scheduled position.
-     *
-     * For the SoN IR, nodes are not explicitly assigned to blocks at
-     * this stage. Instead, we walk all nodes and apply the transfer
-     * function to each node reachable from the block's control flow.
-     *
-     * Simplified approach: walk ALL nodes in the graph for each block's
-     * transfer function. This is correct because the escape state is
-     * monotonic — joining can only increase states, never decrease them.
-     * Each block processes all nodes, and the entry state captures the
-     * block's specific flow-sensitivity.
-     *
-     * For better performance on large graphs, we would compute a
-     * block-to-node mapping first. But for correctness, the global
-     * walk is sufficient.
-     */
-    (void)block; /* block_idx used for state, block info for future refinement */
-
+    /* Walk only the nodes that belong to this block.
+     * We determine block membership by checking each node's control input
+     * chain: a node belongs to a block if it is the block's region_node,
+     * or if its control input (inputs[0]) traces back to this block's
+     * region_node. For data nodes without control inputs, we use the
+     * bytecode_pc to assign them to the block whose region_node has the
+     * closest preceding bytecode_pc. */
     for (uint32_t i = 0; i < table->count; i++) {
         vtx_node_t *node = &table->nodes[i];
         if (node->dead) continue;
+
+        /* Check if this node belongs to this block */
+        bool belongs = false;
+
+        /* Region node of this block always belongs */
+        if (node->id == block->region_node) {
+            belongs = true;
+        }
+        /* Control/memory nodes of this block belong */
+        else if (node->id == block->control_node ||
+                 node->id == block->memory_node) {
+            belongs = true;
+        }
+        /* Nodes that have the block's region_node as a direct input belong
+         * to this block (they are control projections or data nodes
+         * scheduled under this block's control flow). */
+        else {
+            for (uint32_t j = 0; j < node->input_count; j++) {
+                if (node->inputs[j] == block->region_node ||
+                    node->inputs[j] == block->control_node ||
+                    node->inputs[j] == block->memory_node) {
+                    belongs = true;
+                    break;
+                }
+            }
+            /* Also check by bytecode_pc: if the node's bytecode_pc matches
+             * this block's region_node's bytecode_pc, it belongs here. */
+            if (!belongs && block->region_node < table->count) {
+                vtx_node_t *region = &table->nodes[block->region_node];
+                if (node->bytecode_pc == region->bytecode_pc) {
+                    belongs = true;
+                }
+            }
+        }
+
+        if (!belongs) continue;
+
         transfer_node(node, table, bs->exit_state, bs->state_count);
     }
 }

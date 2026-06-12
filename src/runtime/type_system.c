@@ -166,6 +166,11 @@ vtx_typeid_t vtx_type_register(vtx_type_system_t *ts,
     td->interfaces      = NULL;
     td->shape_id        = VTX_SHAPE_INVALID; /* computed later */
 
+    /* Ensure compiled_code is initialized to NULL for all methods */
+    for (uint32_t i = 0; i < method_count; i++) {
+        methods[i].compiled_code = NULL;
+    }
+
     /* Compute field offsets and instance size */
     if (fields != NULL && field_count > 0) {
         compute_field_offsets(fields, field_count, &td->instance_size);

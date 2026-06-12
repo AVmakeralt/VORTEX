@@ -396,6 +396,21 @@ static void perform_merge(vtx_graph_t *graph,
         a->dead = true;
         b->dead = true;
 
+        /* Redirect all users of the original guards to the merged guard.
+         * Without this, nodes that referenced the original guards as
+         * control inputs would have dangling references. */
+        for (uint32_t i = 0; i < graph->node_table.count; i++) {
+            vtx_node_t *node = &graph->node_table.nodes[i];
+            if (node->dead) continue;
+            for (uint32_t inp = 0; inp < node->input_count; inp++) {
+                if (node->inputs[inp] == candidate->guard_a ||
+                    node->inputs[inp] == candidate->guard_b) {
+                    vtx_node_replace_input(&graph->node_table,
+                                            node->id, inp, merged_guard);
+                }
+            }
+        }
+
         result->type_checks_merged++;
         result->guards_merged += 2;
         break;
@@ -493,7 +508,7 @@ static void perform_merge(vtx_graph_t *graph,
             vtx_node_t *lg = vtx_node_get(&graph->node_table, lower_guard);
             if (lg != NULL) {
                 lg->flags = VTX_NF_CONTROL | VTX_NF_SIDE_EFFECT;
-                lg->cond = VTX_COND_NEVER; /* GE is always true → deopt when not GE */
+                lg->cond = VTX_COND_GE; /* guard passes when min >= 0, deopts when min < 0 */
                 lg->bytecode_pc = a->bytecode_pc;
                 lg->frame_state = a->frame_state;
                 vtx_node_add_input(&graph->node_table, lower_guard, a->inputs[0]);
@@ -531,6 +546,24 @@ static void perform_merge(vtx_graph_t *graph,
         /* Mark original guards as dead */
         a->dead = true;
         b->dead = true;
+
+        /* Redirect all users of the original guards to the replacement guards.
+         * Users of guard_a are redirected to lower_guard, and users of guard_b
+         * are redirected to upper_guard. Without this, nodes that referenced
+         * the original guards as control inputs would have dangling references. */
+        for (uint32_t i = 0; i < graph->node_table.count; i++) {
+            vtx_node_t *node = &graph->node_table.nodes[i];
+            if (node->dead) continue;
+            for (uint32_t inp = 0; inp < node->input_count; inp++) {
+                if (node->inputs[inp] == candidate->guard_a) {
+                    vtx_node_replace_input(&graph->node_table,
+                                            node->id, inp, lower_guard);
+                } else if (node->inputs[inp] == candidate->guard_b) {
+                    vtx_node_replace_input(&graph->node_table,
+                                            node->id, inp, upper_guard);
+                }
+            }
+        }
 
         result->range_checks_merged++;
         result->guards_merged += 2;

@@ -430,9 +430,25 @@ static uint32_t rewrite_virtual_field_accesses(vtx_graph_t *graph,
             }
 
             if (!found) {
-                /* New field — this shouldn't normally happen if we
-                 * initialized all fields during classification, but
-                 * handle it gracefully */
+                /* New field — grow the array if needed */
+                if (vobj->field_count >= vobj->field_capacity) {
+                    uint32_t new_cap = vobj->field_capacity * 2;
+                    uint32_t *new_offsets = realloc(vobj->field_offsets,
+                        new_cap * sizeof(uint32_t));
+                    vtx_nodeid_t *new_values = realloc(vobj->field_values,
+                        new_cap * sizeof(vtx_nodeid_t));
+                    if (!new_offsets || !new_values) {
+                        free(new_offsets);
+                        free(new_values);
+                        /* Can't add the field — skip to avoid buffer overflow */
+                        node->dead = true;
+                        rewritten++;
+                        continue;
+                    }
+                    vobj->field_offsets = new_offsets;
+                    vobj->field_values = new_values;
+                    vobj->field_capacity = new_cap;
+                }
                 vobj->field_offsets[vobj->field_count] = node->field_offset;
                 vobj->field_values[vobj->field_count]  = value_id;
                 vobj->field_count++;

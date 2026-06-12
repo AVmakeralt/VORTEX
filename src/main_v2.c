@@ -311,17 +311,15 @@ static vtx_bytecode_t *build_fib_bytecode(vtx_arena_t *arena)
     EMIT_OP(VT_OP_ISUB);                          /* n - 1 */
     EMIT_OP(VT_OP_STORE_LOCAL);    EMIT_U16(0);   /* n = n - 1 */
 
-    /* goto loop_start */
+    /* goto loop_start — operand is absolute target PC */
     EMIT_OP(VT_OP_GOTO);
-    int32_t back_offset = (int32_t)loop_start - (int32_t)(pos + 3);
-    EMIT_U16((uint16_t)back_offset);
+    EMIT_U16((uint16_t)loop_start);
 
     /* End of loop: return a */
     size_t loop_end = pos;
-    /* Patch the if_false offset */
-    uint16_t exit_offset = (uint16_t)(loop_end - (if_false_patch + 2));
-    buf[if_false_patch] = (uint8_t)(exit_offset >> 8);
-    buf[if_false_patch + 1] = (uint8_t)(exit_offset & 0xFF);
+    /* Patch the if_false operand to absolute target PC */
+    buf[if_false_patch] = (uint8_t)((uint16_t)loop_end >> 8);
+    buf[if_false_patch + 1] = (uint8_t)((uint16_t)loop_end & 0xFF);
 
     EMIT_OP(VT_OP_LOAD_LOCAL);    EMIT_U16(1);    /* load a */
     EMIT_OP(VT_OP_RETURN_VALUE);
@@ -329,12 +327,18 @@ static vtx_bytecode_t *build_fib_bytecode(vtx_arena_t *arena)
     #undef EMIT_OP
     #undef EMIT_U16
 
+    /* Build constant pool (needed for LOAD_CONST_INT opcodes) */
+    uint32_t const_count = 2;
+    vtx_value_t *const_pool = vtx_arena_alloc(arena, const_count * sizeof(vtx_value_t));
+    const_pool[0] = vtx_make_smi(0);
+    const_pool[1] = vtx_make_smi(1);
+
     /* Build bytecode structure */
     vtx_bytecode_t *bc = vtx_arena_alloc(arena, sizeof(vtx_bytecode_t));
     bc->code = buf;
     bc->length = (uint32_t)pos;
-    bc->constant_pool = NULL;
-    bc->constant_count = 0;
+    bc->constant_pool = const_pool;
+    bc->constant_count = const_count;
     return bc;
 }
 
@@ -464,6 +468,7 @@ static int run_self_test(void)
                 .name = "fib",
                 .signature = "(I)I",
                 .bytecode = bc,
+                .compiled_code = NULL,
                 .vtable_index = 0,
                 .is_virtual = false
             };
@@ -515,6 +520,7 @@ static int run_self_test(void)
                 .name = "fib_ir",
                 .signature = "(I)I",
                 .bytecode = bc,
+                .compiled_code = NULL,
                 .vtable_index = 0,
                 .is_virtual = false
             };
@@ -575,7 +581,7 @@ static int run_self_test(void)
         vtx_type_system_init(&ts);
 
         vtx_method_desc_t m1 = { .name = "test_method", .signature = "()V",
-                                  .bytecode = NULL, .vtable_index = 0, .is_virtual = false };
+                                  .bytecode = NULL, .compiled_code = NULL, .vtable_index = 0, .is_virtual = false };
         vtx_profile_method_t *pm = vtx_profile_add_method(&profile, &m1);
         if (pm) {
             pm->invocation_count = 5000;
@@ -733,6 +739,7 @@ static int run_benchmarks(void)
             .name = "fib",
             .signature = "(I)I",
             .bytecode = bc,
+            .compiled_code = NULL,
             .vtable_index = 0,
             .is_virtual = false
         };
@@ -847,6 +854,7 @@ int main(int argc, char *argv[])
             .name = "main",
             .signature = "()V",
             .bytecode = bc,
+            .compiled_code = NULL,
             .vtable_index = 0,
             .is_virtual = false
         };

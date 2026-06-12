@@ -59,7 +59,8 @@ struct vtx_alloc_edge {
     vtx_nodeid_t  value_id;      /* the allocation stored into the field */
     uint32_t      field_offset;  /* the field offset of the store */
     vtx_nodeid_t  store_node_id; /* the StoreField node that creates this edge */
-    vtx_alloc_edge_t *next;      /* linked list of edges from the same container */
+    vtx_alloc_edge_t *next;      /* linked list of edges from the same container (forward) */
+    vtx_alloc_edge_t *rev_next;  /* linked list of edges to the same value (reverse) */
 };
 
 /**

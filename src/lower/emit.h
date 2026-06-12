@@ -266,6 +266,12 @@ void vtx_x86_emit_call_rel32(vtx_x86_emit_t *e, int32_t offset);
 void vtx_x86_emit_ret(vtx_x86_emit_t *e);
 void vtx_x86_emit_nop(vtx_x86_emit_t *e);
 
+/**
+ * Emit UCOMISD xmm, xmm — unordered compare scalar double.
+ * Sets EFLAGS for floating-point comparison.
+ */
+void vtx_x86_emit_ucomisd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+
 /* ========================================================================== */
 /* Function prologue/epilogue                                                  */
 /* ========================================================================== */

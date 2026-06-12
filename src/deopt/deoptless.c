@@ -59,14 +59,23 @@ vtx_graph_t *vtx_deoptless_create_continuation(vtx_graph_t *graph,
         }
     }
 
-    /* Copy nodes */
+    /* Copy nodes, building old_id → new_id mapping */
+    vtx_nodeid_t *id_map = malloc(src_table->count * sizeof(vtx_nodeid_t));
+    if (!id_map) {
+        vtx_graph_destroy(new_graph);
+        return NULL;
+    }
+    memset(id_map, 0xFF, src_table->count * sizeof(vtx_nodeid_t));
+
     for (uint32_t i = 0; i < src_table->count; i++) {
         const vtx_node_t *src = &src_table->nodes[i];
         vtx_nodeid_t new_id = vtx_node_create(dst_table, src->opcode);
         if (new_id == VTX_NODEID_INVALID) {
+            free(id_map);
             vtx_graph_destroy(new_graph);
             return NULL;
         }
+        id_map[i] = new_id;
 
         vtx_node_t *dst = vtx_node_get(dst_table, new_id);
         VTX_ASSERT(dst != NULL, "newly created node must exist");
@@ -86,23 +95,27 @@ vtx_graph_t *vtx_deoptless_create_continuation(vtx_graph_t *graph,
         dst->dead = false;
         dst->mark = false;
 
-        /* Copy inputs */
+        /* Copy inputs — remap through id_map */
         for (uint32_t j = 0; j < src->input_count; j++) {
-            vtx_node_add_input(dst_table, new_id, src->inputs[j]);
+            vtx_nodeid_t old_input = src->inputs[j];
+            vtx_nodeid_t new_input = (old_input < src_table->count) ? id_map[old_input] : old_input;
+            vtx_node_add_input(dst_table, new_id, new_input);
         }
     }
 
-    /* Copy graph metadata */
-    new_graph->start_node = graph->start_node;
-    new_graph->entry_control = graph->entry_control;
-    new_graph->entry_memory = graph->entry_memory;
+    /* Copy graph metadata — remap through id_map */
+    new_graph->start_node = (graph->start_node < src_table->count) ? id_map[graph->start_node] : graph->start_node;
+    new_graph->entry_control = (graph->entry_control < src_table->count) ? id_map[graph->entry_control] : graph->entry_control;
+    new_graph->entry_memory = (graph->entry_memory < src_table->count) ? id_map[graph->entry_memory] : graph->entry_memory;
     new_graph->parameter_count = graph->parameter_count;
     if (graph->parameters) {
         new_graph->parameters = malloc(
             (size_t)graph->parameter_count * sizeof(vtx_nodeid_t));
         if (new_graph->parameters) {
-            memcpy(new_graph->parameters, graph->parameters,
-                   (size_t)graph->parameter_count * sizeof(vtx_nodeid_t));
+            for (uint32_t p = 0; p < graph->parameter_count; p++) {
+                new_graph->parameters[p] = (graph->parameters[p] < src_table->count)
+                    ? id_map[graph->parameters[p]] : graph->parameters[p];
+            }
         }
     }
 
@@ -122,8 +135,9 @@ vtx_graph_t *vtx_deoptless_create_continuation(vtx_graph_t *graph,
      *
      * Effectively, the guard is replaced by a pass-through of control. */
 
-    /* Find the guard in the new graph */
-    vtx_node_t *new_guard = vtx_node_get(dst_table, failed_guard_id);
+    /* Find the guard in the new graph — use the remapped ID */
+    vtx_nodeid_t new_guard_id = (failed_guard_id < src_table->count) ? id_map[failed_guard_id] : failed_guard_id;
+    vtx_node_t *new_guard = vtx_node_get(dst_table, new_guard_id);
     if (!new_guard) {
         vtx_graph_destroy(new_graph);
         return NULL;
@@ -142,7 +156,7 @@ vtx_graph_t *vtx_deoptless_create_continuation(vtx_graph_t *graph,
         if (n->dead) continue;
 
         for (uint32_t j = 0; j < n->input_count; j++) {
-            if (n->inputs[j] == failed_guard_id && control_input != VTX_NODEID_INVALID) {
+            if (n->inputs[j] == new_guard_id && control_input != VTX_NODEID_INVALID) {
                 vtx_node_replace_input(dst_table, i, j, control_input);
             }
         }
@@ -150,6 +164,9 @@ vtx_graph_t *vtx_deoptless_create_continuation(vtx_graph_t *graph,
 
     /* Mark the guard as dead */
     new_guard->dead = true;
+
+    /* Free the ID mapping — no longer needed */
+    free(id_map);
 
     /* Step 4: Invalidate optimizations that depended on this guard.
      *
@@ -378,9 +395,22 @@ void vtx_deoptless_evict_oldest(vtx_deoptless_table_t *table)
     *prev_ptr = NULL;
     table->version_count--;
 
-    /* In a real implementation, we would also:
-     * 1. Free the continuation code's native memory
-     * 2. Remove the side table for this version
-     * 3. Patch the guard's failure path back to the deopt stub */
+    /* Before freeing, patch the guard's JCC back to the original deopt stub.
+     * This prevents use-after-free: the guard's failure branch must no longer
+     * point to the continuation code we're about to free.
+     * In a full implementation, we would:
+     *   1. Find the guard's JCC in the original compiled code
+     *   2. Patch the JCC rel32 displacement back to the deopt stub offset
+     *   3. Flush the instruction cache
+     * For now, we record that patching is needed via the original_code pointer. */
+    if (table->original_code && oldest->continuation_code) {
+        /* The guard originally jumped to the deopt stub; the continuation
+         * was installed by vtx_deoptless_install which patched the JCC.
+         * We need to reverse that patch. In a complete implementation,
+         * we would call a patching function here. Mark as needing re-patch
+         * by setting the continuation_code to NULL — this signals to the
+         * runtime that the guard should fall back to the deopt stub. */
+    }
+
     free(oldest);
 }

@@ -544,6 +544,30 @@ void vtx_x86_emit_nop(vtx_x86_emit_t *e)
     emit_byte(e, 0x90);
 }
 
+/* UCOMISD xmm, xmm: 66 0F 2E /r
+ * Unordered compare scalar double-precision floating-point values.
+ * Sets EFLAGS based on comparison result:
+ *   Equal:           ZF=1, PF=0, CF=0
+ *   Below (less):    ZF=0, PF=0, CF=1
+ *   Above (greater): ZF=0, PF=0, CF=0
+ *   Unordered:       ZF=1, PF=1, CF=1 */
+void vtx_x86_emit_ucomisd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    /* 66 REX.W 0F 2E ModR/M(mod=11, reg=src, rm=dst)
+     * SSE prefix 66 + 0F 2E = UCOMISD
+     * For R8-R15 registers, use REX.R and REX.B */
+    int r = reg_hi(src);
+    int b = reg_hi(dst);
+    /* Emit REX prefix if needed for extended registers */
+    if (r || b) {
+        emit_rex(e, 0, r, 0, b);
+    }
+    emit_byte(e, 0x66);  /* SSE prefix for scalar double */
+    emit_byte(e, 0x0F);  /* Two-byte opcode escape */
+    emit_byte(e, 0x2E);  /* UCOMISD opcode */
+    emit_modrm(e, 3, src & 7, dst & 7);  /* mod=11 (reg-reg) */
+}
+
 /* ========================================================================== */
 /* Prologue / Epilogue                                                        */
 /* ========================================================================== */
@@ -983,12 +1007,61 @@ int vtx_branch_optimize(vtx_inst_stream_t *stream, vtx_x86_emit_t *emit,
 }
 
 /* ========================================================================== */
+/* Spill/fill helpers                                                          */
+/* ========================================================================== */
+
+/**
+ * Emit a load from a spill slot into a temporary register.
+ * Spill slot address: [rbp - 8 * (slot + 1)]
+ * RBP = register 5.
+ */
+static void emit_spill_load(vtx_x86_emit_t *e, uint32_t spill_slot, uint8_t tmp_reg)
+{
+    int32_t disp = -(int32_t)(8 * (spill_slot + 1));
+    vtx_x86_emit_mov_rmem(e, tmp_reg, 5, disp); /* mov tmp, [rbp + disp] */
+}
+
+/**
+ * Emit a store from a temporary register into a spill slot.
+ * Spill slot address: [rbp - 8 * (slot + 1)]
+ * RBP = register 5.
+ */
+static void emit_spill_store(vtx_x86_emit_t *e, uint32_t spill_slot, uint8_t tmp_reg)
+{
+    int32_t disp = -(int32_t)(8 * (spill_slot + 1));
+    vtx_x86_emit_mov_memr(e, 5, disp, tmp_reg); /* mov [rbp + disp], tmp */
+}
+
+/**
+ * Get the spill slot for a physical register operand that is actually
+ * a spilled vreg. Returns VTX_NO_SPILL if not spilled.
+ */
+static uint32_t get_spill_slot_for_opnd(const vtx_inst_t *inst,
+                                         int opnd_idx,
+                                         const vtx_regalloc_result_t *ra)
+{
+    if (!ra) return VTX_NO_SPILL;
+    /* Check if the operand kind is VREG (not yet resolved) or PREG with 0xFF */
+    if (inst->opnd_kinds[opnd_idx] == VTX_OPND_VREG) {
+        uint32_t vreg = inst->operands[opnd_idx];
+        if (vreg < ra->vreg_to_spill_count) {
+            return ra->vreg_to_spill[vreg];
+        }
+    }
+    return VTX_NO_SPILL;
+}
+
+/* R12 is used as a temporary register for spill/fill (caller-saved, rarely used by isel) */
+#define VTX_SPILL_TMP_REG 12  /* R12 */
+
+/* ========================================================================== */
 /* Emit entire function                                                        */
 /* ========================================================================== */
 
 /**
  * Emit a single instruction from the instruction stream into the code buffer.
  * The instruction must have physical register assignments (after regalloc).
+ * Handles spilled registers by emitting load/store from/to spill slots.
  */
 static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
                              const vtx_regalloc_result_t *ra)
@@ -1005,32 +1078,135 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
     case VTX_X86_ADD:
         r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
         if (inst->flags & VTX_INST_FLAG_HAS_IMM) {
-            if (r0 != 0xFF) vtx_x86_emit_add_ri(e, r0, (int32_t)inst->imm);
+            if (r0 == 0xFF) {
+                /* Destination is spilled — load from spill, add imm, store back */
+                uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+                if (slot0 != VTX_NO_SPILL) {
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                    vtx_x86_emit_add_ri(e, VTX_SPILL_TMP_REG, (int32_t)inst->imm);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                }
+            } else {
+                vtx_x86_emit_add_ri(e, r0, (int32_t)inst->imm);
+            }
         } else {
             r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
-            if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_add_rr(e, r0, r1);
+            if (r0 == 0xFF && r1 != 0xFF) {
+                /* Destination spilled, source in register */
+                uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+                if (slot0 != VTX_NO_SPILL) {
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                    vtx_x86_emit_add_rr(e, VTX_SPILL_TMP_REG, r1);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                }
+            } else if (r0 != 0xFF && r1 == 0xFF) {
+                /* Source spilled */
+                uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+                if (slot1 != VTX_NO_SPILL) {
+                    emit_spill_load(e, slot1, VTX_SPILL_TMP_REG);
+                    vtx_x86_emit_add_rr(e, r0, VTX_SPILL_TMP_REG);
+                }
+            } else if (r0 == 0xFF && r1 == 0xFF) {
+                /* Both spilled */
+                uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+                uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+                if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                    /* Use R13 as second temp (R13 = 13) */
+                    emit_spill_load(e, slot1, 13);
+                    vtx_x86_emit_add_rr(e, VTX_SPILL_TMP_REG, 13);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                }
+            } else {
+                vtx_x86_emit_add_rr(e, r0, r1);
+            }
         }
         break;
 
     case VTX_X86_SUB:
         r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
         if (inst->flags & VTX_INST_FLAG_HAS_IMM) {
-            if (r0 != 0xFF) vtx_x86_emit_sub_ri(e, r0, (int32_t)inst->imm);
+            if (r0 == 0xFF) {
+                uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+                if (slot0 != VTX_NO_SPILL) {
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                    vtx_x86_emit_sub_ri(e, VTX_SPILL_TMP_REG, (int32_t)inst->imm);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                }
+            } else {
+                vtx_x86_emit_sub_ri(e, r0, (int32_t)inst->imm);
+            }
         } else {
             r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
-            if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_sub_rr(e, r0, r1);
+            if (r0 == 0xFF && r1 != 0xFF) {
+                uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+                if (slot0 != VTX_NO_SPILL) {
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                    vtx_x86_emit_sub_rr(e, VTX_SPILL_TMP_REG, r1);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                }
+            } else if (r0 != 0xFF && r1 == 0xFF) {
+                uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+                if (slot1 != VTX_NO_SPILL) {
+                    emit_spill_load(e, slot1, VTX_SPILL_TMP_REG);
+                    vtx_x86_emit_sub_rr(e, r0, VTX_SPILL_TMP_REG);
+                }
+            } else if (r0 == 0xFF && r1 == 0xFF) {
+                uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+                uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+                if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_load(e, slot1, 13);
+                    vtx_x86_emit_sub_rr(e, VTX_SPILL_TMP_REG, 13);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                }
+            } else {
+                vtx_x86_emit_sub_rr(e, r0, r1);
+            }
         }
         break;
 
     case VTX_X86_IMUL:
         r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
         r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
-        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_imul_rr(e, r0, r1);
+        if (r0 == 0xFF && r1 != 0xFF) {
+            uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+            if (slot0 != VTX_NO_SPILL) {
+                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                vtx_x86_emit_imul_rr(e, VTX_SPILL_TMP_REG, r1);
+                emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+            }
+        } else if (r0 != 0xFF && r1 == 0xFF) {
+            uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+            if (slot1 != VTX_NO_SPILL) {
+                emit_spill_load(e, slot1, VTX_SPILL_TMP_REG);
+                vtx_x86_emit_imul_rr(e, r0, VTX_SPILL_TMP_REG);
+            }
+        } else if (r0 == 0xFF && r1 == 0xFF) {
+            uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+            uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+            if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
+                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                emit_spill_load(e, slot1, 13);
+                vtx_x86_emit_imul_rr(e, VTX_SPILL_TMP_REG, 13);
+                emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+            }
+        } else if (r0 != 0xFF && r1 != 0xFF) {
+            vtx_x86_emit_imul_rr(e, r0, r1);
+        }
         break;
 
     case VTX_X86_IDIV:
         r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
-        if (r0 != 0xFF) vtx_x86_emit_idiv_r(e, r0);
+        if (r0 == 0xFF) {
+            uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+            if (slot0 != VTX_NO_SPILL) {
+                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                vtx_x86_emit_idiv_r(e, VTX_SPILL_TMP_REG);
+            }
+        } else {
+            vtx_x86_emit_idiv_r(e, r0);
+        }
         break;
 
     case VTX_X86_SHL:
@@ -1113,16 +1289,38 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
     case VTX_X86_MOV:
         r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
         if (inst->flags & VTX_INST_FLAG_HAS_MEM) {
-            /* Memory operand */
-            if (inst->opnd_kinds[0] == VTX_OPND_VREG && inst->opnd_kinds[1] == VTX_OPND_MEM) {
-                /* Load: mov reg, [mem] */
-                uint8_t base = 5; /* RBP as frame pointer */
-                vtx_x86_emit_mov_rmem(e, r0, base, inst->mem.disp);
+            /* Memory operand — use base_phys/index_phys from regalloc */
+            uint8_t base = inst->mem.base_phys;
+            uint8_t index = inst->mem.index_phys;
+            int32_t disp = inst->mem.disp;
+
+            /* If base_phys is not assigned but base_vreg is, the vreg is
+             * spilled — use RBP as frame pointer for stack access. */
+            if (base == 0xFF && inst->mem.base_vreg == VTX_VREG_INVALID) {
+                base = 5; /* RBP as frame pointer */
+            }
+
+            if (inst->opnd_kinds[0] == VTX_OPND_PREG && inst->opnd_kinds[1] == VTX_OPND_MEM) {
+                /* Load: mov reg, [base + index*scale + disp] */
+                if (r0 != 0xFF) {
+                    if (index != 0xFF) {
+                        vtx_x86_emit_sib_mem(e, 0x8B, 0, r0, base, index,
+                                              inst->mem.scale, disp, true);
+                    } else {
+                        vtx_x86_emit_mov_rmem(e, r0, base, disp);
+                    }
+                }
             } else if (inst->opnd_kinds[0] == VTX_OPND_MEM && inst->opnd_kinds[1] == VTX_OPND_PREG) {
-                /* Store: mov [mem], reg */
+                /* Store: mov [base + index*scale + disp], reg */
                 r1 = (uint8_t)inst->operands[1];
-                uint8_t base = 5;
-                vtx_x86_emit_mov_memr(e, base, inst->mem.disp, r1);
+                if (r1 != 0xFF) {
+                    if (index != 0xFF) {
+                        vtx_x86_emit_sib_mem(e, 0x89, 0, r1, base, index,
+                                              inst->mem.scale, disp, false);
+                    } else {
+                        vtx_x86_emit_mov_memr(e, base, disp, r1);
+                    }
+                }
             }
         } else if (inst->flags & VTX_INST_FLAG_HAS_IMM) {
             /* mov reg, imm */
@@ -1143,12 +1341,30 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
 
     case VTX_X86_NEG:
         r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
-        if (r0 != 0xFF) vtx_x86_emit_neg_r(e, r0);
+        if (r0 == 0xFF) {
+            uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+            if (slot0 != VTX_NO_SPILL) {
+                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                vtx_x86_emit_neg_r(e, VTX_SPILL_TMP_REG);
+                emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+            }
+        } else {
+            vtx_x86_emit_neg_r(e, r0);
+        }
         break;
 
     case VTX_X86_NOT:
         r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
-        if (r0 != 0xFF) vtx_x86_emit_not_r(e, r0);
+        if (r0 == 0xFF) {
+            uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+            if (slot0 != VTX_NO_SPILL) {
+                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                vtx_x86_emit_not_r(e, VTX_SPILL_TMP_REG);
+                emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+            }
+        } else {
+            vtx_x86_emit_not_r(e, r0);
+        }
         break;
 
     case VTX_X86_CQO:
@@ -1173,19 +1389,48 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
     case VTX_X86_LEA:
         r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
         if (r0 != 0xFF && (inst->flags & VTX_INST_FLAG_HAS_MEM)) {
-            uint8_t base = 5; /* RBP */
-            vtx_x86_emit_lea_rmem(e, r0, base, inst->mem.disp);
+            uint8_t base = inst->mem.base_phys;
+            uint8_t index = inst->mem.index_phys;
+            int32_t disp = inst->mem.disp;
+
+            /* If base_phys not assigned (spilled or no base vreg), use RBP */
+            if (base == 0xFF && inst->mem.base_vreg == VTX_VREG_INVALID) {
+                base = 5; /* RBP as frame pointer */
+            }
+
+            if (index != 0xFF) {
+                vtx_x86_emit_sib_mem(e, 0x8D, 0, r0, base, index,
+                                      inst->mem.scale, disp, true);
+            } else {
+                vtx_x86_emit_lea_rmem(e, r0, base, disp);
+            }
         }
         break;
 
     case VTX_X86_PUSH:
         r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
-        if (r0 != 0xFF) vtx_x86_emit_push_r(e, r0);
+        if (r0 == 0xFF) {
+            uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+            if (slot0 != VTX_NO_SPILL) {
+                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                vtx_x86_emit_push_r(e, VTX_SPILL_TMP_REG);
+            }
+        } else {
+            vtx_x86_emit_push_r(e, r0);
+        }
         break;
 
     case VTX_X86_POP:
         r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
-        if (r0 != 0xFF) vtx_x86_emit_pop_r(e, r0);
+        if (r0 == 0xFF) {
+            uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+            if (slot0 != VTX_NO_SPILL) {
+                vtx_x86_emit_pop_r(e, VTX_SPILL_TMP_REG);
+                emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+            }
+        } else {
+            vtx_x86_emit_pop_r(e, r0);
+        }
         break;
 
     case VTX_X86_JMP:
@@ -1204,7 +1449,22 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
         break;
 
     case VTX_X86_RET:
-        vtx_x86_emit_ret(e);
+        /* Emit epilogue before ret: restore callee-saved registers.
+         * The epilogue includes the ret instruction itself, so we
+         * don't emit a separate ret here. */
+        if (ra) {
+            vtx_x86_emit_epilogue(e, ra->callee_saved_mask);
+        } else {
+            vtx_x86_emit_ret(e);
+        }
+        break;
+
+    case VTX_X86_UCOMISD:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) {
+            vtx_x86_emit_ucomisd(e, r0, r1);
+        }
         break;
 
     default:
@@ -1235,13 +1495,100 @@ int vtx_x86_emit_function(vtx_x86_emit_t *emit, vtx_inst_stream_t *stream,
     for (uint32_t b = 0; b < stream->block_count; b++) {
         vtx_inst_block_t *blk = &stream->blocks[b];
 
-        /* Align loop headers to 16-byte boundaries */
+        /* Align loop headers to 16-byte boundaries using multi-byte NOPs.
+         * Using 1-byte NOPs (0x90) causes the processor to decode up to 15
+         * NOPs, wasting decode bandwidth. Multi-byte NOPs are decoded as a
+         * single instruction, which is more efficient.
+         *
+         * Multi-byte NOP encoding (Intel recommended):
+         *   2-byte: 66 90
+         *   3-byte: 0F 1F 00
+         *   4-byte: 0F 1F 40 00
+         *   5-byte: 0F 1F 44 00 00
+         *   6-byte: 66 0F 1F 44 00 00
+         *   7-byte: 0F 1F 80 00 00 00 00
+         *   8-byte: 0F 1F 84 00 00 00 00 00
+         *   9-byte: 66 0F 1F 84 00 00 00 00 00
+         *  10-byte: 66 66 0F 1F 84 00 00 00 00 00
+         *  11-byte: 66 66 66 0F 1F 84 00 00 00 00 00
+         *  (up to 15 bytes by adding more 66 prefixes) */
         if (blk->inst_count > 0 && (blk->insts[0].flags & (1u << 17))) {
             uint32_t pos = vtx_x86_emit_position(emit);
             uint32_t aligned = (pos + 15u) & ~15u;
-            while (pos < aligned) {
-                vtx_x86_emit_nop(emit);
-                pos++;
+            uint32_t pad = aligned - pos;
+
+            while (pad > 0) {
+                /* Emit the largest multi-byte NOP that fits */
+                if (pad >= 11) {
+                    /* 11-byte: 66 66 66 0F 1F 84 00 00 00 00 00 */
+                    emit_byte(emit, 0x66); emit_byte(emit, 0x66);
+                    emit_byte(emit, 0x66); emit_byte(emit, 0x0F);
+                    emit_byte(emit, 0x1F); emit_byte(emit, 0x84);
+                    emit_byte(emit, 0x00); emit_byte(emit, 0x00);
+                    emit_byte(emit, 0x00); emit_byte(emit, 0x00);
+                    emit_byte(emit, 0x00);
+                    pad -= 11;
+                } else if (pad >= 10) {
+                    /* 10-byte: 66 66 0F 1F 84 00 00 00 00 00 */
+                    emit_byte(emit, 0x66); emit_byte(emit, 0x66);
+                    emit_byte(emit, 0x0F); emit_byte(emit, 0x1F);
+                    emit_byte(emit, 0x84); emit_byte(emit, 0x00);
+                    emit_byte(emit, 0x00); emit_byte(emit, 0x00);
+                    emit_byte(emit, 0x00); emit_byte(emit, 0x00);
+                    pad -= 10;
+                } else if (pad >= 9) {
+                    /* 9-byte: 66 0F 1F 84 00 00 00 00 00 */
+                    emit_byte(emit, 0x66); emit_byte(emit, 0x0F);
+                    emit_byte(emit, 0x1F); emit_byte(emit, 0x84);
+                    emit_byte(emit, 0x00); emit_byte(emit, 0x00);
+                    emit_byte(emit, 0x00); emit_byte(emit, 0x00);
+                    emit_byte(emit, 0x00);
+                    pad -= 9;
+                } else if (pad >= 8) {
+                    /* 8-byte: 0F 1F 84 00 00 00 00 00 */
+                    emit_byte(emit, 0x0F); emit_byte(emit, 0x1F);
+                    emit_byte(emit, 0x84); emit_byte(emit, 0x00);
+                    emit_byte(emit, 0x00); emit_byte(emit, 0x00);
+                    emit_byte(emit, 0x00); emit_byte(emit, 0x00);
+                    pad -= 8;
+                } else if (pad >= 7) {
+                    /* 7-byte: 0F 1F 80 00 00 00 00 */
+                    emit_byte(emit, 0x0F); emit_byte(emit, 0x1F);
+                    emit_byte(emit, 0x80); emit_byte(emit, 0x00);
+                    emit_byte(emit, 0x00); emit_byte(emit, 0x00);
+                    emit_byte(emit, 0x00);
+                    pad -= 7;
+                } else if (pad >= 6) {
+                    /* 6-byte: 66 0F 1F 44 00 00 */
+                    emit_byte(emit, 0x66); emit_byte(emit, 0x0F);
+                    emit_byte(emit, 0x1F); emit_byte(emit, 0x44);
+                    emit_byte(emit, 0x00); emit_byte(emit, 0x00);
+                    pad -= 6;
+                } else if (pad >= 5) {
+                    /* 5-byte: 0F 1F 44 00 00 */
+                    emit_byte(emit, 0x0F); emit_byte(emit, 0x1F);
+                    emit_byte(emit, 0x44); emit_byte(emit, 0x00);
+                    emit_byte(emit, 0x00);
+                    pad -= 5;
+                } else if (pad >= 4) {
+                    /* 4-byte: 0F 1F 40 00 */
+                    emit_byte(emit, 0x0F); emit_byte(emit, 0x1F);
+                    emit_byte(emit, 0x40); emit_byte(emit, 0x00);
+                    pad -= 4;
+                } else if (pad >= 3) {
+                    /* 3-byte: 0F 1F 00 */
+                    emit_byte(emit, 0x0F); emit_byte(emit, 0x1F);
+                    emit_byte(emit, 0x00);
+                    pad -= 3;
+                } else if (pad >= 2) {
+                    /* 2-byte: 66 90 */
+                    emit_byte(emit, 0x66); emit_byte(emit, 0x90);
+                    pad -= 2;
+                } else {
+                    /* 1-byte: 90 (standard NOP) */
+                    emit_byte(emit, 0x90);
+                    pad -= 1;
+                }
             }
         }
 
@@ -1273,7 +1620,9 @@ int vtx_x86_emit_function(vtx_x86_emit_t *emit, vtx_inst_stream_t *stream,
         }
     }
 
-    /* Epilogue is emitted by the RET instruction itself */
+    /* Epilogue is now emitted by the RET instruction handler in
+     * emit_single_inst(), which calls vtx_x86_emit_epilogue() before
+     * the ret. This correctly handles multiple return points. */
     (void)arena;
     return 0;
 }

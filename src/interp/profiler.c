@@ -21,6 +21,10 @@ int vtx_profiler_init(vtx_profiler_t *profiler)
         return -1;
     }
     profiler->count = 0;
+
+    /* Initialize LRU cache to empty */
+    memset(profiler->lru, 0, sizeof(profiler->lru));
+
     return 0;
 }
 
@@ -103,6 +107,49 @@ static void ensure_profile_arrays(vtx_profile_data_t *pd)
 }
 
 /* ========================================================================== */
+/* LRU cache helpers                                                           */
+/* ========================================================================== */
+
+/**
+ * Look up a method in the LRU cache. Returns the profile data pointer
+ * if found, or NULL. On hit, moves the entry to MRU position (slot 0).
+ */
+static vtx_profile_data_t *lru_lookup(vtx_profiler_t *profiler,
+                                       const vtx_method_desc_t *method)
+{
+    for (int i = 0; i < VTX_PROFILER_LRU_SIZE; i++) {
+        if (profiler->lru[i].method == method && profiler->lru[i].pd != NULL) {
+            /* Hit — move to MRU (slot 0) by shifting entries down */
+            if (i > 0) {
+                const vtx_method_desc_t *tmp_method = profiler->lru[i].method;
+                vtx_profile_data_t      *tmp_pd     = profiler->lru[i].pd;
+                memmove(&profiler->lru[1], &profiler->lru[0],
+                        i * sizeof(profiler->lru[0]));
+                profiler->lru[0].method = tmp_method;
+                profiler->lru[0].pd     = tmp_pd;
+            }
+            return profiler->lru[0].pd;
+        }
+    }
+    return NULL;
+}
+
+/**
+ * Insert a method→pd mapping into the LRU cache at MRU position.
+ * Evicts the least recently used entry (last slot).
+ */
+static void lru_insert(vtx_profiler_t *profiler,
+                        const vtx_method_desc_t *method,
+                        vtx_profile_data_t *pd)
+{
+    /* Shift everything down by one, evicting the last entry */
+    memmove(&profiler->lru[1], &profiler->lru[0],
+            (VTX_PROFILER_LRU_SIZE - 1) * sizeof(profiler->lru[0]));
+    profiler->lru[0].method = method;
+    profiler->lru[0].pd = pd;
+}
+
+/* ========================================================================== */
 /* Get or create method profile data                                           */
 /* ========================================================================== */
 
@@ -112,10 +159,18 @@ vtx_profile_data_t *vtx_profiler_get_method_data(vtx_profiler_t *profiler,
     VTX_ASSERT(profiler != NULL, "profiler must not be NULL");
     VTX_ASSERT(method != NULL, "method must not be NULL");
 
-    /* Search for existing entry */
+    /* Fast path: check LRU cache first (O(1) for repeated calls) */
+    vtx_profile_data_t *cached = lru_lookup(profiler, method);
+    if (cached != NULL) {
+        return cached;
+    }
+
+    /* Slow path: linear search for existing entry */
     for (uint32_t i = 0; i < profiler->count; i++) {
         if (profiler->data[i].method == method) {
-            return &profiler->data[i];
+            vtx_profile_data_t *pd = &profiler->data[i];
+            lru_insert(profiler, method, pd);
+            return pd;
         }
     }
 
@@ -138,6 +193,10 @@ vtx_profile_data_t *vtx_profiler_get_method_data(vtx_profiler_t *profiler,
     ensure_profile_arrays(pd);
 
     profiler->count++;
+
+    /* Insert into LRU cache */
+    lru_insert(profiler, method, pd);
+
     return pd;
 }
 
@@ -352,15 +411,21 @@ const vtx_call_site_profile_t *vtx_profiler_get_call_site_profile(
     VTX_ASSERT(profiler != NULL, "profiler must not be NULL");
     VTX_ASSERT(method != NULL, "method must not be NULL");
 
-    /* Find the method's profile data */
-    for (uint32_t i = 0; i < profiler->count; i++) {
-        if (profiler->data[i].method == method) {
-            const vtx_profile_data_t *pd = &profiler->data[i];
-            if (pd->call_site_types != NULL && call_pc < pd->call_site_count) {
-                return &pd->call_site_types[call_pc];
+    /* Find the method's profile data — check LRU cache first */
+    const vtx_profile_data_t *pd = lru_lookup((vtx_profiler_t *)profiler, method);
+    if (pd == NULL) {
+        /* Slow path: linear search */
+        for (uint32_t i = 0; i < profiler->count; i++) {
+            if (profiler->data[i].method == method) {
+                pd = &profiler->data[i];
+                break;
             }
-            return NULL;
         }
+    }
+    if (pd == NULL) return NULL;
+
+    if (pd->call_site_types != NULL && call_pc < pd->call_site_count) {
+        return &pd->call_site_types[call_pc];
     }
     return NULL;
 }
@@ -372,19 +437,25 @@ double vtx_profiler_get_branch_probability(const vtx_profiler_t *profiler,
     VTX_ASSERT(profiler != NULL, "profiler must not be NULL");
     VTX_ASSERT(method != NULL, "method must not be NULL");
 
-    for (uint32_t i = 0; i < profiler->count; i++) {
-        if (profiler->data[i].method == method) {
-            const vtx_profile_data_t *pd = &profiler->data[i];
-            if (pd->branch_total_counts != NULL && pc < pd->branch_array_size) {
-                uint32_t total = pd->branch_total_counts[pc];
-                uint32_t taken = pd->branch_taken_counts[pc];
-                if (total == 0) {
-                    return 0.5; /* unknown */
-                }
-                return (double)taken / (double)total;
+    /* Find the method's profile data — check LRU cache first */
+    const vtx_profile_data_t *pd = lru_lookup((vtx_profiler_t *)profiler, method);
+    if (pd == NULL) {
+        for (uint32_t i = 0; i < profiler->count; i++) {
+            if (profiler->data[i].method == method) {
+                pd = &profiler->data[i];
+                break;
             }
-            return 0.5;
         }
+    }
+    if (pd == NULL) return 0.5;
+
+    if (pd->branch_total_counts != NULL && pc < pd->branch_array_size) {
+        uint32_t total = pd->branch_total_counts[pc];
+        uint32_t taken = pd->branch_taken_counts[pc];
+        if (total == 0) {
+            return 0.5; /* unknown */
+        }
+        return (double)taken / (double)total;
     }
     return 0.5;
 }
@@ -396,14 +467,20 @@ vtx_shapeid_t vtx_profiler_get_field_shape(const vtx_profiler_t *profiler,
     VTX_ASSERT(profiler != NULL, "profiler must not be NULL");
     VTX_ASSERT(method != NULL, "method must not be NULL");
 
-    for (uint32_t i = 0; i < profiler->count; i++) {
-        if (profiler->data[i].method == method) {
-            const vtx_profile_data_t *pd = &profiler->data[i];
-            if (pd->field_shape_ids != NULL && field_pc < pd->field_array_size) {
-                return (vtx_shapeid_t)pd->field_shape_ids[field_pc];
+    /* Find the method's profile data — check LRU cache first */
+    const vtx_profile_data_t *pd = lru_lookup((vtx_profiler_t *)profiler, method);
+    if (pd == NULL) {
+        for (uint32_t i = 0; i < profiler->count; i++) {
+            if (profiler->data[i].method == method) {
+                pd = &profiler->data[i];
+                break;
             }
-            return VTX_SHAPE_INVALID;
         }
+    }
+    if (pd == NULL) return VTX_SHAPE_INVALID;
+
+    if (pd->field_shape_ids != NULL && field_pc < pd->field_array_size) {
+        return (vtx_shapeid_t)pd->field_shape_ids[field_pc];
     }
     return VTX_SHAPE_INVALID;
 }

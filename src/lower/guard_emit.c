@@ -12,6 +12,34 @@
 #include <string.h>
 
 /* ========================================================================== */
+/* Deopt handler configuration (Bug 2 fix)                                     */
+/* ========================================================================== */
+
+/**
+ * Default deopt handler stub — called when a guard fails and no custom
+ * handler has been registered. Prints diagnostic info and aborts.
+ */
+extern void vtx_deopt_handler_stub(uint32_t frame_state_index,
+                                    uint32_t native_pc);
+
+/**
+ * Global deopt handler function pointer. If NULL, the default
+ * vtx_deopt_handler_stub is used.
+ */
+static void *(*vtx_deopt_handler)(uint32_t frame_state_index,
+                                   uint32_t native_pc) = NULL;
+
+void vtx_guard_emit_set_deopt_handler(void *handler)
+{
+    vtx_deopt_handler = handler;
+}
+
+void *vtx_guard_emit_get_deopt_handler(void)
+{
+    return vtx_deopt_handler;
+}
+
+/* ========================================================================== */
 /* Guard descriptor array                                                      */
 /* ========================================================================== */
 
@@ -98,6 +126,39 @@ static void collect_live_regs(vtx_inst_stream_t *stream, uint32_t block_idx,
             vtx_side_table_add_register(side_table, r, node_id);
         }
     }
+
+    (void)side_entry_idx;
+}
+
+/**
+ * Find the JCC instruction in the instruction stream that corresponds to
+ * a given guard node. The JCC is identified by:
+ *   - opcode == VTX_X86_JCC
+ *   - flags & VTX_INST_FLAG_IS_GUARD
+ *   - source_node == guard_node
+ *
+ * Returns the block index and instruction index via out_block/out_inst,
+ * or returns -1 if not found.
+ */
+static int find_guard_jcc(vtx_inst_stream_t *stream,
+                           vtx_nodeid_t guard_node,
+                           uint32_t *out_block,
+                           uint32_t *out_inst)
+{
+    for (uint32_t b = 0; b < stream->block_count; b++) {
+        vtx_inst_block_t *blk = &stream->blocks[b];
+        for (uint32_t i = 0; i < blk->inst_count; i++) {
+            vtx_inst_t *inst = &blk->insts[i];
+            if (inst->opcode == VTX_X86_JCC &&
+                (inst->flags & VTX_INST_FLAG_IS_GUARD) &&
+                inst->source_node == guard_node) {
+                *out_block = b;
+                *out_inst = i;
+                return 0;
+            }
+        }
+    }
+    return -1;
 }
 
 int vtx_guard_emit_lower(vtx_guard_desc_array_t *guards,
@@ -113,8 +174,27 @@ int vtx_guard_emit_lower(vtx_guard_desc_array_t *guards,
     for (uint32_t g = 0; g < guards->count; g++) {
         vtx_guard_desc_t *guard = &guards->guards[g];
 
-        /* Record the native PC offset of this guard */
-        uint32_t native_pc = vtx_x86_emit_position(emit);
+        /* Find the JCC instruction for this guard in the instruction stream.
+         * The JCC's native_offset was filled by vtx_x86_emit_function during
+         * code emission. We use this to record where the JCC is in the native
+         * code buffer, so we can later patch its rel32 displacement. */
+        uint32_t jcc_block = 0, jcc_inst = 0;
+        if (inst_stream && find_guard_jcc(inst_stream, guard->guard_node,
+                                           &jcc_block, &jcc_inst) == 0) {
+            vtx_inst_t *jcc = &inst_stream->blocks[jcc_block].insts[jcc_inst];
+            guard->jcc_native_offset = jcc->native_offset;
+        } else {
+            /* Fallback: if we can't find the JCC in the stream, mark as invalid.
+             * This guard will be skipped during patching. */
+            guard->jcc_native_offset = UINT32_MAX;
+        }
+
+        /* Record the native PC offset of this guard for the side table.
+         * Use the JCC's native offset if available, otherwise use the current
+         * emitter position (which may be inaccurate). */
+        uint32_t native_pc = (guard->jcc_native_offset != UINT32_MAX)
+                             ? guard->jcc_native_offset
+                             : vtx_x86_emit_position(emit);
 
         /* Add a side table entry */
         uint32_t st_idx = vtx_side_table_add_entry(side_table, native_pc,
@@ -122,22 +202,22 @@ int vtx_guard_emit_lower(vtx_guard_desc_array_t *guards,
                             VTX_STF_GUARD);
 
         /* Collect live registers at this point */
-        /* Find the guard instruction in the stream */
-        for (uint32_t b = 0; b < inst_stream->block_count; b++) {
-            vtx_inst_block_t *blk = &inst_stream->blocks[b];
-            for (uint32_t i = 0; i < blk->inst_count; i++) {
-                if (blk->insts[i].source_node == guard->guard_node &&
-                    (blk->insts[i].flags & VTX_INST_FLAG_IS_GUARD)) {
-                    collect_live_regs(inst_stream, b, i, side_table, st_idx);
-                    break;
+        if (inst_stream) {
+            for (uint32_t b = 0; b < inst_stream->block_count; b++) {
+                vtx_inst_block_t *blk = &inst_stream->blocks[b];
+                for (uint32_t i = 0; i < blk->inst_count; i++) {
+                    if (blk->insts[i].source_node == guard->guard_node &&
+                        (blk->insts[i].flags & VTX_INST_FLAG_IS_GUARD)) {
+                        collect_live_regs(inst_stream, b, i, side_table, st_idx);
+                        break;
+                    }
                 }
             }
         }
 
         /* The guard's compare + jcc have already been emitted by isel.
-         * We just need to record the side table entry.
+         * We just need to record the side table entry and JCC offset.
          * The jcc target (deopt stub) will be patched later. */
-        guard->bytecode_pc = native_pc; /* store for later patching */
 
         lowered++;
     }
@@ -150,15 +230,6 @@ int vtx_guard_emit_lower(vtx_guard_desc_array_t *guards,
 /* Deopt stub emission                                                         */
 /* ========================================================================== */
 
-/**
- * Structure to track deopt stub locations for patching.
- */
-typedef struct {
-    uint32_t guard_index;      /* index into guards array */
-    uint32_t stub_offset;      /* native code offset of the deopt stub */
-    uint32_t jcc_patch_offset; /* native code offset of the JCC to patch */
-} vtx_deopt_stub_info_t;
-
 int vtx_guard_emit_deopt_stubs(vtx_guard_desc_array_t *guards,
                                 vtx_x86_emit_t *emit,
                                 vtx_side_table_t *side_table,
@@ -169,47 +240,55 @@ int vtx_guard_emit_deopt_stubs(vtx_guard_desc_array_t *guards,
 
     int emitted = 0;
 
-    /* Allocate tracking array */
-    uint32_t info_count = guards->count;
-    vtx_deopt_stub_info_t *infos = (vtx_deopt_stub_info_t *)vtx_arena_alloc(
-        arena, info_count * sizeof(vtx_deopt_stub_info_t));
-    if (!infos && info_count > 0) return -1;
-
     for (uint32_t g = 0; g < guards->count; g++) {
         vtx_guard_desc_t *guard = &guards->guards[g];
 
-        /* Record the stub offset */
+        /* Skip guards whose JCC we couldn't locate */
+        if (guard->jcc_native_offset == UINT32_MAX) continue;
+
+        /* Record the stub offset — this is the native code offset where the
+         * deopt stub begins. We store it back in the guard descriptor so
+         * vtx_guard_emit_patch can compute the JCC rel32 displacement. */
         uint32_t stub_offset = vtx_x86_emit_position(emit);
-        infos[g].guard_index = g;
-        infos[g].stub_offset = stub_offset;
+        guard->deopt_stub_offset = stub_offset;
 
         /* Emit deopt stub:
-         * 1. Save callee-saved registers that might have live values
-         * 2. Store the frame_state_index in RDI for the deopt runtime
-         * 3. Load the deopt handler address
-         * 4. Jump to the deopt runtime
+         *   1. Save the original RDI (callee-saved in System V ABI)
+         *   2. Set RDI = frame_state_index (1st argument)
+         *   3. Set RSI = native_pc_offset (2nd argument)
+         *   4. Load deopt handler address into RAX
+         *   5. Jump to the deopt handler via JMP RAX
+         *
+         * Bug 2 fix: Previously emitted "mov rax, 0; push rax; ret" which
+         * jumped to address 0 (NULL). Now we load the actual handler address
+         * and use a proper JMP RAX.
          */
 
-        /* Push frame state index in RDI */
+        /* Push frame state index in RDI (save original RDI) */
         vtx_x86_emit_push_r(emit, 7); /* RDI */
 
         /* mov rdi, frame_state_index */
         vtx_x86_emit_mov_imm32(emit, 7, (int32_t)guard->frame_state_index); /* RDI = 7 */
 
         /* mov rsi, native_pc_offset (for the deopt runtime to look up) */
-        vtx_x86_emit_mov_imm32(emit, 6, (int32_t)guard->bytecode_pc); /* RSI = 6 */
+        vtx_x86_emit_mov_imm32(emit, 6, (int32_t)guard->jcc_native_offset); /* RSI = 6 */
 
-        /* Load deopt handler address (absolute, 64-bit)
-         * This will be patched by the reloc system */
-        /* mov rax, 0 (placeholder — will be patched with actual address) */
-        vtx_x86_emit_mov_imm64(emit, 0, 0); /* RAX = 0, placeholder */
+        /* Load the deopt handler address into RAX.
+         * Use the registered handler if available, otherwise use the default stub. */
+        void *handler = vtx_deopt_handler;
+        if (handler == NULL) {
+            handler = (void *)(uintptr_t)vtx_deopt_handler_stub;
+        }
 
-        /* call rax (jump to deopt handler) */
-        /* Actually use jmp since we don't need to return */
-        /* mov rax, [rip+0] would be ideal, but for now use absolute address */
-        /* jmp rax */
-        vtx_x86_emit_push_r(emit, 0); /* push RAX (deopt handler address) */
-        vtx_x86_emit_ret(emit);        /* "ret" jumps to the address on stack */
+        /* mov rax, imm64 (absolute 64-bit address of the deopt handler) */
+        vtx_x86_emit_mov_imm64(emit, 0, (uint64_t)(uintptr_t)handler);
+
+        /* jmp rax — jump to the deopt handler.
+         * Encoding: FF E0 (opcode FF /4, register RAX=0)
+         * This replaces the old "push rax; ret" which jumped to whatever
+         * was on the stack (address 0 = crash). */
+        emit_byte(emit, 0xFF);
+        emit_byte(emit, 0xE0); /* ModR/M: mod=11, reg=4 (/4 = JMP), rm=0 (RAX) */
 
         /* Record in side table */
         if (side_table) {
@@ -222,6 +301,8 @@ int vtx_guard_emit_deopt_stubs(vtx_guard_desc_array_t *guards,
         emitted++;
     }
 
+    (void)code_start;
+    (void)arena;
     return emitted;
 }
 
@@ -236,25 +317,63 @@ int vtx_guard_emit_patch(vtx_guard_desc_array_t *guards,
 {
     if (!guards || !emit || !emit->buffer) return -1;
 
-    /* This function would patch the JCC instructions in the main code
-     * to point to their corresponding deopt stubs.
-     *
-     * The actual implementation requires:
-     * 1. Knowing the offset of each JCC instruction
-     * 2. Knowing the offset of each deopt stub
-     * 3. Computing the relative displacement (stub_offset - jcc_offset - 6)
-     * 4. Patching the 32-bit displacement in the code buffer
-     *
-     * For a full implementation, the guard_emit_lower function would
-     * record the JCC offsets, and this function would use them.
-     */
+    int patched = 0;
 
-    /* For each guard, find its JCC in the instruction stream and patch it.
-     * This is a simplified implementation that scans the code buffer
-     * for JCC patterns. A production implementation would track the
-     * exact offsets during emission. */
+    for (uint32_t g = 0; g < guards->count; g++) {
+        vtx_guard_desc_t *guard = &guards->guards[g];
 
-    (void)code_start;
+        /* Skip guards with invalid offsets */
+        if (guard->jcc_native_offset == UINT32_MAX ||
+            guard->deopt_stub_offset == 0) {
+            continue;
+        }
+
+        /* x86-64 JCC rel32 encoding: 0F 8x cd (6 bytes total)
+         *   Byte 0:    0x0F (two-byte opcode prefix)
+         *   Byte 1:    0x80 + condition_code
+         *   Bytes 2-5: 32-bit displacement (little-endian)
+         *
+         * The displacement is relative to the instruction AFTER the JCC:
+         *   rel32 = target - (jcc_offset + 6)
+         * Where:
+         *   target        = deopt_stub_offset (offset from code_start)
+         *   jcc_offset    = jcc_native_offset (offset from code_start)
+         *   6             = size of the JCC rel32 instruction
+         *
+         * The displacement is stored at code_start + jcc_native_offset + 2.
+         */
+        uint32_t jcc_off = guard->jcc_native_offset;
+        uint32_t stub_off = guard->deopt_stub_offset;
+
+        /* Bounds check: ensure we have room for the 6-byte JCC instruction */
+        if (jcc_off + 6 > emit->position) {
+            continue; /* JCC offset out of bounds, skip */
+        }
+
+        /* Verify this looks like a JCC rel32: first byte should be 0x0F */
+        if (code_start[jcc_off] != 0x0F) {
+            continue; /* Not a JCC rel32, skip */
+        }
+
+        /* Verify second byte is in the JCC range: 0x80-0x8F */
+        uint8_t opcode2 = code_start[jcc_off + 1];
+        if ((opcode2 & 0xF0) != 0x80) {
+            continue; /* Not a JCC rel32, skip */
+        }
+
+        /* Compute the relative displacement */
+        int32_t rel32 = (int32_t)stub_off - (int32_t)(jcc_off + 6);
+
+        /* Patch the 32-bit displacement in the code buffer.
+         * Write in little-endian order. */
+        code_start[jcc_off + 2] = (uint8_t)(rel32 & 0xFF);
+        code_start[jcc_off + 3] = (uint8_t)((rel32 >> 8) & 0xFF);
+        code_start[jcc_off + 4] = (uint8_t)((rel32 >> 16) & 0xFF);
+        code_start[jcc_off + 5] = (uint8_t)((rel32 >> 24) & 0xFF);
+
+        patched++;
+    }
+
     (void)arena;
-    return 0;
+    return patched;
 }

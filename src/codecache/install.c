@@ -168,11 +168,7 @@ bool vtx_install_method(vtx_code_cache_t *cache,
     /* Update the method's code pointer with release store.
      * This ensures that all writes to the code and metadata are
      * visible to other threads before they see the new code pointer. */
-    __atomic_store_n(&method->bytecode, (const uint8_t *)code_mem, __ATOMIC_RELEASE);
-    /* Note: In a real implementation, the method descriptor would have a
-     * dedicated code pointer field. We use bytecode as a proxy here since
-     * that's the field available in vtx_method_desc_t. In practice, you'd
-     * add a `void *compiled_code` field to vtx_method_desc_t. */
+    __atomic_store_n(&method->compiled_code, code_mem, __ATOMIC_RELEASE);
 
     (void)arena;
     return true;
@@ -193,7 +189,7 @@ int vtx_uninstall_method(vtx_code_cache_t *cache,
 
     /* Set the method's code pointer to NULL with release store */
     if (cm->method_desc) {
-        __atomic_store_n(&cm->method_desc->bytecode, NULL, __ATOMIC_RELEASE);
+        __atomic_store_n(&cm->method_desc->compiled_code, NULL, __ATOMIC_RELEASE);
     }
 
     /* Free the code in the cache */

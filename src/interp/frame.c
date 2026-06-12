@@ -250,12 +250,18 @@ vtx_frame_t *vtx_frame_create(const vtx_method_desc_t *method,
     frame->catch_handler_pc = VTX_CATCH_NONE;
     frame->exception        = VTX_VALUE_UNDEFINED;
 
-    /* Initialize locals to undefined */
+    /* Initialize locals to undefined.
+     * NOTE: We cannot use memset() here because VTX_VALUE_UNDEFINED is
+     * 0x7FF8000000000005 (NaN-boxed), which is NOT bitwise-zero.
+     * The loop is necessary for correct initialization. */
     for (uint32_t i = 0; i < max_locals; i++) {
         locals[i] = VTX_VALUE_UNDEFINED;
     }
 
-    /* Initialize monitored types to VTX_TYPE_INVALID */
+    /* Initialize monitored types to VTX_TYPE_INVALID.
+     * VTX_TYPE_INVALID is typically 0 or UINT32_MAX. If it's 0,
+     * memset would work, but we use the loop for clarity and safety
+     * since the value may change. */
     for (uint32_t i = 0; i < max_locals; i++) {
         monitored_types[i] = VTX_TYPE_INVALID;
     }

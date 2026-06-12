@@ -359,8 +359,19 @@ bool vtx_version_exit(vtx_version_manager_t *manager,
         /* Refcount dropped to zero */
         if (version->state == VTX_VERSION_DEPRECATED ||
             version->state == VTX_VERSION_INVALIDATED) {
-            /* Safe to free */
-            vtx_version_free(manager, version);
+            /* Safe to free — must hold method_mutex to modify the version list */
+            vtx_method_versions_t *mv = get_method_versions(manager,
+                version->method_id, false);
+            if (mv) {
+                pthread_mutex_lock(&mv->method_mutex);
+                /* Re-check state under lock: another thread may have
+                 * changed it between the lockless check and here. */
+                if (version->state == VTX_VERSION_DEPRECATED ||
+                    version->state == VTX_VERSION_INVALIDATED) {
+                    vtx_version_free(manager, version);
+                }
+                pthread_mutex_unlock(&mv->method_mutex);
+            }
             return true;
         }
     }

@@ -64,6 +64,7 @@ static const char *vtx_x86_opcode_names[VTX_X86_OPCODE_COUNT] = {
     [VTX_X86_RET]   = "ret",
     [VTX_X86_LAHF]  = "lahf",
     [VTX_X86_SAHF]  = "sahf",
+    [VTX_X86_UCOMISD] = "ucomisd",
 };
 
 const char *vtx_x86_opcode_name(vtx_x86_opcode_t opcode)
@@ -397,21 +398,21 @@ static bool emit_mul_by_constant(vtx_inst_stream_t *stream, vtx_inst_block_t *bl
 
     /* x * 3 → lea dst, [lhs + lhs*2] */
     if (constant == 3) {
-        vtx_x86_memop_t mem = { lhs_vreg, lhs_vreg, 2, 0 };
+        vtx_x86_memop_t mem = { lhs_vreg, lhs_vreg, 0xFF, 0xFF, 2, 0 };
         vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_LEA, dst, &mem, node_id), arena);
         return true;
     }
 
     /* x * 5 → lea dst, [lhs + lhs*4] */
     if (constant == 5) {
-        vtx_x86_memop_t mem = { lhs_vreg, lhs_vreg, 4, 0 };
+        vtx_x86_memop_t mem = { lhs_vreg, lhs_vreg, 0xFF, 0xFF, 4, 0 };
         vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_LEA, dst, &mem, node_id), arena);
         return true;
     }
 
     /* x * 6 → lea dst, [lhs*2 + lhs*4] then add lhs (or: lea [lhs+lhs*2]; shl 1) */
     if (constant == 6) {
-        vtx_x86_memop_t mem = { lhs_vreg, lhs_vreg, 2, 0 };
+        vtx_x86_memop_t mem = { lhs_vreg, lhs_vreg, 0xFF, 0xFF, 2, 0 };
         vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_LEA, dst, &mem, node_id), arena);
         vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, dst, 1, node_id), arena);
         return true;
@@ -419,14 +420,14 @@ static bool emit_mul_by_constant(vtx_inst_stream_t *stream, vtx_inst_block_t *bl
 
     /* x * 9 → lea dst, [lhs + lhs*8] */
     if (constant == 9) {
-        vtx_x86_memop_t mem = { lhs_vreg, lhs_vreg, 8, 0 };
+        vtx_x86_memop_t mem = { lhs_vreg, lhs_vreg, 0xFF, 0xFF, 8, 0 };
         vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_LEA, dst, &mem, node_id), arena);
         return true;
     }
 
     /* x * 10 → lea dst, [lhs + lhs*4]; shl 1 */
     if (constant == 10) {
-        vtx_x86_memop_t mem = { lhs_vreg, lhs_vreg, 4, 0 };
+        vtx_x86_memop_t mem = { lhs_vreg, lhs_vreg, 0xFF, 0xFF, 4, 0 };
         vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_LEA, dst, &mem, node_id), arena);
         vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, dst, 1, node_id), arena);
         return true;
@@ -435,20 +436,21 @@ static bool emit_mul_by_constant(vtx_inst_stream_t *stream, vtx_inst_block_t *bl
     /* x * (2^n + 1) → lea dst, [lhs + lhs*2^n] */
     for (int n = 1; n <= 3; n++) {
         if (constant == ((1 << n) + 1)) {
-            vtx_x86_memop_t mem = { lhs_vreg, lhs_vreg, (uint8_t)(1 << n), 0 };
+            vtx_x86_memop_t mem = { lhs_vreg, lhs_vreg, 0xFF, 0xFF, (uint8_t)(1 << n), 0 };
             vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_LEA, dst, &mem, node_id), arena);
             return true;
         }
     }
 
-    /* x * (2^n - 1) → lea dst, [lhs*2^n - lhs] (use negative disp) */
-    for (int n = 2; n <= 3; n++) {
-        if (constant == ((1 << n) - 1)) {
-            vtx_x86_memop_t mem = { lhs_vreg, lhs_vreg, (uint8_t)(1 << n), -8 };
-            vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_LEA, dst, &mem, node_id), arena);
-            return true;
-        }
-    }
+    /* x * (2^n - 1): REMOVED — this pattern was incorrectly implemented.
+     * The old code used negative displacement (disp=-8) which is a constant,
+     * not a register value. For example, for x*7 (2^3-1), it computed
+     * lea dst, [x + x*8 - 8] = 9x - 8, not 7x. The general pattern
+     * x*(2^n-1) cannot be expressed in a single LEA because LEA
+     * supports [base + index*scale + disp] where disp is a constant,
+     * not a register subtraction. The specific cases (3, 5, 9) that
+     * ARE expressible are already handled above as x*(2^n+1) patterns.
+     * For other constants, fall through to IMUL. */
 
     /* For negative constants: compute |c| * x, then negate */
     if (constant < 0 && constant > -64) {
@@ -528,6 +530,8 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             vtx_x86_memop_t mem;
             mem.base_vreg = VTX_VREG_INVALID;
             mem.index_vreg = VTX_VREG_INVALID;
+            mem.base_phys = 0xFF;
+            mem.index_phys = 0xFF;
             mem.scale = 1;
             mem.disp = (int32_t)(16 + 8 * (pidx - 6));
             vtx_inst_t inst;
@@ -871,7 +875,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         uint32_t addr = vtx_isel_node_vreg(stream, node->inputs[0]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (addr == VTX_VREG_INVALID) return -1;
-        vtx_x86_memop_t mem = { addr, VTX_VREG_INVALID, 1, 0 };
+        vtx_x86_memop_t mem = { addr, VTX_VREG_INVALID, 0xFF, 0xFF, 1, 0 };
         vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_MOV, dst, &mem, node_id), arena);
         break;
     }
@@ -881,7 +885,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         uint32_t addr = vtx_isel_node_vreg(stream, node->inputs[0]);
         uint32_t val = vtx_isel_node_vreg(stream, node->inputs[1]);
         if (addr == VTX_VREG_INVALID || val == VTX_VREG_INVALID) return -1;
-        vtx_x86_memop_t mem = { addr, VTX_VREG_INVALID, 1, 0 };
+        vtx_x86_memop_t mem = { addr, VTX_VREG_INVALID, 0xFF, 0xFF, 1, 0 };
         vtx_isel_emit_inst(block, make_mr_inst(VTX_X86_MOV, &mem, val, node_id), arena);
         break;
     }
@@ -891,7 +895,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         uint32_t obj = vtx_isel_node_vreg(stream, node->inputs[0]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (obj == VTX_VREG_INVALID) return -1;
-        vtx_x86_memop_t mem = { obj, VTX_VREG_INVALID, 1, (int32_t)node->field_offset };
+        vtx_x86_memop_t mem = { obj, VTX_VREG_INVALID, 0xFF, 0xFF, 1, (int32_t)node->field_offset };
         vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_MOV, dst, &mem, node_id), arena);
         break;
     }
@@ -901,7 +905,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         uint32_t obj = vtx_isel_node_vreg(stream, node->inputs[0]);
         uint32_t val = vtx_isel_node_vreg(stream, node->inputs[1]);
         if (obj == VTX_VREG_INVALID || val == VTX_VREG_INVALID) return -1;
-        vtx_x86_memop_t mem = { obj, VTX_VREG_INVALID, 1, (int32_t)node->field_offset };
+        vtx_x86_memop_t mem = { obj, VTX_VREG_INVALID, 0xFF, 0xFF, 1, (int32_t)node->field_offset };
         vtx_isel_emit_inst(block, make_mr_inst(VTX_X86_MOV, &mem, val, node_id), arena);
         break;
     }
@@ -912,7 +916,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         uint32_t idx = vtx_isel_node_vreg(stream, node->inputs[1]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (base == VTX_VREG_INVALID || idx == VTX_VREG_INVALID) return -1;
-        vtx_x86_memop_t mem = { base, idx, 8, 0 };
+        vtx_x86_memop_t mem = { base, idx, 0xFF, 0xFF, 8, 0 };
         vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_MOV, dst, &mem, node_id), arena);
         break;
     }
@@ -923,7 +927,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         uint32_t idx = vtx_isel_node_vreg(stream, node->inputs[1]);
         uint32_t val = vtx_isel_node_vreg(stream, node->inputs[2]);
         if (base == VTX_VREG_INVALID || idx == VTX_VREG_INVALID || val == VTX_VREG_INVALID) return -1;
-        vtx_x86_memop_t mem = { base, idx, 8, 0 };
+        vtx_x86_memop_t mem = { base, idx, 0xFF, 0xFF, 8, 0 };
         vtx_isel_emit_inst(block, make_mr_inst(VTX_X86_MOV, &mem, val, node_id), arena);
         break;
     }
@@ -1284,6 +1288,71 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         break;
     }
 
+    /* ---- Float/Double Comparison ---- */
+    case VTX_OP_CmpF:
+    case VTX_OP_CmpD: {
+        if (node->input_count < 2) return -1;
+        uint32_t lhs = vtx_isel_node_vreg(stream, node->inputs[0]);
+        uint32_t rhs = vtx_isel_node_vreg(stream, node->inputs[1]);
+        uint32_t dst = ensure_node_vreg(stream, node_id, arena);
+        if (lhs == VTX_VREG_INVALID || rhs == VTX_VREG_INVALID) return -1;
+
+        /* Emit UCOMISD lhs, rhs — unordered compare scalar double.
+         * UCOMISD sets EFLAGS as follows:
+         *   Equal:           ZF=1, PF=0, CF=0  → SETE (0F 94)
+         *   Below (less):    ZF=0, PF=0, CF=1  → SETB (0F 92)
+         *   Above (greater): ZF=0, PF=0, CF=0  → SETA (0F 97)
+         *   Unordered:       ZF=1, PF=1, CF=1
+         *
+         * For floating-point comparisons, we map VTX conditions to
+         * the unsigned comparison condition codes (same as UCOMISD):
+         *   VTX_COND_EQ  → E  (ZF=1)
+         *   VTX_COND_NE  → NE (ZF=0) — note: doesn't catch unordered,
+         *                   but matches the common behavior for != on floats
+         *   VTX_COND_LT  → B  (CF=1)
+         *   VTX_COND_LE  → BE (CF=1 or ZF=1)
+         *   VTX_COND_GT  → A  (CF=0 and ZF=0)
+         *   VTX_COND_GE  → AE (CF=0) */
+        vtx_inst_t ucomisd;
+        memset(&ucomisd, 0, sizeof(ucomisd));
+        ucomisd.opcode = VTX_X86_UCOMISD;
+        ucomisd.opnd_kinds[0] = VTX_OPND_VREG;
+        ucomisd.operands[0] = lhs;
+        ucomisd.opnd_kinds[1] = VTX_OPND_VREG;
+        ucomisd.operands[1] = rhs;
+        ucomisd.source_node = node_id;
+        vtx_isel_emit_inst(block, ucomisd, arena);
+
+        /* Map float condition to x86 condition code.
+         * Float comparisons use unsigned condition codes because
+         * UCOMISD sets CF/ZF/PF like an unsigned comparison. */
+        vtx_cond_t float_cond = node->cond;
+        /* For LT/LE/GT/GE, use the unsigned equivalents for float */
+        vtx_cond_t ucond = float_cond;
+        switch (float_cond) {
+        case VTX_COND_LT: ucond = VTX_COND_ULT; break;
+        case VTX_COND_LE: ucond = VTX_COND_ULE; break;
+        case VTX_COND_GT: ucond = VTX_COND_UGT; break;
+        case VTX_COND_GE: ucond = VTX_COND_UGE; break;
+        default: break;
+        }
+
+        /* Emit SETCC dst */
+        vtx_inst_t setcc;
+        memset(&setcc, 0, sizeof(setcc));
+        setcc.opcode = VTX_X86_SETCC;
+        setcc.opnd_kinds[0] = VTX_OPND_VREG;
+        setcc.operands[0] = dst;
+        setcc.cond = ucond;
+        setcc.flags = VTX_INST_FLAG_HAS_COND;
+        setcc.source_node = node_id;
+        vtx_isel_emit_inst(block, setcc, arena);
+
+        /* Zero-extend the byte result: AND dst, 0xFF */
+        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_AND, dst, 0xFF, node_id), arena);
+        break;
+    }
+
     case VTX_OP_FrameState:
     case VTX_OP_Start:
     case VTX_OP_End:
@@ -1292,8 +1361,6 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
     case VTX_OP_Unwind:
     case VTX_OP_Catch:
     case VTX_OP_Province:
-    case VTX_OP_CmpF:
-    case VTX_OP_CmpD:
     case VTX_OP_MemBar:
     case VTX_OP_Initialize:
     case VTX_OP_InitializeKlass:
@@ -1303,6 +1370,75 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         break;
     }
 
+    return 0;
+}
+
+/* ========================================================================== */
+/* Phi resolution: emit parallel copy sequences at block boundaries            */
+/* ========================================================================== */
+
+/**
+ * After all blocks have been selected, resolve Phi nodes by emitting MOV
+ * instructions at the end of each predecessor block.
+ *
+ * For each Phi in block B with inputs [v0, v1, ...] and predecessors [P0, P1, ...],
+ * we emit "MOV phi_vreg, vi_vreg" at the end of Pi (before the terminal branch).
+ *
+ * TODO: For proper parallel copy semantics, we should handle circular dependencies
+ * (where phi A depends on phi B and vice versa in the same block) by using temporary
+ * vregs. The current sequential approach works for most cases but can break on cycles.
+ */
+static int resolve_phis(vtx_inst_stream_t *stream, const vtx_schedule_t *schedule,
+                         const vtx_graph_t *graph, vtx_arena_t *arena)
+{
+    for (uint32_t b = 0; b < stream->block_count && b < schedule->count; b++) {
+        const vtx_schedule_block_t *sched_blk = &schedule->blocks[b];
+
+        /* Collect Phi nodes for this block */
+        for (uint32_t n = 0; n < sched_blk->node_count; n++) {
+            vtx_nodeid_t nid = sched_blk->nodes[n];
+            const vtx_node_t *node = vtx_node_get_const(&graph->node_table, nid);
+            if (!node || node->opcode != VTX_OP_Phi) continue;
+
+            uint32_t phi_vreg = vtx_isel_node_vreg(stream, nid);
+            if (phi_vreg == VTX_VREG_INVALID) continue;
+
+            /* For each input to the Phi, emit a MOV from the input's vreg
+             * to the phi's vreg in the corresponding predecessor block.
+             * The i-th input of the Phi corresponds to the i-th predecessor. */
+            for (uint32_t i = 0; i < node->input_count && i < sched_blk->pred_count; i++) {
+                uint32_t input_vreg = vtx_isel_node_vreg(stream, node->inputs[i]);
+                if (input_vreg == VTX_VREG_INVALID || input_vreg == phi_vreg) continue;
+
+                uint32_t pred_block_idx = sched_blk->pred_blocks[i];
+                if (pred_block_idx >= stream->block_count) continue;
+
+                vtx_inst_block_t *pred_blk = &stream->blocks[pred_block_idx];
+
+                /* Emit MOV at the end of the predecessor block (before the
+                 * terminal branch). We need to find the last non-branch
+                 * instruction and insert after it. */
+                vtx_inst_t copy = make_rr_inst(VTX_X86_MOV, phi_vreg, input_vreg, nid);
+                copy.flags |= VTX_INST_FLAG_PHI_COPY;
+
+                /* Find the insertion point: before the first trailing branch */
+                uint32_t insert_pos = pred_blk->inst_count;
+                for (uint32_t j = pred_blk->inst_count; j > 0; j--) {
+                    if (!(pred_blk->insts[j-1].flags & VTX_INST_FLAG_IS_BRANCH)) {
+                        insert_pos = j;
+                        break;
+                    }
+                }
+
+                /* Insert at insert_pos by shifting instructions to make room */
+                if (vtx_isel_block_ensure_capacity(pred_blk, 1, arena) != 0) return -1;
+                memmove(&pred_blk->insts[insert_pos + 1], &pred_blk->insts[insert_pos],
+                        (pred_blk->inst_count - insert_pos) * sizeof(vtx_inst_t));
+                pred_blk->insts[insert_pos] = copy;
+                pred_blk->inst_count++;
+            }
+        }
+    }
     return 0;
 }
 
@@ -1368,6 +1504,11 @@ vtx_inst_stream_t *vtx_isel_select(const vtx_schedule_t *schedule,
                 return NULL;
             }
         }
+    }
+
+    /* Resolve Phi nodes: emit parallel copy sequences at predecessor block ends */
+    if (resolve_phis(stream, schedule, graph, arena) != 0) {
+        return NULL;
     }
 
     /* Resolve branch targets from schedule successor info */

@@ -43,11 +43,12 @@ typedef struct {
 } vtx_field_desc_t;
 
 typedef struct {
-    const char       *name;        /* method name */
-    const char       *signature;   /* method signature string (e.g., "(II)I") */
-    vtx_bytecode_t   *bytecode;    /* method bytecode (may be NULL for native) */
-    uint32_t          vtable_index;/* index in the vtable (0xFFFFFFFF if not virtual) */
-    bool              is_virtual;  /* true if this is a virtual method */
+    const char       *name;          /* method name */
+    const char       *signature;     /* method signature string (e.g., "(II)I") */
+    vtx_bytecode_t   *bytecode;      /* method bytecode (may be NULL for native) */
+    void             *compiled_code; /* JIT-compiled native code (NULL if not compiled) */
+    uint32_t          vtable_index;  /* index in the vtable (0xFFFFFFFF if not virtual) */
+    bool              is_virtual;    /* true if this is a virtual method */
 } vtx_method_desc_t;
 
 /* ========================================================================== */
