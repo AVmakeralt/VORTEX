@@ -8,6 +8,10 @@
  *   - Guard page polling: replaces CMP+JCC with a single MOV from a
  *     memory-mapped page. The page is normally readable; when a safepoint
  *     is needed, mprotect(PROT_NONE) triggers SIGSEGV → handler → deopt.
+ *   - Guard-page type checking: eliminates type-check CMP+JCC branches
+ *     using mprotected pages indexed by type_id. A load from the page
+ *     at offset type_id*4096 succeeds for the expected type (readable)
+ *     and SIGSEGVs for wrong types (PROT_NONE) → handler → deopt.
  *   - Implicit null checks: SIGSEGV from null deref → handler → deopt.
  *   - Predicated guard traps: INT3/UD2 from CMOVCC logic → SIGTRAP/SIGILL → handler → deopt.
  */
@@ -15,6 +19,7 @@
 /* Enable GNU extensions for ucontext_t and SA_NODEFER on glibc */
 #define _GNU_SOURCE
 #include "compile/safepoint.h"
+#include "guard/guard_page_type.h"
 #include "interp/dispatch.h"
 #include <stdlib.h>
 #include <string.h>
@@ -454,7 +459,67 @@ static void vtx_guard_page_sigsegv_handler(int sig, siginfo_t *info, void *ucont
         return;
     }
 
-    /* Case 2: Implicit null check — fault in the low address range.
+    /* Case 2: Type guard page fault — guard-page type checking.
+     * The fault address falls within a registered type guard page
+     * region. This means a type check failed: the loaded type_id
+     * indexed into a PROT_NONE page instead of the readable page
+     * for the expected type.
+     *
+     * This check is performed BEFORE the null-page check because
+     * type guard page regions are allocated with mmap and will
+     * never be in the low address range. The lookup is lock-free
+     * and safe in signal handler context. */
+    {
+        vtx_type_guard_page_registry_t *tg_registry =
+            vtx_type_guard_page_get_registry();
+        if (tg_registry != NULL) {
+            vtx_type_guard_fault_info_t fault_info;
+            if (vtx_type_guard_page_registry_lookup(tg_registry, fault_addr,
+                                                     &fault_info)) {
+                /* Found: the fault is from a type guard page.
+                 * Invoke the registered callback or perform deopt. */
+                vtx_type_guard_fault_callback_t callback =
+                    vtx_type_guard_page_get_fault_callback();
+                if (callback != NULL) {
+                    callback(&fault_info, ucontext);
+                    return;
+                }
+
+                /* No callback registered — use the standard deopt path.
+                 * Find the compiled method from the faulting RIP and
+                 * perform deoptimization. */
+                ucontext_t *uc = (ucontext_t *)ucontext;
+                uintptr_t faulting_rip =
+                    (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
+
+                pthread_mutex_lock(&vtx_deopt_table_mutex);
+                for (uint32_t i = 0; i < vtx_deopt_table_count; i++) {
+                    const vtx_guard_page_deopt_entry_t *entry =
+                        &vtx_deopt_table[i];
+                    if (faulting_rip >= (uintptr_t)entry->code_start &&
+                        faulting_rip < (uintptr_t)(entry->code_start +
+                                                    entry->code_size)) {
+                        pthread_mutex_unlock(&vtx_deopt_table_mutex);
+
+                        extern void vtx_deopt_handler_stub(uint32_t, uint32_t);
+                        uint32_t native_pc = (uint32_t)(faulting_rip -
+                            (uintptr_t)entry->code_start);
+                        vtx_deopt_handler_stub(entry->side_table_index,
+                                                native_pc);
+                        return;
+                    }
+                }
+                pthread_mutex_unlock(&vtx_deopt_table_mutex);
+
+                /* Method not found in deopt table — fall through.
+                 * This shouldn't happen in normal operation; it means
+                 * the type guard page was faulted but the method isn't
+                 * registered for deopt. Chain to the original handler. */
+            }
+        }
+    }
+
+    /* Case 3: Implicit null check — fault in the low address range.
      * This occurs when JIT code dereferences a null pointer without
      * an explicit test+branch guard. The MMU catches the fault. */
     if (fault_addr < VTX_NULL_PAGE_LIMIT) {
@@ -495,7 +560,7 @@ static void vtx_guard_page_sigsegv_handler(int sig, siginfo_t *info, void *ucont
          * non-JIT code. Fall through to the original handler. */
     }
 
-    /* Case 3: Not a VORTEX-related fault — chain to the original handler.
+    /* Case 4: Not a VORTEX-related fault — chain to the original handler.
      * This preserves normal crash behavior for bugs in non-JIT code. */
     if (vtx_old_sigsegv_action.sa_flags & SA_SIGINFO) {
         if (vtx_old_sigsegv_action.sa_sigaction) {

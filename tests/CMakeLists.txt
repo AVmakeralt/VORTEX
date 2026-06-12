@@ -92,6 +92,33 @@ target_link_libraries(test_zero_cost_deopt PRIVATE
 )
 add_test(NAME test_zero_cost_deopt COMMAND test_zero_cost_deopt)
 
+# test_p2_features — P2 feature verification (guard-page type checking,
+# guard dependency graph, phase-reactive reactivation, speculative PEA + lock elision)
+add_executable(test_p2_features
+    unit/test_p2_features.c
+    ${CMAKE_SOURCE_DIR}/src/runtime_stubs.c
+)
+target_link_libraries(test_p2_features PRIVATE
+    vortex_test_framework
+    -Wl,--start-group
+    vortex_guard
+    vortex_compile
+    vortex_lower
+    vortex_codecache
+    vortex_deopt
+    vortex_ir
+    vortex_interp
+    vortex_runtime
+    vortex_profile
+    vortex_baseline
+    vortex_inliner
+    vortex_pea
+    -Wl,--end-group
+    m
+    pthread
+)
+add_test(NAME test_p2_features COMMAND test_p2_features)
+
 # ---- Integration tests ----
 
 # test_interp_basics

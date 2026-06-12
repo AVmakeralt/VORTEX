@@ -24,6 +24,7 @@ const char *vtx_version_state_name(vtx_version_state_t s)
     case VTX_VERSION_DEPRECATED:  return "Deprecated";
     case VTX_VERSION_INVALIDATED: return "Invalidated";
     case VTX_VERSION_FREED:       return "Freed";
+    case VTX_VERSION_PARKED:      return "Parked";
     }
     return "Unknown";
 }
@@ -300,9 +301,10 @@ int vtx_version_free(vtx_version_manager_t *manager,
     VTX_ASSERT(manager != NULL, "manager must not be NULL");
     VTX_ASSERT(version != NULL, "version must not be NULL");
 
-    /* Only free deprecated or invalidated versions with zero refcount */
+    /* Only free deprecated, invalidated, or parked versions with zero refcount */
     if (version->state != VTX_VERSION_DEPRECATED &&
-        version->state != VTX_VERSION_INVALIDATED) {
+        version->state != VTX_VERSION_INVALIDATED &&
+        version->state != VTX_VERSION_PARKED) {
         return -1;
     }
 
@@ -359,7 +361,8 @@ bool vtx_version_exit(vtx_version_manager_t *manager,
     if (old == 1) {
         /* Refcount dropped to zero */
         if (version->state == VTX_VERSION_DEPRECATED ||
-            version->state == VTX_VERSION_INVALIDATED) {
+            version->state == VTX_VERSION_INVALIDATED ||
+            version->state == VTX_VERSION_PARKED) {
             /* Safe to free — must hold method_mutex to modify the version list */
             vtx_method_versions_t *mv = get_method_versions(manager,
                 version->method_id, false);
@@ -368,7 +371,8 @@ bool vtx_version_exit(vtx_version_manager_t *manager,
                 /* Re-check state under lock: another thread may have
                  * changed it between the lockless check and here. */
                 if (version->state == VTX_VERSION_DEPRECATED ||
-                    version->state == VTX_VERSION_INVALIDATED) {
+                    version->state == VTX_VERSION_INVALIDATED ||
+                    version->state == VTX_VERSION_PARKED) {
                     vtx_version_free(manager, version);
                 }
                 pthread_mutex_unlock(&mv->method_mutex);

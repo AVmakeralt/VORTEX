@@ -230,6 +230,24 @@ void vtx_guard_meta_update_sampled(vtx_guard_meta_t *meta, bool failed);
 /* ========================================================================== */
 
 /**
+ * Default sampling interval for guard metadata updates.
+ * Only update the EWMA every Nth execution to reduce hot-path overhead.
+ */
+#define VTX_GUARD_SAMPLE_INTERVAL_DEFAULT  1024
+
+/**
+ * Sampling interval for very stable guards (EWMA failure rate < 0.01%).
+ * These guards almost never fail, so we check less frequently.
+ */
+#define VTX_GUARD_SAMPLE_INTERVAL_STABLE   4096
+
+/**
+ * Sampling interval for unstable guards (EWMA failure rate > 1%).
+ * These guards are near transition thresholds and need responsive tracking.
+ */
+#define VTX_GUARD_SAMPLE_INTERVAL_UNSTABLE 256
+
+/**
  * Hot-path inline guard metadata update for JIT-compiled code.
  *
  * This is the function that JIT code should call on every guard execution.
@@ -284,24 +302,6 @@ static inline void vtx_guard_meta_update_hot(vtx_guard_meta_t *meta, bool failed
     /* Sample boundary reached — call the slow path */
     vtx_guard_meta_update_sampled(meta, failed);
 }
-
-/**
- * Default sampling interval for guard metadata updates.
- * Only update the EWMA every Nth execution to reduce hot-path overhead.
- */
-#define VTX_GUARD_SAMPLE_INTERVAL_DEFAULT  1024
-
-/**
- * Sampling interval for very stable guards (EWMA failure rate < 0.01%).
- * These guards almost never fail, so we check less frequently.
- */
-#define VTX_GUARD_SAMPLE_INTERVAL_STABLE   4096
-
-/**
- * Sampling interval for unstable guards (EWMA failure rate > 1%).
- * These guards are near transition thresholds and need responsive tracking.
- */
-#define VTX_GUARD_SAMPLE_INTERVAL_UNSTABLE 256
 
 /**
  * Get the current strength level of a guard.

@@ -52,7 +52,8 @@ typedef enum {
     VTX_VERSION_ACTIVE     = 1,  /* installed and callable */
     VTX_VERSION_DEPRECATED = 2,  /* replaced by newer version, may still be running */
     VTX_VERSION_INVALIDATED = 3, /* no longer valid (dependency broken) */
-    VTX_VERSION_FREED      = 4   /* memory freed */
+    VTX_VERSION_FREED      = 4,  /* memory freed */
+    VTX_VERSION_PARKED     = 5   /* parked for phase-reactive reactivation (see phase_react.h) */
 } vtx_version_state_t;
 
 /* Human-readable name for version state */
