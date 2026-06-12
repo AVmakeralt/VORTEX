@@ -552,6 +552,20 @@ bool vtx_type_is_subtype(const vtx_type_system_t *ts,
 {
     VTX_ASSERT(ts != NULL, "type system must not be NULL");
 
+    /* BUGFIX: Reject invalid TypeIDs before the equality check.
+     * The original code returned true when child_id == parent_id even
+     * if both were VTX_TYPE_INVALID (0) or any other out-of-range ID.
+     * An invalid type is not a valid subtype of anything — not even
+     * itself. Only valid, registered types participate in subtype
+     * relationships. VTX_TYPE_INVALID is explicitly excluded because
+     * it represents "no type" (a sentinel value), not a real type. */
+    if (child_id == VTX_TYPE_INVALID || parent_id == VTX_TYPE_INVALID) {
+        return false;
+    }
+    if (child_id >= ts->type_count || parent_id >= ts->type_count) {
+        return false;
+    }
+
     /* A type is a subtype of itself */
     if (child_id == parent_id) {
         return true;

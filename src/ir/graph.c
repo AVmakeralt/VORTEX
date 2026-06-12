@@ -689,27 +689,56 @@ static int create_block_entry(vtx_graph_t *graph, vtx_block_info_t *blocks,
     if (region == VTX_NODEID_INVALID) return -1;
     block->region_node = region;
 
-    /* Connect predecessor control outputs as Region inputs */
+    /* Connect predecessor control outputs as Region inputs.
+     *
+     * BUGFIX: For loop headers, we must NOT add back-edge predecessor
+     * inputs during Phase 2. The back-edge predecessor (loop latch) hasn't
+     * been processed yet — its control_node is VTX_NODEID_INVALID, and
+     * its real control output will only be known after Phase 3 processes
+     * the latch block. We skip back-edge predecessors here and connect
+     * them in Phase 4 when we create the LoopEnd.
+     *
+     * The original code skipped back-edge predecessors implicitly because
+     * their control_node was INVALID, but then it used block->pred_count
+     * (which INCLUDES the back-edge) to create Phi inputs — causing a
+     * mismatch between the number of Region inputs and Phi inputs. This
+     * inconsistency crashed later Phases that expect Phis to have one
+     * data input per Region input. */
+    uint32_t forward_pred_count = 0;  /* number of forward (non-back-edge) predecessors */
     for (uint32_t p = 0; p < block->pred_count; p++) {
         uint32_t pred_idx = block->pred_indices[p];
+        /* Skip back-edge predecessors for loop headers */
+        if (block->is_loop_header && blocks[pred_idx].is_loop_end) {
+            continue;
+        }
         vtx_nodeid_t pred_ctrl = blocks[pred_idx].control_node;
         if (pred_ctrl != VTX_NODEID_INVALID) {
             vtx_node_add_input(nt, region, pred_ctrl);
         }
+        forward_pred_count++;
     }
 
     block->control_node = region;
 
-    /* Create initial memory Phi for merge points with >1 predecessor */
-    if (block->pred_count > 1) {
+    /* Create initial memory Phi for merge points with >1 predecessor.
+     *
+     * BUGFIX: Only count forward predecessors for Phi creation. The
+     * back-edge predecessor's memory state will be added as a Phi input
+     * in Phase 4. Using block->pred_count (which includes the back-edge)
+     * caused Phi inputs to include VTX_NODEID_INVALID or stale values
+     * from the unprocessed latch block. */
+    if (forward_pred_count > 1) {
         vtx_nodeid_t mem_phi = vtx_node_create(nt, VTX_OP_Phi);
         if (mem_phi == VTX_NODEID_INVALID) return -1;
         vtx_node_t *phi_node = vtx_node_get(nt, mem_phi);
         phi_node->flags = vtx_nf_union(phi_node->flags, VTX_NF_MEMORY);
 
-        /* Add memory inputs from each predecessor */
+        /* Add memory inputs from each FORWARD predecessor only */
         for (uint32_t p = 0; p < block->pred_count; p++) {
             uint32_t pred_idx = block->pred_indices[p];
+            if (block->is_loop_header && blocks[pred_idx].is_loop_end) {
+                continue; /* back-edge input added in Phase 4 */
+            }
             vtx_nodeid_t pred_mem = blocks[pred_idx].memory_node;
             if (pred_mem == VTX_NODEID_INVALID) {
                 pred_mem = graph->entry_memory;
@@ -719,9 +748,16 @@ static int create_block_entry(vtx_graph_t *graph, vtx_block_info_t *blocks,
         /* Memory Phi depends on the Region for control */
         vtx_node_add_input(nt, mem_phi, region);
         block->memory_node = mem_phi;
-    } else if (block->pred_count == 1) {
-        /* Single predecessor: inherit memory directly */
-        block->memory_node = blocks[block->pred_indices[0]].memory_node;
+    } else if (forward_pred_count == 1) {
+        /* Single forward predecessor: inherit memory directly */
+        for (uint32_t p = 0; p < block->pred_count; p++) {
+            uint32_t pred_idx = block->pred_indices[p];
+            if (block->is_loop_header && blocks[pred_idx].is_loop_end) {
+                continue;
+            }
+            block->memory_node = blocks[pred_idx].memory_node;
+            break;
+        }
         if (block->memory_node == VTX_NODEID_INVALID) {
             block->memory_node = graph->entry_memory;
         }
@@ -733,20 +769,30 @@ static int create_block_entry(vtx_graph_t *graph, vtx_block_info_t *blocks,
     block->locals = (vtx_nodeid_t *)vtx_arena_alloc(arena, max_locals * sizeof(vtx_nodeid_t));
     if (block->locals == NULL) return -1;
 
-    if (block->pred_count == 1) {
-        /* Single predecessor: inherit locals directly */
-        uint32_t pred_idx = block->pred_indices[0];
-        for (uint16_t i = 0; i < max_locals; i++) {
-            block->locals[i] = blocks[pred_idx].locals[i];
+    if (forward_pred_count == 1) {
+        /* Single forward predecessor: inherit locals directly */
+        for (uint32_t p = 0; p < block->pred_count; p++) {
+            uint32_t pred_idx = block->pred_indices[p];
+            if (block->is_loop_header && blocks[pred_idx].is_loop_end) {
+                continue;
+            }
+            for (uint16_t i = 0; i < max_locals; i++) {
+                block->locals[i] = blocks[pred_idx].locals[i];
+            }
+            break;
         }
-    } else if (block->pred_count > 1) {
-        /* Multiple predecessors: create Phi nodes for locals that differ */
+    } else if (forward_pred_count > 1) {
+        /* Multiple forward predecessors: create Phi nodes for locals that differ.
+         * Back-edge predecessor inputs will be added to Phis in Phase 4. */
         for (uint16_t li = 0; li < max_locals; li++) {
-            /* Check if all predecessors agree on this local */
+            /* Check if all FORWARD predecessors agree on this local */
             bool all_same = true;
             vtx_nodeid_t first_val = VTX_NODEID_INVALID;
             for (uint32_t p = 0; p < block->pred_count; p++) {
                 uint32_t pred_idx = block->pred_indices[p];
+                if (block->is_loop_header && blocks[pred_idx].is_loop_end) {
+                    continue;
+                }
                 vtx_nodeid_t val = blocks[pred_idx].locals[li];
                 if (first_val == VTX_NODEID_INVALID) {
                     first_val = val;
@@ -764,9 +810,13 @@ static int create_block_entry(vtx_graph_t *graph, vtx_block_info_t *blocks,
                 if (phi == VTX_NODEID_INVALID) return -1;
                 vtx_node_t *phi_n = vtx_node_get(nt, phi);
 
-                /* Add one input per predecessor */
+                /* Add one input per FORWARD predecessor only.
+                 * Back-edge input will be added in Phase 4. */
                 for (uint32_t p = 0; p < block->pred_count; p++) {
                     uint32_t pred_idx = block->pred_indices[p];
+                    if (block->is_loop_header && blocks[pred_idx].is_loop_end) {
+                        continue;
+                    }
                     vtx_nodeid_t val = blocks[pred_idx].locals[li];
                     vtx_node_add_input(nt, phi, val);
                 }
@@ -2136,8 +2186,16 @@ int vtx_graph_build(vtx_graph_t *graph,
         }
     }
 
-    /* Phase 4: For loop headers, create LoopEnd in the latch block and
-     * connect the back edge to the LoopBegin. */
+    /* Phase 4: For loop headers, create LoopEnd in the latch block,
+     * connect the back edge to the LoopBegin, and update Phi node inputs.
+     *
+     * BUGFIX: The original code only connected the LoopEnd to the LoopBegin
+     * but never updated the Phi nodes' inputs. After Phase 2, the loop
+     * header's Phi nodes only have inputs from forward (non-back-edge)
+     * predecessors. Phase 4 must add the back-edge predecessor's values
+     * as additional Phi inputs, so that each Phi has one data input per
+     * Region/LoopBegin input. Without this, the SSA invariant was broken:
+     * the LoopBegin had N inputs but its Phis had N-1 data inputs. */
     for (uint32_t bi = 0; bi < nblocks; bi++) {
         vtx_block_info_t *block = &blocks[bi];
         if (block->is_loop_header && block->region_node != VTX_NODEID_INVALID) {
@@ -2155,6 +2213,71 @@ int vtx_graph_build(vtx_graph_t *graph,
 
                         /* Connect LoopEnd to LoopBegin as back-edge input */
                         vtx_node_add_input(&graph->node_table, block->region_node, loop_end);
+
+                        /* BUGFIX: Update Phi node inputs with back-edge values.
+                         * The loop header's memory_node is either a Phi (if there
+                         * are multiple forward predecessors) or inherited from the
+                         * single forward predecessor. In both cases, if it's a Phi
+                         * node, we need to add the latch block's memory state as
+                         * an additional input. */
+                        if (block->memory_node != VTX_NODEID_INVALID) {
+                            vtx_node_t *mem_node = vtx_node_get(&graph->node_table, block->memory_node);
+                            if (mem_node != NULL && mem_node->opcode == VTX_OP_Phi) {
+                                /* Add the latch's memory state as a Phi input */
+                                vtx_nodeid_t latch_mem = blocks[pred_idx].memory_node;
+                                if (latch_mem == VTX_NODEID_INVALID) {
+                                    latch_mem = graph->entry_memory;
+                                }
+                                vtx_node_add_input(&graph->node_table, block->memory_node, latch_mem);
+                            }
+                        }
+
+                        /* Update each local variable Phi with the latch's value.
+                         * The loop header's locals[i] is either:
+                         *  - A Phi node (if forward predecessors disagreed)
+                         *  - A direct value (if forward predecessors agreed)
+                         * For Phi nodes, we add the latch's value as an input.
+                         * For direct values, we need to create a Phi if the
+                         * latch's value differs. */
+                        if (block->locals != NULL) {
+                            for (uint16_t li = 0; li < max_locals; li++) {
+                                vtx_nodeid_t local_node = block->locals[li];
+                                if (local_node == VTX_NODEID_INVALID) continue;
+
+                                vtx_node_t *local_n = vtx_node_get(&graph->node_table, local_node);
+                                if (local_n != NULL && local_n->opcode == VTX_OP_Phi) {
+                                    /* Add the latch's local value as a Phi input */
+                                    vtx_nodeid_t latch_val = VTX_NODEID_INVALID;
+                                    if (blocks[pred_idx].locals != NULL) {
+                                        latch_val = blocks[pred_idx].locals[li];
+                                    }
+                                    vtx_node_add_input(&graph->node_table, local_node, latch_val);
+                                } else {
+                                    /* The local is a direct value from forward
+                                     * predecessors. If the latch's value differs,
+                                     * we need to create a new Phi that merges
+                                     * the forward value with the latch value. */
+                                    vtx_nodeid_t latch_val = VTX_NODEID_INVALID;
+                                    if (blocks[pred_idx].locals != NULL) {
+                                        latch_val = blocks[pred_idx].locals[li];
+                                    }
+                                    if (latch_val != local_node && latch_val != VTX_NODEID_INVALID) {
+                                        /* Create a new Phi merging forward + back-edge */
+                                        vtx_nodeid_t phi = vtx_node_create(&graph->node_table, VTX_OP_Phi);
+                                        if (phi == VTX_NODEID_INVALID) return -1;
+                                        vtx_node_t *phi_n = vtx_node_get(&graph->node_table, phi);
+                                        /* Input 0: forward predecessor value */
+                                        vtx_node_add_input(&graph->node_table, phi, local_node);
+                                        /* Input 1: back-edge (latch) value */
+                                        vtx_node_add_input(&graph->node_table, phi, latch_val);
+                                        /* Phi depends on Region for control */
+                                        vtx_node_add_input(&graph->node_table, phi, block->region_node);
+                                        phi_n->type = VTX_TYPE_Bottom;
+                                        block->locals[li] = phi;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

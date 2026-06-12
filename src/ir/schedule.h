@@ -47,8 +47,10 @@ typedef struct {
     /* Successor / predecessor block indices */
     uint32_t      *succ_blocks;  /* indices into the schedule's blocks array */
     uint32_t       succ_count;
+    uint32_t       succ_capacity; /* allocated capacity of succ_blocks */
     uint32_t      *pred_blocks;
     uint32_t       pred_count;
+    uint32_t       pred_capacity; /* allocated capacity of pred_blocks */
 
     /* Dominance frontier: blocks where this block's dominance ends.
      * Used for SSA Phi node placement (Cytron et al. 1991). */

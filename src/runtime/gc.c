@@ -193,6 +193,29 @@ static void *old_gen_alloc(vtx_old_gen_t *old, size_t size)
  * Simplest approach: prepend to free list. In a production system,
  * we would coalesce adjacent blocks.
  */
+/**
+ * Remove a free node from the old-gen free list.
+ * Returns true if found and removed, false otherwise.
+ */
+static bool free_list_remove(vtx_old_gen_t *old, vtx_free_node_t *target)
+{
+    vtx_free_node_t *prev = NULL;
+    vtx_free_node_t *curr = old->free_list;
+    while (curr != NULL) {
+        if (curr == target) {
+            if (prev != NULL) {
+                prev->next = curr->next;
+            } else {
+                old->free_list = curr->next;
+            }
+            return true;
+        }
+        prev = curr;
+        curr = curr->next;
+    }
+    return false;
+}
+
 static void old_gen_free(vtx_old_gen_t *old, void *ptr, size_t size)
 {
     size = align_up_8(size);
@@ -207,36 +230,66 @@ static void old_gen_free(vtx_old_gen_t *old, void *ptr, size_t size)
     old->free_list = node;
     old->used -= size;
 
-    /* Coalesce with adjacent free blocks */
-    /* Look for the adjacent block (next in memory) in the free list */
-    vtx_free_node_t *prev_adj = NULL;
-    vtx_free_node_t *curr_adj = old->free_list;
-    while (curr_adj != NULL) {
+    /* Coalesce with adjacent free blocks — both forward and backward.
+     *
+     * BUGFIX: The original code only coalesced forward (merged a free block
+     * that starts immediately after the newly freed block). It never checked
+     * for a backward adjacent block (a free block whose end is exactly at the
+     * start of the newly freed block). This caused fragmentation when blocks
+     * were freed in reverse address order: two adjacent free blocks would
+     * remain separate, preventing the allocator from satisfying larger
+     * allocation requests that span both blocks. */
+
+    /* Forward coalescing: look for a free block that starts immediately
+     * after the newly freed block ends. */
+    bool merged = true;
+    while (merged) {
+        merged = false;
         size_t node_size = vtx_free_node_get_size(node);
-        if ((uint8_t *)curr_adj == (uint8_t *)node + node_size) {
-            /* Coalesce: merge curr_adj into node */
-            vtx_free_node_set_size(node, node_size + vtx_free_node_get_size(curr_adj));
-            /* Remove curr_adj from free list */
-            vtx_free_node_t *p = NULL;
-            vtx_free_node_t *c = old->free_list;
-            while (c != NULL) {
-                if (c == curr_adj) {
-                    if (p != NULL) {
-                        p->next = c->next;
+        vtx_free_node_t *curr = old->free_list;
+        while (curr != NULL) {
+            if (curr != node &&
+                (uint8_t *)curr == (uint8_t *)node + node_size) {
+                /* curr is the forward adjacent block — merge into node */
+                vtx_free_node_set_size(node, node_size + vtx_free_node_get_size(curr));
+                free_list_remove(old, curr);
+                merged = true;
+                break;
+            }
+            curr = curr->next;
+        }
+    }
+
+    /* Backward coalescing: look for a free block whose end is exactly at
+     * the start of the newly freed block. */
+    merged = true;
+    while (merged) {
+        merged = false;
+        vtx_free_node_t *curr = old->free_list;
+        while (curr != NULL) {
+            if (curr != node) {
+                size_t curr_size = vtx_free_node_get_size(curr);
+                if ((uint8_t *)node == (uint8_t *)curr + curr_size) {
+                    /* curr is the backward adjacent block — merge node
+                     * into curr, expanding curr to cover both. */
+                    vtx_free_node_set_size(curr, curr_size + vtx_free_node_get_size(node));
+                    /* Remove node from the free list since it's now
+                     * part of curr. Set curr as the new head if node
+                     * was the head. */
+                    if (old->free_list == node) {
+                        old->free_list = node->next;
                     } else {
-                        old->free_list = c->next;
+                        free_list_remove(old, node);
                     }
+                    /* node is gone; curr is now the representative block */
+                    node = curr;
+                    merged = true;
                     break;
                 }
-                p = c;
-                c = c->next;
             }
-            break;
+            curr = curr->next;
         }
-        prev_adj = curr_adj;
-        curr_adj = curr_adj->next;
     }
-    (void)prev_adj; /* suppress unused warning */
 }
 
 /* ========================================================================== */

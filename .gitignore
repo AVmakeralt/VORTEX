@@ -17,3 +17,8 @@ __pycache__/
 *.pyc
 # Generated config
 vortex_config.h
+# AI tool / skill artifacts
+.tool-results/
+worklog.md
+my-project/
+download/
