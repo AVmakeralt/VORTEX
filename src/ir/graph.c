@@ -588,10 +588,40 @@ static int create_block_entry(vtx_graph_t *graph, vtx_block_info_t *blocks,
     vtx_block_info_t *block = &blocks[block_idx];
     vtx_node_table_t *nt = &graph->node_table;
 
-    if (block_idx == 0) {
-        /* Entry block: Region is just Start */
+    if (block_idx == 0 && !block->is_loop_header) {
+        /* Entry block (not a loop header): Region is just Start */
         block->region_node = graph->start_node;
         block->control_node = graph->start_node;
+        block->memory_node = graph->entry_memory;
+
+        /* Allocate locals for entry block: map locals to Parameter nodes */
+        block->locals = (vtx_nodeid_t *)vtx_arena_alloc(arena, max_locals * sizeof(vtx_nodeid_t));
+        if (block->locals == NULL) return -1;
+        for (uint16_t i = 0; i < max_locals; i++) {
+            if (i < graph->parameter_count) {
+                block->locals[i] = graph->parameters[i];
+            } else {
+                /* Undefined local */
+                vtx_nodeid_t undef = vtx_node_create(nt, VTX_OP_Constant);
+                if (undef == VTX_NODEID_INVALID) return -1;
+                vtx_node_t *n = vtx_node_get(nt, undef);
+                n->constval = vtx_constval_void();
+                n->type = VTX_TYPE_Void;
+                block->locals[i] = undef;
+            }
+        }
+        return 0;
+    }
+
+    if (block_idx == 0 && block->is_loop_header) {
+        /* Entry block is also a loop header (backward branch to PC 0).
+         * Create a LoopBegin node that takes Start as the entry control
+         * input; the back-edge input will be connected in Phase 4. */
+        vtx_nodeid_t loop_begin = vtx_node_create(nt, VTX_OP_LoopBegin);
+        if (loop_begin == VTX_NODEID_INVALID) return -1;
+        vtx_node_add_input(nt, loop_begin, graph->start_node);
+        block->region_node = loop_begin;
+        block->control_node = loop_begin;
         block->memory_node = graph->entry_memory;
 
         /* Allocate locals for entry block: map locals to Parameter nodes */
