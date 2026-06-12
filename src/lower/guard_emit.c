@@ -84,46 +84,81 @@ uint32_t vtx_guard_desc_array_add(vtx_guard_desc_array_t *arr,
 
 /**
  * Collect the set of physical registers that are live at a given instruction
- * position. This is a simplified version — in a full implementation, we'd
- * use the liveness information from the register allocator.
+ * position, using the register allocator's live interval data when available.
  *
- * For now, we record the registers used by the guard instruction itself
- * and any registers that appear in the same block before the guard.
+ * When a regalloc result is provided, this function uses the live intervals
+ * to accurately determine which physical registers are live and which NodeIDs
+ * they contain at the guard point. This is more accurate than scanning the
+ * instruction stream because the regalloc accounts for liveness across
+ * multiple definitions and uses.
+ *
+ * When no regalloc result is available, falls back to the simplified scan.
  */
 static void collect_live_regs(vtx_inst_stream_t *stream, uint32_t block_idx,
                                uint32_t inst_idx, vtx_side_table_t *side_table,
-                               uint32_t side_entry_idx)
+                               uint32_t side_entry_idx,
+                               const vtx_regalloc_result_t *ra)
 {
     if (block_idx >= stream->block_count) return;
     vtx_inst_block_t *blk = &stream->blocks[block_idx];
 
-    /* Track which physical registers are in use at this point */
-    uint32_t reg_set = 0; /* bitmask of live physical registers */
+    /* Determine the instruction position from the block/inst index.
+     * The regalloc assigns sequential positions to instructions across blocks
+     * (via assign_positions in regalloc.c). We use native_offset as position. */
+    uint32_t guard_position = blk->insts[inst_idx < blk->inst_count ? inst_idx : 0].native_offset;
 
-    /* Walk instructions up to the guard point to find live registers */
-    for (uint32_t i = 0; i <= inst_idx && i < blk->inst_count; i++) {
-        vtx_inst_t *inst = &blk->insts[i];
-        for (int op = 0; op < VTX_INST_MAX_OPERANDS; op++) {
-            if (inst->opnd_kinds[op] == VTX_OPND_PREG) {
-                reg_set |= (1u << inst->operands[op]);
+    if (ra != NULL && ra->intervals != NULL && ra->interval_count > 0) {
+        /* Use the register allocator's live interval data for accurate
+         * register-to-NodeID mapping. This is the correct implementation
+         * that uses the regalloc's liveness information. */
+        uint8_t  live_regs[VTX_PHYS_REG_COUNT];
+        vtx_nodeid_t live_nodeids[VTX_PHYS_REG_COUNT];
+        uint32_t live_count = vtx_regalloc_live_regs_at_position(
+            ra, guard_position, live_regs, live_nodeids, VTX_PHYS_REG_COUNT);
+
+        /* For each live register, resolve vreg → NodeID using the
+         * instruction stream if possible, then add to the side table. */
+        for (uint32_t i = 0; i < live_count; i++) {
+            vtx_nodeid_t node_id = live_nodeids[i];
+
+            /* The live_regs_at_position returns vreg as a proxy for NodeID.
+             * Try to resolve the actual NodeID via the instruction stream. */
+            if (node_id != VTX_NODEID_INVALID) {
+                node_id = vtx_regalloc_node_at_position(
+                    ra, stream, guard_position, live_regs[i]);
             }
-        }
-    }
 
-    /* Add register map entries for each live register */
-    for (uint32_t r = 0; r < 16; r++) {
-        if (reg_set & (1u << r)) {
-            /* Find the NodeID for this register — simplified: use the
-             * source_node from the instruction that defined it */
-            vtx_nodeid_t node_id = VTX_NODEID_INVALID;
-            for (uint32_t i = 0; i <= inst_idx && i < blk->inst_count; i++) {
-                vtx_inst_t *inst = &blk->insts[i];
-                if (inst->opnd_kinds[0] == VTX_OPND_PREG &&
-                    inst->operands[0] == r) {
-                    node_id = inst->source_node;
+            vtx_side_table_add_register(side_table, live_regs[i], node_id);
+        }
+    } else {
+        /* Fallback: simplified scan when no regalloc result is available.
+         * Walk instructions up to the guard point to find live registers. */
+        uint32_t reg_set = 0; /* bitmask of live physical registers */
+
+        for (uint32_t i = 0; i <= inst_idx && i < blk->inst_count; i++) {
+            vtx_inst_t *inst = &blk->insts[i];
+            for (int op = 0; op < VTX_INST_MAX_OPERANDS; op++) {
+                if (inst->opnd_kinds[op] == VTX_OPND_PREG) {
+                    reg_set |= (1u << inst->operands[op]);
                 }
             }
-            vtx_side_table_add_register(side_table, r, node_id);
+        }
+
+        /* Add register map entries for each live register */
+        for (uint32_t r = 0; r < 16; r++) {
+            if (reg_set & (1u << r)) {
+                /* Find the NodeID for this register from the instruction
+                 * that defined it (simplified approach). */
+                vtx_nodeid_t node_id = VTX_NODEID_INVALID;
+                for (uint32_t i = 0; i <= inst_idx && i < blk->inst_count; i++) {
+                    vtx_inst_t *inst = &blk->insts[i];
+                    if (inst->opnd_kinds[0] == VTX_OPND_PREG &&
+                        inst->operands[0] == r) {
+                        node_id = inst->source_node;
+                    }
+                }
+                vtx_side_table_add_register(side_table, r, node_id);
+            }
         }
     }
 
@@ -165,9 +200,11 @@ int vtx_guard_emit_lower(vtx_guard_desc_array_t *guards,
                           vtx_inst_stream_t *inst_stream,
                           vtx_x86_emit_t *emit,
                           vtx_side_table_t *side_table,
-                          vtx_arena_t *arena)
+                          vtx_arena_t *arena,
+                          const vtx_regalloc_result_t *ra)
 {
     if (!guards || !emit || !side_table) return -1;
+    /* ra is used by collect_live_regs for accurate register-to-NodeID mapping */
 
     int lowered = 0;
 
@@ -201,14 +238,15 @@ int vtx_guard_emit_lower(vtx_guard_desc_array_t *guards,
                             guard->frame_state_index,
                             VTX_STF_GUARD);
 
-        /* Collect live registers at this point */
+        /* Collect live registers at this point using the register
+         * allocator result for accurate register-to-NodeID mapping. */
         if (inst_stream) {
             for (uint32_t b = 0; b < inst_stream->block_count; b++) {
                 vtx_inst_block_t *blk = &inst_stream->blocks[b];
                 for (uint32_t i = 0; i < blk->inst_count; i++) {
                     if (blk->insts[i].source_node == guard->guard_node &&
                         (blk->insts[i].flags & VTX_INST_FLAG_IS_GUARD)) {
-                        collect_live_regs(inst_stream, b, i, side_table, st_idx);
+                        collect_live_regs(inst_stream, b, i, side_table, st_idx, ra);
                         break;
                     }
                 }

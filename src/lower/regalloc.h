@@ -158,4 +158,42 @@ uint8_t vtx_regalloc_phys_reg(const vtx_regalloc_result_t *result, uint32_t vreg
  */
 uint32_t vtx_regalloc_spill_slot(const vtx_regalloc_result_t *result, uint32_t vreg);
 
+/**
+ * Find the NodeID that is currently in a given physical register at a
+ * given instruction position.
+ *
+ * Uses the register allocator's live interval data to determine which
+ * vreg (and thus which SoN node) occupies the physical register at
+ * the specified instruction position.
+ *
+ * @param result   Register allocation result
+ * @param stream   Instruction stream (for vreg → NodeID reverse mapping)
+ * @param position Instruction position (sequential instruction index)
+ * @param phys_reg Physical register number to look up
+ * @return         NodeID occupying the register, or VTX_NODEID_INVALID
+ */
+vtx_nodeid_t vtx_regalloc_node_at_position(
+    const vtx_regalloc_result_t *result,
+    const vtx_inst_stream_t *stream,
+    uint32_t position,
+    uint8_t phys_reg);
+
+/**
+ * Get the set of physical registers that are live at a given instruction
+ * position, along with their defining NodeIDs.
+ *
+ * @param result       Register allocation result
+ * @param position     Instruction position (sequential instruction index)
+ * @param out_regs     Output array of physical register numbers (caller-allocated)
+ * @param out_nodeids  Output array of NodeIDs (caller-allocated, parallel to out_regs)
+ * @param max_entries  Maximum number of entries the output arrays can hold
+ * @return             Number of live register entries written
+ */
+uint32_t vtx_regalloc_live_regs_at_position(
+    const vtx_regalloc_result_t *result,
+    uint32_t position,
+    uint8_t *out_regs,
+    vtx_nodeid_t *out_nodeids,
+    uint32_t max_entries);
+
 #endif /* VORTEX_LOWER_REGALLOC_H */

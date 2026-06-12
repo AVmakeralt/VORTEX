@@ -15,6 +15,7 @@
  */
 
 #include "lower/regalloc.h"
+#include "ir/node.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -750,4 +751,91 @@ uint32_t vtx_regalloc_spill_slot(const vtx_regalloc_result_t *result, uint32_t v
     if (!result || !result->vreg_to_spill || vreg >= result->vreg_to_spill_count)
         return VTX_NO_SPILL;
     return result->vreg_to_spill[vreg];
+}
+
+/* ========================================================================== */
+/* Position-based register queries (for guard emission)                        */
+/* ========================================================================== */
+
+uint32_t vtx_regalloc_live_regs_at_position(
+    const vtx_regalloc_result_t *result,
+    uint32_t position,
+    uint8_t *out_regs,
+    vtx_nodeid_t *out_nodeids,
+    uint32_t max_entries)
+{
+    if (!result || !result->intervals || !out_regs || !out_nodeids)
+        return 0;
+
+    uint32_t count = 0;
+
+    /* Walk all live intervals and find ones that are live at `position`
+     * and have a valid physical register assignment. */
+    for (uint32_t i = 0; i < result->interval_count && count < max_entries; i++) {
+        const vtx_live_interval_t *iv = &result->intervals[i];
+
+        /* Skip intervals that were coalesced into another */
+        if (iv->coalesce_src != VTX_VREG_INVALID) continue;
+
+        /* Check if this interval is live at the given position */
+        if (iv->start <= position && iv->end >= position &&
+            iv->phys_reg != 0xFF) {
+            out_regs[count] = iv->phys_reg;
+            out_nodeids[count] = (vtx_nodeid_t)iv->vreg; /* vreg is used as proxy;
+                                                           * the caller maps vreg → NodeID
+                                                           * via the instruction stream */
+            count++;
+        }
+    }
+
+    return count;
+}
+
+vtx_nodeid_t vtx_regalloc_node_at_position(
+    const vtx_regalloc_result_t *result,
+    const vtx_inst_stream_t *stream,
+    uint32_t position,
+    uint8_t phys_reg)
+{
+    if (!result || !result->intervals)
+        return VTX_NODEID_INVALID;
+
+    /* Find the live interval that occupies phys_reg at the given position */
+    for (uint32_t i = 0; i < result->interval_count; i++) {
+        const vtx_live_interval_t *iv = &result->intervals[i];
+
+        if (iv->coalesce_src != VTX_VREG_INVALID) continue;
+        if (iv->phys_reg != phys_reg) continue;
+        if (iv->start > position || iv->end < position) continue;
+
+        /* Found the interval occupying this register at this position.
+         * Now we need to map vreg → NodeID.
+         * The instruction stream has a node_to_vreg mapping, but we need
+         * the reverse. We scan the instruction stream for the instruction
+         * that defines this vreg and return its source_node. */
+        uint32_t target_vreg = iv->vreg;
+
+        if (stream != NULL) {
+            for (uint32_t b = 0; b < stream->block_count; b++) {
+                const vtx_inst_block_t *blk = &stream->blocks[b];
+                for (uint32_t j = 0; j < blk->inst_count; j++) {
+                    const vtx_inst_t *inst = &blk->insts[j];
+                    /* The first operand of most instructions is the destination.
+                     * If it's a vreg matching our target, this instruction
+                     * defines it. */
+                    if (inst->opnd_kinds[0] == VTX_OPND_VREG &&
+                        inst->operands[0] == target_vreg &&
+                        inst->source_node != VTX_NODEID_INVALID) {
+                        return inst->source_node;
+                    }
+                }
+            }
+        }
+
+        /* Couldn't find the defining instruction — use vreg as NodeID proxy.
+         * This is an approximation but better than VTX_NODEID_INVALID. */
+        return (vtx_nodeid_t)target_vreg;
+    }
+
+    return VTX_NODEID_INVALID;
 }

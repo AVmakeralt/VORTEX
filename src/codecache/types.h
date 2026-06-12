@@ -25,6 +25,7 @@
 typedef struct {
     uint32_t bytecode_pc;    /* bytecode PC */
     uint32_t native_offset;  /* corresponding native code offset */
+    uint32_t stack_depth;    /* expression stack depth at this bytecode boundary */
 } vtx_bc_pc_map_entry_t;
 
 /* ========================================================================== */

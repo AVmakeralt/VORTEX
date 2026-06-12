@@ -119,6 +119,7 @@ vtx_pipeline_config_t vtx_pipeline_config_t2(void)
     cfg.inline_size_limit = 0;      /* use default VTX_INLINE_SIZE_LIMIT */
     cfg.callee_lookup     = NULL;
     cfg.callee_lookup_context = NULL;
+    cfg.type_feedback     = NULL;   /* no type feedback by default; set by caller */
     return cfg;
 }
 
@@ -151,6 +152,7 @@ vtx_pipeline_config_t vtx_pipeline_config_t3(void)
     cfg.inline_size_limit = 512;    /* more aggressive: 2x the default limit */
     cfg.callee_lookup     = NULL;
     cfg.callee_lookup_context = NULL;
+    cfg.type_feedback     = NULL;   /* no type feedback by default; set by caller */
     return cfg;
 }
 
@@ -868,11 +870,15 @@ int vtx_pipeline_run(vtx_graph_t *graph,
     /* ================================================================== */
     if (config->run_speculative) {
         /* Scan for virtual call sites and insert type guards.
-         * For each CallVirtual/CallInterface, if profiling data shows
-         * a dominant receiver type, insert a DeoptGuard that checks
-         * the receiver's type_id against the observed dominant type.
-         * On type mismatch, execution falls back to the interpreter. */
+         * For each CallVirtual/CallInterface, we look up the dominant
+         * receiver type from the type feedback system (if available),
+         * or fall back to the IR node's type_id as a speculative hint.
+         * A DeoptGuard is inserted that checks the receiver's type_id
+         * against the speculated dominant type. On type mismatch,
+         * execution falls back to the interpreter. */
         vtx_node_table_t *ntable = &graph->node_table;
+        const vtx_type_feedback_t *feedback = config->type_feedback;
+
         for (uint32_t i = 0; i < ntable->count; i++) {
             vtx_node_t *node = &ntable->nodes[i];
             if (node->dead) continue;
@@ -880,15 +886,7 @@ int vtx_pipeline_run(vtx_graph_t *graph,
                 node->opcode != VTX_OP_CallInterface) continue;
             if (node->input_count < 1) continue;
 
-            /* The receiver is the first data input (after control+memory).
-             * For now, we insert a DeoptGuard that checks the receiver
-             * type_id against a speculated dominant type. Since we don't
-             * have runtime type feedback in the pipeline, we use the
-             * node's type_id as a speculative hint. */
-            /* TODO: Integrate with vtx_type_feedback_t to get the actual
-             * dominant receiver type from profiling data. When available,
-             * use vtx_type_feedback_get_dominant_call_type() to determine
-             * the speculated type. */
+            /* The receiver is the first data input (after control+memory). */
             vtx_nodeid_t receiver_id = VTX_NODEID_INVALID;
             for (uint32_t inp = 0; inp < node->input_count; inp++) {
                 const vtx_node_t *inp_node = vtx_node_get_const(ntable, node->inputs[inp]);
@@ -898,7 +896,36 @@ int vtx_pipeline_run(vtx_graph_t *graph,
                 }
             }
 
-            if (receiver_id != VTX_NODEID_INVALID && node->type_id != 0) {
+            if (receiver_id == VTX_NODEID_INVALID) continue;
+
+            /* Determine the speculated dominant receiver type.
+             *
+             * Priority:
+             *   1. If type feedback is available, look up the call site's
+             *      bytecode_pc in the feedback and use the dominant observed
+             *      type from profiling data. This is far more accurate than
+             *      the IR node's type_id, which may be a generic base type.
+             *   2. If no feedback is available (feedback pointer is NULL
+             *      or VTX_TYPE_INVALID returned for the site), fall back
+             *      to the node's type_id as a speculative hint. */
+            vtx_typeid_t speculated_type = VTX_TYPE_INVALID;
+
+            if (feedback != NULL) {
+                /* Look up the dominant receiver type from profiling data.
+                 * The site_index is the node's bytecode_pc — the same
+                 * index used when recording observations in the interpreter
+                 * dispatch loop (see dispatch.c: vtx_type_feedback_record_call). */
+                speculated_type = vtx_type_feedback_get_dominant_call_type(
+                    feedback, node->bytecode_pc);
+            }
+
+            /* Fall back to node->type_id if no feedback data is available */
+            if (speculated_type == VTX_TYPE_INVALID) {
+                speculated_type = node->type_id;
+            }
+
+            /* Only insert a guard if we have a valid speculated type */
+            if (speculated_type != VTX_TYPE_INVALID) {
                 /* Insert a DeoptGuard before this call:
                  * Guard(receiver_type == speculated_type)
                  * On failure, deoptimize to interpreter. */
@@ -907,7 +934,7 @@ int vtx_pipeline_run(vtx_graph_t *graph,
                     vtx_node_t *guard = vtx_node_get(ntable, guard_id);
                     if (guard) {
                         guard->cond = VTX_COND_EQ;
-                        guard->type_id = node->type_id;
+                        guard->type_id = speculated_type;
                         guard->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
                         guard->bytecode_pc = node->bytecode_pc;
                         /* Add the receiver as input */

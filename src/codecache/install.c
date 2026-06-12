@@ -106,6 +106,7 @@ bool vtx_install_method(vtx_code_cache_t *cache,
                          const uint8_t *code,
                          uint32_t code_size,
                          vtx_side_table_t *side_table,
+                         vtx_reloc_table_t *reloc_table,
                          const uint32_t *dep_types,
                          uint32_t dep_type_count,
                          const uint32_t *dep_shapes,
@@ -120,6 +121,15 @@ bool vtx_install_method(vtx_code_cache_t *cache,
 
     /* Copy the compiled code into the cache */
     memcpy(code_mem, code, code_size);
+
+    /* Apply external relocations: fix up calls to runtime helpers
+     * using the actual code base address in the code cache.
+     * This must happen AFTER copying the code (so we patch the final
+     * copy) and BEFORE making the code executable. */
+    if (reloc_table != NULL) {
+        vtx_reloc_apply_external(reloc_table, code_mem,
+                                  (uint8_t *)code_mem, code_size);
+    }
 
     /* Make the code executable */
     if (vtx_code_cache_make_exec(cache, code_mem, code_size) != 0) {
@@ -137,6 +147,7 @@ bool vtx_install_method(vtx_code_cache_t *cache,
     cm->code_start = (uint8_t *)code_mem;
     cm->code_size = code_size;
     cm->side_table = side_table;
+    cm->reloc_table = reloc_table;  /* save for potential re-patching */
     cm->is_installed = true;
     cm->is_valid = true;
     cm->last_used_timestamp = 0;

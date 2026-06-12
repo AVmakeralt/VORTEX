@@ -7,6 +7,7 @@
 #include "vortex_config.h"
 #include "codecache/cache.h"
 #include "deopt/side_table.h"
+#include "lower/reloc.h"
 #include "runtime/type_system.h"
 #include "runtime/arena.h"
 
@@ -20,7 +21,7 @@
  * Installation steps:
  *   1. Allocate space in the code cache
  *   2. Copy the compiled code into the segment
- *   3. Apply relocations (fix up call targets, etc.)
+ *   3. Apply external relocations (fix up call targets using final address)
  *   4. Make the code segment executable
  *   5. Store metadata (side table, deopt info)
  *   6. Update the method's code pointer with release store
@@ -48,6 +49,10 @@ struct vtx_compiled_method {
     /* Deoptimization metadata */
     vtx_side_table_t        *side_table;        /* deopt side table */
 
+    /* Relocation table (for re-applying external call relocations
+     * if the code is moved or re-installed) */
+    vtx_reloc_table_t       *reloc_table;
+
     /* Dependency set: TypeIDs and ShapeIDs this method's guards depend on */
     uint32_t                *dep_type_ids;      /* array of TypeIDs */
     uint32_t                 dep_type_count;
@@ -72,7 +77,7 @@ struct vtx_compiled_method {
 
 #define VTX_METHOD_REGISTRY_INITIAL_CAPACITY 256
 
-typedef struct {
+typedef struct vtx_method_registry {
     vtx_compiled_method_t **methods;        /* array indexed by method_id */
     uint32_t                method_count;   /* number of registered methods */
     uint32_t                capacity;       /* allocated capacity */
@@ -125,6 +130,7 @@ int vtx_method_registry_remove(vtx_method_registry_t *registry, uint32_t method_
  * @param code        Compiled code bytes
  * @param code_size   Size of compiled code
  * @param side_table  Deoptimization side table (ownership transferred)
+ * @param reloc_table Relocation table (for external call fixups at install time)
  * @param dep_types   Array of TypeIDs this method depends on
  * @param dep_type_count Number of TypeIDs
  * @param dep_shapes  Array of ShapeIDs this method depends on
@@ -139,6 +145,7 @@ bool vtx_install_method(vtx_code_cache_t *cache,
                          const uint8_t *code,
                          uint32_t code_size,
                          vtx_side_table_t *side_table,
+                         vtx_reloc_table_t *reloc_table,
                          const uint32_t *dep_types,
                          uint32_t dep_type_count,
                          const uint32_t *dep_shapes,

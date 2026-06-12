@@ -174,6 +174,7 @@ endif()
 # Main VORTEX executable
 add_executable(vortex
     main_new.c
+    runtime_stubs.c
 )
 target_include_directories(vortex PRIVATE ${VORTEX_INCLUDE_DIRS})
 target_link_libraries(vortex PRIVATE

@@ -38,9 +38,12 @@ typedef struct {
     vtx_reloc_kind_t kind;          /* relocation type */
     uint32_t         offset;        /* offset in code buffer where fixup goes */
     uint32_t         target_offset; /* target offset in code buffer (for intra-code relocations) */
-    uint64_t         target_address;/* absolute target address (for ABS64) */
+    uint64_t         target_address;/* absolute target address (for ABS64 and external calls) */
     uint32_t         symbol;        /* symbol index (for external references) */
     int32_t          addend;        /* additional offset to add */
+    bool             is_external;   /* true if this is a deferred external call relocation
+                                     * that must be re-applied at install time when the
+                                     * final code base address is known */
 } vtx_reloc_t;
 
 /* ========================================================================== */
@@ -158,5 +161,31 @@ uint32_t vtx_reloc_add_deopt_handler(vtx_reloc_table_t *table,
                                       uint32_t patch_offset,
                                       uint64_t handler_addr,
                                       vtx_arena_t *arena);
+
+/**
+ * Apply deferred external call relocations at install time.
+ *
+ * When code is installed in the code cache, the base address changes
+ * from the temporary emission buffer to the final code cache address.
+ * External call relocations (calls to runtime helpers) use REL32 relative
+ * addressing, so the displacement depends on the code's final address.
+ *
+ * This function must be called AFTER the code has been copied to its
+ * final location in the code cache, and BEFORE the code is made executable.
+ *
+ * Only relocations marked is_external=true are processed. Intra-code
+ * relocations were already resolved by vtx_reloc_apply_all() and are
+ * not affected.
+ *
+ * @param table          Relocation table
+ * @param code_base      Final base address of the installed code
+ * @param code_buffer    Writable pointer to the installed code
+ * @param code_size      Size of the code
+ * @return               0 on success, -1 on failure
+ */
+int vtx_reloc_apply_external(vtx_reloc_table_t *table,
+                              const void *code_base,
+                              uint8_t *code_buffer,
+                              uint32_t code_size);
 
 #endif /* VORTEX_LOWER_RELOC_H */

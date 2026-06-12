@@ -52,6 +52,7 @@ struct vtx_frame {
     uint32_t           *monitored_types;  /* typeid per local for deopt type state */
     uint32_t            locals_count;     /* number of local variable slots */
     uint32_t            catch_handler_pc; /* PC of current catch handler (VTX_CATCH_NONE if none) */
+    vtx_typeid_t        catch_type;       /* TypeID of exception caught (0 = catch-all, VTX_TYPE_INVALID = none) */
     vtx_value_t         exception;        /* pending exception (VTX_VALUE_UNDEFINED if none) */
 };
 

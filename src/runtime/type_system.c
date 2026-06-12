@@ -5,6 +5,15 @@
 #include <stddef.h>
 
 /* ========================================================================== */
+/* Global type system instance (used by interpreter and runtime stubs)          */
+/* ========================================================================== */
+
+static vtx_type_system_t *the_type_system = NULL;
+
+vtx_type_system_t *vtx_get_current_type_system(void) { return the_type_system; }
+void vtx_set_current_type_system(vtx_type_system_t *ts) { the_type_system = ts; }
+
+/* ========================================================================== */
 /* Type system init/destroy                                                    */
 /* ========================================================================== */
 

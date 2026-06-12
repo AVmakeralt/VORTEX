@@ -252,31 +252,61 @@ bool vtx_deoptless_install(vtx_deoptless_version_t *version)
         return false;
     }
 
-    /* D2 fix: Proper guard patching implementation.
+    /* Patch the guard's JCC in the original compiled code to point to
+     * the continuation code instead of the deopt stub.
      *
-     * When a deoptless continuation is installed, we need to patch the
-     * guard's conditional jump (JCC) in the original compiled code to
-     * point to the continuation code instead of the deopt stub.
+     * On x86-64, a near JCC has format: 0F 8x [4-byte rel32]
+     * The displacement is relative to the end of the JCC instruction,
+     * i.e., relative to (displacement_position + 4).
      *
-     * On x86-64, a near JCC has the format: 0F 8x [4-byte rel32]
-     * The 4-byte displacement is relative to the instruction after the JCC.
+     * We need:
+     *   - code_start:            base address of the original compiled code
+     *   - guard_branch_offset:   offset from code_start to the 4-byte rel32
+     *   - continuation_code:     target address to jump to on guard failure
      *
-     * For a full implementation, we would need:
-     *   1. The address of the JCC instruction in the original code
-     *   2. The displacement position within the JCC
-     *   3. The target address (continuation code entry)
-     *
-     * Since we don't store the JCC address directly, we use a simpler
-     * approach: the runtime checks for a deoptless version before
-     * jumping to the deopt stub. If a version exists, it jumps to
-     * the continuation code instead.
-     *
-     * This avoids the need for runtime code patching (which requires
-     * I-cache synchronization and is platform-specific) while still
-     * achieving the deoptless performance benefit.
-     *
-     * The version is marked as installed so the runtime knows it's active.
+     * New displacement = target_addr - (disp_pos + 4)
+     *                  = continuation_code - (code_start + guard_branch_offset + 4)
      */
+
+    if (!version->code_start || version->guard_branch_offset == 0) {
+        /* No patch site recorded — cannot patch. The runtime must fall
+         * back to checking for a deoptless version before entering the
+         * deopt stub. */
+        return true;
+    }
+
+    /* Compute the address of the 4-byte displacement in the JCC */
+    uint8_t *disp_pos = version->code_start + version->guard_branch_offset;
+
+    /* Compute the new relative displacement */
+    intptr_t target = (intptr_t)version->continuation_code;
+    intptr_t branch_end = (intptr_t)(disp_pos + 4);
+    int32_t new_disp = (int32_t)(target - branch_end);
+
+    /* Check that the displacement fits in 32 bits (near JCC range).
+     * If the continuation code is too far away, we cannot patch with
+     * a near JCC and must fall back to the runtime check approach. */
+    intptr_t raw_disp = target - branch_end;
+    if (raw_disp != (intptr_t)(int32_t)raw_disp) {
+        /* Displacement out of range for near JCC — cannot patch */
+        return true;
+    }
+
+    /* Patch the 4 bytes with the new displacement.
+     * We use a volatile pointer to prevent the compiler from
+     * reordering or optimizing away the write. */
+    volatile int32_t *patch_addr = (volatile int32_t *)disp_pos;
+    *patch_addr = new_disp;
+
+    /* Flush the instruction cache: on x86-64, coherent caches mean we
+     * only need a compiler barrier to ensure the write is visible.
+     * On other architectures, __builtin___clear_cache would be needed.
+     * We use both for portability and correctness. */
+    __asm__ __volatile__("" : : : "memory");
+#if defined(__GNUC__) && !defined(__x86_64__)
+    __builtin___clear_cache((char *)disp_pos, (char *)(disp_pos + 4));
+#endif
+
     return true;
 }
 

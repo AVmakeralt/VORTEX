@@ -7,6 +7,7 @@
 
 #define _POSIX_C_SOURCE 199309L
 #include "compile/safepoint.h"
+#include "interp/dispatch.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -130,9 +131,13 @@ static uint32_t process_installations(vtx_safepoint_manager_t *manager)
 /* Internal: process pending invalidations                                     */
 /* ========================================================================== */
 
-static uint32_t process_invalidations(vtx_safepoint_manager_t *manager)
+static uint32_t process_invalidations(vtx_safepoint_manager_t *manager,
+                                       uint32_t *first_invalidated_method_id)
 {
     uint32_t invalidated = 0;
+    if (first_invalidated_method_id) {
+        *first_invalidated_method_id = UINT32_MAX;
+    }
 
     pthread_mutex_lock(&manager->invalidate_mutex);
 
@@ -155,6 +160,10 @@ static uint32_t process_invalidations(vtx_safepoint_manager_t *manager)
                  * eviction policy. */
                 method->is_valid     = false;
                 method->is_installed = false;
+                if (first_invalidated_method_id &&
+                    *first_invalidated_method_id == UINT32_MAX) {
+                    *first_invalidated_method_id = req->method_id;
+                }
                 invalidated++;
             }
         }
@@ -210,10 +219,21 @@ int vtx_safepoint_check(vtx_safepoint_manager_t *manager, void *interp)
 
     /* Process invalidations */
     if (orig_state & VTX_SP_INVALIDATE_PENDING) {
-        uint32_t invalidated = process_invalidations(manager);
+        uint32_t first_invalidated_id = UINT32_MAX;
+        uint32_t invalidated = process_invalidations(manager, &first_invalidated_id);
         manager->total_invalidations += invalidated;
         if (invalidated > 0) {
             result = -1; /* signal that deopt may be needed */
+
+            /* Trigger deoptimization: if the caller provided an interpreter
+             * state and a method was invalidated, set the deopt_pending flag
+             * so the dispatch loop triggers deoptimization at the next safe
+             * point. */
+            if (interp != NULL) {
+                vtx_interp_t *interp_state = (vtx_interp_t *)interp;
+                interp_state->deopt_pending = true;
+                interp_state->deopt_method_id = first_invalidated_id;
+            }
         }
     }
 
@@ -224,8 +244,6 @@ int vtx_safepoint_check(vtx_safepoint_manager_t *manager, void *interp)
     __atomic_fetch_add(&manager->total_time_ns, elapsed_ns, __ATOMIC_RELAXED);
 
     __atomic_fetch_add(&manager->total_checks, 1, __ATOMIC_RELAXED);
-
-    (void)interp; /* used in full implementation for deopt triggering */
 
     return result;
 }

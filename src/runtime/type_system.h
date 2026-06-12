@@ -98,6 +98,13 @@ int vtx_type_system_init(vtx_type_system_t *ts);
 void vtx_type_system_destroy(vtx_type_system_t *ts);
 
 /**
+ * Get/set the global type system instance.
+ * Used by the interpreter and runtime stubs for type queries.
+ */
+vtx_type_system_t *vtx_get_current_type_system(void);
+void vtx_set_current_type_system(vtx_type_system_t *ts);
+
+/**
  * Register a new type. Returns the new TypeID on success,
  * VTX_TYPE_INVALID on failure.
  *

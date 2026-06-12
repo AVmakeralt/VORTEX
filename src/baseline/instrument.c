@@ -266,14 +266,142 @@ void vtx_instrument_emit_call_type_record(vtx_code_buffer_t *buf,
         vtx_code_buffer_emit_byte(buf, REX_W);
         vtx_code_buffer_emit_byte(buf, 0x89);
         vtx_code_buffer_emit_byte(buf, modrm(3, typeid_reg, VTX_REG_RCX));
+    } else if (receiver_reg == VTX_REG_NONE) {
+        /* No receiver register available — can't determine type inline, use 0. */
+        /* xor ecx, ecx */
+        vtx_code_buffer_emit_byte(buf, 0x31);
+        vtx_code_buffer_emit_byte(buf, 0xC9);
     } else {
-        /* Need to extract typeid from the receiver object.
-         * This requires: untag the heap pointer, load type_id from offset 0.
-         * For simplicity, we use 0 as a placeholder typeid — the profiler
-         * function will extract it from the tagged value. */
-        vtx_code_buffer_emit_byte(buf, REX_W);
-        vtx_code_buffer_emit_byte(buf, 0x89);
-        vtx_code_buffer_emit_byte(buf, modrm(3, receiver_reg, VTX_REG_RCX));
+        /* Extract the typeid from the receiver object inline.
+         *
+         * The receiver_reg contains a NaN-boxed tagged value (vtx_value_t).
+         * For heap objects (tag == VTX_TAG_HEAP_PTR = 1):
+         *   1. Untag the heap pointer: ptr = ((v >> 3) & NAN_DATA_MASK) << 3
+         *   2. Load the type_id (uint32_t) from offset 0 of vtx_heap_object_t
+         * For non-heap values (SMI, bool, null, etc.): use 0 as typeid.
+         *
+         * We use R11 as scratch (caller-saved, not used for arguments).
+         * RAX is used temporarily for the 48-bit mask constant; it will be
+         * reloaded with the function pointer later.
+         *
+         * Generated code:
+         *   mov r11, receiver_reg          ; tagged value
+         *   and r11, 7                     ; extract tag bits
+         *   cmp r11, 1                     ; VTX_TAG_HEAP_PTR
+         *   jne .L_not_heap
+         *   mov r11, receiver_reg          ; reload tagged value
+         *   shr r11, 3                     ; extract payload bits[50:3]
+         *   mov rax, 0x0000FFFFFFFFFFFF    ; 48-bit NaN payload mask
+         *   and r11, rax                   ; clear NaN header bits
+         *   shl r11, 3                     ; shift left to get actual pointer
+         *   mov ecx, dword [r11]           ; load type_id from offset 0
+         *   jmp .L_typeid_done
+         * .L_not_heap:
+         *   xor ecx, ecx                   ; RCX = 0 (non-heap typeid)
+         * .L_typeid_done:
+         */
+
+        /* mov r11, receiver_reg */
+        emit_rex64(buf, VTX_REG_R11, receiver_reg);
+        vtx_code_buffer_emit_byte(buf, 0x8B); /* MOV r64, r/m64 */
+        vtx_code_buffer_emit_byte(buf, modrm(3, VTX_REG_R11, receiver_reg));
+
+        /* and r11, 7 — extract tag bits (VTX_TAG_MASK = 0x7) */
+        {
+            uint8_t rex = REX_W;
+            if (VTX_REG_R11 >= VTX_REG_R8) rex |= 0x01; /* REX.B */
+            vtx_code_buffer_emit_byte(buf, rex);
+        }
+        vtx_code_buffer_emit_byte(buf, 0x83); /* AND r/m64, imm8 */
+        vtx_code_buffer_emit_byte(buf, modrm(3, 4, VTX_REG_R11)); /* /4 = AND */
+        vtx_code_buffer_emit_byte(buf, 0x07); /* imm8 = 7 (VTX_TAG_MASK) */
+
+        /* cmp r11, 1 — compare with VTX_TAG_HEAP_PTR */
+        {
+            uint8_t rex = REX_W;
+            if (VTX_REG_R11 >= VTX_REG_R8) rex |= 0x01; /* REX.B */
+            vtx_code_buffer_emit_byte(buf, rex);
+        }
+        vtx_code_buffer_emit_byte(buf, 0x83); /* CMP r/m64, imm8 */
+        vtx_code_buffer_emit_byte(buf, modrm(3, 7, VTX_REG_R11)); /* /7 = CMP */
+        vtx_code_buffer_emit_byte(buf, 0x01); /* imm8 = 1 (VTX_TAG_HEAP_PTR) */
+
+        /* jne .L_not_heap (short jump, placeholder offset) */
+        uint32_t jne_pos = vtx_code_buffer_position(buf);
+        vtx_code_buffer_emit_byte(buf, 0x75); /* JNE rel8 */
+        vtx_code_buffer_emit_byte(buf, 0x00); /* placeholder offset */
+
+        /* --- Heap pointer path: untag and load type_id --- */
+
+        /* mov r11, receiver_reg — reload full tagged value */
+        emit_rex64(buf, VTX_REG_R11, receiver_reg);
+        vtx_code_buffer_emit_byte(buf, 0x8B);
+        vtx_code_buffer_emit_byte(buf, modrm(3, VTX_REG_R11, receiver_reg));
+
+        /* shr r11, 3 — extract payload: bits[50:3] → bits[47:0] */
+        {
+            uint8_t rex = REX_W;
+            if (VTX_REG_R11 >= VTX_REG_R8) rex |= 0x01;
+            vtx_code_buffer_emit_byte(buf, rex);
+        }
+        vtx_code_buffer_emit_byte(buf, 0xC1); /* SHR r/m64, imm8 */
+        vtx_code_buffer_emit_byte(buf, modrm(3, 5, VTX_REG_R11)); /* /5 = SHR */
+        vtx_code_buffer_emit_byte(buf, 0x03); /* shift count = 3 */
+
+        /* mov rax, 0x0000FFFFFFFFFFFF — 48-bit NaN payload mask */
+        emit_mov_reg_imm64(buf, VTX_REG_RAX, 0x0000FFFFFFFFFFFFULL);
+
+        /* and r11, rax — clear NaN header bits, keep 48-bit payload */
+        emit_rex64(buf, VTX_REG_R11, VTX_REG_RAX);
+        vtx_code_buffer_emit_byte(buf, 0x23); /* AND r64, r/m64 */
+        vtx_code_buffer_emit_byte(buf, modrm(3, VTX_REG_R11, VTX_REG_RAX));
+
+        /* shl r11, 3 — shift left to recover the actual heap pointer */
+        {
+            uint8_t rex = REX_W;
+            if (VTX_REG_R11 >= VTX_REG_R8) rex |= 0x01;
+            vtx_code_buffer_emit_byte(buf, rex);
+        }
+        vtx_code_buffer_emit_byte(buf, 0xC1); /* SHL r/m64, imm8 */
+        vtx_code_buffer_emit_byte(buf, modrm(3, 4, VTX_REG_R11)); /* /4 = SHL */
+        vtx_code_buffer_emit_byte(buf, 0x03); /* shift count = 3 */
+
+        /* mov ecx, dword [r11] — load type_id (uint32_t) from offset 0 */
+        {
+            /* REX.B for R11 (register 11), no REX.W needed (32-bit load) */
+            uint8_t rex = 0x40; /* REX base */
+            if (VTX_REG_R11 >= VTX_REG_R8) rex |= 0x01; /* REX.B */
+            vtx_code_buffer_emit_byte(buf, rex);
+        }
+        vtx_code_buffer_emit_byte(buf, 0x8B); /* MOV r32, r/m32 */
+        vtx_code_buffer_emit_byte(buf, modrm(0, VTX_REG_RCX, 3)); /* [R11] */
+
+        /* jmp .L_typeid_done (short jump, placeholder offset) */
+        uint32_t jmp_pos = vtx_code_buffer_position(buf);
+        vtx_code_buffer_emit_byte(buf, 0xEB); /* JMP rel8 */
+        vtx_code_buffer_emit_byte(buf, 0x00); /* placeholder offset */
+
+        /* --- .L_not_heap: --- */
+        uint32_t not_heap_pos = vtx_code_buffer_position(buf);
+
+        /* Patch the JNE offset */
+        {
+            int8_t offset = (int8_t)(not_heap_pos - jne_pos - 2);
+            buf->bytes[jne_pos + 1] = (uint8_t)offset;
+        }
+
+        /* xor ecx, ecx — RCX = 0 for non-heap values */
+        vtx_code_buffer_emit_byte(buf, 0x31);
+        vtx_code_buffer_emit_byte(buf, 0xC9);
+
+        /* --- .L_typeid_done: --- */
+        uint32_t typeid_done_pos = vtx_code_buffer_position(buf);
+
+        /* Patch the JMP offset */
+        {
+            int8_t offset = (int8_t)(typeid_done_pos - jmp_pos - 2);
+            buf->bytes[jmp_pos + 1] = (uint8_t)offset;
+        }
     }
 
     /* Call the profiler function */

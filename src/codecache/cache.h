@@ -42,7 +42,7 @@ struct vtx_code_segment {
 /* Code cache                                                                  */
 /* ========================================================================== */
 
-typedef struct {
+typedef struct vtx_code_cache {
     vtx_code_segment_t  *segments;         /* linked list of segments */
     vtx_code_segment_t  *current_segment;  /* segment we're currently allocating from */
     uint32_t             segment_count;    /* total number of segments */

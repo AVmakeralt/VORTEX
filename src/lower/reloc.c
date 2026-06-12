@@ -103,8 +103,16 @@ uint32_t vtx_reloc_add_call(vtx_reloc_table_t *table,
                              uint64_t target_address,
                              vtx_arena_t *arena)
 {
-    return vtx_reloc_add(table, VTX_RELOC_REL32, patch_offset,
-                          0, target_address, 0, 0, arena);
+    uint32_t idx = vtx_reloc_add(table, VTX_RELOC_REL32, patch_offset,
+                                  0, target_address, 0, 0, arena);
+    if (idx != UINT32_MAX) {
+        /* Mark as external/deferred: the relative displacement depends
+         * on the code's final address in the code cache, which is not
+         * known at emit time. Will be resolved by vtx_reloc_apply_external()
+         * at install time. */
+        table->entries[idx].is_external = true;
+    }
+    return idx;
 }
 
 uint32_t vtx_reloc_add_deopt_handler(vtx_reloc_table_t *table,
@@ -168,12 +176,16 @@ int vtx_reloc_apply_all(vtx_reloc_table_t *table, uint8_t *code_buffer,
             continue;
         }
 
+        /* Skip external/deferred relocations — they will be applied
+         * at install time by vtx_reloc_apply_external() when the
+         * final code address is known. */
+        if (reloc->is_external) continue;
+
         switch (reloc->kind) {
 
         case VTX_RELOC_REL32: {
             /* 32-bit relative displacement.
              * For intra-code: disp = target_offset - (offset + 4) + addend
-             * For external:   disp = (int32_t)(target_address - (code_base + offset + 4))
              */
             if (reloc->target_offset != 0 || reloc->target_address == 0) {
                 /* Intra-code relocation */
@@ -183,17 +195,14 @@ int vtx_reloc_apply_all(vtx_reloc_table_t *table, uint8_t *code_buffer,
                                reloc->addend;
                 write_i32(code_buffer, reloc->offset, disp);
             } else {
-                /* External call relocation — target_address is absolute.
-                 * We need the code buffer's base address to compute the
-                 * relative displacement. This is set up at install time. */
+                /* Non-external absolute-target REL32 (legacy path for
+                 * entries not marked is_external but with an absolute
+                 * target_address). This shouldn't normally happen after
+                 * the is_external flag was introduced, but we handle it
+                 * for backward compatibility. */
                 if (reloc->offset + 4 > code_size) continue;
-                /* For now, store the absolute address as a placeholder.
-                 * The actual relative displacement will be computed when
-                 * the code is installed at its final address. */
-                int64_t addr = (int64_t)reloc->target_address;
-                int64_t src = (int64_t)(uintptr_t)code_buffer + reloc->offset + 4;
-                int32_t disp = (int32_t)(addr - src + reloc->addend);
-                write_i32(code_buffer, reloc->offset, disp);
+                /* Write zero as placeholder — will be fixed at install */
+                write_i32(code_buffer, reloc->offset, 0);
             }
             break;
         }
@@ -215,6 +224,67 @@ int vtx_reloc_apply_all(vtx_reloc_table_t *table, uint8_t *code_buffer,
             int32_t disp = (int32_t)reloc->target_offset -
                            (int32_t)(reloc->offset + 4) +
                            reloc->addend;
+            write_i32(code_buffer, reloc->offset, disp);
+            break;
+        }
+        }
+    }
+
+    return 0;
+}
+
+/* ========================================================================== */
+/* External relocation application (install time)                              */
+/* ========================================================================== */
+
+int vtx_reloc_apply_external(vtx_reloc_table_t *table,
+                              const void *code_base,
+                              uint8_t *code_buffer,
+                              uint32_t code_size)
+{
+    if (!table || !code_buffer || !code_base) return -1;
+
+    for (uint32_t i = 0; i < table->count; i++) {
+        const vtx_reloc_t *reloc = &table->entries[i];
+
+        /* Only process external/deferred relocations */
+        if (!reloc->is_external) continue;
+
+        /* Bounds check */
+        if (reloc->offset + 4 > code_size) continue;
+
+        switch (reloc->kind) {
+
+        case VTX_RELOC_REL32: {
+            /* External call: compute the relative displacement using
+             * the actual code base address in the code cache.
+             * disp = target_address - (code_base + offset + 4) + addend
+             *
+             * At execution time, the CPU computes:
+             *   next_ip = code_base + offset + 4  (RIP after the disp32)
+             *   target = next_ip + disp
+             * So we need: target = target_address
+             *   => disp = target_address - (code_base + offset + 4)
+             */
+            int64_t addr = (int64_t)reloc->target_address;
+            int64_t src  = (int64_t)(uintptr_t)code_base + reloc->offset + 4;
+            int32_t disp = (int32_t)(addr - src + reloc->addend);
+            write_i32(code_buffer, reloc->offset, disp);
+            break;
+        }
+
+        case VTX_RELOC_ABS64: {
+            /* External absolute 64-bit address — already resolved,
+             * no re-application needed. */
+            break;
+        }
+
+        case VTX_RELOC_RIP_REL32: {
+            /* External RIP-relative — shouldn't normally be deferred,
+             * but handle it for completeness. */
+            int64_t addr = (int64_t)reloc->target_address;
+            int64_t src  = (int64_t)(uintptr_t)code_base + reloc->offset + 4;
+            int32_t disp = (int32_t)(addr - src + reloc->addend);
             write_i32(code_buffer, reloc->offset, disp);
             break;
         }

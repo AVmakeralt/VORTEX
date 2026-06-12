@@ -17,6 +17,10 @@
 #include "baseline/deopt_stubs.h"
 #include "baseline/instrument.h"
 #include "codecache/types.h"
+#include "codecache/install.h"
+
+/* vtx_code_cache_t and vtx_method_registry_t are defined via codecache/install.h
+ * (which includes codecache/cache.h). No forward declarations needed. */
 
 /**
  * VORTEX Baseline JIT Code Generator
@@ -188,13 +192,22 @@ void vtx_compiled_code_destroy(vtx_compiled_code_t *code);
  * operations. Profiling instrumentation is inserted at key points.
  * Deopt stubs are generated after the main code.
  *
+ * If both cache and registry are non-NULL, the compiled code is installed
+ * into the code cache via vtx_install_method() which handles allocation,
+ * mprotect, and atomic code pointer updates. Otherwise, the code is
+ * malloc'd and the caller must handle installation.
+ *
  * @param method       The method to compile
  * @param profile_data Profile data for this method (may be NULL for first compilation)
  * @param arena        Arena for temporary allocations during compilation
+ * @param cache        Code cache for proper code installation (may be NULL)
+ * @param registry     Method registry for code installation (may be NULL)
  * @return             Compiled code struct, or NULL on failure
  */
 vtx_compiled_code_t *vtx_baseline_compile(const vtx_method_desc_t *method,
                                            vtx_profile_data_t *profile_data,
-                                           vtx_arena_t *arena);
+                                           vtx_arena_t *arena,
+                                           vtx_code_cache_t *cache,
+                                           vtx_method_registry_t *registry);
 
 #endif /* VORTEX_BASELINE_CODEGEN_H */

@@ -11,6 +11,10 @@
 #include "deopt/types.h"
 #include "codecache/types.h"
 
+#ifndef VTX_CATCH_NONE
+#define VTX_CATCH_NONE UINT32_MAX
+#endif
+
 /**
  * VORTEX On-Stack Replacement (OSR)
  *
@@ -31,13 +35,30 @@
  */
 
 /* ========================================================================== */
-/* Interpreter frame (simplified)                                             */
+/* Interpreter frame (enhanced)                                                */
 /* ========================================================================== */
 
 /**
- * Simplified representation of an interpreter frame for OSR transitions.
- * The actual interpreter frame layout is defined in src/interp/frame.h,
- * but we need a portable representation here for the OSR transition code.
+ * Frame kind: distinguishes the origin of a frame for stack walking.
+ * The canonical definition is in deopt/stack_walk.h which has the full
+ * set of frame kinds. We include it here to avoid a duplicate typedef.
+ */
+#include "deopt/stack_walk.h"
+
+/**
+ * Monitor state entry: tracks which objects are locked by this frame.
+ * Each entry records the local variable index holding the locked object
+ * and the object value itself (resolved at deopt time).
+ */
+typedef struct {
+    uint32_t     local_index;     /* local variable holding the locked object */
+    vtx_value_t  object;          /* the locked object value (heap pointer) */
+} vtx_osr_monitor_entry_t;
+
+/**
+ * Enhanced representation of an interpreter frame for OSR transitions.
+ * Matches the real interpreter frame from src/interp/frame.h more closely,
+ * including monitor state, exception handlers, return address, and frame kind.
  */
 typedef struct {
     uint32_t         method_id;      /* method being executed */
@@ -48,6 +69,28 @@ typedef struct {
     uint32_t         stack_top;      /* current stack depth */
     uint32_t         stack_capacity; /* max stack depth */
     vtx_frame_state_t *caller;       /* caller's interpreter frame (or NULL) */
+    bool             osr_active;     /* true after OSR up: frame is superseded by JIT code */
+
+    /* --- Enhanced fields (matching src/interp/frame.h) --- */
+
+    /* Monitor state: which objects are locked in this frame.
+     * During OSR down, monitors must be re-acquired in the interpreter
+     * frame after deoptimization. */
+    vtx_osr_monitor_entry_t *monitors;       /* array of locked monitors */
+    uint32_t                 monitor_count;  /* number of active monitors */
+    uint32_t                 monitor_capacity; /* allocated capacity */
+
+    /* Exception handler: the active catch handler for this frame.
+     * VTX_CATCH_NONE (UINT32_MAX) means no handler is active. */
+    uint32_t         catch_handler_pc;  /* PC of current catch handler */
+
+    /* Return address: bytecode PC in the caller to resume after return.
+     * Used for stack walking to reconstruct the full call chain. */
+    uint32_t         return_pc;     /* PC to resume in caller after return */
+
+    /* Frame kind: distinguishes interpreter, JIT, and native frames
+     * during stack walking. */
+    vtx_frame_kind_t frame_kind;    /* interpreter, JIT, or native */
 } vtx_interp_frame_t;
 
 /* ========================================================================== */

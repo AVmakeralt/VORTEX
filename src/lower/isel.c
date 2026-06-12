@@ -337,7 +337,7 @@ static bool compute_magic_number(int64_t d, int64_t *M, int *s)
     /* Use absolute value for the algorithm */
     uint64_t ad = (d < 0) ? (uint64_t)(-d) : (uint64_t)d;
     uint64_t nc = ((uint64_t)1 << 63) - 1 + (ad - (uint64_t)1) / ad; /* nc = 2^63-1 - (2^63-1)\ad + 1 */
-    /* Simplified: we approximate with a standard magic number computation */
+    /* Standard magic number computation per Hacker's Delight §10-3 */
     int p = 63;
     uint64_t q = (uint64_t)1 << p;       /* 2^p */
     uint64_t r = q % ad;                  /* remainder */

@@ -89,6 +89,15 @@ vtx_interp_frame_t *vtx_osr_build_interp_frame(
     frame->stack_capacity = fs->stack_count;
     frame->caller = NULL;
 
+    /* Initialize enhanced fields */
+    frame->monitors = NULL;
+    frame->monitor_count = 0;
+    frame->monitor_capacity = 0;
+    frame->catch_handler_pc = (fs->exception.handler_pc != VTX_DEOPT_NO_HANDLER)
+                              ? fs->exception.handler_pc : VTX_CATCH_NONE;
+    frame->return_pc = 0;  /* Set by caller during frame chain reconstruction */
+    frame->frame_kind = VTX_FRAME_INTERPRETED;
+
     /* Allocate and fill locals */
     if (fs->local_count > 0) {
         frame->locals = calloc(fs->local_count, sizeof(vtx_value_t));
@@ -122,6 +131,27 @@ vtx_interp_frame_t *vtx_osr_build_interp_frame(
         }
     }
 
+    /* Reconstruct monitor state from FrameState */
+    if (fs->monitor_count > 0) {
+        frame->monitors = calloc(fs->monitor_count, sizeof(vtx_osr_monitor_entry_t));
+        if (!frame->monitors) {
+            free(frame->stack);
+            free(frame->locals);
+            free(frame);
+            return NULL;
+        }
+        frame->monitor_count = fs->monitor_count;
+        frame->monitor_capacity = fs->monitor_count;
+        for (uint32_t i = 0; i < fs->monitor_count; i++) {
+            frame->monitors[i].local_index = 0; /* will be resolved during deopt */
+            if (fs->monitors[i].monitor_object != VTX_NODEID_INVALID) {
+                frame->monitors[i].object = node_to_value(fs->monitors[i].monitor_object, context);
+            } else {
+                frame->monitors[i].object = VTX_VALUE_UNDEFINED;
+            }
+        }
+    }
+
     return frame;
 }
 
@@ -129,6 +159,7 @@ vtx_interp_frame_t *vtx_osr_build_interp_frame(
 /* OSR Up: Interpreter → Compiled Code                                        */
 /* ========================================================================== */
 
+__attribute__((optimize("O0")))
 bool vtx_osr_up(vtx_interp_frame_t *interp,
                  uint32_t method_id,
                  const vtx_compiled_code_t *compiled_code,
@@ -191,57 +222,230 @@ bool vtx_osr_up(vtx_interp_frame_t *interp,
     /* ---- Step 3: Set up the JIT frame with interpreter values ----
      *
      * The JIT frame layout (from the compiled_code's frame_layout) is:
-     *   [RBP]         = saved RBP
-     *   [RBP + 8]     = return address
-     *   [RBP - 8]     = first local slot
-     *   [RBP - 16]    = second local slot
+     *   [RBP+32]  = return address
+     *   [RBP+24]  = method pointer
+     *   [RBP+16]  = deopt_info pointer
+     *   [RBP+8]   = profile_data pointer
+     *   [RBP+0]   = caller RBP
+     *   [RBP-8]   = first local slot
+     *   [RBP-16]  = second local slot
      *   ...
-     *   [RBP - 8*N]   = Nth local slot
-     *   [RBP - 8*(N+1)] = first stack slot
+     *   [RBP-8*N] = Nth local slot
+     *   [RBP+spill_base] = first spill slot (operand stack)
      *   ...
      *
-     * In a real implementation, a platform-specific trampoline would:
-     *   1. Save callee-saved registers
-     *   2. Allocate the JIT frame on the native stack
-     *   3. Copy interpreter locals into the JIT frame's local slots
-     *   4. Copy interpreter operand stack into the JIT frame's stack slots
-     *   5. Set RBP to the new JIT frame
-     *   6. Set RSP to the top of the JIT frame
-     *   7. Jump to osr_entry
-     *
-     * Here we prepare the data for the trampoline by storing the
-     * interpreter values and the OSR entry point in a format the
-     * trampoline can consume.
+     * We build the JIT frame on the native stack using inline assembly,
+     * copy interpreter locals and operand stack into the frame slots,
+     * then jump to osr_entry. The C function never returns normally
+     * after a successful transition.
      */
 
-    /* Mark the interpreter frame as OSR'd by recording the entry point.
-     * The trampoline (osr_trampoline.S) will read these values and
-     * perform the actual stack switch. */
-    interp->bytecode_pc = loop_header_pc;  /* confirm OSR point */
+    const vtx_jit_frame_layout_t *layout = &compiled_code->frame_layout;
+    uint32_t frame_sz  = layout->total_frame_size;
+    int32_t  l_base    = layout->locals_base;   /* negative offset of local[0] from RBP */
+    int32_t  s_base    = layout->spill_base;    /* negative offset of spill[0] from RBP */
+    uint32_t nlocals   = interp->local_count;
+    uint32_t nstack    = interp->stack_top;
 
-    /* Store the OSR transition info for the trampoline:
-     * - The compiled code's entry point
-     * - The number of locals and stack values to copy
-     * - Pointers to the local and stack value arrays
+    /* Mark the interpreter frame as OSR'd so GC doesn't collect it.
+     * The frame is now superseded by the JIT frame. */
+    interp->osr_active = true;
+
+    /* Prepare ALL parameters in a struct on the stack to reduce
+     * register pressure on the inline asm. x86-64 has limited
+     * registers and we clobber many, so passing a single pointer
+     * avoids "impossible constraints" errors.
      *
-     * In a complete implementation, these would be stored in a
-     * thread-local OSR transition struct that the trampoline reads. */
+     * Struct layout (all 8-byte slots, natural alignment):
+     *   [0]  frame_sz     (uint64_t)
+     *   [8]  l_base       (int64_t, sign-extended)
+     *   [16] s_base       (int64_t, sign-extended)
+     *   [24] nlocals      (uint64_t)
+     *   [32] nstack       (uint64_t)
+     *   [40] src_locals   (pointer)
+     *   [48] src_stack    (pointer)
+     *   [56] target       (pointer)
+     *   [64] method_desc  (pointer)
+     *   [72] deopt_ptr    (pointer)
+     */
+    struct osr_params {
+        uint64_t frame_sz;
+        int64_t  l_base;
+        int64_t  s_base;
+        uint64_t nlocals;
+        uint64_t nstack;
+        vtx_value_t             *src_locals;
+        vtx_value_t             *src_stack;
+        void                    *target;
+        const vtx_method_desc_t *method_desc;
+        vtx_deopt_info_t        *deopt_ptr;
+    };
 
-    /* For now, we record the transition data in the interp frame.
-     * The caller (interpreter dispatch loop) is responsible for
-     * invoking the platform-specific trampoline with:
-     *   - compiled_code->entry_point (or osr_entry for loop entry)
-     *   - interp->locals (source for JIT local slots)
-     *   - interp->local_count (number of locals to copy)
-     *   - interp->stack (source for JIT stack slots)
-     *   - interp->stack_top (number of stack values to copy)
-     *   - compiled_code->frame_layout (target frame layout)
+    struct osr_params params;
+    params.frame_sz    = (uint64_t)frame_sz;
+    params.l_base      = (int64_t)l_base;
+    params.s_base      = (int64_t)s_base;
+    params.nlocals     = (uint64_t)nlocals;
+    params.nstack      = (uint64_t)nstack;
+    params.src_locals  = interp->locals;
+    params.src_stack   = interp->stack;
+    params.target      = osr_entry;
+    params.method_desc = compiled_code->method;
+    params.deopt_ptr   = compiled_code->deopt_info;
+
+    /*
+     * Inline assembly trampoline (x86-64, System V ABI, Linux).
      *
-     * The trampoline performs the actual frame setup and control
-     * transfer; this function validates and prepares the data. */
-    (void)osr_entry;  /* used by platform-specific trampoline */
+     * We:
+     *   1. Read the current C frame's caller RBP and return address
+     *      (so the JIT frame returns to the right place)
+     *   2. Allocate the JIT frame on the stack
+     *   3. Write the frame header (caller RBP, profile_data, deopt_info,
+     *      method_ptr, return address)
+     *   4. Copy interpreter locals into JIT local slots
+     *   5. Copy interpreter operand stack into JIT spill slots
+     *   6. Load top stack values into expression registers (RAX, RCX, RDX, RBX)
+     *   7. Set RBP/RSP to the new JIT frame
+     *   8. Jump to osr_entry
+     *
+     * After this asm block, the C function never returns.
+     *
+     * Register usage:
+     *   r12 = caller RBP
+     *   r13 = return address
+     *   r14 = new RBP
+     *   r15 = pointer to osr_params struct (loaded once, used throughout)
+     *   rax, rcx, rdx, rsi, r8, r9, r10 = temporaries
+     */
+    __asm__ __volatile__ (
+        /* ---- Read current frame link data before modifying RBP ---- */
+        "movq (%%rbp), %%r12\n\t"           /* r12 = caller's RBP (from current C frame) */
+        "movq 8(%%rbp), %%r13\n\t"          /* r13 = return address   (from current C frame) */
 
-    return true;
+        /* ---- Load params pointer into r15 (single input register) ---- */
+        "movq %[params], %%r15\n\t"
+
+        /* ---- Step 1: Allocate the JIT frame on the stack ---- */
+        "movq 0(%%r15), %%rax\n\t"          /* load frame_sz from params[0] */
+        "addq $48, %%rax\n\t"               /* 48 = 40 header + 8 for alignment margin */
+        "andq $-16, %%rax\n\t"              /* align to 16 bytes */
+        "subq %%rax, %%rsp\n\t"             /* allocate frame on stack */
+
+        /* ---- Step 2: Compute new RBP ---- */
+        "movq 0(%%r15), %%rax\n\t"          /* reload frame_sz */
+        "leaq 8(%%rsp, %%rax), %%r14\n\t"   /* r14 = new RBP */
+
+        /* ---- Step 3: Write frame header above RBP ---- */
+        "movq %%r12, 0(%%r14)\n\t"          /* [RBP+0]  = caller RBP */
+        "xorq %%rax, %%rax\n\t"
+        "movq %%rax, 8(%%r14)\n\t"          /* [RBP+8]  = profile_data (NULL) */
+        "movq 72(%%r15), %%rax\n\t"         /* load deopt_ptr from params[72] */
+        "movq %%rax, 16(%%r14)\n\t"         /* [RBP+16] = deopt_info */
+        "movq 64(%%r15), %%rax\n\t"         /* load method_desc from params[64] */
+        "movq %%rax, 24(%%r14)\n\t"         /* [RBP+24] = method_ptr */
+        "movq %%r13, 32(%%r14)\n\t"         /* [RBP+32] = return address */
+
+        /* ---- Step 4: Copy interpreter locals into JIT frame local slots ---- */
+        "movq 24(%%r15), %%rcx\n\t"         /* load nlocals from params[24] */
+        "testq %%rcx, %%rcx\n\t"
+        "jz 1f\n\t"                         /* skip if no locals */
+        "movq 40(%%r15), %%rsi\n\t"         /* src_locals from params[40] */
+        "movq 8(%%r15), %%rax\n\t"          /* l_base from params[8] */
+        "0:\n\t"
+        "movq (%%rsi), %%rdx\n\t"           /* load local value */
+        "movq %%rdx, (%%r14, %%rax)\n\t"    /* store at [RBP + offset] */
+        "addq $8, %%rsi\n\t"                /* next source slot */
+        "subq $8, %%rax\n\t"                /* next offset (more negative) */
+        "decq %%rcx\n\t"
+        "jnz 0b\n\t"
+        "1:\n\t"
+
+        /* ---- Step 5: Copy interpreter operand stack into JIT frame spill slots ---- */
+        "movq 32(%%r15), %%rcx\n\t"         /* load nstack from params[32] */
+        "testq %%rcx, %%rcx\n\t"
+        "jz 2f\n\t"                         /* skip if no stack values */
+        "movq 48(%%r15), %%rsi\n\t"         /* src_stack from params[48] */
+        "movq 16(%%r15), %%rax\n\t"         /* s_base from params[16] */
+        "0:\n\t"
+        "movq (%%rsi), %%rdx\n\t"           /* load stack value */
+        "movq %%rdx, (%%r14, %%rax)\n\t"    /* store at [RBP + offset] */
+        "addq $8, %%rsi\n\t"                /* next source slot */
+        "subq $8, %%rax\n\t"                /* next offset */
+        "decq %%rcx\n\t"
+        "jnz 0b\n\t"
+        "2:\n\t"
+
+        /* ---- Step 6: Load top expression stack values into JIT registers ---- */
+        "movq 32(%%r15), %%r8\n\t"          /* save nstack for reuse */
+        "movq 16(%%r15), %%r9\n\t"          /* save sbase for reuse */
+        "testq %%r8, %%r8\n\t"
+        "jz 4f\n\t"                         /* skip if no stack values */
+
+        /* Load TOS (stack[stack_top-1]) → RAX */
+        "movq %%r8, %%rax\n\t"
+        "decq %%rax\n\t"
+        "shlq $3, %%rax\n\t"               /* rax = (stack_top-1) * 8 */
+        "movq %%r9, %%rdx\n\t"
+        "subq %%rax, %%rdx\n\t"            /* rdx = s_base - (stack_top-1)*8 */
+        "movq (%%r14, %%rdx), %%rax\n\t"   /* RAX = TOS value */
+
+        "cmpq $1, %%r8\n\t"
+        "je 4f\n\t"                         /* only 1 stack value */
+
+        /* Load TOS-1 (stack[stack_top-2]) → RCX */
+        "movq %%r8, %%rcx\n\t"
+        "subq $2, %%rcx\n\t"
+        "shlq $3, %%rcx\n\t"               /* rcx = (stack_top-2) * 8 */
+        "movq %%r9, %%rdx\n\t"
+        "subq %%rcx, %%rdx\n\t"
+        "movq (%%r14, %%rdx), %%rcx\n\t"   /* RCX = TOS-1 value */
+
+        "cmpq $2, %%r8\n\t"
+        "je 4f\n\t"                         /* only 2 stack values */
+
+        /* Load TOS-2 (stack[stack_top-3]) → RDX */
+        "movq %%r8, %%rdx\n\t"
+        "subq $3, %%rdx\n\t"
+        "shlq $3, %%rdx\n\t"               /* rdx = (stack_top-3) * 8 */
+        "movq %%r9, %%r10\n\t"
+        "subq %%rdx, %%r10\n\t"
+        "movq (%%r14, %%r10), %%rdx\n\t"   /* RDX = TOS-2 value */
+
+        "cmpq $3, %%r8\n\t"
+        "je 4f\n\t"                         /* only 3 stack values */
+
+        /* Load TOS-3 (stack[stack_top-4]) → RBX */
+        "movq %%r8, %%rbx\n\t"
+        "subq $4, %%rbx\n\t"
+        "shlq $3, %%rbx\n\t"               /* rbx = (stack_top-4) * 8 */
+        "movq %%r9, %%r10\n\t"
+        "subq %%rbx, %%r10\n\t"
+        "movq (%%r14, %%r10), %%rbx\n\t"   /* RBX = TOS-3 value */
+        "jmp 4f\n\t"
+
+        "4:\n\t"
+
+        /* ---- Step 7: Set RBP and RSP to the new JIT frame ---- */
+        "movq %%r14, %%rbp\n\t"             /* RBP = new frame base */
+        "movq 0(%%r15), %%rax\n\t"          /* reload frame_sz */
+        "negq %%rax\n\t"
+        "leaq (%%rbp, %%rax), %%rsp\n\t"   /* RSP = RBP - frame_sz */
+
+        /* ---- Step 8: Jump to the OSR entry point ---- */
+        "movq 56(%%r15), %%rax\n\t"         /* load target from params[56] */
+        "jmp *%%rax\n\t"
+
+        /* Should never reach here */
+        "int3\n\t"
+
+        : /* no outputs — we never return */
+        : [params]  "r"(&params)
+        : "rax", "rbx", "rcx", "rdx", "rsi", "r8", "r9", "r10",
+          "r12", "r13", "r14", "r15", "memory"
+    );
+
+    /* The asm block jumps to osr_entry and never returns here. */
+    __builtin_unreachable();
 }
 
 /* ========================================================================== */

@@ -63,6 +63,8 @@ struct vtx_deoptless_version {
     uint32_t                continuation_size; /* native code size in bytes */
     vtx_deoptless_version_t *next_version;     /* linked list of versions */
     uint32_t                version_number;    /* monotonically increasing version */
+    uint32_t                guard_branch_offset; /* offset from code_start to JCC rel32 displacement */
+    uint8_t                *code_start;        /* base address of the original compiled code */
 };
 
 /* ========================================================================== */

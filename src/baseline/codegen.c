@@ -1,4 +1,5 @@
 #include "baseline/codegen.h"
+#include "codecache/install.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -530,6 +531,10 @@ typedef struct {
     /* Side table */
     vtx_side_table_t *side_table;
 
+    /* Code cache and method registry (optional, for proper code installation) */
+    vtx_code_cache_t      *cache;
+    vtx_method_registry_t *registry;
+
     /* Method ID for deopt */
     uint32_t method_id;
 } vtx_compile_ctx_t;
@@ -551,6 +556,7 @@ static void record_bc_pc_map(vtx_compile_ctx_t *ctx, uint32_t bc_pc, uint32_t na
     }
     ctx->pc_map[ctx->pc_map_count].bytecode_pc = bc_pc;
     ctx->pc_map[ctx->pc_map_count].native_offset = native_offset;
+    ctx->pc_map[ctx->pc_map_count].stack_depth = ctx->stack_depth;
     ctx->pc_map_count++;
 }
 
@@ -1231,18 +1237,50 @@ static void compile_store_field(vtx_compile_ctx_t *ctx, uint16_t field_offset)
         vtx_code_buffer_emit_dword(buf, (uint32_t)field_off);
     }
 
-    /* Write barrier: call gc_write_barrier if the value is a young-gen pointer.
-     * For the baseline JIT, we always call the write barrier. */
-    /* Save expr stack regs, call barrier, restore */
+    /* Write barrier: call vtx_gc_write_barrier(gc, obj, field_offset, value)
+     * After the store above:
+     *   R10 = untagged heap object pointer (vtx_heap_object_t*)
+     *   RDI = tagged value that was stored (vtx_value_t)
+     * We must call the write barrier so the generational GC can track
+     * old→young pointer updates. Without this, the GC may miss such
+     * references and prematurely collect live young-gen objects. */
     emit_push(buf, VTX_REG_RAX);
     emit_push(buf, VTX_REG_RCX);
     emit_push(buf, VTX_REG_RDX);
     emit_push(buf, VTX_REG_RBX);
 
-    /* Args: gc_ptr (R10), field_offset, value (RDI) */
-    /* For now, skip the write barrier call — it would need the GC pointer.
-     * The GC integration is handled at a higher level. */
+    /* Save obj (R10) and value (RDI) before function calls that may
+     * clobber caller-saved registers. 6 pushes total = 48 bytes,
+     * keeping the stack 16-byte aligned for the calls below. */
+    emit_push(buf, VTX_REG_R10);
+    emit_push(buf, VTX_REG_RDI);
 
+    /* Get the GC pointer via the global accessor */
+    extern vtx_gc_t *vtx_get_current_gc(void);
+    emit_mov_reg_imm64(buf, VTX_REG_RAX,
+        (uint64_t)(uintptr_t)vtx_get_current_gc);
+    emit_call_reg(buf, VTX_REG_RAX);
+    /* RAX = gc pointer */
+
+    /* Restore value and obj */
+    emit_pop(buf, VTX_REG_RDI);   /* value */
+    emit_pop(buf, VTX_REG_R10);   /* obj */
+
+    /* Set up args for vtx_gc_write_barrier(gc, obj, field_offset, value)
+     * System V ABI: RDI=arg1, RSI=arg2, RDX=arg3, RCX=arg4 */
+    emit_mov_reg_reg64(buf, VTX_REG_RCX, VTX_REG_RDI);  /* arg4 = value */
+    emit_mov_reg_reg64(buf, VTX_REG_RDI, VTX_REG_RAX);  /* arg1 = gc */
+    emit_mov_reg_reg64(buf, VTX_REG_RSI, VTX_REG_R10);  /* arg2 = obj */
+    emit_mov_reg_imm32(buf, VTX_REG_RDX, field_offset);  /* arg3 = field_offset */
+
+    /* Call vtx_gc_write_barrier */
+    extern void vtx_gc_write_barrier(vtx_gc_t *, vtx_heap_object_t *,
+                                     uint32_t, vtx_value_t);
+    emit_mov_reg_imm64(buf, VTX_REG_RAX,
+        (uint64_t)(uintptr_t)vtx_gc_write_barrier);
+    emit_call_reg(buf, VTX_REG_RAX);
+
+    /* Restore expr stack registers */
     emit_pop(buf, VTX_REG_RBX);
     emit_pop(buf, VTX_REG_RDX);
     emit_pop(buf, VTX_REG_RCX);
@@ -1648,19 +1686,65 @@ static void compile_if_true(vtx_compile_ctx_t *ctx, uint16_t target_pc)
     /* Pop TOS; if truthy, branch to target. */
     /* RAX = TOS (tagged value) */
 
-    /* Check truthiness: a value is truthy if it's not VTX_VALUE_FALSE,
-     * not VTX_VALUE_NULL, not VTX_VALUE_UNDEFINED, and not SMI 0. */
-    /* For the baseline JIT, we use a simplified truthiness check:
-     * Compare against VTX_VALUE_FALSE. If not equal, it's truthy. */
+    /* Full truthiness check per JS semantics.
+     * Falsy values: null, undefined, false, SMI 0, NaN, +0.0, -0.0.
+     * Truthy values: everything else (true, non-zero SMI, heap ptr, non-zero double).
+     *
+     * Algorithm:
+     * 1. Check if NaN-boxed: (val & VTX_NAN_BOX_HEADER) == VTX_NAN_BOX_HEADER
+     * 2. If NaN-boxed: falsy if (val & ~0x7) == VTX_NAN_BOX_HEADER
+     *    (all NaN-boxed falsy values — false, null, undefined, SMI 0, NaN double —
+     *     have zero data bits, i.e. only the header and 3-bit tag are set)
+     * 3. If not NaN-boxed: raw double — falsy if (val & 0x7FFFFFFFFFFFFFFF) == 0
+     *    (catches +0.0 and -0.0; raw non-NaN doubles are never NaN)
+     *
+     * After this sequence: ZF=1 means falsy, ZF=0 means truthy.
+     * Clobbers R10, R11. RAX is preserved.
+     */
 
-    /* cmp rax, VTX_VALUE_FALSE */
-    emit_mov_reg_imm64(buf, VTX_REG_R10, VTX_VALUE_FALSE);
-    emit_cmp_reg_reg(buf, VTX_REG_RAX, VTX_REG_R10);
+    /* Step 1: Check if NaN-boxed */
+    emit_mov_reg_imm64(buf, VTX_REG_R10, VTX_NAN_BOX_HEADER);
+    emit_mov_reg_reg64(buf, VTX_REG_R11, VTX_REG_RAX);
+    emit_and_reg_reg(buf, VTX_REG_R11, VTX_REG_R10);
+    emit_cmp_reg_reg(buf, VTX_REG_R11, VTX_REG_R10);
+    /* ZF=1 if NaN-boxed */
 
-    /* Pop the value */
+    /* If not NaN-boxed, jump to raw double check */
+    uint32_t jcc_to_raw = emit_jcc32(buf, CC_NE);
+
+    /* Step 2: NaN-boxed path — check if data bits are zero */
+    /* (val & ~0x7) == VTX_NAN_BOX_HEADER  ⟹  data == 0  ⟹  falsy */
+    emit_mov_reg_imm64(buf, VTX_REG_R10, 0xFFFFFFFFFFFFFFF8ULL);
+    emit_mov_reg_reg64(buf, VTX_REG_R11, VTX_REG_RAX);
+    emit_and_reg_reg(buf, VTX_REG_R11, VTX_REG_R10);
+    emit_mov_reg_imm64(buf, VTX_REG_R10, VTX_NAN_BOX_HEADER);
+    emit_cmp_reg_reg(buf, VTX_REG_R11, VTX_REG_R10);
+    /* ZF=1 if falsy (data==0), ZF=0 if truthy */
+
+    /* Jump past the raw-double path */
+    uint32_t jmp_past = emit_jmp32(buf);
+
+    /* Step 3: Raw double path — check for +0.0 or -0.0 */
+    uint32_t raw_double_start = vtx_code_buffer_position(buf);
+    emit_mov_reg_imm64(buf, VTX_REG_R10, 0x7FFFFFFFFFFFFFFFULL);
+    emit_mov_reg_reg64(buf, VTX_REG_R11, VTX_REG_RAX);
+    emit_and_reg_reg(buf, VTX_REG_R11, VTX_REG_R10);
+    emit_test_reg_reg(buf, VTX_REG_R11);
+    /* ZF=1 if falsy (+0.0 or -0.0), ZF=0 if truthy */
+
+    uint32_t past_target = vtx_code_buffer_position(buf);
+
+    /* Patch the JCC to the raw-double start */
+    vtx_code_buffer_patch_dword(buf, jcc_to_raw,
+        (uint32_t)((int32_t)raw_double_start - (int32_t)(jcc_to_raw + 4)));
+    /* Patch the JMP past */
+    vtx_code_buffer_patch_dword(buf, jmp_past,
+        (uint32_t)((int32_t)past_target - (int32_t)(jmp_past + 4)));
+
+    /* Pop the value (MOV instructions don't affect flags) */
     emit_stack_pop(ctx);
 
-    /* jne target (truthy = not false) */
+    /* jne target (truthy = ZF=0) */
     uint32_t jcc_pos = emit_jcc32(buf, CC_NE);
     uint32_t source_off = vtx_code_buffer_position(buf) - 6;
     add_fixup(ctx, jcc_pos, source_off, target_pc, true);
@@ -1676,12 +1760,44 @@ static void compile_if_false(vtx_compile_ctx_t *ctx, uint16_t target_pc)
     vtx_code_buffer_t *buf = &ctx->buf;
 
     /* Pop TOS; if falsy, branch to target. */
-    emit_mov_reg_imm64(buf, VTX_REG_R10, VTX_VALUE_FALSE);
-    emit_cmp_reg_reg(buf, VTX_REG_RAX, VTX_REG_R10);
+    /* Uses the same truthiness check as compile_if_true.
+     * After the check: ZF=1 means falsy, ZF=0 means truthy. */
 
+    /* Step 1: Check if NaN-boxed */
+    emit_mov_reg_imm64(buf, VTX_REG_R10, VTX_NAN_BOX_HEADER);
+    emit_mov_reg_reg64(buf, VTX_REG_R11, VTX_REG_RAX);
+    emit_and_reg_reg(buf, VTX_REG_R11, VTX_REG_R10);
+    emit_cmp_reg_reg(buf, VTX_REG_R11, VTX_REG_R10);
+
+    uint32_t jcc_to_raw = emit_jcc32(buf, CC_NE);
+
+    /* Step 2: NaN-boxed path — check if data bits are zero */
+    emit_mov_reg_imm64(buf, VTX_REG_R10, 0xFFFFFFFFFFFFFFF8ULL);
+    emit_mov_reg_reg64(buf, VTX_REG_R11, VTX_REG_RAX);
+    emit_and_reg_reg(buf, VTX_REG_R11, VTX_REG_R10);
+    emit_mov_reg_imm64(buf, VTX_REG_R10, VTX_NAN_BOX_HEADER);
+    emit_cmp_reg_reg(buf, VTX_REG_R11, VTX_REG_R10);
+
+    uint32_t jmp_past = emit_jmp32(buf);
+
+    /* Step 3: Raw double path — check for +0.0 or -0.0 */
+    uint32_t raw_double_start = vtx_code_buffer_position(buf);
+    emit_mov_reg_imm64(buf, VTX_REG_R10, 0x7FFFFFFFFFFFFFFFULL);
+    emit_mov_reg_reg64(buf, VTX_REG_R11, VTX_REG_RAX);
+    emit_and_reg_reg(buf, VTX_REG_R11, VTX_REG_R10);
+    emit_test_reg_reg(buf, VTX_REG_R11);
+
+    uint32_t past_target = vtx_code_buffer_position(buf);
+
+    vtx_code_buffer_patch_dword(buf, jcc_to_raw,
+        (uint32_t)((int32_t)raw_double_start - (int32_t)(jcc_to_raw + 4)));
+    vtx_code_buffer_patch_dword(buf, jmp_past,
+        (uint32_t)((int32_t)past_target - (int32_t)(jmp_past + 4)));
+
+    /* Pop the value (MOV instructions don't affect flags) */
     emit_stack_pop(ctx);
 
-    /* je target (falsy = equal to FALSE) */
+    /* je target (falsy = ZF=1) */
     uint32_t jcc_pos = emit_jcc32(buf, CC_E);
     uint32_t source_off = vtx_code_buffer_position(buf) - 6;
     add_fixup(ctx, jcc_pos, source_off, target_pc, true);
@@ -1731,9 +1847,13 @@ static void compile_call_static(vtx_compile_ctx_t *ctx, uint16_t method_idx)
      * Additional args would be passed on the stack. */
     emit_mov_reg_rbp_offset(buf, VTX_REG_RDI, -24); /* method pointer */
 
-    /* For now, pass NULL for deopt_info and profile_data of the callee */
-    emit_mov_reg_imm64(buf, VTX_REG_RSI, 0);
-    emit_mov_reg_imm64(buf, VTX_REG_RDX, 0);
+    /* Pass the current method's deopt_info and profile_data from the frame.
+     * The callee's prologue saves these in its own frame, enabling stack
+     * walking and deoptimization chain traversal back through callers.
+     * Offsets match the prologue layout: deopt_info at [RBP-32],
+     * profile_data at [RBP-40]. */
+    emit_mov_reg_rbp_offset(buf, VTX_REG_RSI, -32);  /* deopt_info */
+    emit_mov_reg_rbp_offset(buf, VTX_REG_RDX, -40);  /* profile_data */
 
     /* Load the method's code entry point.
      * The method_desc_t has a vtable that contains compiled code pointers.
@@ -1881,7 +2001,10 @@ static void compile_new(vtx_compile_ctx_t *ctx, uint16_t typeid_)
 
     /* Tag the heap pointer as a tagged value */
     /* result = VTX_NAN_BOX_HEADER | ((ptr >> 3) & mask) << 3 | VTX_TAG_HEAP_PTR */
-    /* Simplified: tag the pointer in RAX */
+    /* Tag the heap pointer as a NaN-boxed value.
+     * Encoding: VTX_NAN_BOX_HEADER | (ptr >> 3 << 3) | VTX_TAG_HEAP_PTR
+     * The >>3 then <<3 clears the low 3 bits making room for the tag,
+     * then OR in the NaN header and HEAP_PTR tag. */
     /* Right now RAX = raw heap pointer. We need to NaN-box it. */
     /* ptr >> 3: shr rax, 3 */
     vtx_code_buffer_emit_byte(buf, 0x48);
@@ -2363,7 +2486,9 @@ static void compile_typeof(vtx_compile_ctx_t *ctx)
 
 vtx_compiled_code_t *vtx_baseline_compile(const vtx_method_desc_t *method,
                                            vtx_profile_data_t *profile_data,
-                                           vtx_arena_t *arena)
+                                           vtx_arena_t *arena,
+                                           vtx_code_cache_t *cache,
+                                           vtx_method_registry_t *registry)
 {
     if (!method || !method->bytecode) return NULL;
 
@@ -2374,6 +2499,8 @@ vtx_compiled_code_t *vtx_baseline_compile(const vtx_method_desc_t *method,
     ctx.bc = method->bytecode;
     ctx.profile_data = profile_data;
     ctx.arena = arena;
+    ctx.cache = cache;
+    ctx.registry = registry;
     ctx.layout = vtx_frame_layout_compute(method);
     ctx.method_id = 0; /* Would be derived from method in real impl */
 
@@ -2616,24 +2743,62 @@ vtx_compiled_code_t *vtx_baseline_compile(const vtx_method_desc_t *method,
 
     /* Copy the generated code */
     result->code_size = vtx_code_buffer_position(&ctx.buf);
-    result->code = (uint8_t *)malloc(result->code_size);
-    if (!result->code) {
-        free(result);
-        vtx_guard_array_destroy(&ctx.guards);
-        vtx_code_buffer_destroy(&ctx.buf);
-        vtx_deopt_stub_array_destroy(&deopt_stubs);
-        return NULL;
-    }
-    memcpy(result->code, ctx.buf.bytes, result->code_size);
 
-    /* Make code executable (mprotect) */
-    /* This should be done by the code cache, not here. For now, we just
-     * copy the bytes. The code cache will handle making them executable. */
+    if (ctx.cache && ctx.registry) {
+        /* Install through the code cache's proper installation path.
+         * This handles: allocating cache space, copying code, mprotect to
+         * executable, registering in the method registry, and updating the
+         * method's code pointer atomically. */
+        bool installed = vtx_install_method(ctx.cache, ctx.registry,
+            method, ctx.method_id,
+            ctx.buf.bytes, result->code_size,
+            ctx.side_table,
+            NULL,  /* reloc_table: baseline JIT has no external call relocations */
+            NULL, 0,  /* no dependency type info for baseline JIT */
+            NULL, 0,  /* no dependency shape info for baseline JIT */
+            ctx.arena);
+        if (installed) {
+            /* Code is now in the cache; set entry_point to the installed code.
+             * Do NOT set result->code to the cache memory — it's not malloc'd
+             * and must not be freed by vtx_compiled_code_destroy().
+             * The side_table ownership was transferred to the compiled_method. */
+            result->code = NULL;
+            result->entry_point = method->compiled_code;
+            result->side_table = NULL; /* ownership transferred to cache */
+        } else {
+            /* Installation failed — fall back to malloc+memcpy */
+            result->code = (uint8_t *)malloc(result->code_size);
+            if (!result->code) {
+                free(result);
+                vtx_guard_array_destroy(&ctx.guards);
+                vtx_code_buffer_destroy(&ctx.buf);
+                vtx_deopt_stub_array_destroy(&deopt_stubs);
+                return NULL;
+            }
+            memcpy(result->code, ctx.buf.bytes, result->code_size);
+            result->side_table = ctx.side_table;
+        }
+    } else {
+        /* No code cache available — fall back to malloc+memcpy.
+         * The caller must handle making the code executable and installing
+         * the method's code pointer. */
+        result->code = (uint8_t *)malloc(result->code_size);
+        if (!result->code) {
+            free(result);
+            vtx_guard_array_destroy(&ctx.guards);
+            vtx_code_buffer_destroy(&ctx.buf);
+            vtx_deopt_stub_array_destroy(&deopt_stubs);
+            return NULL;
+        }
+        memcpy(result->code, ctx.buf.bytes, result->code_size);
+        result->side_table = ctx.side_table;
+    }
 
     result->frame_layout = ctx.layout;
     result->guards = ctx.guards;
     result->deopt_stubs = deopt_stubs;
-    result->side_table = ctx.side_table;
+    /* side_table is set above: NULL if installed via cache (ownership
+     * transferred to compiled_method), or ctx.side_table if malloc'd. */
     result->method = method;
 
     /* Copy PC maps */
@@ -2655,7 +2820,7 @@ vtx_compiled_code_t *vtx_baseline_compile(const vtx_method_desc_t *method,
             for (uint32_t i = 0; i < ctx.pc_map_count; i++) {
                 result->deopt_info->native_offsets[i] = ctx.pc_map[i].native_offset;
                 result->deopt_info->pc_map[i] = ctx.pc_map[i].bytecode_pc;
-                result->deopt_info->stack_depth_map[i] = 0; /* would need tracking */
+                result->deopt_info->stack_depth_map[i] = ctx.pc_map[i].stack_depth;
             }
         }
     }

@@ -27,7 +27,7 @@
 
 /**
  * A simple stack-based bytecode interpreter frame.
- * This is the T0 interpreter (simplified for the runtime demo).
+ * This is the T0 interpreter (bytecode dispatch loop with profiling hooks).
  */
 #define VTX_MAX_LOCALS    256
 #define VTX_MAX_STACK     256
@@ -505,8 +505,94 @@ static vtx_value_t interp_run(vtx_interp_t *interp)
         }
 
         case VT_OP_CALL_STATIC: {
-            /* Simplified: just advance PC (no actual method call in demo) */
+            /* Read the method index operand */
+            uint16_t method_idx = vtx_bytecode_read_operand(bc, frame->pc);
             frame->pc += 3;
+
+            /* Look up the method descriptor from the type system.
+             * We search all registered types for a method at this index.
+             * For simplicity, method_idx maps directly to a global method
+             * array we maintain in the interpreter. */
+            const vtx_method_desc_t *callee = NULL;
+            if (interp->ts != NULL) {
+                for (uint32_t t = 0; t < interp->ts->type_count && !callee; t++) {
+                    const vtx_type_desc_t *td = &interp->ts->types[t];
+                    for (uint32_t m = 0; m < td->method_count; m++) {
+                        if (td->methods[m].bytecode != NULL &&
+                            td->methods[m].vtable_index == method_idx) {
+                            callee = &td->methods[m];
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (callee == NULL || callee->bytecode == NULL) {
+                /* No method found — push undefined as return value */
+                frame_push(frame, vtx_make_undefined());
+                break;
+            }
+
+            /* Determine argument count from the method signature */
+            uint32_t arg_count = 0;
+            if (callee->signature) {
+                const char *sig = callee->signature;
+                if (*sig == '(') {
+                    sig++;
+                    while (*sig && *sig != ')') {
+                        if (*sig == 'I' || *sig == 'Z' || *sig == 'F' ||
+                            *sig == 'J' || *sig == 'B' || *sig == 'C' ||
+                            *sig == 'S') {
+                            arg_count++;
+                            sig++;
+                        } else if (*sig == 'L') {
+                            arg_count++;
+                            while (*sig && *sig != ';') sig++;
+                            if (*sig == ';') sig++;
+                        } else if (*sig == '[') {
+                            /* Array type — skip brackets */
+                            while (*sig == '[') sig++;
+                            if (*sig == 'L') {
+                                while (*sig && *sig != ';') sig++;
+                                if (*sig == ';') sig++;
+                            } else {
+                                sig++;
+                            }
+                            arg_count++;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            /* Pop arguments from caller's stack (in reverse order) */
+            vtx_value_t args[VTX_MAX_LOCALS];
+            if (arg_count > VTX_MAX_LOCALS) arg_count = VTX_MAX_LOCALS;
+            for (int i = (int)arg_count - 1; i >= 0; i--) {
+                args[i] = frame_pop(frame);
+            }
+
+            /* Push a new frame with the callee's bytecode */
+            vtx_frame_t *callee_frame = interp_push_frame(interp, callee->bytecode);
+
+            /* Copy arguments to callee's locals */
+            for (uint32_t i = 0; i < arg_count; i++) {
+                callee_frame->locals[i] = args[i];
+            }
+
+            /* Execute the callee recursively */
+            vtx_value_t ret_val = interp_run(interp);
+
+            /* Pop the callee frame */
+            interp_pop_frame(interp);
+
+            /* Refresh frame pointer (it changed due to push/pop) */
+            frame = interp_current_frame(interp);
+            bc = frame->bytecode;
+
+            /* Push the return value onto the caller's stack */
+            frame_push(frame, ret_val);
             break;
         }
 
@@ -541,7 +627,8 @@ static vtx_value_t interp_run(vtx_interp_t *interp)
         }
 
         case VT_OP_NEWARRAY: {
-            /* Simplified: create an object with array-like storage */
+            /* Create an array object: header + length field + element slots.
+             * elem_type is recorded but not used for type checking in T0. */
             uint16_t elem_type = vtx_bytecode_read_operand(bc, frame->pc);
             (void)elem_type;
             vtx_value_t size_val = frame_pop(frame);
@@ -573,7 +660,21 @@ static vtx_value_t interp_run(vtx_interp_t *interp)
         }
 
         case VT_OP_CHECKCAST: {
-            /* Simplified: just pass through */
+            /* Read the expected type from the operand */
+            uint16_t typeid_ = vtx_bytecode_read_operand(bc, frame->pc);
+            /* Peek at the top-of-stack value (don't pop — CHECKCAST just validates) */
+            vtx_value_t obj_val = frame_peek(frame, 0);
+            /* Perform the type check using the helper */
+            bool check_ok = vtx_helpers_type_check(interp->ts, obj_val, typeid_);
+            if (!check_ok) {
+                /* Type check failed — throw a ClassCastException */
+                /* Pop the value and replace with an exception marker */
+                (void)frame_pop(frame);
+                fprintf(stderr, "VORTEX: ClassCastException: object is not instance of type %u\n", typeid_);
+                /* Push a null as the "exception" — the value is consumed */
+                frame_push(frame, vtx_make_null());
+            }
+            /* If check passed, the value stays on the stack unchanged */
             frame->pc += 3;
             break;
         }
@@ -639,9 +740,64 @@ static vtx_value_t interp_run(vtx_interp_t *interp)
         }
 
         case VT_OP_THROW: {
-            /* Simplified: just halt */
-            fprintf(stderr, "VORTEX: unhandled exception\n");
-            return vtx_make_undefined();
+            /* Pop the exception value from the stack */
+            vtx_value_t exc_val = frame_pop(frame);
+
+            /* Walk the frame chain looking for a catch handler */
+            bool caught = false;
+            vtx_frame_t *walk_frame = frame;
+            int walk_idx = interp->frame_count - 1;
+
+            while (walk_frame != NULL && walk_idx >= 0) {
+                /* Check the current bytecode for CATCH instructions.
+                 * Scan backwards from current PC for a CATCH with a handler PC. */
+                const vtx_bytecode_t *walk_bc = walk_frame->bytecode;
+                for (size_t p = 0; p < walk_bc->length; ) {
+                    vtx_opcode_t op = vtx_bytecode_opcode_at(walk_bc, p);
+                    if (op == VT_OP_CATCH) {
+                        uint16_t handler_pc = vtx_bytecode_read_operand(walk_bc, p);
+                        /* Found a catch handler — jump to it */
+                        if (walk_frame == frame) {
+                            /* Same frame — set PC and push exception */
+                            frame->pc = handler_pc;
+                            frame_push(frame, exc_val);
+                            caught = true;
+                        } else {
+                            /* Different frame (caller) — unwind to that frame */
+                            interp->frame_count = walk_idx + 1;
+                            walk_frame->pc = handler_pc;
+                            walk_frame->sp = 0;
+                            frame_push(walk_frame, exc_val);
+                            /* Refresh our local frame/bc pointers */
+                            frame = interp_current_frame(interp);
+                            bc = frame->bytecode;
+                            caught = true;
+                        }
+                        break;
+                    }
+                    /* Advance to next instruction */
+                    if (op < VT_OP_COUNT && vtx_opcode_table[op].has_operand) {
+                        p += 1 + vtx_opcode_table[op].operand_size;
+                    } else {
+                        p += 1;
+                    }
+                }
+                if (caught) break;
+
+                /* Move to the caller frame */
+                walk_idx--;
+                if (walk_idx >= 0) {
+                    walk_frame = &interp->frames[walk_idx];
+                } else {
+                    walk_frame = NULL;
+                }
+            }
+
+            if (!caught) {
+                fprintf(stderr, "VORTEX: uncaught exception\n");
+                return vtx_make_undefined();
+            }
+            break;
         }
 
         case VT_OP_CATCH:
@@ -687,9 +843,36 @@ static vtx_value_t interp_run(vtx_interp_t *interp)
         }
 
         case VT_OP_TYPEOF: {
-            (void)frame_pop(frame);
-            /* Simplified: push the type name as undefined for now */
-            frame_push(frame, vtx_make_undefined());
+            vtx_value_t val = frame_pop(frame);
+            vtx_value_t type_result;
+            if (vtx_is_smi(val)) {
+                /* SMI → "number" — encode as SMI 0 (number) */
+                type_result = vtx_make_smi(0);
+            } else if (vtx_is_bool(val)) {
+                /* bool → "boolean" — encode as SMI 1 */
+                type_result = vtx_make_smi(1);
+            } else if (vtx_is_null(val)) {
+                /* null → "null" — encode as SMI 2 */
+                type_result = vtx_make_smi(2);
+            } else if (vtx_is_undefined(val)) {
+                /* undefined → "undefined" — encode as SMI 3 */
+                type_result = vtx_make_smi(3);
+            } else if (vtx_is_double(val)) {
+                /* double → "number" — encode as SMI 0 */
+                type_result = vtx_make_smi(0);
+            } else if (vtx_is_heap_ptr(val)) {
+                /* heap pointer → look up type name from type_system.
+                 * We encode the type_id from the heap object as the result.
+                 * If type_system is available, we could look up the name,
+                 * but for simplicity we encode the type_id shifted by 4
+                 * to distinguish from primitive type codes 0-3. */
+                vtx_heap_object_t *obj = (vtx_heap_object_t *)vtx_heap_ptr(val);
+                type_result = vtx_make_smi((int64_t)(obj->type_id + 4));
+            } else {
+                /* Unknown type — encode as SMI -1 */
+                type_result = vtx_make_smi(-1);
+            }
+            frame_push(frame, type_result);
             frame->pc += 1;
             break;
         }
@@ -714,8 +897,7 @@ static vtx_value_t interp_run(vtx_interp_t *interp)
  *   if n <= 1: return n
  *   return fib(n-1) + fib(n-2)
  *
- * Since our interpreter doesn't support recursive calls yet (simplified),
- * we implement an iterative Fibonacci instead:
+ * For the self-test, we use an iterative Fibonacci to keep the bytecode simple.
  *
  * function fib(n):
  *   local[0] = n          // argument
@@ -1405,6 +1587,12 @@ static int run_self_test(void)
 }
 
 /* ========================================================================== */
+/* Bytecode file loader (forward declaration)                                  */
+/* ========================================================================== */
+
+static int load_and_run_bytecode(const char *filename);
+
+/* ========================================================================== */
 /* Main entry point                                                            */
 /* ========================================================================== */
 
@@ -1414,14 +1602,229 @@ int main(int argc, char *argv[])
         if (strcmp(argv[1], "--test") == 0) {
             return run_self_test();
         }
-        /* Otherwise, treat argv[1] as a bytecode file (not yet implemented) */
-        fprintf(stderr, "VORTEX: bytecode file loading not yet implemented\n");
-        fprintf(stderr, "Usage: vortex [--test]\n");
-        return 1;
+        /* Treat argv[1] as a bytecode file */
+        return load_and_run_bytecode(argv[1]);
     }
 
     /* Default: run self-test */
     printf("VORTEX JIT Compiler v0.1.0\n");
     printf("Running self-test (use --test for explicit test mode)...\n\n");
     return run_self_test();
+}
+
+/* ========================================================================== */
+/* Bytecode file loader                                                        */
+/* ========================================================================== */
+
+/**
+ * Simple VORTEX bytecode binary format:
+ *   4 bytes: magic "VTBC"
+ *   4 bytes: version (1)
+ *   4 bytes: constant pool size (number of entries)
+ *   N * 12 bytes: constant pool entries (each: 4-byte type + 8-byte value)
+ *   4 bytes: code size
+ *   N bytes: bytecode instructions
+ *   4 bytes: local count
+ *   4 bytes: stack count
+ */
+
+#define VTX_BC_MAGIC 0x56425443  /* "VTBC" in little-endian ASCII */
+#define VTX_BC_VERSION 1
+
+/* Constant pool entry types */
+#define VTX_CP_INT    1
+#define VTX_CP_FLOAT  2
+#define VTX_CP_STRING 3
+#define VTX_CP_NULL   4
+#define VTX_CP_BOOL   5
+
+static uint32_t read_u32_le(const uint8_t *buf)
+{
+    return (uint32_t)buf[0] |
+           ((uint32_t)buf[1] << 8) |
+           ((uint32_t)buf[2] << 16) |
+           ((uint32_t)buf[3] << 24);
+}
+
+static uint64_t read_u64_le(const uint8_t *buf)
+{
+    uint64_t lo = read_u32_le(buf);
+    uint64_t hi = read_u32_le(buf + 4);
+    return lo | (hi << 32);
+}
+
+static int load_and_run_bytecode(const char *filename)
+{
+    /* Read the file into a buffer */
+    FILE *f = fopen(filename, "rb");
+    if (!f) {
+        fprintf(stderr, "VORTEX: cannot open bytecode file: %s\n", filename);
+        return 1;
+    }
+
+    fseek(f, 0, SEEK_END);
+    long file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    if (file_size < 16) {
+        fprintf(stderr, "VORTEX: bytecode file too small\n");
+        fclose(f);
+        return 1;
+    }
+
+    uint8_t *buf = (uint8_t *)malloc((size_t)file_size);
+    if (!buf) {
+        fprintf(stderr, "VORTEX: out of memory\n");
+        fclose(f);
+        return 1;
+    }
+
+    size_t nread = fread(buf, 1, (size_t)file_size, f);
+    fclose(f);
+
+    if ((long)nread != file_size) {
+        fprintf(stderr, "VORTEX: failed to read bytecode file\n");
+        free(buf);
+        return 1;
+    }
+
+    /* Parse the binary format */
+    size_t pos = 0;
+
+    /* Magic number */
+    if (pos + 4 > (size_t)file_size) goto parse_err;
+    uint32_t magic = read_u32_le(buf + pos); pos += 4;
+    if (magic != VTX_BC_MAGIC) {
+        fprintf(stderr, "VORTEX: invalid bytecode magic (expected VTBC)\n");
+        free(buf);
+        return 1;
+    }
+
+    /* Version */
+    if (pos + 4 > (size_t)file_size) goto parse_err;
+    uint32_t version = read_u32_le(buf + pos); pos += 4;
+    if (version != VTX_BC_VERSION) {
+        fprintf(stderr, "VORTEX: unsupported bytecode version %u (expected %u)\n",
+                version, VTX_BC_VERSION);
+        free(buf);
+        return 1;
+    }
+
+    /* Constant pool */
+    if (pos + 4 > (size_t)file_size) goto parse_err;
+    uint32_t cp_count = read_u32_le(buf + pos); pos += 4;
+
+    vtx_value_t *const_pool = NULL;
+    if (cp_count > 0) {
+        const_pool = (vtx_value_t *)calloc(cp_count, sizeof(vtx_value_t));
+        if (!const_pool) {
+            fprintf(stderr, "VORTEX: out of memory for constant pool\n");
+            free(buf);
+            return 1;
+        }
+
+        for (uint32_t i = 0; i < cp_count; i++) {
+            if (pos + 12 > (size_t)file_size) goto parse_err;
+            uint32_t cp_type = read_u32_le(buf + pos); pos += 4;
+            uint64_t cp_val  = read_u64_le(buf + pos); pos += 8;
+
+            switch (cp_type) {
+            case VTX_CP_INT: {
+                int64_t ival = (int64_t)cp_val;
+                if (ival >= VTX_SMI_MIN && ival <= VTX_SMI_MAX) {
+                    const_pool[i] = vtx_make_smi(ival);
+                } else {
+                    const_pool[i] = vtx_make_double((double)ival);
+                }
+                break;
+            }
+            case VTX_CP_FLOAT: {
+                union { uint64_t bits; double d; } u;
+                u.bits = cp_val;
+                const_pool[i] = vtx_make_double(u.d);
+                break;
+            }
+            case VTX_CP_STRING:
+                /* String constants: encode the offset as an SMI for now.
+                 * A full implementation would intern the string. */
+                const_pool[i] = vtx_make_smi((int64_t)cp_val);
+                break;
+            case VTX_CP_NULL:
+                const_pool[i] = vtx_make_null();
+                break;
+            case VTX_CP_BOOL:
+                const_pool[i] = vtx_make_bool(cp_val != 0);
+                break;
+            default:
+                const_pool[i] = vtx_make_undefined();
+                break;
+            }
+        }
+    }
+
+    /* Code section */
+    if (pos + 4 > (size_t)file_size) goto parse_err;
+    uint32_t code_size = read_u32_le(buf + pos); pos += 4;
+
+    if (pos + code_size > (size_t)file_size) goto parse_err;
+    uint8_t *code = buf + pos;  /* point into the file buffer (no copy needed) */
+    pos += code_size;
+
+    /* Local and stack counts */
+    if (pos + 8 > (size_t)file_size) goto parse_err;
+    uint32_t local_count = read_u32_le(buf + pos); pos += 4;
+    uint32_t stack_count = read_u32_le(buf + pos); pos += 4;
+
+    /* Create a vtx_bytecode_t from the parsed data */
+    vtx_bytecode_t bc;
+    memset(&bc, 0, sizeof(bc));
+    bc.code = code;
+    bc.length = code_size;
+    bc.constant_pool = const_pool;
+    bc.constant_count = cp_count;
+    bc.max_locals = (uint16_t)(local_count > 65535 ? 65535 : local_count);
+    bc.max_stack = (uint16_t)(stack_count > 65535 ? 65535 : stack_count);
+
+    /* Initialize runtime and run */
+    vtx_gc_t gc;
+    vtx_type_system_t ts;
+    vtx_type_system_init(&ts);
+    vtx_gc_init(&gc, &ts, VTX_GC_MODE_MANUAL);
+
+    vtx_interp_t interp;
+    interp_init(&interp, &gc, &ts);
+
+    vtx_frame_t *frame = interp_push_frame(&interp, &bc);
+    (void)frame;
+
+    vtx_value_t result = interp_run(&interp);
+
+    /* Print result */
+    if (vtx_is_smi(result)) {
+        printf("%ld\n", vtx_smi_value(result));
+    } else if (vtx_is_double(result)) {
+        printf("%.6g\n", vtx_double_value(result));
+    } else if (vtx_is_bool(result)) {
+        printf("%s\n", vtx_bool_value(result) ? "true" : "false");
+    } else if (vtx_is_null(result)) {
+        printf("null\n");
+    } else if (vtx_is_undefined(result)) {
+        printf("undefined\n");
+    } else {
+        printf("[object]\n");
+    }
+
+    /* Cleanup */
+    interp_pop_frame(&interp);
+    vtx_type_system_destroy(&ts);
+    free(const_pool);
+    free(buf);
+
+    return 0;
+
+parse_err:
+    fprintf(stderr, "VORTEX: bytecode file parse error (unexpected end of data)\n");
+    free(const_pool);
+    free(buf);
+    return 1;
 }

@@ -109,7 +109,8 @@ typedef enum {
 
     /* Exception handling */
     VT_OP_THROW,
-    VT_OP_CATCH,        /* 2-byte operand: catch handler PC */
+    VT_OP_CATCH,            /* 2-byte operand: catch handler PC (catch-all) */
+    VT_OP_CATCH_TYPED,      /* 2-byte operand: catch handler PC + 2-byte catch typeid */
 
     /* Monitor (synchronization) */
     VT_OP_MONITOR_ENTER,

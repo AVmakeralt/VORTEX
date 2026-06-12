@@ -70,6 +70,13 @@ typedef struct {
     /* Running state */
     bool                running;
 
+    /* Deopt trigger: set by safepoint check when an invalidation
+     * affects the current method. The dispatch loop checks this
+     * flag at every backward branch and triggers deoptimization
+     * if set. */
+    bool                deopt_pending;
+    uint32_t            deopt_method_id;   /* method_id that was invalidated */
+
     /* Pending exception (VTX_VALUE_UNDEFINED if none) */
     vtx_value_t         exception;
 

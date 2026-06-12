@@ -99,24 +99,22 @@ static void add_read_field(vtx_sota_alloc_record_t *rec, uint32_t field_offset)
 }
 
 /* ========================================================================== */
-/* Escape analysis (simplified flow-insensitive)                               */
+/* Escape analysis — flow-insensitive fallback                                 */
 /* ========================================================================== */
 
 /**
- * Determine if an allocation escapes by checking how its value is used.
+ * Flow-insensitive escape analysis (original, kept as fallback).
  *
- * An allocation escapes if:
- *   - It is returned from the method (Return node input)
- *   - It is stored into a field of another escaping object
- *   - It is passed as an argument to a call (unknown callee)
- *   - It is stored into a global/static field
- *   - It is used in a monitor operation
+ * Scans ALL nodes globally without considering control flow.
+ * Conservative: if an allocation escapes on ANY path, it is marked as
+ * escaping everywhere.
  *
- * This is a conservative flow-insensitive analysis. A more precise
- * flow-sensitive analysis would track per-block escape states.
+ * Fixed StoreField case: when the target object is known to be NoEscape,
+ * the stored value is also NoEscape (since if the container doesn't escape,
+ * neither does anything stored in its fields).
  */
-static vtx_escape_state_t compute_escape(const vtx_graph_t *graph,
-                                           vtx_nodeid_t alloc_node)
+static vtx_escape_state_t compute_escape_flow_insensitive(const vtx_graph_t *graph,
+                                                            vtx_nodeid_t alloc_node)
 {
     const vtx_node_t *alloc = vtx_node_get_const(&graph->node_table, alloc_node);
     if (alloc == NULL) return VTX_ESCAPE_GLOBAL;
@@ -149,12 +147,42 @@ static vtx_escape_state_t compute_escape(const vtx_graph_t *graph,
                 break;
 
             case VTX_OP_StoreField:
-                /* Stored into a field. If the target object escapes,
-                 * this allocation also escapes.
-                 * For now, conservatively mark as arg escape.
-                 * The effective_escape computation below will refine this. */
+                /* Stored into a field. If the target object is known
+                 * to be NoEscape, the stored value is also NoEscape
+                 * (since if the container doesn't escape, neither does
+                 * anything stored in its fields). Otherwise, the stored
+                 * value escapes at least as much as the container. */
                 if (j >= 2) { /* value input */
-                    escape = VTX_ESCAPE_ARG;
+                    /* Check the target object's escape state.
+                     * StoreField inputs: [0]=control, [1]=memory,
+                     *                    [2]=target, [3]=value */
+                    if (user->input_count >= 4 && user->inputs[2] != alloc_node) {
+                        vtx_nodeid_t target_id = user->inputs[2];
+                        const vtx_node_t *target =
+                            vtx_node_get_const(&graph->node_table, target_id);
+                        if (target != NULL && is_alloc_opcode(target->opcode)) {
+                            /* Recursively check the target's escape.
+                             * If target is NoEscape, stored value is NoEscape
+                             * on this path — don't upgrade escape state.
+                             * We do a quick local check: if the target is
+                             * only used by LoadField/Guard/StoreField (as
+                             * the target, not value), it doesn't escape. */
+                            vtx_escape_state_t target_escape =
+                                compute_escape_flow_insensitive(graph, target_id);
+                            if (target_escape == VTX_ESCAPE_NONE) {
+                                /* Container doesn't escape, so neither does
+                                 * the stored value via this store. */
+                                break;
+                            }
+                            /* Container escapes — stored value escapes
+                             * at least as much as the container. */
+                            escape = vtx_escape_join(escape, target_escape);
+                            break;
+                        }
+                    }
+                    /* Non-allocation target or can't determine —
+                     * conservatively mark as arg escape */
+                    escape = vtx_escape_join(escape, VTX_ESCAPE_ARG);
                 }
                 break;
 
@@ -164,8 +192,7 @@ static vtx_escape_state_t compute_escape(const vtx_graph_t *graph,
 
             case VTX_OP_CheckCast:
             case VTX_OP_InstanceOf:
-                /* Type check — no escape by itself, but may indicate
-                 * the value is about to be used in an escaping way */
+                /* Type check — no escape by itself */
                 break;
 
             case VTX_OP_Guard:
@@ -174,9 +201,9 @@ static vtx_escape_state_t compute_escape(const vtx_graph_t *graph,
                 break;
 
             case VTX_OP_Phi:
-                /* Allocation flows through a Phi — need to check
-                 * all uses of the Phi. For simplicity, mark as arg escape.
-                 * A more precise analysis would track through Phis. */
+                /* Allocation flows through a Phi — conservatively
+                 * mark as arg escape. The flow-sensitive analysis
+                 * can do better by tracking through Phis. */
                 escape = VTX_ESCAPE_ARG;
                 break;
 
@@ -187,6 +214,531 @@ static vtx_escape_state_t compute_escape(const vtx_graph_t *graph,
     }
 
     return escape;
+}
+
+/* ========================================================================== */
+/* Flow-sensitive escape analysis                                              */
+/* ========================================================================== */
+
+/**
+ * Per-block escape state for the flow-sensitive analysis.
+ *
+ * Each block has entry and exit escape-state arrays, indexed by
+ * allocation-node ID. The transfer function walks the block's nodes
+ * and updates the exit state based on how each node uses allocations.
+ */
+typedef struct {
+    vtx_escape_state_t *entry_state; /* per-alloc escape state at block entry */
+    vtx_escape_state_t *exit_state;  /* per-alloc escape state at block exit */
+    uint32_t            state_count; /* size of entry/exit arrays */
+} flow_block_state_t;
+
+/**
+ * Determine if a node belongs to a given basic block.
+ *
+ * A node belongs to a block if:
+ *   - It IS the block's region_node
+ *   - It IS the block's control_node or memory_node
+ *   - One of its inputs IS the block's region/control/memory node
+ *   - Its bytecode_pc matches the block's region_node's bytecode_pc
+ */
+static bool node_belongs_to_block(const vtx_node_t *node,
+                                    const vtx_block_info_t *block,
+                                    const vtx_node_table_t *table)
+{
+    /* Region node of this block always belongs */
+    if (node->id == block->region_node) return true;
+
+    /* Control/memory nodes of this block belong */
+    if (node->id == block->control_node ||
+        node->id == block->memory_node) {
+        return true;
+    }
+
+    /* Nodes whose direct input is the block's region/control/memory node */
+    for (uint32_t j = 0; j < node->input_count; j++) {
+        if (node->inputs[j] == block->region_node ||
+            node->inputs[j] == block->control_node ||
+            node->inputs[j] == block->memory_node) {
+            return true;
+        }
+    }
+
+    /* Check by bytecode_pc */
+    if (block->region_node < table->count) {
+        const vtx_node_t *region = &table->nodes[block->region_node];
+        if (node->bytecode_pc == region->bytecode_pc) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * Transfer function for a single node in the flow-sensitive analysis.
+ *
+ * Examines how the node uses allocation values and updates the escape
+ * state array accordingly. Key improvement over flow-insensitive:
+ *   - StoreField into a NoEscape container → stored value stays NoEscape
+ *   - Escape states are per-block, so branch-sensitive results are possible
+ */
+static void flow_transfer_node(const vtx_node_t *node,
+                                 const vtx_node_table_t *table,
+                                 vtx_escape_state_t *state,
+                                 uint32_t state_count)
+{
+    if (node->dead) return;
+
+    switch (node->opcode) {
+    /* ---- Return: any returned allocation escapes globally ---- */
+    case VTX_OP_Return:
+        for (uint32_t i = 0; i < node->input_count; i++) {
+            vtx_nodeid_t input_id = node->inputs[i];
+            if (input_id < state_count) {
+                const vtx_node_t *input = vtx_node_get_const(table, input_id);
+                if (input && !input->dead && is_alloc_opcode(input->opcode)) {
+                    state[input_id] = vtx_escape_join(state[input_id],
+                                                       VTX_ESCAPE_GLOBAL);
+                }
+            }
+        }
+        break;
+
+    /* ---- StoreField: if the stored value is an allocation, it escapes
+       based on the receiver's escape state ---- */
+    case VTX_OP_StoreField:
+        if (node->input_count >= 4) {
+            vtx_nodeid_t receiver_id = node->inputs[2];
+            vtx_nodeid_t value_id    = node->inputs[3];
+
+            /* If the stored value is an allocation, its escape depends
+             * on the container's escape state */
+            if (value_id < state_count) {
+                const vtx_node_t *val_node = vtx_node_get_const(table, value_id);
+                if (val_node && !val_node->dead && is_alloc_opcode(val_node->opcode)) {
+                    /* Key improvement: if the container (receiver) is
+                     * NoEscape, the stored value is also NoEscape.
+                     * If the container doesn't escape, nothing stored
+                     * in its fields can escape through it. */
+                    vtx_escape_state_t container_state = VTX_ESCAPE_GLOBAL;
+                    if (receiver_id < state_count) {
+                        const vtx_node_t *recv_node =
+                            vtx_node_get_const(table, receiver_id);
+                        if (recv_node && !recv_node->dead &&
+                            is_alloc_opcode(recv_node->opcode)) {
+                            container_state = state[receiver_id];
+                        }
+                    }
+
+                    if (container_state == VTX_ESCAPE_NONE) {
+                        /* Container doesn't escape → stored value doesn't
+                         * escape through this store. No state change needed. */
+                        break;
+                    }
+
+                    /* Container escapes → stored value escapes at least
+                     * as much as the container (but not more). The join
+                     * with VTX_ESCAPE_ARG captures the minimum "stored into
+                     * a field" escape. */
+                    state[value_id] = vtx_escape_join(state[value_id],
+                        vtx_escape_join(container_state, VTX_ESCAPE_ARG));
+                }
+            }
+        }
+        break;
+
+    /* ---- StoreIndexed: storing into an array — the value escapes
+       at least as much as the array ---- */
+    case VTX_OP_StoreIndexed:
+        if (node->input_count >= 3) {
+            vtx_nodeid_t array_id = node->inputs[node->input_count - 3];
+            vtx_nodeid_t value_id = node->inputs[node->input_count - 1];
+
+            if (value_id < state_count) {
+                const vtx_node_t *val_node = vtx_node_get_const(table, value_id);
+                if (val_node && !val_node->dead && is_alloc_opcode(val_node->opcode)) {
+                    vtx_escape_state_t array_state = VTX_ESCAPE_GLOBAL;
+                    if (array_id < state_count) {
+                        const vtx_node_t *arr_node =
+                            vtx_node_get_const(table, array_id);
+                        if (arr_node && !arr_node->dead &&
+                            is_alloc_opcode(arr_node->opcode)) {
+                            array_state = state[array_id];
+                        }
+                    }
+
+                    if (array_state == VTX_ESCAPE_NONE) {
+                        break; /* array doesn't escape → value doesn't escape */
+                    }
+
+                    state[value_id] = vtx_escape_join(state[value_id],
+                        vtx_escape_join(array_state, VTX_ESCAPE_ARG));
+                }
+            }
+        }
+        break;
+
+    /* ---- Calls: any allocation passed as argument escapes ---- */
+    case VTX_OP_CallStatic:
+    case VTX_OP_CallVirtual:
+    case VTX_OP_CallInterface:
+    case VTX_OP_CallRuntime:
+        for (uint32_t i = 0; i < node->input_count; i++) {
+            vtx_nodeid_t input_id = node->inputs[i];
+            if (input_id < state_count) {
+                const vtx_node_t *input = vtx_node_get_const(table, input_id);
+                if (input && !input->dead && is_alloc_opcode(input->opcode)) {
+                    if (node->opcode == VTX_OP_CallRuntime) {
+                        state[input_id] = vtx_escape_join(state[input_id],
+                            VTX_ESCAPE_GLOBAL);
+                    } else {
+                        state[input_id] = vtx_escape_join(state[input_id],
+                            VTX_ESCAPE_ARG);
+                    }
+                }
+            }
+        }
+        break;
+
+    /* ---- No-escape operations ---- */
+    case VTX_OP_LoadField:
+    case VTX_OP_CheckCast:
+    case VTX_OP_InstanceOf:
+    case VTX_OP_Guard:
+    case VTX_OP_DeoptGuard:
+        break;
+
+    /* ---- Phi: propagate escape states through inputs ---- */
+    case VTX_OP_Phi:
+        /* A Phi merges values from multiple control flow paths.
+         * If any input allocation has a higher escape state, propagate
+         * it to all other allocation inputs of the Phi (since they
+         * represent the same logical value at the merge point). */
+        {
+            vtx_escape_state_t max_input_state = VTX_ESCAPE_NONE;
+            for (uint32_t i = 0; i < node->input_count; i++) {
+                vtx_nodeid_t input_id = node->inputs[i];
+                if (input_id < state_count) {
+                    const vtx_node_t *input = vtx_node_get_const(table, input_id);
+                    if (input && !input->dead && is_alloc_opcode(input->opcode)) {
+                        max_input_state = vtx_escape_join(max_input_state,
+                            state[input_id]);
+                    }
+                }
+            }
+            /* Propagate the maximum state back to all allocation inputs.
+             * This models the fact that if a value escapes on one branch,
+             * it escapes at the merge point. */
+            if (max_input_state > VTX_ESCAPE_NONE) {
+                for (uint32_t i = 0; i < node->input_count; i++) {
+                    vtx_nodeid_t input_id = node->inputs[i];
+                    if (input_id < state_count) {
+                        const vtx_node_t *input = vtx_node_get_const(table, input_id);
+                        if (input && !input->dead && is_alloc_opcode(input->opcode)) {
+                            state[input_id] = vtx_escape_join(state[input_id],
+                                max_input_state);
+                        }
+                    }
+                }
+            }
+        }
+        break;
+
+    default:
+        break;
+    }
+}
+
+/**
+ * Apply the transfer function to all nodes belonging to a block.
+ *
+ * Copies the entry state to the exit state, then walks all nodes
+ * that belong to the block and applies the per-node transfer function.
+ */
+static void flow_transfer_block(const vtx_graph_t *graph,
+                                  uint32_t block_idx,
+                                  flow_block_state_t *bs)
+{
+    /* Start from entry state */
+    memcpy(bs->exit_state, bs->entry_state,
+           bs->state_count * sizeof(vtx_escape_state_t));
+
+    const vtx_block_info_t *block = &graph->blocks[block_idx];
+    const vtx_node_table_t *table = &graph->node_table;
+
+    /* Walk only nodes that belong to this block */
+    for (uint32_t i = 0; i < table->count; i++) {
+        const vtx_node_t *node = &table->nodes[i];
+        if (node->dead) continue;
+        if (!node_belongs_to_block(node, block, table)) continue;
+
+        flow_transfer_node(node, table, bs->exit_state, bs->state_count);
+    }
+}
+
+/**
+ * Join two escape-state arrays (dst = max(dst, src)).
+ * Returns true if dst changed.
+ */
+static bool flow_join_states(vtx_escape_state_t *dst,
+                               const vtx_escape_state_t *src,
+                               uint32_t count)
+{
+    bool changed = false;
+    for (uint32_t i = 0; i < count; i++) {
+        vtx_escape_state_t joined = vtx_escape_join(dst[i], src[i]);
+        if (joined != dst[i]) {
+            dst[i] = joined;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+/**
+ * Compare two escape-state arrays; return true if different.
+ */
+static bool flow_states_differ(const vtx_escape_state_t *a,
+                                 const vtx_escape_state_t *b,
+                                 uint32_t count)
+{
+    return memcmp(a, b, count * sizeof(vtx_escape_state_t)) != 0;
+}
+
+/**
+ * Compute reverse postorder of the CFG for efficient worklist iteration.
+ * Returns an arena-allocated array of block indices in RPO.
+ */
+static uint32_t *flow_compute_rpo(const vtx_graph_t *graph,
+                                    vtx_arena_t *arena,
+                                    uint32_t *rpo_count)
+{
+    uint32_t n = graph->block_count;
+    if (n == 0) {
+        *rpo_count = 0;
+        return NULL;
+    }
+
+    uint32_t *rpo = vtx_arena_alloc(arena, n * sizeof(uint32_t));
+    if (!rpo) return NULL;
+
+    bool *visited = vtx_arena_alloc(arena, n * sizeof(bool));
+    uint32_t *stack = vtx_arena_alloc(arena, n * sizeof(uint32_t));
+    if (!visited || !stack) return NULL;
+
+    memset(visited, 0, n * sizeof(bool));
+
+    uint32_t rpo_idx = n;
+    int32_t top = 0;
+    stack[0] = 0;
+    visited[0] = true;
+
+    while (top >= 0) {
+        uint32_t current = stack[top];
+        bool has_unvisited_succ = false;
+
+        const vtx_block_info_t *block = &graph->blocks[current];
+        for (uint32_t i = 0; i < block->succ_count; i++) {
+            uint32_t succ = block->succ_indices[i];
+            if (succ < n && !visited[succ]) {
+                visited[succ] = true;
+                top++;
+                stack[top] = succ;
+                has_unvisited_succ = true;
+                break;
+            }
+        }
+
+        if (!has_unvisited_succ) {
+            rpo_idx--;
+            rpo[rpo_idx] = current;
+            top--;
+        }
+    }
+
+    *rpo_count = n - rpo_idx;
+    if (rpo_idx > 0) {
+        memmove(rpo, rpo + rpo_idx, *rpo_count * sizeof(uint32_t));
+    }
+
+    return rpo;
+}
+
+/**
+ * Flow-sensitive escape analysis.
+ *
+ * For each allocation, tracks escape state per basic block and propagates
+ * through the control flow graph. At merge points (Region/Phi), takes the
+ * maximum (most escaping) of all predecessor states. Handles loops by
+ * iterating until a fixed point is reached (escape states can only increase).
+ *
+ * Key improvement over flow-insensitive: if an allocation is stored into a
+ * field in one branch but not another, flow-insensitive says it escapes.
+ * Flow-sensitive can say it doesn't escape on the path where it's not stored.
+ *
+ * Also fixes the conservative StoreField case: when the target object is
+ * NoEscape, the stored value stays NoEscape (container doesn't escape →
+ * nothing in its fields escapes).
+ *
+ * @param graph  The SoN graph to analyze
+ * @param ag     The allocation graph (records already populated in Step 1)
+ * @param arena  Arena for temporary allocations
+ * @return       true on success, false on failure (caller should fall back
+ *               to flow-insensitive analysis)
+ */
+static bool compute_escape_flow_sensitive(const vtx_graph_t *graph,
+                                            vtx_sota_alloc_graph_t *ag,
+                                            vtx_arena_t *arena)
+{
+    uint32_t block_count = graph->block_count;
+    uint32_t state_count = graph->node_table.count;
+
+    /* If no blocks, we can't do flow-sensitive analysis */
+    if (block_count == 0 || state_count == 0) return false;
+
+    /* ---- Allocate per-block state arrays ---- */
+    flow_block_state_t *block_states =
+        vtx_arena_alloc(arena, block_count * sizeof(flow_block_state_t));
+    if (!block_states) return false;
+
+    for (uint32_t i = 0; i < block_count; i++) {
+        flow_block_state_t *bs = &block_states[i];
+        bs->state_count = state_count;
+
+        bs->entry_state = vtx_arena_alloc(arena,
+            state_count * sizeof(vtx_escape_state_t));
+        bs->exit_state = vtx_arena_alloc(arena,
+            state_count * sizeof(vtx_escape_state_t));
+
+        if (!bs->entry_state || !bs->exit_state) return false;
+
+        /* Initialize all to NoEscape */
+        memset(bs->entry_state, 0, state_count * sizeof(vtx_escape_state_t));
+        memset(bs->exit_state, 0, state_count * sizeof(vtx_escape_state_t));
+    }
+
+    /* ---- Compute reverse postorder for worklist ---- */
+    uint32_t rpo_count = 0;
+    uint32_t *rpo = flow_compute_rpo(graph, arena, &rpo_count);
+
+    /* ---- Initialize worklist ---- */
+    bool *on_worklist = vtx_arena_alloc(arena, block_count * sizeof(bool));
+    if (!on_worklist) return false;
+    memset(on_worklist, 0, block_count * sizeof(bool));
+
+    /* Circular buffer worklist */
+    uint32_t wl_capacity = block_count + 1;
+    uint32_t *worklist = vtx_arena_alloc(arena, wl_capacity * sizeof(uint32_t));
+    if (!worklist) return false;
+
+    uint32_t wl_head = 0, wl_tail = 0;
+
+    /* Enqueue all blocks in RPO */
+    for (uint32_t i = 0; i < rpo_count; i++) {
+        uint32_t block_idx = rpo ? rpo[i] : i;
+        worklist[wl_tail] = block_idx;
+        wl_tail = (wl_tail + 1) % wl_capacity;
+        on_worklist[block_idx] = true;
+    }
+    /* If no RPO (allocation failure), enqueue all blocks in order */
+    if (rpo_count == 0) {
+        for (uint32_t i = 0; i < block_count; i++) {
+            worklist[wl_tail] = i;
+            wl_tail = (wl_tail + 1) % wl_capacity;
+            on_worklist[i] = true;
+        }
+    }
+
+    /* ---- Iterate to fixed point ---- */
+    uint32_t iterations = 0;
+    const uint32_t MAX_ITERATIONS = 200; /* safety bound for loops */
+
+    while (wl_head != wl_tail && iterations < MAX_ITERATIONS) {
+        iterations++;
+
+        uint32_t block_idx = worklist[wl_head];
+        wl_head = (wl_head + 1) % wl_capacity;
+        on_worklist[block_idx] = false;
+
+        flow_block_state_t *bs = &block_states[block_idx];
+        const vtx_block_info_t *block = &graph->blocks[block_idx];
+
+        /* Compute entry state as join of predecessor exit states */
+        vtx_escape_state_t *new_entry = vtx_arena_alloc(arena,
+            state_count * sizeof(vtx_escape_state_t));
+        if (!new_entry) return false;
+        memset(new_entry, 0, state_count * sizeof(vtx_escape_state_t));
+
+        if (block->pred_count == 0) {
+            /* Entry block: all NoEscape (already zeroed) */
+        } else {
+            /* Join all predecessor exit states */
+            for (uint32_t p = 0; p < block->pred_count; p++) {
+                uint32_t pred_idx = block->pred_indices[p];
+                if (pred_idx < block_count) {
+                    flow_join_states(new_entry,
+                        block_states[pred_idx].exit_state,
+                        state_count);
+                }
+            }
+        }
+
+        /* Check if entry state changed */
+        bool entry_changed = flow_states_differ(new_entry, bs->entry_state,
+                                                  state_count);
+        if (entry_changed) {
+            memcpy(bs->entry_state, new_entry,
+                   state_count * sizeof(vtx_escape_state_t));
+        }
+
+        /* Save old exit state and apply transfer function */
+        vtx_escape_state_t *old_exit = vtx_arena_alloc(arena,
+            state_count * sizeof(vtx_escape_state_t));
+        if (!old_exit) return false;
+        memcpy(old_exit, bs->exit_state,
+               state_count * sizeof(vtx_escape_state_t));
+
+        flow_transfer_block(graph, block_idx, bs);
+
+        bool exit_changed = flow_states_differ(bs->exit_state, old_exit,
+                                                 state_count);
+
+        /* If exit state changed, add successors to worklist */
+        if (entry_changed || exit_changed) {
+            for (uint32_t s = 0; s < block->succ_count; s++) {
+                uint32_t succ_idx = block->succ_indices[s];
+                if (succ_idx < block_count && !on_worklist[succ_idx]) {
+                    worklist[wl_tail] = succ_idx;
+                    wl_tail = (wl_tail + 1) % wl_capacity;
+                    /* Guard against worklist overflow */
+                    if (wl_tail == wl_head) break;
+                    on_worklist[succ_idx] = true;
+                }
+            }
+        }
+    }
+
+    /* ---- Finalize: for each allocation, compute the final escape state
+     * as the join of all block exit states. This gives a global result
+     * that accounts for the worst-case across all paths. ---- */
+    for (uint32_t i = 0; i < ag->record_count; i++) {
+        vtx_sota_alloc_record_t *rec = &ag->records[i];
+        vtx_nodeid_t alloc_node = rec->alloc_node;
+
+        vtx_escape_state_t final_state = VTX_ESCAPE_NONE;
+
+        for (uint32_t b = 0; b < block_count; b++) {
+            if (alloc_node < block_states[b].state_count) {
+                final_state = vtx_escape_join(final_state,
+                    block_states[b].exit_state[alloc_node]);
+            }
+        }
+
+        rec->escape_state = final_state;
+    }
+
+    return true;
 }
 
 /* ========================================================================== */
@@ -402,12 +954,22 @@ vtx_sota_alloc_graph_t *vtx_alloc_graph_build(const vtx_graph_t *graph,
         }
     }
 
-    /* Step 4: Run escape analysis for each allocation */
-    for (uint32_t i = 0; i < ag->record_count; i++) {
-        vtx_sota_alloc_record_t *rec = &ag->records[i];
-        rec->escape_state = compute_escape(graph, rec->alloc_node);
+    /* Step 4: Run flow-sensitive escape analysis.
+     * Falls back to flow-insensitive analysis if the flow-sensitive
+     * pass fails (e.g., no block info, allocation failure). */
+    bool flow_sensitive_ok = compute_escape_flow_sensitive(graph, ag, arena);
 
-        switch (rec->escape_state) {
+    if (!flow_sensitive_ok) {
+        /* Fallback: use flow-insensitive analysis */
+        for (uint32_t i = 0; i < ag->record_count; i++) {
+            vtx_sota_alloc_record_t *rec = &ag->records[i];
+            rec->escape_state = compute_escape_flow_insensitive(graph, rec->alloc_node);
+        }
+    }
+
+    /* Compute statistics */
+    for (uint32_t i = 0; i < ag->record_count; i++) {
+        switch (ag->records[i].escape_state) {
         case VTX_ESCAPE_NONE:   ag->no_escape_count++; break;
         case VTX_ESCAPE_ARG:    ag->arg_escape_count++; break;
         case VTX_ESCAPE_GLOBAL: ag->global_escape_count++; break;

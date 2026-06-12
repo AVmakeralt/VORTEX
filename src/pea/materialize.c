@@ -127,6 +127,13 @@ static vtx_materialize_point_t *add_materialize_point(
  * Insert NewObject + StoreField nodes for a single materialization point.
  * The materialized object node replaces references to the scalar-replaced
  * allocation at the escape point.
+ *
+ * If pt->predecessor_control is not VTX_NODEID_INVALID, the NewObject
+ * node is anchored to that control node as its first input. This ensures
+ * the scheduler places the materialization in the predecessor block
+ * (correct for Phi merge-point materialization per SSA semantics).
+ * The last StoreField node becomes the new memory state for subsequent
+ * nodes in the predecessor block.
  */
 static int insert_materialization_code(vtx_graph_t *graph,
                                         vtx_materialize_point_t *pt,
@@ -143,7 +150,19 @@ static int insert_materialization_code(vtx_graph_t *graph,
     new_obj->type    = VTX_TYPE_Ptr;
     new_obj->flags   = vtx_nf_union(VTX_NF_SIDE_EFFECT, VTX_NF_MEMORY);
 
+    /* If a predecessor control node is specified, add it as the first
+     * input to the NewObject. This anchors the allocation to the
+     * predecessor block's control flow, ensuring the scheduler places
+     * it in the correct block. */
+    if (pt->predecessor_control != VTX_NODEID_INVALID) {
+        vtx_node_add_input(table, new_obj_id, pt->predecessor_control);
+    }
+
     pt->materialized_obj_id = new_obj_id;
+
+    /* Track the current memory state for chaining StoreField nodes.
+     * Initially, the NewObject produces the new memory state. */
+    vtx_nodeid_t mem_state = new_obj_id;
 
     /* Create StoreField nodes for each field */
     for (uint32_t f = 0; f < pt->field_count; f++) {
@@ -155,10 +174,15 @@ static int insert_materialization_code(vtx_graph_t *graph,
         store->type    = VTX_TYPE_Void;
         store->flags   = vtx_nf_union(VTX_NF_SIDE_EFFECT, VTX_NF_MEMORY);
 
-        /* Add inputs: memory chain (null for now — scheduling will fix),
-         * receiver (new object), value (scalar local) */
-        vtx_node_add_input(table, store_id, new_obj_id);
-        vtx_node_add_input(table, store_id, pt->field_local_ids[f]);
+        /* Add inputs: memory chain, receiver (new object), value (scalar local).
+         * The memory chain is threaded: each StoreField takes the previous
+         * memory state as input, ensuring correct ordering. */
+        vtx_node_add_input(table, store_id, mem_state);  /* memory chain */
+        vtx_node_add_input(table, store_id, new_obj_id); /* receiver */
+        vtx_node_add_input(table, store_id, pt->field_local_ids[f]); /* value */
+
+        /* This StoreField becomes the new memory state */
+        mem_state = store_id;
     }
 
     return 0;
@@ -348,24 +372,43 @@ vtx_materialize_result_t *vtx_materialize_run(vtx_graph_t *graph,
      *
      * When a Phi node merges a scalar-replaced virtual object with another
      * value (either another virtual object or a real heap object), the
-     * virtual object must be materialized at the Phi's merge point.
-     * Otherwise, the Phi would try to merge a "virtual" (scalar-replaced)
-     * object with a real pointer, which is type-incorrect.
+     * virtual object must be materialized in the predecessor block that
+     * corresponds to the virtual input. Otherwise, the Phi would try to
+     * merge a "virtual" (scalar-replaced) object with a real pointer,
+     * which is type-incorrect.
      *
      * For each Phi node that has one or more virtual object inputs:
      *   1. Identify which inputs are virtual (scalar-replaced allocations)
-     *   2. For each virtual input, emit the allocation + field stores
-     *      (materialization) before the Phi
-     *   3. Replace the virtual input with the materialized object
+     *   2. For each virtual input, determine the predecessor block that
+     *      corresponds to this input (Phi input[i] comes from the i-th
+     *      predecessor of the Phi's Region node)
+     *   3. Emit the allocation + field stores (materialization) in that
+     *      predecessor block, anchored to the predecessor's terminal
+     *      control node
+     *   4. Replace the virtual input with the materialized object
      *
-     * This ensures that the Phi only merges concrete heap pointers. */
+     * This ensures that the Phi only merges concrete heap pointers, and
+     * the materialized object exists before control flow reaches the Phi.
+     *
+     * In the SoN IR, a Phi node's layout is:
+     *   Phi->inputs[0] = Region node
+     *   Phi->inputs[1..N] = values from predecessors 0..N-1
+     *   Region->inputs[0..N-1] = control from predecessors 0..N-1
+     * So Phi->inputs[inp] (inp >= 1) corresponds to
+     *   Region->inputs[inp - 1] (the predecessor's control output).
+     */
     for (uint32_t i = 0; i < table->count; i++) {
         vtx_node_t *node = &table->nodes[i];
         if (node->dead || node->opcode != VTX_OP_Phi) continue;
 
+        /* The Phi's first input is the Region node */
+        vtx_nodeid_t region_id = (node->input_count > 0)
+                                 ? node->inputs[0]
+                                 : VTX_NODEID_INVALID;
+        vtx_node_t *region = vtx_node_get(table, region_id);
+
         /* Check each input of the Phi for scalar-replaced allocations */
         for (uint32_t inp = 0; inp < node->input_count; inp++) {
-            /* Skip the Region input (first input of a Phi is the Region) */
             vtx_nodeid_t input_id = node->inputs[inp];
             vtx_node_t *input_node = vtx_node_get(table, input_id);
             if (!input_node || input_node->dead) continue;
@@ -374,7 +417,17 @@ vtx_materialize_result_t *vtx_materialize_run(vtx_graph_t *graph,
             if (!vtx_pea_is_scalar_replaceable(analysis, input_id)) continue;
 
             /* This Phi input is a scalar-replaced allocation that
-             * must be materialized at the merge point. */
+             * must be materialized in the predecessor block. */
+
+            /* Determine the predecessor control node for this input.
+             * Phi input[inp] corresponds to Region input[inp - 1].
+             * (Input 0 of the Phi is the Region itself, value inputs
+             * start at index 1 and map 1:1 to Region predecessor index.) */
+            vtx_nodeid_t pred_control = VTX_NODEID_INVALID;
+            if (inp >= 1 && region && inp - 1 < region->input_count) {
+                pred_control = region->inputs[inp - 1];
+            }
+
             bool already_materialized = false;
             for (uint32_t p = 0; p < result->point_count; p++) {
                 if (result->points[p].alloc_id == input_id &&
@@ -395,6 +448,7 @@ vtx_materialize_result_t *vtx_materialize_run(vtx_graph_t *graph,
 
             pt->escape_node_id = node->id;  /* Phi is the escape point */
             pt->alloc_id       = input_id;
+            pt->predecessor_control = pred_control; /* anchor to predecessor */
 
             vtx_node_t *alloc_node = vtx_node_get(table, input_id);
             pt->type_id = alloc_node ? alloc_node->type_id : 0;
@@ -409,7 +463,10 @@ vtx_materialize_result_t *vtx_materialize_run(vtx_graph_t *graph,
                 graph, input_id, pt->field_offsets, pt->field_local_ids,
                 MAX_FIELDS_PER_OBJ);
 
-            /* Insert materialization code (NewObject + StoreField) */
+            /* Insert materialization code (NewObject + StoreField).
+             * The predecessor_control field is set, so the NewObject
+             * will be anchored to the predecessor block's control node,
+             * ensuring correct placement. */
             if (insert_materialization_code(graph, pt, arena) != 0) {
                 return NULL;
             }
@@ -423,19 +480,6 @@ vtx_materialize_result_t *vtx_materialize_run(vtx_graph_t *graph,
             /* Phi merge points are not deopt points per se, but the
              * materialization is needed for correctness. */
         }
-
-        /* TODO: Full Phi materialization requires placing the allocation
-         * and field stores in the *predecessor* block that corresponds to
-         * the virtual input, not at the Phi itself. The current approach
-         * places the materialization after the Phi, which is correct but
-         * may not be optimal. A complete implementation would:
-         *   1. Determine which predecessor block corresponds to this input
-         *   2. Insert the NewObject + StoreField sequence at the end of
-         *      that predecessor (before the branch to the Phi's block)
-         *   3. Replace the Phi input with the materialized object
-         * This ensures the materialized object exists before the control
-         * flow reaches the Phi, avoiding any potential issues with the
-         * SSA construction. */
     }
 
     return result;

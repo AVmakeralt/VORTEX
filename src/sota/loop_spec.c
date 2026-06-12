@@ -185,13 +185,84 @@ static void analyze_loop_body(const vtx_graph_t *graph,
              * Type-based alias analysis can help here: if the array types
              * are different (e.g., int[] vs float[]), they can't alias. */
             result->has_aliased_access = true;
-            break;
+            /* Fall through to stride detection */
+            /* fall through */
 
-        case VTX_OP_LoadIndexed:
-            /* Stride-1 check: if the index is the loop induction variable
-             * (or IV + constant), the access is stride-1.
-             * For now, assume stride-1 for simple loops. */
+        case VTX_OP_LoadIndexed: {
+            /* Stride detection: walk back from the index input to find
+             * the induction variable pattern.
+             *
+             * LoadIndexed inputs: [array_base, index]
+             * StoreIndexed inputs: [array_base, index, value]
+             *
+             * We look at the index expression (input[1]) and check:
+             *   a) If index is just the IV (a Parameter node from LoopBegin) → stride = 1
+             *   b) If index is IV * constant (Mul node with one constant input) → stride = constant
+             *   c) If index is IV + constant (Add node with one constant input) → stride = 1, offset
+             *   d) Otherwise → mark as non-stride-1
+             */
+            if (node->input_count >= 2) {
+                vtx_nodeid_t index_id = node->inputs[1];
+                const vtx_node_t *index_node = vtx_node_get_const(&graph->node_table, index_id);
+
+                if (index_node != NULL && !index_node->dead) {
+                    /* Walk through Add/Sub nodes that add a constant offset */
+                    const vtx_node_t *base_expr = index_node;
+                    while (base_expr != NULL && !base_expr->dead &&
+                           (base_expr->opcode == VTX_OP_Add || base_expr->opcode == VTX_OP_Sub)) {
+                        /* Check if one input is a Constant → this is IV + offset */
+                        bool found_const = false;
+                        for (uint32_t k = 0; k < base_expr->input_count; k++) {
+                            const vtx_node_t *in = vtx_node_get_const(&graph->node_table, base_expr->inputs[k]);
+                            if (in && in->opcode == VTX_OP_Constant) {
+                                /* The other input is the actual IV expression */
+                                vtx_nodeid_t other = base_expr->inputs[(k == 0) ? 1 : 0];
+                                base_expr = vtx_node_get_const(&graph->node_table, other);
+                                found_const = true;
+                                break;
+                            }
+                        }
+                        if (!found_const) break;
+                    }
+
+                    if (base_expr != NULL && !base_expr->dead) {
+                        if (base_expr->opcode == VTX_OP_Phi || base_expr->opcode == VTX_OP_Parameter) {
+                            /* Direct IV reference → stride = 1 */
+                            /* Already set to stride 1 by default */
+                        } else if (base_expr->opcode == VTX_OP_Mul) {
+                            /* IV * constant → stride = constant */
+                            for (uint32_t k = 0; k < base_expr->input_count; k++) {
+                                const vtx_node_t *mul_in = vtx_node_get_const(&graph->node_table, base_expr->inputs[k]);
+                                if (mul_in && mul_in->opcode == VTX_OP_Constant &&
+                                    mul_in->constval.kind == VTX_TYPE_Int) {
+                                    int64_t stride_val = mul_in->constval.as.int_val;
+                                    if (stride_val > 0 && stride_val <= 16) {
+                                        if (result->stride == 1 || (uint32_t)stride_val < result->stride) {
+                                            result->stride = (uint32_t)stride_val;
+                                        }
+                                        if (stride_val != 1) {
+                                            result->is_stride1 = false;
+                                        }
+                                    } else {
+                                        /* Stride too large or negative — not vectorizable */
+                                        result->is_stride1 = false;
+                                        result->stride = 0; /* unknown/bad stride */
+                                    }
+                                    break;
+                                }
+                            }
+                        } else if (base_expr->opcode == VTX_OP_Constant) {
+                            /* Constant index — not really a loop-driven access */
+                            result->is_stride1 = false;
+                        } else {
+                            /* Unknown index expression — mark as non-stride-1 */
+                            result->is_stride1 = false;
+                        }
+                    }
+                }
+            }
             break;
+        }
 
         case VTX_OP_StoreField:
         case VTX_OP_LoadField:

@@ -93,7 +93,8 @@ int vtx_guard_emit_lower(vtx_guard_desc_array_t *guards,
                           vtx_inst_stream_t *inst_stream,
                           vtx_x86_emit_t *emit,
                           vtx_side_table_t *side_table,
-                          vtx_arena_t *arena);
+                          vtx_arena_t *arena,
+                          const vtx_regalloc_result_t *ra);
 
 /**
  * Emit deopt stubs after the main code.

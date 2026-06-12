@@ -64,6 +64,13 @@ typedef struct {
 
     /* The NewObject node created by materialization */
     vtx_nodeid_t  materialized_obj_id; /* NewObject node ID (set during materialization) */
+
+    /* For Phi materialization: the predecessor block's terminal control node.
+     * The NewObject + StoreField sequence is anchored to this control node,
+     * ensuring the scheduler places the materialization in the predecessor
+     * block rather than at the Phi itself. VTX_NODEID_INVALID for non-Phi
+     * materializations. */
+    vtx_nodeid_t  predecessor_control; /* control input from predecessor block */
 } vtx_materialize_point_t;
 
 /* ========================================================================== */

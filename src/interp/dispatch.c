@@ -378,12 +378,46 @@ static uint32_t throw_exception(vtx_interp_t *interp, vtx_value_t exc_value,
 {
     interp->exception = exc_value;
 
-    /* Walk the frame chain looking for a catch handler */
+    /* Get the exception's type_id for catch handler matching */
+    vtx_typeid_t exc_typeid = VTX_TYPE_INVALID;
+    if (vtx_is_heap_ptr(exc_value)) {
+        vtx_heap_object_t *obj = (vtx_heap_object_t *)vtx_heap_ptr(exc_value);
+        exc_typeid = obj->type_id;
+    }
+
+    /* Walk the frame chain looking for a matching catch handler */
     vtx_frame_t *f = interp->current_frame;
     while (f != NULL) {
         if (f->catch_handler_pc != VTX_CATCH_NONE) {
-            *out_handler_frame = f;
-            return f->catch_handler_pc;
+            /* Check if this handler catches the exception:
+             * - catch_type == 0 (catch-all): matches any exception
+             * - catch_type != 0: matches if exc_typeid is a subtype
+             *   of catch_type (including exact match).
+             * If exc_typeid is VTX_TYPE_INVALID (non-heap exception),
+             * only a catch-all handler can catch it. */
+            vtx_typeid_t catch_type = f->catch_type;
+            bool matches = false;
+
+            if (catch_type == 0) {
+                /* catch-all: accepts any exception */
+                matches = true;
+            } else if (exc_typeid != VTX_TYPE_INVALID) {
+                /* Check subtype relationship using the type system.
+                 * vtx_get_current_type_system() is declared in
+                 * runtime/type_system.h which is included via frame.h. */
+                vtx_type_system_t *ts = vtx_get_current_type_system();
+                if (ts != NULL) {
+                    matches = vtx_type_is_subtype(ts, exc_typeid, catch_type);
+                } else {
+                    /* No type system: exact match only */
+                    matches = (exc_typeid == catch_type);
+                }
+            }
+
+            if (matches) {
+                *out_handler_frame = f;
+                return f->catch_handler_pc;
+            }
         }
         f = f->caller;
     }
@@ -510,6 +544,7 @@ vtx_value_t vtx_interp_run(vtx_interp_t *interp,
         local_dispatch_table[VT_OP_ARRAY_LENGTH]   = DISPATCH_LABEL(VT_OP_ARRAY_LENGTH);
         local_dispatch_table[VT_OP_THROW]          = DISPATCH_LABEL(VT_OP_THROW);
         local_dispatch_table[VT_OP_CATCH]          = DISPATCH_LABEL(VT_OP_CATCH);
+        local_dispatch_table[VT_OP_CATCH_TYPED]   = DISPATCH_LABEL(VT_OP_CATCH_TYPED);
         local_dispatch_table[VT_OP_MONITOR_ENTER]  = DISPATCH_LABEL(VT_OP_MONITOR_ENTER);
         local_dispatch_table[VT_OP_MONITOR_EXIT]   = DISPATCH_LABEL(VT_OP_MONITOR_EXIT);
         local_dispatch_table[VT_OP_DUP]            = DISPATCH_LABEL(VT_OP_DUP);
@@ -1698,8 +1733,27 @@ dispatch_VT_OP_THROW:
 dispatch_VT_OP_CATCH:
     operand = read_operand(code, pc);
     {
-        /* Set the catch handler PC for the current frame */
+        /* Set the catch handler PC for the current frame.
+         * VT_OP_CATCH is catch-all (catch_type = 0) for backward
+         * compatibility. Use VT_OP_CATCH_TYPED for typed handlers. */
         frame->catch_handler_pc = (uint32_t)operand;
+        frame->catch_type = 0; /* catch-all */
+        /* Push undefined as a placeholder for the exception variable */
+        *sp++ = VTX_VALUE_UNDEFINED;
+    }
+    DISPATCH_NEXT();
+
+    /* ---- VT_OP_CATCH_TYPED ---- */
+dispatch_VT_OP_CATCH_TYPED:
+    operand = read_operand(code, pc);
+    {
+        /* Two 2-byte operands: handler PC + catch type ID.
+         * The handler PC is in 'operand' (first 2 bytes).
+         * The catch type ID is in the next 2 bytes. */
+        uint32_t handler_pc = (uint32_t)operand;
+        uint16_t catch_type_raw = (uint16_t)read_operand(code, pc + 3);
+        frame->catch_handler_pc = handler_pc;
+        frame->catch_type = (vtx_typeid_t)catch_type_raw;
         /* Push undefined as a placeholder for the exception variable */
         *sp++ = VTX_VALUE_UNDEFINED;
     }
@@ -1774,12 +1828,64 @@ dispatch_VT_OP_TYPEOF:
     /* ---- VT_OP_CALL_RUNTIME ---- */
 dispatch_VT_OP_CALL_RUNTIME:
     operand = read_operand(code, pc);
-    /* Bug #2 fix: CALL_RUNTIME handler — placeholder that pushes undefined.
-     * A full implementation would dispatch to the runtime function identified
-     * by the operand. For now, we just consume the operand and push undefined
-     * to avoid a NULL dispatch table entry and segfault. */
-    (void)operand;
-    *sp++ = VTX_VALUE_UNDEFINED;
+    {
+        /* Runtime function IDs — must agree with the bytecode compiler.
+         * Each runtime function has a known argument count and return
+         * value convention:
+         *   0 = typeof          : 1 arg  → 1 result (TypeID as SMI)
+         *   1 = monitor_enter   : 1 arg  → 0 results
+         *   2 = monitor_exit    : 1 arg  → 0 results
+         *   3 = throw           : 1 arg  → does not return normally
+         */
+        switch (operand) {
+        case 0: /* typeof */
+            a = *--sp;
+            {
+                vtx_typeid_t tid = value_typeid(a);
+                *sp++ = vtx_make_smi((int64_t)tid);
+            }
+            break;
+        case 1: /* monitor_enter */
+            a = *--sp;
+            vtx_helpers_null_check(a);
+            /* T0 interpreter: monitors are no-ops. A full implementation
+             * would use pthread_mutex or similar. */
+            break;
+        case 2: /* monitor_exit */
+            a = *--sp;
+            vtx_helpers_null_check(a);
+            /* T0 interpreter: monitors are no-ops. */
+            break;
+        case 3: /* throw */
+            a = *--sp;
+            {
+                vtx_frame_t *handler_frame = NULL;
+                uint32_t handler_pc = throw_exception(interp, a, &handler_frame);
+
+                if (handler_pc != VTX_CATCH_NONE && handler_frame != NULL) {
+                    SYNC_SP();
+                    frame = unwind_to_handler(interp, frame, handler_frame);
+                    interp->current_frame = frame;
+                    RELOAD_FRAME();
+                    sp = frame->operand_stack + frame->stack_top;
+                    locals_arr = frame->locals;
+                    pc = handler_pc;
+                    /* Push undefined as a placeholder for the exception variable */
+                    *sp++ = VTX_VALUE_UNDEFINED;
+                    DISPATCH();
+                } else {
+                    /* Uncaught exception — unwind everything and return */
+                    result = vtx_interp_handle_uncaught(interp, a);
+                    goto dispatch_done;
+                }
+            }
+            break;
+        default:
+            /* Unknown runtime function — push undefined as a safe fallback */
+            *sp++ = VTX_VALUE_UNDEFINED;
+            break;
+        }
+    }
     DISPATCH_NEXT();
 
     /* ===================================================================

@@ -22,6 +22,7 @@
 #include "lower/emit.h"
 #include "lower/guard_emit.h"
 #include "runtime/arena.h"
+#include "interp/type_feedback.h"
 #include "vortex_config.h"
 
 /* Callee graph lookup callback for inlining.
@@ -49,6 +50,13 @@ typedef struct {
      * If NULL, inlining decisions are recorded but the transform is skipped. */
     vtx_callee_lookup_fn  callee_lookup;
     void                 *callee_lookup_context;
+
+    /* Type feedback for speculative guard insertion (T3 only).
+     * If NULL, falls back to node->type_id as a speculative hint.
+     * When provided, vtx_type_feedback_get_dominant_call_type() is used
+     * to look up the actual observed dominant receiver type at each
+     * call site, indexed by the node's bytecode_pc. */
+    const vtx_type_feedback_t *type_feedback;
 } vtx_pipeline_config_t;
 
 /* Pipeline statistics */
