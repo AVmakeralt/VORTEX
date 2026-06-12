@@ -51,6 +51,131 @@ static inline bool vtx_safepoint_should_stop(void) {
 }
 
 /* ========================================================================== */
+/* Guard page safepoint polling (zero-cost deopt)                              */
+/* ========================================================================== */
+
+/**
+ * Guard page safepoint mechanism — replaces CMP+JCC with a single MOV load.
+ *
+ * Instead of:
+ *   cmpq [vtx_safepoint_flag], 0    ; 8 bytes, 1 uop + branch
+ *   jne  deopt_stub                  ; 6 bytes, 1 uop (branch prediction)
+ *
+ * Emit:
+ *   movq rax, [guard_page]           ; 6-8 bytes, 1 uop, no branch
+ *
+ * When no safepoint is requested, the guard_page is readable (PROT_READ)
+ * and the MOV completes normally — the loaded value is ignored.
+ * When a safepoint is needed, the runtime calls mprotect(guard_page, ...,
+ * PROT_NONE) which makes the page inaccessible. The next MOV from the
+ * guard page triggers SIGSEGV, which the signal handler catches and
+ * translates to a safepoint/deopt.
+ *
+ * Hot-path cost: 1 load (no compare, no branch, no branch-prediction slot).
+ * Cold-path cost: SIGSEGV signal delivery + handler (~1-2 microseconds).
+ *
+ * The guard page is a single 4KB page allocated at initialization.
+ * All JIT-compiled code shares the same guard page.
+ */
+
+/** Maximum number of deopt info entries the SIGSEGV handler can look up */
+#define VTX_GUARD_PAGE_DEOPT_TABLE_SIZE 4096
+
+/** Null-page detection threshold — any fault address below this is a null deref */
+#define VTX_NULL_PAGE_LIMIT  0x10000UL  /* 64KB — covers null + small offsets */
+
+/**
+ * Guard page deopt table entry — maps a code range to deopt metadata.
+ * When a SIGSEGV occurs, the handler scans this table to find which
+ * compiled method the fault occurred in, then performs deopt.
+ */
+typedef struct {
+    const uint8_t *code_start;    /* start of compiled code */
+    uint32_t       code_size;     /* size of compiled code */
+    uint32_t       method_id;     /* method ID for deopt lookup */
+    uint32_t       side_table_index; /* index into the method's side table */
+} vtx_guard_page_deopt_entry_t;
+
+/**
+ * Initialize the guard page safepoint mechanism.
+ * Allocates a single page with mmap and sets it PROT_READ.
+ * Registers SIGSEGV and SIGTRAP signal handlers.
+ *
+ * @return 0 on success, -1 on failure
+ */
+int vtx_guard_page_init(void);
+
+/**
+ * Destroy the guard page and restore original signal handlers.
+ */
+void vtx_guard_page_destroy(void);
+
+/**
+ * Get the address of the guard page for RIP-relative MOV emission.
+ * Returns NULL if the guard page has not been initialized.
+ */
+void *vtx_guard_page_address(void);
+
+/**
+ * Trigger a safepoint by making the guard page inaccessible.
+ * All JIT-compiled code that polls the guard page will SIGSEGV
+ * on their next poll, entering the signal handler which performs
+ * the safepoint check.
+ *
+ * @return 0 on success, -1 on failure
+ */
+int vtx_guard_page_arm(void);
+
+/**
+ * Disarm the safepoint by making the guard page readable again.
+ * Called after the safepoint operation completes.
+ *
+ * @return 0 on success, -1 on failure
+ */
+int vtx_guard_page_disarm(void);
+
+/**
+ * Register a compiled method's code range in the deopt table.
+ * The SIGSEGV handler uses this to map fault addresses to deopt info.
+ *
+ * @param code_start   Start address of compiled code
+ * @param code_size    Size of compiled code in bytes
+ * @param method_id    Method ID for deopt lookup
+ * @param side_table_index Side table entry index for the safepoint
+ * @return             0 on success, -1 on table full
+ */
+int vtx_guard_page_register_code(const uint8_t *code_start, uint32_t code_size,
+                                   uint32_t method_id, uint32_t side_table_index);
+
+/**
+ * Unregister a compiled method's code range from the deopt table.
+ *
+ * @param code_start   Start address of compiled code
+ * @return             0 on success, -1 on not found
+ */
+int vtx_guard_page_unregister_code(const uint8_t *code_start);
+
+/**
+ * Check whether the guard page mechanism is initialized and available.
+ */
+bool vtx_guard_page_is_available(void);
+
+/**
+ * Global flag indicating guard page availability.
+ * This is set by vtx_guard_page_init() and can be checked by
+ * code in other libraries (e.g., isel) without creating a
+ * circular dependency. Read with atomic load for thread safety.
+ */
+extern volatile int vtx_guard_page_available_flag;
+
+/** Inline fast-path check for guard page availability.
+ * This avoids a function call and can be used from any
+ * translation unit that includes this header. */
+static inline bool vtx_guard_page_is_available_inline(void) {
+    return __atomic_load_n(&vtx_guard_page_available_flag, __ATOMIC_ACQUIRE) != 0;
+}
+
+/* ========================================================================== */
 /* Safe point state                                                            */
 /* ========================================================================== */
 

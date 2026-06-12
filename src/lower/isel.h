@@ -107,7 +107,8 @@ typedef enum {
     VTX_X86_MOVSD,      /* movsd xmm, xmm — scalar double move */
 
     /* Safepoint poll (pseudo-instruction) */
-    VTX_X86_SAFEPOINT_POLL, /* cmpq [vtx_safepoint_flag], 0; jne deopt_stub */
+    VTX_X86_SAFEPOINT_POLL,         /* cmpq [vtx_safepoint_flag], 0; jne deopt_stub */
+    VTX_X86_SAFEPOINT_POLL_GUARD_PAGE, /* movq rax, [guard_page] — zero-cost poll */
 
     VTX_X86_OPCODE_COUNT
 } vtx_x86_opcode_t;

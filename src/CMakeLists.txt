@@ -188,6 +188,7 @@ add_executable(vortex
 )
 target_include_directories(vortex PRIVATE ${VORTEX_INCLUDE_DIRS})
 target_link_libraries(vortex PRIVATE
+    -Wl,--start-group
     vortex_runtime
     vortex_interp
     vortex_baseline
@@ -204,6 +205,7 @@ target_link_libraries(vortex PRIVATE
     vortex_guard
     vortex_midtier
     $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota>
+    -Wl,--end-group
     m
     pthread
 )

@@ -21,6 +21,7 @@
 
 #include "lower/isel.h"
 #include "ir/graph.h"
+#include "compile/safepoint.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -72,6 +73,7 @@ static const char *vtx_x86_opcode_names[VTX_X86_OPCODE_COUNT] = {
     [VTX_X86_XORPS]  = "xorps",
     [VTX_X86_MOVSD]  = "movsd",
     [VTX_X86_SAFEPOINT_POLL] = "safepoint_poll",
+    [VTX_X86_SAFEPOINT_POLL_GUARD_PAGE] = "safepoint_poll_guard_page",
 };
 
 const char *vtx_x86_opcode_name(vtx_x86_opcode_t opcode)
@@ -1519,16 +1521,35 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
     case VTX_OP_End:
     case VTX_OP_LoopEnd: {
         /* Emit safepoint poll at loop back-edge.
-         * This pseudo-instruction expands to:
-         *   cmpq [vtx_safepoint_flag], 0
-         *   jne  deopt_stub
-         * The JNE is marked IS_GUARD so the guard emission pipeline
-         * patches it to jump to the appropriate deopt stub. */
+         *
+         * When the guard page mechanism is available (zero-cost deopt),
+         * emit a single MOV from the guard page instead of CMP+JCC.
+         * The guard page is normally readable; when a safepoint is
+         * requested, the page becomes PROT_NONE and the MOV triggers
+         * SIGSEGV, which the signal handler processes.
+         *
+         * The guard page poll does NOT need IS_GUARD flag because
+         * there is no JCC to patch — the SIGSEGV handler directly
+         * processes the safepoint.
+         *
+         * When the guard page is NOT available, fall back to the
+         * traditional CMP+JCC approach. */
         vtx_inst_t sp;
         memset(&sp, 0, sizeof(sp));
-        sp.opcode = VTX_X86_SAFEPOINT_POLL;
         sp.source_node = node_id;
-        sp.flags = VTX_INST_FLAG_IS_GUARD | VTX_INST_FLAG_IS_SAFEPOINT;
+
+        /* Check if guard page is available at compile time.
+         * If so, use the zero-cost poll; otherwise use the
+         * traditional CMP+JCC poll. Use the inline flag check
+         * to avoid a circular dependency between vortex_lower
+         * and vortex_compile. */
+        if (vtx_guard_page_is_available_inline()) {
+            sp.opcode = VTX_X86_SAFEPOINT_POLL_GUARD_PAGE;
+            sp.flags = VTX_INST_FLAG_IS_SAFEPOINT;
+        } else {
+            sp.opcode = VTX_X86_SAFEPOINT_POLL;
+            sp.flags = VTX_INST_FLAG_IS_GUARD | VTX_INST_FLAG_IS_SAFEPOINT;
+        }
         vtx_isel_emit_inst(block, sp, arena);
         break;
     }

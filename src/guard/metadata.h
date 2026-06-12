@@ -109,6 +109,21 @@ typedef struct {
     vtx_ewma_t          long_failure_rate_ewma;  /* longer-window EWMA (alpha=0.01) for strengthening */
     uint32_t            phase_context;            /* method call stack hash at time of last weakening */
     uint64_t            residence_count;          /* executions at current strength level */
+
+    /* Sampling-based profiling (zero-cost deopt).
+     * Instead of updating the EWMA on every guard execution (~5 cycles
+     * of FP math), only update every Nth execution. The counter
+     * decrements on each pass; when it hits zero, the full update
+     * runs and the counter resets. This reduces hot-path overhead
+     * from ~5 cycles/guard to ~1 cycle (decrement + predicted branch).
+     *
+     * The sample_interval is adaptive: stable guards (low failure rate)
+     * get longer intervals (less frequent updates), while guards near
+     * a transition threshold get shorter intervals (more responsive). */
+    uint32_t            sample_counter;           /* countdown to next EWMA update */
+    uint32_t            sample_interval;          /* reset value for sample_counter */
+    uint64_t            sampled_executions;       /* executions accumulated between samples */
+    uint64_t            sampled_failures;         /* failures accumulated between samples */
 } vtx_guard_meta_t;
 
 /* ========================================================================== */
@@ -185,6 +200,48 @@ vtx_guard_meta_t *vtx_guard_meta_register(vtx_guard_meta_table_t *table,
  *   - Sets strength_changed flag if a transition occurred
  */
 void vtx_guard_meta_update(vtx_guard_meta_t *meta, bool failed);
+
+/**
+ * Sampling-based guard metadata update (zero-cost deopt).
+ *
+ * Instead of updating the EWMA on every execution, only updates
+ * every sample_interval executions. Between samples, execution and
+ * failure counts are accumulated and batch-applied when the counter
+ * reaches zero.
+ *
+ * This reduces the hot-path cost from ~5 cycles (2 FP multiplies +
+ * counter increments + transition checks) to ~1 cycle (decrement +
+ * predicted branch). The branch is highly predictable since the
+ * counter rarely hits zero.
+ *
+ * The sample interval adapts based on guard stability:
+ *   - Stable guards (EWMA < 0.01%): interval = 4096
+ *   - Moderate guards (EWMA < 1%):   interval = 1024
+ *   - Unstable guards (EWMA > 1%):   interval = 256
+ *   - After a failure:               interval = min(interval, 256)
+ *
+ * @param meta    Guard metadata to update
+ * @param failed  Whether this execution resulted in a guard failure
+ */
+void vtx_guard_meta_update_sampled(vtx_guard_meta_t *meta, bool failed);
+
+/**
+ * Default sampling interval for guard metadata updates.
+ * Only update the EWMA every Nth execution to reduce hot-path overhead.
+ */
+#define VTX_GUARD_SAMPLE_INTERVAL_DEFAULT  1024
+
+/**
+ * Sampling interval for very stable guards (EWMA failure rate < 0.01%).
+ * These guards almost never fail, so we check less frequently.
+ */
+#define VTX_GUARD_SAMPLE_INTERVAL_STABLE   4096
+
+/**
+ * Sampling interval for unstable guards (EWMA failure rate > 1%).
+ * These guards are near transition thresholds and need responsive tracking.
+ */
+#define VTX_GUARD_SAMPLE_INTERVAL_UNSTABLE 256
 
 /**
  * Get the current strength level of a guard.

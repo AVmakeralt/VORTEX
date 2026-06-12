@@ -144,6 +144,12 @@ vtx_guard_meta_t *vtx_guard_meta_register(vtx_guard_meta_table_t *table,
     meta->phase_context = 0;
     meta->residence_count = 0;
 
+    /* Initialize sampling-based profiling (zero-cost deopt) */
+    meta->sample_counter = VTX_GUARD_SAMPLE_INTERVAL_DEFAULT;
+    meta->sample_interval = VTX_GUARD_SAMPLE_INTERVAL_DEFAULT;
+    meta->sampled_executions = 0;
+    meta->sampled_failures = 0;
+
     table->guard_count++;
 
     /* Update strength category count */
@@ -253,6 +259,170 @@ vtx_guard_strength_t vtx_guard_meta_strength(const vtx_guard_meta_t *meta)
 {
     if (meta == NULL) return VTX_GUARD_DEOPT_ALWAYS;
     return meta->strength;
+}
+
+/* ========================================================================== */
+/* Sampling-based update (zero-cost deopt)                                     */
+/* ========================================================================== */
+
+/**
+ * Choose an adaptive sampling interval based on the guard's current
+ * EWMA failure rate. Stable guards get longer intervals (less overhead),
+ * unstable guards get shorter intervals (more responsive transitions).
+ */
+static uint32_t choose_sample_interval(const vtx_guard_meta_t *meta)
+{
+    if (meta == NULL || !meta->failure_rate_ewma.initialized) {
+        return VTX_GUARD_SAMPLE_INTERVAL_DEFAULT;
+    }
+
+    double ewma = vtx_ewma_value(&meta->failure_rate_ewma);
+
+    if (ewma < VTX_GUARD_PREDICATE_THRESHOLD) {
+        /* Very stable: < 0.001% failure rate */
+        return VTX_GUARD_SAMPLE_INTERVAL_STABLE;
+    } else if (ewma < VTX_GUARD_WEAKEN_THRESHOLD) {
+        /* Moderate: < 1% failure rate */
+        return VTX_GUARD_SAMPLE_INTERVAL_DEFAULT;
+    } else {
+        /* Unstable: > 1% failure rate — need responsive tracking */
+        return VTX_GUARD_SAMPLE_INTERVAL_UNSTABLE;
+    }
+}
+
+void vtx_guard_meta_update_sampled(vtx_guard_meta_t *meta, bool failed)
+{
+    if (meta == NULL) return;
+
+    /* Accumulate execution and failure counts without touching the EWMA.
+     * This is the hot-path work: just two integer increments and a
+     * decrement of the sample counter. The branch on counter == 0
+     * is highly predictable (taken with probability 1/interval). */
+    if (meta->sampled_executions < UINT64_MAX) {
+        meta->sampled_executions++;
+    }
+    if (failed && meta->sampled_failures < UINT64_MAX) {
+        meta->sampled_failures++;
+    }
+
+    /* On failure, immediately shorten the sampling interval to ensure
+     * we detect instability quickly. This is critical: without it,
+     * a burst of failures could be missed for up to 4096 executions. */
+    if (failed) {
+        uint32_t current = meta->sample_interval;
+        if (current > VTX_GUARD_SAMPLE_INTERVAL_UNSTABLE) {
+            meta->sample_interval = VTX_GUARD_SAMPLE_INTERVAL_UNSTABLE;
+            /* Also shorten the current counter if it's far from zero */
+            if (meta->sample_counter > VTX_GUARD_SAMPLE_INTERVAL_UNSTABLE) {
+                meta->sample_counter = VTX_GUARD_SAMPLE_INTERVAL_UNSTABLE;
+            }
+        }
+    }
+
+    /* Decrement the sample counter. Only do the expensive EWMA update
+     * when the counter reaches zero. */
+    if (__builtin_expect(meta->sample_counter > 1, 1)) {
+        meta->sample_counter--;
+        return;
+    }
+
+    /* ---- Sample boundary: perform full update ---- */
+
+    /* Apply the accumulated executions and failures to the
+     * overall counters. */
+    uint64_t batch_exec = meta->sampled_executions;
+    uint64_t batch_fail = meta->sampled_failures;
+
+    /* Reset sampled accumulators */
+    meta->sampled_executions = 0;
+    meta->sampled_failures = 0;
+
+    /* Saturating increment of execution count */
+    if (meta->execution_count < UINT64_MAX - batch_exec) {
+        meta->execution_count += batch_exec;
+    } else {
+        meta->execution_count = UINT64_MAX;
+    }
+
+    /* Saturating increment of failure count */
+    if (batch_fail > 0) {
+        if (meta->failure_count < UINT64_MAX - batch_fail) {
+            meta->failure_count += batch_fail;
+        } else {
+            meta->failure_count = UINT64_MAX;
+        }
+
+        /* Update last failure timestamp using execution count as proxy */
+        meta->last_failure_timestamp = meta->execution_count;
+    }
+
+    /* Update the EWMA with the batched observation.
+     * We use vtx_ewma_update_counts to compute the failure rate
+     * from the batch and incorporate it into the EWMA in one shot.
+     * This is equivalent to running individual updates but with
+     * much less FP math overhead. */
+    if (batch_exec > 0) {
+        vtx_ewma_update_counts(&meta->failure_rate_ewma,
+                                batch_fail, batch_exec);
+        vtx_ewma_update_counts(&meta->long_failure_rate_ewma,
+                                batch_fail, batch_exec);
+    }
+
+    /* Increment residence count */
+    if (meta->residence_count < UINT64_MAX - batch_exec) {
+        meta->residence_count += batch_exec;
+    } else {
+        meta->residence_count = UINT64_MAX;
+    }
+
+    /* Check for strength transition using the EWMA failure rate. */
+    vtx_guard_strength_t old_strength = meta->strength;
+    vtx_guard_strength_t new_strength = old_strength;
+    double ewma_rate = vtx_ewma_value(&meta->failure_rate_ewma);
+
+    switch (old_strength) {
+    case VTX_GUARD_UNCONDITIONAL:
+        if (batch_fail > 0) {
+            new_strength = VTX_GUARD_FAST_CHECK;
+        }
+        break;
+
+    case VTX_GUARD_FAST_CHECK:
+        if (ewma_rate < VTX_GUARD_PREDICATE_THRESHOLD &&
+            meta->execution_count >= 10000) {
+            new_strength = VTX_GUARD_PREDICATED_CHECK;
+        } else if (ewma_rate > VTX_GUARD_WEAKEN_THRESHOLD) {
+            new_strength = VTX_GUARD_FULL_CHECK;
+        }
+        break;
+
+    case VTX_GUARD_PREDICATED_CHECK:
+        if (ewma_rate > VTX_GUARD_WEAKEN_THRESHOLD) {
+            new_strength = VTX_GUARD_FULL_CHECK;
+        }
+        break;
+
+    case VTX_GUARD_FULL_CHECK:
+        if (ewma_rate > VTX_GUARD_ABANDON_THRESHOLD) {
+            new_strength = VTX_GUARD_DEOPT_ALWAYS;
+        }
+        break;
+
+    case VTX_GUARD_DEOPT_ALWAYS:
+        break;
+    }
+
+    /* Apply transition */
+    if (new_strength != old_strength) {
+        meta->strength = new_strength;
+        meta->strength_changed = true;
+    }
+
+    /* Adapt the sampling interval based on the current failure rate.
+     * Stable guards get longer intervals (less overhead), unstable
+     * guards get shorter intervals (more responsive transitions). */
+    meta->sample_interval = choose_sample_interval(meta);
+    meta->sample_counter = meta->sample_interval;
 }
 
 vtx_guard_meta_t *vtx_guard_meta_lookup(vtx_guard_meta_table_t *table,

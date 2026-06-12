@@ -3,14 +3,39 @@
  *
  * Application threads check for pending installations and invalidations
  * at safe points. The fast path is a single atomic load.
+ *
+ * Zero-cost deopt extensions:
+ *   - Guard page polling: replaces CMP+JCC with a single MOV from a
+ *     memory-mapped page. The page is normally readable; when a safepoint
+ *     is needed, mprotect(PROT_NONE) triggers SIGSEGV → handler → deopt.
+ *   - Implicit null checks: SIGSEGV from null deref → handler → deopt.
+ *   - Predicated guard traps: INT3/UD2 from CMOVCC logic → SIGTRAP/SIGILL → handler → deopt.
  */
 
-#define _POSIX_C_SOURCE 199309L
+/* Enable GNU extensions for ucontext_t and SA_NODEFER on glibc */
+#define _GNU_SOURCE
 #include "compile/safepoint.h"
 #include "interp/dispatch.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <signal.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <ucontext.h>
+#include <errno.h>
+
+/** Global safepoint manager pointer for signal handler access */
+static vtx_safepoint_manager_t *vtx_global_safepoint_manager = NULL;
+
+/** Global flag for guard page availability (checked by isel without
+ * creating a circular dependency between vortex_lower and vortex_compile) */
+volatile int vtx_guard_page_available_flag = 0;
+
+vtx_safepoint_manager_t *vtx_get_safepoint_manager(void)
+{
+    return vtx_global_safepoint_manager;
+}
 
 /* ========================================================================== */
 /* Global safepoint flag                                                       */
@@ -42,6 +67,9 @@ int vtx_safepoint_init(vtx_safepoint_manager_t *manager,
     manager->install_tail = NULL;
     manager->invalidate_head = NULL;
     manager->invalidate_tail = NULL;
+
+    /* Save for signal handler access */
+    vtx_global_safepoint_manager = manager;
 
     if (pthread_mutex_init(&manager->install_mutex, NULL) != 0) {
         return -1;
@@ -344,4 +372,371 @@ int vtx_safepoint_request_invalidate(vtx_safepoint_manager_t *manager,
                                            __ATOMIC_RELAXED));
 
     return 0;
+}
+
+/* ========================================================================== */
+/* Guard page safepoint polling (zero-cost deopt)                              */
+/* ========================================================================== */
+
+/**
+ * Guard page for zero-cost safepoint polls.
+ *
+ * When armed (safepoint requested): page is PROT_NONE, any read triggers SIGSEGV.
+ * When disarmed (normal execution): page is PROT_READ, reads succeed silently.
+ *
+ * The page also contains a magic value at offset 0 that the SIGSEGV handler
+ * can check to distinguish guard page faults from null pointer dereferences.
+ */
+static uint8_t *vtx_guard_page_mem = NULL;
+static long     vtx_guard_page_size = 0;
+
+/** Saved signal handlers for restoration on destroy */
+static struct sigaction vtx_old_sigsegv_action;
+static struct sigaction vtx_old_sigtrap_action;
+static struct sigaction vtx_old_sigill_action;
+static bool vtx_signal_handlers_installed = false;
+
+/** Deopt table: maps code ranges to deopt metadata for SIGSEGV handler */
+static vtx_guard_page_deopt_entry_t vtx_deopt_table[VTX_GUARD_PAGE_DEOPT_TABLE_SIZE];
+static uint32_t vtx_deopt_table_count = 0;
+static pthread_mutex_t vtx_deopt_table_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/** Magic value at the start of the guard page (for fault disambiguation) */
+#define VTX_GUARD_PAGE_MAGIC 0xDEADBEEFCAFEBABEULL
+
+/* Forward declaration of the signal handler */
+static void vtx_guard_page_sigsegv_handler(int sig, siginfo_t *info, void *ucontext);
+static void vtx_guard_page_sigtrap_handler(int sig, siginfo_t *info, void *ucontext);
+
+/* ========================================================================== */
+/* SIGSEGV handler — guard page faults + implicit null checks                  */
+/* ========================================================================== */
+
+/**
+ * SIGSEGV handler for zero-cost deopt.
+ *
+ * This handler is invoked when:
+ *   1. A guard page poll triggers (page is PROT_NONE) -> safepoint deopt
+ *   2. An implicit null check fails (null deref) -> null check deopt
+ *   3. Any other SIGSEGV in JIT code -> forward to original handler
+ *
+ * The handler distinguishes between these cases by checking:
+ *   - Is the fault address within the guard page? -> safepoint
+ *   - Is the fault address < VTX_NULL_PAGE_LIMIT? -> implicit null check
+ *   - Is the faulting RIP within a registered code range? -> deopt
+ *   - Otherwise -> chain to the previous handler (crash)
+ */
+static void vtx_guard_page_sigsegv_handler(int sig, siginfo_t *info, void *ucontext)
+{
+    (void)sig;
+
+    uintptr_t fault_addr = (uintptr_t)info->si_addr;
+
+    /* Case 1: Guard page fault — safepoint requested.
+     * The fault address falls within the guard page's address range. */
+    if (vtx_guard_page_mem != NULL &&
+        fault_addr >= (uintptr_t)vtx_guard_page_mem &&
+        fault_addr < (uintptr_t)(vtx_guard_page_mem + vtx_guard_page_size)) {
+        /* Disarm the guard page immediately to prevent re-triggering.
+         * The safepoint handler will re-arm if needed. */
+        mprotect(vtx_guard_page_mem, (size_t)vtx_guard_page_size, PROT_READ);
+
+        /* Perform the safepoint check. This processes pending
+         * installations and invalidations. */
+        vtx_safepoint_manager_t *mgr = vtx_get_safepoint_manager();
+        if (mgr) {
+            vtx_safepoint_check(mgr, NULL);
+        }
+
+        /* Return from signal handler — the faulting instruction will be
+         * re-executed. Since we disarmed the page, the MOV will succeed
+         * this time. The loaded value is ignored by the JIT code. */
+        return;
+    }
+
+    /* Case 2: Implicit null check — fault in the low address range.
+     * This occurs when JIT code dereferences a null pointer without
+     * an explicit test+branch guard. The MMU catches the fault. */
+    if (fault_addr < VTX_NULL_PAGE_LIMIT) {
+        /* Find the compiled method that contains the faulting RIP.
+         * The RIP is in the ucontext's register state. */
+        ucontext_t *uc = (ucontext_t *)ucontext;
+        uintptr_t faulting_rip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
+
+        pthread_mutex_lock(&vtx_deopt_table_mutex);
+        for (uint32_t i = 0; i < vtx_deopt_table_count; i++) {
+            const vtx_guard_page_deopt_entry_t *entry = &vtx_deopt_table[i];
+            if (faulting_rip >= (uintptr_t)entry->code_start &&
+                faulting_rip < (uintptr_t)(entry->code_start + entry->code_size)) {
+                /* Found the method — perform deopt.
+                 * Look up the side table for the faulting PC to get
+                 * the frame state index, then call the deopt handler. */
+                pthread_mutex_unlock(&vtx_deopt_table_mutex);
+
+                /* Call the deopt runtime to transition to the interpreter.
+                 * The deopt handler will reconstruct the interpreter frame
+                 * from the side table entry at the faulting PC. */
+                extern void vtx_deopt_handler_stub(uint32_t, uint32_t);
+                uint32_t native_pc = (uint32_t)(faulting_rip -
+                    (uintptr_t)entry->code_start);
+                vtx_deopt_handler_stub(entry->side_table_index, native_pc);
+
+                /* vtx_deopt_handler_stub should not return — it transfers
+                 * to the interpreter. If it does return, the signal handler
+                 * returns and the faulting instruction is re-executed,
+                 * which will SIGSEGV again and fall through to the
+                 * original handler below. */
+                return;
+            }
+        }
+        pthread_mutex_unlock(&vtx_deopt_table_mutex);
+
+        /* Code range not found — could be a genuine null deref in
+         * non-JIT code. Fall through to the original handler. */
+    }
+
+    /* Case 3: Not a VORTEX-related fault — chain to the original handler.
+     * This preserves normal crash behavior for bugs in non-JIT code. */
+    if (vtx_old_sigsegv_action.sa_flags & SA_SIGINFO) {
+        if (vtx_old_sigsegv_action.sa_sigaction) {
+            vtx_old_sigsegv_action.sa_sigaction(sig, info, ucontext);
+            return;
+        }
+    } else if (vtx_old_sigsegv_action.sa_handler != SIG_DFL &&
+               vtx_old_sigsegv_action.sa_handler != SIG_IGN) {
+        vtx_old_sigsegv_action.sa_handler(sig);
+        return;
+    }
+
+    /* No previous handler — re-raise with default handler (crash) */
+    signal(SIGSEGV, SIG_DFL);
+    raise(SIGSEGV);
+}
+
+/* ========================================================================== */
+/* SIGTRAP handler — predicated guard traps (CMOVCC + INT3/UD2)               */
+/* ========================================================================== */
+
+/**
+ * SIGTRAP handler for predicated guard traps.
+ *
+ * When a PredicatedCheck guard fails, the CMOVCC logic places an INT3
+ * (0xCC) instruction at the guard point, which triggers SIGTRAP.
+ * This handler translates the trap into a deopt.
+ */
+static void vtx_guard_page_sigtrap_handler(int sig, siginfo_t *info, void *ucontext)
+{
+    (void)sig;
+    (void)info;
+
+    ucontext_t *uc = (ucontext_t *)ucontext;
+    uintptr_t faulting_rip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
+
+    /* The RIP points to the instruction AFTER the INT3 (0xCC).
+     * The INT3 is a 1-byte instruction, so the trapping instruction
+     * is at faulting_rip - 1. But the kernel sets RIP to the
+     * instruction following the INT3, so faulting_rip is actually
+     * correct for looking up the side table. */
+
+    /* Look up the code range in the deopt table */
+    pthread_mutex_lock(&vtx_deopt_table_mutex);
+    for (uint32_t i = 0; i < vtx_deopt_table_count; i++) {
+        const vtx_guard_page_deopt_entry_t *entry = &vtx_deopt_table[i];
+        if (faulting_rip >= (uintptr_t)entry->code_start &&
+            faulting_rip < (uintptr_t)(entry->code_start + entry->code_size)) {
+            pthread_mutex_unlock(&vtx_deopt_table_mutex);
+
+            extern void vtx_deopt_handler_stub(uint32_t, uint32_t);
+            uint32_t native_pc = (uint32_t)(faulting_rip -
+                (uintptr_t)entry->code_start);
+            vtx_deopt_handler_stub(entry->side_table_index, native_pc);
+            return;
+        }
+    }
+    pthread_mutex_unlock(&vtx_deopt_table_mutex);
+
+    /* Not a VORTEX guard trap — chain to original handler */
+    if (vtx_old_sigtrap_action.sa_flags & SA_SIGINFO) {
+        if (vtx_old_sigtrap_action.sa_sigaction) {
+            vtx_old_sigtrap_action.sa_sigaction(sig, info, ucontext);
+            return;
+        }
+    } else if (vtx_old_sigtrap_action.sa_handler != SIG_DFL &&
+               vtx_old_sigtrap_action.sa_handler != SIG_IGN) {
+        vtx_old_sigtrap_action.sa_handler(sig);
+        return;
+    }
+
+    signal(SIGTRAP, SIG_DFL);
+    raise(SIGTRAP);
+}
+
+/* ========================================================================== */
+/* Guard page lifecycle                                                        */
+/* ========================================================================== */
+
+int vtx_guard_page_init(void)
+{
+    /* Get page size */
+    vtx_guard_page_size = sysconf(_SC_PAGESIZE);
+    if (vtx_guard_page_size <= 0) vtx_guard_page_size = 4096;
+
+    /* Allocate a single guard page with mmap.
+     * Initially readable (PROT_READ) — JIT code can load from it freely. */
+    vtx_guard_page_mem = (uint8_t *)mmap(NULL, (size_t)vtx_guard_page_size,
+                                          PROT_READ | PROT_WRITE,
+                                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (vtx_guard_page_mem == MAP_FAILED) {
+        vtx_guard_page_mem = NULL;
+        return -1;
+    }
+
+    /* Write a magic value at the start of the page for disambiguation.
+     * This value is visible to JIT code when they load from the guard page,
+     * but the loaded value is always ignored. */
+    memset(vtx_guard_page_mem, 0, (size_t)vtx_guard_page_size);
+    uint64_t magic = VTX_GUARD_PAGE_MAGIC;
+    memcpy(vtx_guard_page_mem, &magic, sizeof(magic));
+
+    /* Now make the page read-only (JIT code only reads from it) */
+    if (mprotect(vtx_guard_page_mem, (size_t)vtx_guard_page_size, PROT_READ) != 0) {
+        munmap(vtx_guard_page_mem, (size_t)vtx_guard_page_size);
+        vtx_guard_page_mem = NULL;
+        return -1;
+    }
+
+    /* Install signal handlers for SIGSEGV (guard page + null checks)
+     * and SIGTRAP (predicated guard traps with INT3). */
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = vtx_guard_page_sigsegv_handler;
+    sa.sa_flags = SA_SIGINFO | SA_NODEFER;
+    sigemptyset(&sa.sa_mask);
+
+    if (sigaction(SIGSEGV, &sa, &vtx_old_sigsegv_action) != 0) {
+        munmap(vtx_guard_page_mem, (size_t)vtx_guard_page_size);
+        vtx_guard_page_mem = NULL;
+        return -1;
+    }
+
+    /* Install SIGTRAP handler for predicated guard INT3 traps */
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = vtx_guard_page_sigtrap_handler;
+    sa.sa_flags = SA_SIGINFO | SA_NODEFER;
+    sigemptyset(&sa.sa_mask);
+
+    if (sigaction(SIGTRAP, &sa, &vtx_old_sigtrap_action) != 0) {
+        /* Restore SIGSEGV handler on failure */
+        sigaction(SIGSEGV, &vtx_old_sigsegv_action, NULL);
+        munmap(vtx_guard_page_mem, (size_t)vtx_guard_page_size);
+        vtx_guard_page_mem = NULL;
+        return -1;
+    }
+
+    /* Save the old SIGILL handler too (for UD2 traps if used) */
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = vtx_guard_page_sigtrap_handler; /* reuse same handler */
+    sa.sa_flags = SA_SIGINFO | SA_NODEFER;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGILL, &sa, &vtx_old_sigill_action);
+    /* SIGILL install failure is non-fatal — UD2 is optional */
+
+    vtx_signal_handlers_installed = true;
+    vtx_deopt_table_count = 0;
+
+    /* Set the global availability flag so isel can use guard page polls */
+    __atomic_store_n(&vtx_guard_page_available_flag, 1, __ATOMIC_RELEASE);
+
+    return 0;
+}
+
+void vtx_guard_page_destroy(void)
+{
+    /* Clear the availability flag first */
+    __atomic_store_n(&vtx_guard_page_available_flag, 0, __ATOMIC_RELEASE);
+
+    if (vtx_guard_page_mem != NULL) {
+        munmap(vtx_guard_page_mem, (size_t)vtx_guard_page_size);
+        vtx_guard_page_mem = NULL;
+    }
+
+    /* Restore original signal handlers */
+    if (vtx_signal_handlers_installed) {
+        sigaction(SIGSEGV, &vtx_old_sigsegv_action, NULL);
+        sigaction(SIGTRAP, &vtx_old_sigtrap_action, NULL);
+        sigaction(SIGILL, &vtx_old_sigill_action, NULL);
+        vtx_signal_handlers_installed = false;
+    }
+
+    vtx_deopt_table_count = 0;
+}
+
+void *vtx_guard_page_address(void)
+{
+    return (void *)vtx_guard_page_mem;
+}
+
+int vtx_guard_page_arm(void)
+{
+    if (vtx_guard_page_mem == NULL) return -1;
+
+    if (mprotect(vtx_guard_page_mem, (size_t)vtx_guard_page_size, PROT_NONE) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+int vtx_guard_page_disarm(void)
+{
+    if (vtx_guard_page_mem == NULL) return -1;
+
+    if (mprotect(vtx_guard_page_mem, (size_t)vtx_guard_page_size, PROT_READ) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+bool vtx_guard_page_is_available(void)
+{
+    return vtx_guard_page_mem != NULL;
+}
+
+int vtx_guard_page_register_code(const uint8_t *code_start, uint32_t code_size,
+                                   uint32_t method_id, uint32_t side_table_index)
+{
+    pthread_mutex_lock(&vtx_deopt_table_mutex);
+
+    if (vtx_deopt_table_count >= VTX_GUARD_PAGE_DEOPT_TABLE_SIZE) {
+        pthread_mutex_unlock(&vtx_deopt_table_mutex);
+        return -1;
+    }
+
+    vtx_guard_page_deopt_entry_t *entry =
+        &vtx_deopt_table[vtx_deopt_table_count];
+    entry->code_start = code_start;
+    entry->code_size = code_size;
+    entry->method_id = method_id;
+    entry->side_table_index = side_table_index;
+    vtx_deopt_table_count++;
+
+    pthread_mutex_unlock(&vtx_deopt_table_mutex);
+    return 0;
+}
+
+int vtx_guard_page_unregister_code(const uint8_t *code_start)
+{
+    pthread_mutex_lock(&vtx_deopt_table_mutex);
+
+    for (uint32_t i = 0; i < vtx_deopt_table_count; i++) {
+        if (vtx_deopt_table[i].code_start == code_start) {
+            /* Swap with last entry and shrink */
+            vtx_deopt_table[i] = vtx_deopt_table[vtx_deopt_table_count - 1];
+            vtx_deopt_table_count--;
+            pthread_mutex_unlock(&vtx_deopt_table_mutex);
+            return 0;
+        }
+    }
+
+    pthread_mutex_unlock(&vtx_deopt_table_mutex);
+    return -1;
 }

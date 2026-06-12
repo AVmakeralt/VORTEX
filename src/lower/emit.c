@@ -712,6 +712,71 @@ int vtx_x86_emit_safepoint_poll(vtx_x86_emit_t *e)
 }
 
 /* ========================================================================== */
+/* Guard page safepoint poll emission (zero-cost deopt)                        */
+/* ========================================================================== */
+
+int vtx_x86_emit_safepoint_poll_guard_page(vtx_x86_emit_t *e)
+{
+    if (!e) return -1;
+
+    /* Emit:
+     *   movq rax, [rip + disp32]     ; 7 bytes
+     *
+     * MOV r64, r/m64 with RIP-relative addressing:
+     *   REX.W (0x48) + 0x8B + ModR/M(00, rax(0), 101) + disp32
+     *   0x48 0x8B 0x05 dd dd dd dd
+     *
+     * When the guard page is readable, this is a normal load — the
+     * value in rax is ignored. When the guard page is PROT_NONE,
+     * this triggers SIGSEGV, which the signal handler catches and
+     * processes as a safepoint.
+     *
+     * Advantages over CMP+JCC:
+     *   - 7 bytes vs. 14 bytes (50% smaller)
+     *   - 1 uop vs. 2 uops (CMP+JCC)
+     *   - No branch prediction entry consumed
+     *   - No compare, no conditional branch
+     *   - Same latency as a normal load on the hot path
+     *
+     * The displacement is a placeholder (0); a VTX_RELOC_RIP_REL32
+     * external relocation is recorded so it gets patched at code
+     * install time when the final code address is known.
+     * Use stub_id -6 as a special marker for guard page relocations.
+     */
+
+    /* Ensure buffer has space: 7 bytes */
+    if (vtx_x86_emit_ensure(e, 7) != 0) return -1;
+
+    /* ---- Emit MOV rax, [rip + disp32] ---- */
+    uint32_t mov_disp_offset = vtx_x86_emit_position(e) + 3; /* disp32 starts at byte 3 */
+
+    emit_byte(e, 0x48);  /* REX.W */
+    emit_byte(e, 0x8B);  /* MOV r64, r/m64 */
+    emit_byte(e, 0x05);  /* ModR/M: mod=00, reg=0 (RAX), r/m=5 (RIP-relative) */
+    emit_dword(e, 0);    /* placeholder disp32 — will be patched by relocation */
+
+    /* Record RIP-relative relocation for the MOV's displacement.
+     * Marked as external because the code's final address in the code
+     * cache is not known at emit time. The target is the address of
+     * the guard page (vtx_guard_page_address()).
+     * Use stub_id -6 as a special external relocation ID that the
+     * code install step will resolve to vtx_guard_page_address(). */
+    if (e->relocs && e->reloc_arena) {
+        uint32_t reloc_idx = vtx_reloc_add(e->relocs, VTX_RELOC_RIP_REL32,
+                                            mov_disp_offset,
+                                            0,  /* target_offset (N/A for external) */
+                                            0,  /* target_addr: resolved at install time */
+                                            -6, /* stub_id: special marker for guard_page */
+                                            0, e->reloc_arena);
+        if (reloc_idx == UINT32_MAX) return -1;
+        /* Mark as external so it gets re-applied at install time */
+        e->relocs->entries[reloc_idx].is_external = true;
+    }
+
+    return 0;
+}
+
+/* ========================================================================== */
 /* Prologue / Epilogue                                                        */
 /* ========================================================================== */
 
@@ -1977,6 +2042,15 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
     case VTX_X86_SAFEPOINT_POLL:
         /* Emit safepoint poll: cmpq [vtx_safepoint_flag], 0; jne deopt_stub */
         if (vtx_x86_emit_safepoint_poll(e) != 0) {
+            return -1;
+        }
+        break;
+
+    case VTX_X86_SAFEPOINT_POLL_GUARD_PAGE:
+        /* Zero-cost guard page poll: movq rax, [guard_page]
+         * No CMP, no JCC — just a single load from a page that
+         * becomes PROT_NONE when a safepoint is needed. */
+        if (vtx_x86_emit_safepoint_poll_guard_page(e) != 0) {
             return -1;
         }
         break;

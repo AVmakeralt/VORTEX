@@ -341,6 +341,34 @@ void vtx_x86_emit_movsd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
  */
 int vtx_x86_emit_safepoint_poll(vtx_x86_emit_t *e);
 
+/**
+ * Emit a zero-cost guard page safepoint poll at a loop back-edge.
+ * Replaces the CMP+JCC approach with a single MOV load.
+ *
+ * When the guard page is readable (normal operation), the MOV completes
+ * silently — zero overhead beyond a single load instruction. When a
+ * safepoint is requested, the page is mprotected to PROT_NONE, causing
+ * the MOV to SIGSEGV. The signal handler catches the fault, processes
+ * the safepoint, re-arms the page, and returns.
+ *
+ * Emitted code:
+ *   movq rax, [rip + disp32]    ; 7 bytes (REX.W + 8B + ModR/M + disp32)
+ *   ; loaded value is discarded — rax is a scratch register
+ *
+ * Total: 7 bytes (vs. 14 bytes for CMP+JCC). No compare, no branch,
+ * no branch-prediction entry consumed.
+ *
+ * A VTX_RELOC_RIP_REL32 external relocation is recorded so the
+ * displacement is patched at code install time to point to the
+ * guard page. The special stub_id -6 is used to mark this as a
+ * guard page relocation (distinct from -5 which is the flag-based
+ * safepoint poll).
+ *
+ * @param e  Emitter context (must have relocs initialized)
+ * @return   0 on success, -1 on failure
+ */
+int vtx_x86_emit_safepoint_poll_guard_page(vtx_x86_emit_t *e);
+
 /* ========================================================================== */
 /* Function prologue/epilogue                                                  */
 /* ========================================================================== */

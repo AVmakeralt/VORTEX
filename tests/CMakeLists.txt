@@ -66,6 +66,32 @@ target_link_libraries(test_bugfixes PRIVATE
 )
 add_test(NAME test_bugfixes COMMAND test_bugfixes)
 
+# test_zero_cost_deopt — zero-cost deopt feature verification
+add_executable(test_zero_cost_deopt
+    unit/test_zero_cost_deopt.c
+    ${CMAKE_SOURCE_DIR}/src/runtime_stubs.c
+)
+target_link_libraries(test_zero_cost_deopt PRIVATE
+    vortex_test_framework
+    -Wl,--start-group
+    vortex_guard
+    vortex_compile
+    vortex_lower
+    vortex_codecache
+    vortex_deopt
+    vortex_ir
+    vortex_interp
+    vortex_runtime
+    vortex_profile
+    vortex_baseline
+    vortex_inliner
+    vortex_pea
+    -Wl,--end-group
+    m
+    pthread
+)
+add_test(NAME test_zero_cost_deopt COMMAND test_zero_cost_deopt)
+
 # ---- Integration tests ----
 
 # test_interp_basics
