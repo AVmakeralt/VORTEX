@@ -39,6 +39,11 @@ static int64_t task_priority_cached(const vtx_compile_task_t *task,
 {
     VTX_ASSERT(task != NULL, "task must not be NULL");
 
+    /* If an explicit priority override is set, use it */
+    if (task->priority > 0) {
+        return task->priority;
+    }
+
     int64_t priority = 0;
 
     /* Tier weight: dominant factor */

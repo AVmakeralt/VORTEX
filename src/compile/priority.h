@@ -35,6 +35,7 @@ typedef struct {
     uint32_t          method_id;     /* method to compile */
     vtx_compile_tier_t tier;         /* compilation tier */
     uint32_t          heat;          /* method invocation count (profiling) */
+    int64_t           priority;      /* explicit priority override (0 = compute from tier/heat) */
     uint64_t          submit_time;   /* timestamp when submitted (nanoseconds) */
     void            (*task_fn)(void *arg); /* compilation function */
     void             *arg;           /* argument to task_fn */
@@ -113,6 +114,21 @@ uint32_t vtx_pq_count(const vtx_priority_queue_t *pq);
  * Check if the queue is empty.
  */
 bool vtx_pq_is_empty(const vtx_priority_queue_t *pq);
+
+/* ========================================================================== */
+/* Priority constants                                                          */
+/* ========================================================================== */
+
+/**
+ * Priority levels for compilation tasks.
+ * Higher value = higher priority.
+ * When priority is 0, the effective priority is computed from
+ * tier/heat/wait_time by vtx_pq_task_priority().
+ * When priority > 0, it overrides the computed priority.
+ */
+#define VTX_COMPILE_PRIORITY_LOW    100   /* proactive/background compilation */
+#define VTX_COMPILE_PRIORITY_NORMAL 1000  /* default on-demand compilation */
+#define VTX_COMPILE_PRIORITY_HIGH   5000  /* urgent: drift, deopt storm, hot method */
 
 /* ========================================================================== */
 /* Priority computation                                                        */

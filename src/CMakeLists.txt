@@ -148,9 +148,10 @@ add_library(vortex_compile STATIC
     compile/pipeline.c
     compile/phase_react.c
     compile/spec_versioning.c
+    compile/orchestrator.c
 )
 target_include_directories(vortex_compile PUBLIC ${VORTEX_INCLUDE_DIRS})
-target_link_libraries(vortex_compile PUBLIC vortex_ir vortex_pea vortex_inliner vortex_lower vortex_deopt vortex_codecache Threads::Threads)
+target_link_libraries(vortex_compile PUBLIC vortex_ir vortex_pea vortex_inliner vortex_lower vortex_deopt vortex_codecache vortex_guard vortex_profile $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota> Threads::Threads)
 
 find_package(Threads REQUIRED)
 
@@ -172,7 +173,6 @@ target_link_libraries(vortex_guard PUBLIC vortex_ir vortex_deopt vortex_pea)
 if(VORTEX_ENABLE_SOTA)
 add_library(vortex_sota STATIC
     sota/phase.c
-    sota/alloc_graph.c
     sota/recomp.c
     sota/loop_spec.c
     sota/fdi.c

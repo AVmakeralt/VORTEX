@@ -279,6 +279,14 @@ bool vtx_deoptless_install(vtx_deoptless_version_t *version)
     /* Compute the address of the 4-byte displacement in the JCC */
     uint8_t *disp_pos = version->code_start + version->guard_branch_offset;
 
+    /* D2 fix: Save the original JCC displacement BEFORE patching.
+     * This is critical for eviction: when the version is evicted, we
+     * must restore the JCC to point back to the deopt stub. Without
+     * saving the original displacement, we'd leave a dangling pointer
+     * to freed memory (use-after-free). */
+    volatile int32_t *read_addr = (volatile int32_t *)disp_pos;
+    version->original_jcc_disp = *read_addr;
+
     /* Compute the new relative displacement */
     intptr_t target = (intptr_t)version->continuation_code;
     intptr_t branch_end = (intptr_t)(disp_pos + 4);
@@ -298,6 +306,9 @@ bool vtx_deoptless_install(vtx_deoptless_version_t *version)
      * reordering or optimizing away the write. */
     volatile int32_t *patch_addr = (volatile int32_t *)disp_pos;
     *patch_addr = new_disp;
+
+    /* Mark as patched so eviction knows to restore */
+    version->is_patched = true;
 
     /* Flush the instruction cache: on x86-64, coherent caches mean we
      * only need a compiler barrier to ensure the write is visible.
@@ -403,6 +414,10 @@ vtx_deoptless_version_t *vtx_deoptless_add_version(
     v->graph = NULL;  /* graph is set separately after compilation */
     v->parent_version = table->versions;  /* current newest is our parent */
 
+    /* D2 eviction fix: initialize JCC patch tracking */
+    v->original_jcc_disp = 0;
+    v->is_patched = false;
+
     /* Prepend to linked list (newest first) */
     v->next_version = table->versions;
     table->versions = v;
@@ -444,16 +459,31 @@ void vtx_deoptless_evict_oldest(vtx_deoptless_table_t *table)
     *prev_ptr = NULL;
     table->version_count--;
 
-    /* D2 fix: Before freeing, patch the guard's JCC back to the original
-     * deopt stub. This prevents use-after-free: the guard's failure branch
-     * must no longer point to the continuation code we're about to free.
+    /* D2 fix: Unpatch the guard's JCC back to the original deopt stub.
      *
-     * We need the original deopt stub address to patch back to. We can
-     * compute it from the original code and the guard's branch offset.
-     * Since we don't have direct access to the guard's branch offset here,
-     * we mark the version as evicted and set continuation_code to NULL.
-     * The runtime must check for NULL before following a continuation
-     * pointer, and fall back to the standard deopt path. */
+     * When a deoptless version was installed, we patched the guard's JCC
+     * to point to the continuation code instead of the deopt stub. Now
+     * that we're evicting the version, we must restore the original JCC
+     * displacement so the guard branches back to the deopt stub. Without
+     * this, the JCC would point to freed memory (use-after-free).
+     *
+     * The original displacement was saved in vtx_deoptless_install().
+     * We restore it here, then flush the instruction cache.
+     */
+    if (oldest->is_patched && oldest->code_start != NULL &&
+        oldest->guard_branch_offset != 0) {
+        uint8_t *disp_pos = oldest->code_start + oldest->guard_branch_offset;
+        volatile int32_t *patch_addr = (volatile int32_t *)disp_pos;
+        *patch_addr = oldest->original_jcc_disp;
+
+        /* Flush instruction cache after restoring */
+        __asm__ __volatile__("" : : : "memory");
+#if defined(__GNUC__) && !defined(__x86_64__)
+        __builtin___clear_cache((char *)disp_pos, (char *)(disp_pos + 4));
+#endif
+        oldest->is_patched = false;
+    }
+
     oldest->continuation_code = NULL;
     oldest->continuation_size = 0;
 

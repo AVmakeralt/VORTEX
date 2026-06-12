@@ -77,6 +77,7 @@
 #include "compile/safepoint.h"
 #include "compile/version.h"
 #include "compile/pipeline.h"
+#include "compile/orchestrator.h"
 #include "ir/licm.h"
 #include "ir/bounds_check.h"
 #include "guard/metadata.h"
@@ -85,7 +86,6 @@
 #include "guard/merge.h"
 #ifdef VORTEX_ENABLE_SOTA
 #include "sota/phase.h"
-#include "sota/alloc_graph.h"
 #include "sota/recomp.h"
 #include "sota/loop_spec.h"
 #include "sota/fdi.h"

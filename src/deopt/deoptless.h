@@ -68,6 +68,17 @@ struct vtx_deoptless_version {
     uint8_t                *code_start;        /* base address of the original compiled code */
     vtx_graph_t         *graph;            /* SoN graph snapshot for this version (for incremental continuation) */
     vtx_deoptless_version_t *parent_version; /* parent version that this continues from */
+
+    /* D2 eviction fix: save the original JCC displacement so we can
+     * restore it when the version is evicted. Without this, evicting
+     * a version leaves the JCC pointing at freed memory (use-after-free).
+     *
+     * When vtx_deoptless_install() patches the JCC to point to the
+     * continuation code, it first saves the original 4-byte displacement
+     * here. When vtx_deoptless_evict_oldest() needs to unpatch, it
+     * restores this value, making the JCC point back to the deopt stub. */
+    int32_t                 original_jcc_disp; /* original JCC rel32 displacement before patching */
+    bool                    is_patched;        /* true if the JCC has been patched to continuation */
 };
 
 /* ========================================================================== */
