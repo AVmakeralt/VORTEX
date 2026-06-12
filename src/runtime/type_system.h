@@ -163,6 +163,20 @@ int vtx_type_add_interface(vtx_type_system_t *ts,
                            vtx_typeid_t impl_type,
                            vtx_typeid_t interface_type);
 
+/**
+ * RT-13 fix: Update the vtable entry for a method after it has been compiled.
+ * Must be called when a method's compiled_code pointer changes (e.g., after JIT
+ * compilation) so that virtual dispatch through the vtable uses the new code.
+ *
+ * @param ts        Type system
+ * @param typeid    Type that owns the method
+ * @param method    Pointer to the method descriptor (must be in the type's methods array)
+ * @return          0 on success, -1 on failure
+ */
+int vtx_type_update_vtable(vtx_type_system_t *ts,
+                             vtx_typeid_t typeid,
+                             const vtx_method_desc_t *method);
+
 /* ========================================================================== */
 /* Inline cache                                                                */
 /* ========================================================================== */

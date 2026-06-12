@@ -223,9 +223,13 @@ vtx_typeid_t vtx_type_register(vtx_type_system_t *ts,
                     for (uint32_t j = 0; j < parent->method_count; j++) {
                         if (strcmp(parent->methods[j].name, methods[i].name) == 0 &&
                             parent->methods[j].is_virtual) {
-                            /* Override: use the parent's vtable slot */
+                            /* Override: use the parent's vtable slot.
+                             * RT-10 fix: set the vtable entry to the child's
+                             * implementation (compiled_code), not NULL. If the
+                             * method isn't compiled yet, we still set it to NULL
+                             * and update it later when compilation happens. */
                             methods[i].vtable_index = parent->methods[j].vtable_index;
-                            td->vtable[methods[i].vtable_index] = NULL; /* placeholder */
+                            td->vtable[methods[i].vtable_index] = methods[i].compiled_code;
                             overridden = true;
                             break;
                         }
@@ -233,6 +237,8 @@ vtx_typeid_t vtx_type_register(vtx_type_system_t *ts,
                 }
                 if (!overridden) {
                     methods[i].vtable_index = vtable_idx;
+                    /* RT-13 fix: populate vtable with compiled_code */
+                    td->vtable[vtable_idx] = methods[i].compiled_code;
                     vtable_idx++;
                 }
             }
@@ -437,6 +443,31 @@ int vtx_type_add_interface(vtx_type_system_t *ts,
     td->interface_count = new_count;
 
     return 0;
+}
+
+/* ========================================================================== */
+/* Vtable update                                                               */
+/* ========================================================================== */
+
+int vtx_type_update_vtable(vtx_type_system_t *ts,
+                             vtx_typeid_t typeid,
+                             const vtx_method_desc_t *method)
+{
+    VTX_ASSERT(ts != NULL, "type system must not be NULL");
+    VTX_ASSERT(method != NULL, "method must not be NULL");
+
+    if (typeid >= ts->type_count) return -1;
+
+    vtx_type_desc_t *td = &ts->types[typeid];
+
+    /* If this method is virtual and has a vtable index, update the entry */
+    if (method->is_virtual && method->vtable_index != 0xFFFFFFFF &&
+        method->vtable_index < td->vtable_size && td->vtable != NULL) {
+        td->vtable[method->vtable_index] = method->compiled_code;
+        return 0;
+    }
+
+    return -1;
 }
 
 /* ========================================================================== */

@@ -178,14 +178,12 @@ bool vtx_sota_fdi_evaluate(vtx_sota_fdi_t *fdi, uint32_t method_id)
     bool has_unprofitable = false;
 
     if (fdi->feedback != NULL) {
-        /* Scan feedback decisions for this method's call sites */
+        /* BS-3 fix: Scan feedback decisions ONLY for this method's call sites */
         for (uint32_t i = 0; i < fdi->feedback->decision_count; i++) {
             const vtx_inline_decision_t *dec = &fdi->feedback->decisions[i];
 
-            /* We need to know which decisions belong to this method.
-             * For now, we check if the decision is unprofitable and
-             * the call site was inlined. A more precise implementation
-             * would track method_id in the feedback decisions. */
+            /* Skip decisions for other methods */
+            if (dec->method_id != method_id) continue;
             if (dec->inlined && dec->outcome == VTX_OUTCOME_UNPROFITABLE) {
                 has_unprofitable = true;
 
@@ -326,11 +324,14 @@ void vtx_sota_fdi_record_execution(vtx_sota_fdi_t *fdi, uint32_t method_id)
         rec->total_executions++;
     }
 
-    /* Also record in the feedback system for any tracked call sites */
+    /* Also record in the feedback system for this method's tracked call sites.
+     * BS-4 fix: Only increment executions for call sites belonging to this method. */
     if (fdi->feedback != NULL) {
         for (uint32_t i = 0; i < fdi->feedback->decision_count; i++) {
             vtx_inline_decision_t *dec = &fdi->feedback->decisions[i];
-            vtx_feedback_increment_executions(fdi->feedback, dec->call_site_id);
+            if (dec->method_id == method_id) {
+                vtx_feedback_increment_executions(fdi->feedback, dec->call_site_id);
+            }
         }
     }
 }
@@ -410,6 +411,8 @@ void vtx_sota_fdi_record_performance(vtx_sota_fdi_t *fdi,
         if (fdi->feedback != NULL) {
             for (uint32_t i = 0; i < fdi->feedback->decision_count; i++) {
                 const vtx_inline_decision_t *dec = &fdi->feedback->decisions[i];
+                /* BS-3 fix: only consider decisions for this method */
+                if (dec->method_id != method_id) continue;
                 if (dec->inlined) {
                     add_no_inline_site(rec, dec->call_site_id);
                 }
@@ -427,6 +430,8 @@ void vtx_sota_fdi_record_performance(vtx_sota_fdi_t *fdi,
         if (fdi->feedback != NULL) {
             for (uint32_t i = 0; i < fdi->feedback->decision_count; i++) {
                 const vtx_inline_decision_t *dec = &fdi->feedback->decisions[i];
+                /* BS-3 fix: only consider decisions for this method */
+                if (dec->method_id != method_id) continue;
                 if (dec->inlined && dec->deopt_count > 0) {
                     double site_deopt_rate = (dec->execution_count > 0)
                         ? (double)dec->deopt_count / (double)dec->execution_count
@@ -449,6 +454,8 @@ void vtx_sota_fdi_record_performance(vtx_sota_fdi_t *fdi,
 
         for (uint32_t i = 0; i < fdi->feedback->decision_count; i++) {
             const vtx_inline_decision_t *dec = &fdi->feedback->decisions[i];
+            /* BS-3 fix: only consider decisions for this method */
+            if (dec->method_id != method_id) continue;
             if (dec->inlined) {
                 vtx_feedback_record_outcome(fdi->feedback, dec->call_site_id,
                                              overall_profitable);

@@ -125,7 +125,12 @@ static vtx_lattice_val_t evaluate_node(vtx_node_opcode_t opcode,
         if (input_count < 2) return vtx_lattice_bottom();
         if (inputs[0].tag == VTX_LATTICE_CONSTANT && inputs[1].tag == VTX_LATTICE_CONSTANT) {
             if (inputs[0].value.kind == VTX_TYPE_Int && inputs[1].value.kind == VTX_TYPE_Int) {
-                return vtx_lattice_const_int(inputs[0].value.as.int_val + inputs[1].value.as.int_val);
+                /* IR-8 fix: use unsigned arithmetic to avoid signed overflow UB */
+                int64_t a_val = inputs[0].value.as.int_val;
+                int64_t b_val = inputs[1].value.as.int_val;
+                uint64_t ua = (uint64_t)a_val;
+                uint64_t ub = (uint64_t)b_val;
+                return vtx_lattice_const_int((int64_t)(ua + ub));
             }
             if (inputs[0].value.kind == VTX_TYPE_Float && inputs[1].value.kind == VTX_TYPE_Float) {
                 return vtx_lattice_const_float(inputs[0].value.as.float_val + inputs[1].value.as.float_val);
@@ -142,7 +147,12 @@ static vtx_lattice_val_t evaluate_node(vtx_node_opcode_t opcode,
         if (input_count < 2) return vtx_lattice_bottom();
         if (inputs[0].tag == VTX_LATTICE_CONSTANT && inputs[1].tag == VTX_LATTICE_CONSTANT) {
             if (inputs[0].value.kind == VTX_TYPE_Int && inputs[1].value.kind == VTX_TYPE_Int) {
-                return vtx_lattice_const_int(inputs[0].value.as.int_val - inputs[1].value.as.int_val);
+                /* IR-8 fix: use unsigned arithmetic to avoid signed overflow UB */
+                int64_t a_val = inputs[0].value.as.int_val;
+                int64_t b_val = inputs[1].value.as.int_val;
+                uint64_t ua = (uint64_t)a_val;
+                uint64_t ub = (uint64_t)b_val;
+                return vtx_lattice_const_int((int64_t)(ua - ub));
             }
             if (inputs[0].value.kind == VTX_TYPE_Float && inputs[1].value.kind == VTX_TYPE_Float) {
                 return vtx_lattice_const_float(inputs[0].value.as.float_val - inputs[1].value.as.float_val);
@@ -158,7 +168,12 @@ static vtx_lattice_val_t evaluate_node(vtx_node_opcode_t opcode,
         if (input_count < 2) return vtx_lattice_bottom();
         if (inputs[0].tag == VTX_LATTICE_CONSTANT && inputs[1].tag == VTX_LATTICE_CONSTANT) {
             if (inputs[0].value.kind == VTX_TYPE_Int && inputs[1].value.kind == VTX_TYPE_Int) {
-                return vtx_lattice_const_int(inputs[0].value.as.int_val * inputs[1].value.as.int_val);
+                /* IR-8 fix: use unsigned arithmetic to avoid signed overflow UB */
+                int64_t a_val = inputs[0].value.as.int_val;
+                int64_t b_val = inputs[1].value.as.int_val;
+                uint64_t ua = (uint64_t)a_val;
+                uint64_t ub = (uint64_t)b_val;
+                return vtx_lattice_const_int((int64_t)(ua * ub));
             }
             if (inputs[0].value.kind == VTX_TYPE_Float && inputs[1].value.kind == VTX_TYPE_Float) {
                 return vtx_lattice_const_float(inputs[0].value.as.float_val * inputs[1].value.as.float_val);
@@ -275,7 +290,9 @@ static vtx_lattice_val_t evaluate_node(vtx_node_opcode_t opcode,
         if (input_count < 1) return vtx_lattice_bottom();
         if (inputs[0].tag == VTX_LATTICE_CONSTANT) {
             if (inputs[0].value.kind == VTX_TYPE_Int) {
-                return vtx_lattice_const_int(-inputs[0].value.as.int_val);
+                /* IR-8 fix: use unsigned arithmetic to avoid signed overflow UB */
+                uint64_t ua = (uint64_t)inputs[0].value.as.int_val;
+                return vtx_lattice_const_int((int64_t)(~ua + 1));
             }
             if (inputs[0].value.kind == VTX_TYPE_Float) {
                 return vtx_lattice_const_float(-inputs[0].value.as.float_val);
@@ -622,7 +639,19 @@ uint32_t vtx_constant_prop_run(vtx_graph_t *graph)
                 }
             }
 
-            /* Mark the original node as dead */
+            /* IR-7 fix: Disconnect inputs before marking dead.
+             * Without this, the input nodes' output_count remains
+             * inflated, which can prevent them from being cleaned
+             * up by later DCE passes. */
+            for (uint32_t j = 0; j < node->input_count; j++) {
+                if (node->inputs[j] != VTX_NODEID_INVALID && node->inputs[j] < nt->count) {
+                    vtx_node_t *producer = &nt->nodes[node->inputs[j]];
+                    if (producer->output_count > 0) {
+                        producer->output_count--;
+                    }
+                }
+            }
+            node->input_count = 0;
             node->dead = true;
             node->output_count = 0;
             simplified++;
@@ -634,6 +663,16 @@ uint32_t vtx_constant_prop_run(vtx_graph_t *graph)
             if (vtx_nf_has(node->flags, VTX_NF_DATA) &&
                 !vtx_nf_has(node->flags, VTX_NF_SIDE_EFFECT) &&
                 !vtx_nf_has(node->flags, VTX_NF_CONTROL)) {
+                /* IR-7 fix: disconnect inputs on dead nodes */
+                for (uint32_t j = 0; j < node->input_count; j++) {
+                    if (node->inputs[j] != VTX_NODEID_INVALID && node->inputs[j] < nt->count) {
+                        vtx_node_t *producer = &nt->nodes[node->inputs[j]];
+                        if (producer->output_count > 0) {
+                            producer->output_count--;
+                        }
+                    }
+                }
+                node->input_count = 0;
                 node->dead = true;
                 simplified++;
             }

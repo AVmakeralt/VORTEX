@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <time.h>
 
 /* ========================================================================== */
 /* Lifecycle                                                                   */
@@ -74,6 +75,7 @@ static int32_t feedback_find(const vtx_inline_feedback_t *feedback,
 
 int vtx_feedback_record_decision(vtx_inline_feedback_t *feedback,
                                   uint64_t call_site_id,
+                                  uint32_t method_id,
                                   const vtx_inline_features_t *features,
                                   bool inlined)
 {
@@ -84,12 +86,25 @@ int vtx_feedback_record_decision(vtx_inline_feedback_t *feedback,
     if (existing >= 0) {
         /* Update the existing decision with new features and decision */
         vtx_inline_decision_t *dec = &feedback->decisions[existing];
+
+        /* BS-5 fix: decrement old classification counter before resetting */
+        if (dec->outcome == VTX_OUTCOME_PROFITABLE) {
+            feedback->profitable_count--;
+        } else if (dec->outcome == VTX_OUTCOME_UNPROFITABLE) {
+            feedback->unprofitable_count--;
+        } else {
+            feedback->unknown_count--;
+        }
+
         dec->features = *features;
         dec->inlined = inlined;
         dec->outcome = VTX_OUTCOME_UNKNOWN;
         dec->execution_count = 0;
         dec->deopt_count = 0;
-        /* Keep the old decision's unknown_count classification updated */
+        /* BS-20 fix: set the decision timestamp */
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        dec->decision_timestamp = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
         feedback->unknown_count++;
         return 0;
     }
@@ -104,12 +119,18 @@ int vtx_feedback_record_decision(vtx_inline_feedback_t *feedback,
     memset(dec, 0, sizeof(*dec));
 
     dec->call_site_id = call_site_id;
+    dec->method_id = method_id; /* BS-3/BS-4 fix: store method_id */
     dec->features = *features;
     dec->inlined = inlined;
     dec->outcome = VTX_OUTCOME_UNKNOWN;
     dec->execution_count = 0;
     dec->deopt_count = 0;
-    dec->decision_timestamp = 0; /* caller should set this if needed */
+    /* BS-20 fix: set the decision timestamp */
+    {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        dec->decision_timestamp = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+    }
 
     feedback->decision_count++;
     feedback->unknown_count++;

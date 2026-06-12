@@ -48,12 +48,13 @@ typedef enum {
 
 typedef struct {
     uint64_t                call_site_id;  /* unique call site identifier */
+    uint32_t                method_id;     /* BS-3/BS-4 fix: method this call site belongs to */
     vtx_inline_features_t   features;      /* feature vector at decision time */
     bool                    inlined;       /* was the decision to inline? */
     vtx_inline_outcome_t    outcome;       /* observed outcome */
     uint64_t                execution_count; /* executions since decision */
     uint64_t                deopt_count;     /* deopts at this site since decision */
-    uint64_t                decision_timestamp; /* when the decision was made (ns) */
+    uint64_t                decision_timestamp; /* BS-20 fix: when the decision was made (ns) */
 } vtx_inline_decision_t;
 
 /* ========================================================================== */
@@ -107,6 +108,7 @@ void vtx_feedback_destroy(vtx_inline_feedback_t *feedback);
  */
 int vtx_feedback_record_decision(vtx_inline_feedback_t *feedback,
                                   uint64_t call_site_id,
+                                  uint32_t method_id,
                                   const vtx_inline_features_t *features,
                                   bool inlined);
 
