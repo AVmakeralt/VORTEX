@@ -1,3 +1,19 @@
 build*/
 *.o
 /debug_interp.c
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+# OS generated files
+.DS_Store
+Thumbs.db
+# Agent/context files
+agent-ctx/
+# Python cache
+__pycache__/
+*.pyc
+# Generated config
+vortex_config.h

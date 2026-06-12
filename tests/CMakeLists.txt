@@ -53,6 +53,19 @@ add_executable(test_graph
 target_link_libraries(test_graph PRIVATE vortex_test_framework vortex_ir vortex_runtime)
 add_test(NAME test_graph COMMAND test_graph)
 
+# test_bugfixes — comprehensive bug fix verification
+add_executable(test_bugfixes
+    unit/test_bugfixes.c
+)
+target_link_libraries(test_bugfixes PRIVATE
+    vortex_test_framework
+    vortex_ir
+    vortex_interp
+    vortex_runtime
+    m
+)
+add_test(NAME test_bugfixes COMMAND test_bugfixes)
+
 # ---- Integration tests ----
 
 # test_interp_basics

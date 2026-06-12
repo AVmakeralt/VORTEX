@@ -379,9 +379,15 @@ static int type_system_ensure_capacity(vtx_type_system_t *ts, uint32_t needed)
  * VTX_HEAP_OBJECT_HEADER_SIZE.
  */
 static void compute_field_offsets(vtx_field_desc_t *fields, uint32_t field_count,
+                                  uint32_t parent_instance_size,
                                   uint32_t *out_instance_size)
 {
-    uint32_t offset = (uint32_t)VTX_HEAP_OBJECT_HEADER_SIZE;
+    /* BUGFIX: Start field offsets from the parent's instance_size, not
+     * VTX_HEAP_OBJECT_HEADER_SIZE. If a parent type has fields, the child's
+     * fields must come AFTER the parent's fields in the object layout.
+     * Starting from VTX_HEAP_OBJECT_HEADER_SIZE would cause child fields to
+     * overlap parent fields, corrupting data. */
+    uint32_t offset = parent_instance_size > 0 ? parent_instance_size : (uint32_t)VTX_HEAP_OBJECT_HEADER_SIZE;
 
     for (uint32_t i = 0; i < field_count; i++) {
         /* All fields are vtx_value_t (8 bytes), aligned to 8 bytes */
@@ -438,10 +444,16 @@ vtx_typeid_t vtx_type_register(vtx_type_system_t *ts,
     }
 
     /* Compute field offsets and instance size */
+    /* BUGFIX: Pass parent instance_size so child fields don't overlap parent fields */
+    uint32_t parent_instance_size = 0;
+    if (parent_id != VTX_TYPE_INVALID && parent_id < ts->type_count) {
+        parent_instance_size = ts->types[parent_id].instance_size;
+    }
+
     if (fields != NULL && field_count > 0) {
-        compute_field_offsets(fields, field_count, &td->instance_size);
+        compute_field_offsets(fields, field_count, parent_instance_size, &td->instance_size);
     } else {
-        td->instance_size = (uint32_t)VTX_HEAP_OBJECT_HEADER_SIZE;
+        td->instance_size = parent_instance_size > 0 ? parent_instance_size : (uint32_t)VTX_HEAP_OBJECT_HEADER_SIZE;
     }
 
     /* Compute vtable: inherit parent's vtable, then add our virtual methods */

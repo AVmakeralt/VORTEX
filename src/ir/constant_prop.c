@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <limits.h>
 
 /* ========================================================================== */
 /* Lattice meet (join)                                                         */
@@ -190,7 +191,15 @@ static vtx_lattice_val_t evaluate_node(vtx_node_opcode_t opcode,
         if (inputs[0].tag == VTX_LATTICE_CONSTANT && inputs[1].tag == VTX_LATTICE_CONSTANT) {
             if (inputs[0].value.kind == VTX_TYPE_Int && inputs[1].value.kind == VTX_TYPE_Int) {
                 if (inputs[1].value.as.int_val != 0) {
-                    return vtx_lattice_const_int(inputs[0].value.as.int_val / inputs[1].value.as.int_val);
+                    /* BUGFIX: INT64_MIN / -1 is undefined behavior in C
+                     * (signed integer overflow). On x86-64 this triggers
+                     * a hardware SIGFPE. Don't fold this case. */
+                    int64_t a = inputs[0].value.as.int_val;
+                    int64_t b = inputs[1].value.as.int_val;
+                    if (a == INT64_MIN && b == -1) {
+                        return vtx_lattice_bottom(); /* would overflow */
+                    }
+                    return vtx_lattice_const_int(a / b);
                 }
                 /* Division by zero: don't fold, leave as bottom */
             }
@@ -211,7 +220,14 @@ static vtx_lattice_val_t evaluate_node(vtx_node_opcode_t opcode,
         if (inputs[0].tag == VTX_LATTICE_CONSTANT && inputs[1].tag == VTX_LATTICE_CONSTANT) {
             if (inputs[0].value.kind == VTX_TYPE_Int && inputs[1].value.kind == VTX_TYPE_Int) {
                 if (inputs[1].value.as.int_val != 0) {
-                    return vtx_lattice_const_int(inputs[0].value.as.int_val % inputs[1].value.as.int_val);
+                    /* BUGFIX: INT64_MIN % -1 is also undefined behavior
+                     * in C (same overflow issue as division). */
+                    int64_t a = inputs[0].value.as.int_val;
+                    int64_t b = inputs[1].value.as.int_val;
+                    if (a == INT64_MIN && b == -1) {
+                        return vtx_lattice_bottom(); /* would overflow */
+                    }
+                    return vtx_lattice_const_int(a % b);
                 }
             }
         }

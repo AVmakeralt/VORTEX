@@ -704,7 +704,13 @@ void vtx_node_table_clear_dead(vtx_node_table_t *table)
      * the inputs array to remove VTX_NODEID_INVALID slots. When DCE marks
      * a node dead, its users may still reference it via input edges. We
      * remove those references and shift remaining inputs down to keep
-     * the graph well-formed for verification. */
+     * the graph well-formed for verification.
+     *
+     * BUGFIX: When inputs are shifted (from position j to write_idx), we
+     * must also update the producer's use-def list. The use entry records
+     * which input_index of the consumer references the producer. After
+     * shifting, the index changes, so we must remove the old entry and
+     * add a new one with the updated index. */
     for (uint32_t i = 0; i < table->count; i++) {
         vtx_node_t *node = &table->nodes[i];
         if (node->dead) continue; /* skip dead nodes themselves */
@@ -714,7 +720,8 @@ void vtx_node_table_clear_dead(vtx_node_table_t *table)
         for (uint32_t j = 0; j < node->input_count; j++) {
             vtx_nodeid_t inp = node->inputs[j];
             if (inp != VTX_NODEID_INVALID && inp < table->count && table->nodes[inp].dead) {
-                /* This input points to a dead node — skip it */
+                /* This input points to a dead node — skip it and clean up use-def */
+                node_remove_use(&table->nodes[inp], (vtx_nodeid_t)i, j);
                 if (table->nodes[inp].output_count > 0) {
                     table->nodes[inp].output_count--;
                 }
@@ -727,6 +734,12 @@ void vtx_node_table_clear_dead(vtx_node_table_t *table)
             /* Keep this input */
             if (write_idx != j) {
                 node->inputs[write_idx] = node->inputs[j];
+                /* BUGFIX: Update the producer's use-def list to reflect
+                 * the new input index after the shift. */
+                if (inp != VTX_NODEID_INVALID && inp < table->count) {
+                    node_remove_use(&table->nodes[inp], (vtx_nodeid_t)i, j);
+                    node_add_use(&table->nodes[inp], (vtx_nodeid_t)i, write_idx);
+                }
             }
             write_idx++;
         }

@@ -80,13 +80,34 @@ typedef struct {
  * RT-4 fix: Added gc_mark field set to 0xFF so the sweep phase can
  * distinguish free blocks from live objects. Live objects have
  * gc_mark == 0 or 1 (0=unmarked, 1=marked). Free blocks have
- * gc_mark == 0xFF, which is never a valid mark state for a live object. */
+ * gc_mark == 0xFF, which is never a valid mark state for a live object.
+ *
+ * BUGFIX: gc_mark MUST be at the same byte offset as in vtx_heap_object_t.
+ * vtx_heap_object_t has gc_mark at offset 4 (after uint32_t type_id).
+ * The free_node must match so that casting a free block to
+ * vtx_heap_object_t* and checking obj->gc_mark == 0xFF actually reads
+ * the gc_mark field and not some other byte. */
 typedef struct vtx_free_node vtx_free_node_t;
 struct vtx_free_node {
-    size_t           size;     /* size of this free block (including this header) */
-    vtx_free_node_t *next;    /* next free block */
-    uint8_t          gc_mark; /* RT-4: always 0xFF for free blocks */
+    uint32_t         pad_type_id;  /* offset 0: pad to match vtx_heap_object_t.type_id */
+    uint8_t          gc_mark;      /* offset 4: matches vtx_heap_object_t.gc_mark position */
+    uint8_t          pad_age;      /* offset 5: pad to match layout */
+    uint8_t          pad_pinned;   /* offset 6 */
+    uint8_t          pad_remembered; /* offset 7 */
+    uint32_t         size_low;     /* offset 8: lower 32 bits of size (matches vtx_heap_object_t.size offset) */
+    uint32_t         size_high;    /* offset 12: upper 32 bits of size */
+    vtx_free_node_t *next;         /* offset 16: next free block */
 };
+
+/* Accessors for the split size field */
+static inline size_t vtx_free_node_get_size(const vtx_free_node_t *node) {
+    return ((size_t)node->size_high << 32) | node->size_low;
+}
+
+static inline void vtx_free_node_set_size(vtx_free_node_t *node, size_t size) {
+    node->size_low = (uint32_t)(size & 0xFFFFFFFF);
+    node->size_high = (uint32_t)(size >> 32);
+}
 
 /* Old generation (mark-sweep) */
 typedef struct {

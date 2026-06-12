@@ -115,7 +115,7 @@ static int old_gen_init(vtx_old_gen_t *old, size_t size)
 
     /* The entire old gen starts as one big free block */
     old->free_list = (vtx_free_node_t *)old->start;
-    old->free_list->size = size;
+    vtx_free_node_set_size(old->free_list, size);
     old->free_list->next = NULL;
     old->free_list->gc_mark = 0xFF; /* RT-4: Mark as free block */
 
@@ -153,12 +153,13 @@ static void *old_gen_alloc(vtx_old_gen_t *old, size_t size)
     vtx_free_node_t *curr = old->free_list;
 
     while (curr != NULL) {
-        if (curr->size >= size) {
+        size_t curr_size = vtx_free_node_get_size(curr);
+        if (curr_size >= size) {
             /* Found a suitable block */
-            if (curr->size >= size + sizeof(vtx_free_node_t)) {
+            if (curr_size >= size + sizeof(vtx_free_node_t)) {
                 /* Split the block */
                 vtx_free_node_t *remainder = (vtx_free_node_t *)((uint8_t *)curr + size);
-                remainder->size = curr->size - size;
+                vtx_free_node_set_size(remainder, curr_size - size);
                 remainder->next = curr->next;
 
                 if (prev != NULL) {
@@ -168,7 +169,7 @@ static void *old_gen_alloc(vtx_old_gen_t *old, size_t size)
                 }
             } else {
                 /* Use the entire block (may be slightly larger than requested) */
-                size = curr->size;
+                size = curr_size;
                 if (prev != NULL) {
                     prev->next = curr->next;
                 } else {
@@ -200,7 +201,7 @@ static void old_gen_free(vtx_old_gen_t *old, void *ptr, size_t size)
     }
 
     vtx_free_node_t *node = (vtx_free_node_t *)ptr;
-    node->size = size;
+    vtx_free_node_set_size(node, size);
     node->next = old->free_list;
     node->gc_mark = 0xFF; /* RT-4: Mark as free block so sweep can identify it */
     old->free_list = node;
@@ -211,9 +212,10 @@ static void old_gen_free(vtx_old_gen_t *old, void *ptr, size_t size)
     vtx_free_node_t *prev_adj = NULL;
     vtx_free_node_t *curr_adj = old->free_list;
     while (curr_adj != NULL) {
-        if ((uint8_t *)curr_adj == (uint8_t *)node + node->size) {
+        size_t node_size = vtx_free_node_get_size(node);
+        if ((uint8_t *)curr_adj == (uint8_t *)node + node_size) {
             /* Coalesce: merge curr_adj into node */
-            node->size += curr_adj->size;
+            vtx_free_node_set_size(node, node_size + vtx_free_node_get_size(curr_adj));
             /* Remove curr_adj from free list */
             vtx_free_node_t *p = NULL;
             vtx_free_node_t *c = old->free_list;
@@ -399,7 +401,7 @@ void vtx_gc_manual_free(vtx_gc_t *gc, void *ptr, size_t size)
         size = sizeof(vtx_free_node_t);
     }
     vtx_free_node_t *node = (vtx_free_node_t *)ptr;
-    node->size = size;
+    vtx_free_node_set_size(node, size);
     node->next = gc->manual_free_list;
     node->gc_mark = 0xFF; /* RT-4: Mark as free block */
     gc->manual_free_list = node;
@@ -867,7 +869,7 @@ static void scan_dirty_cards(vtx_gc_t *gc)
             if (obj->gc_mark == 0xFF) {
                 /* Free block — skip it */
                 vtx_free_node_t *free_node = (vtx_free_node_t *)ptr;
-                size_t free_size = align_up_8(free_node->size);
+                size_t free_size = align_up_8(vtx_free_node_get_size(free_node));
                 if (free_size < sizeof(vtx_free_node_t)) {
                     free_size = sizeof(vtx_free_node_t);
                 }
@@ -1023,12 +1025,27 @@ void vtx_gc_collect_young(vtx_gc_t *gc)
                 if (vtx_is_heap_ptr(field)) {
                     void *field_ptr = vtx_heap_ptr(field);
                     if (vtx_gc_in_young(gc, field_ptr)) {
-                        /* Add to remembered set */
-                        if (gc->remembered_count < gc->remembered_capacity) {
-                            gc->remembered_set[gc->remembered_count].obj = obj;
-                            gc->remembered_count++;
-                            obj->gc_remembered = 1;
+                        /* Add to remembered set.
+                         * BUGFIX: Grow the remembered set if full instead of
+                         * silently dropping entries. Dropping entries causes
+                         * old→young references to be missed, leading to
+                         * premature collection of live young-gen objects. */
+                        if (gc->remembered_count >= gc->remembered_capacity) {
+                            uint32_t new_cap = gc->remembered_capacity * 2;
+                            vtx_remembered_entry_t *new_set = (vtx_remembered_entry_t *)realloc(
+                                gc->remembered_set, new_cap * sizeof(vtx_remembered_entry_t));
+                            if (new_set == NULL) {
+                                /* Cannot grow — this is a fatal condition.
+                                 * We must not silently drop, so we assert. */
+                                VTX_ASSERT(false, "remembered set overflow during rebuild");
+                                break;
+                            }
+                            gc->remembered_set = new_set;
+                            gc->remembered_capacity = new_cap;
                         }
+                        gc->remembered_set[gc->remembered_count].obj = obj;
+                        gc->remembered_count++;
+                        obj->gc_remembered = 1;
                         break; /* Only add each object once */
                     }
                 }
@@ -1050,6 +1067,13 @@ void vtx_gc_collect_young(vtx_gc_t *gc)
  * Young-gen objects can hold references to old-gen objects, and we must
  * follow those references during old-gen collection to avoid sweeping
  * live old-gen objects.
+ *
+ * BUGFIX: The old code only traced ONE level through young-gen objects.
+ * If there was a chain Root → YoungObj1 → YoungObj2 → OldObj2, OldObj2
+ * was never marked. Now we recursively trace through young-gen objects
+ * to find ALL transitively reachable old-gen objects. We use the gc_mark
+ * bit on young-gen objects as a temporary visited flag during old-gen
+ * collection to prevent infinite loops on cycles.
  */
 static void mark_object(vtx_gc_t *gc, vtx_heap_object_t *obj)
 {
@@ -1066,31 +1090,18 @@ static void mark_object(vtx_gc_t *gc, vtx_heap_object_t *obj)
         vtx_value_t field = obj->fields[i];
         if (vtx_is_heap_ptr(field)) {
             vtx_heap_object_t *field_obj = (vtx_heap_object_t *)vtx_heap_ptr(field);
-            /* RT-5 fix: Only mark old-gen objects (we're doing old-gen
-             * collection). But we DO recurse through young-gen objects
-             * to find their old-gen references. */
             if (vtx_gc_in_old(gc, field_obj)) {
                 mark_object(gc, field_obj);
             }
-            /* Also recurse into young-gen objects to find transitive
-             * old-gen references, but don't mark them (they're managed
-             * by the young-gen collector). Use a separate visited set
-             * to avoid infinite loops on cycles in young-gen. */
+            /* BUGFIX: Recursively trace through young-gen objects to find
+             * ALL transitively reachable old-gen objects. The old code only
+             * traced one level (young → old direct refs), missing chains
+             * like Young1 → Young2 → Old. We mark young-gen objects with
+             * gc_mark=1 as a visited flag to prevent infinite loops on
+             * cycles, and clear them after the mark phase completes. */
             else if (vtx_gc_in_young(gc, field_obj) && !field_obj->gc_mark) {
-                /* Temporarily mark to avoid re-visiting */
-                field_obj->gc_mark = 1;
-                /* Recurse to find old-gen references through young-gen */
-                for (uint32_t j = 0; j < field_obj->field_count; j++) {
-                    vtx_value_t inner = field_obj->fields[j];
-                    if (vtx_is_heap_ptr(inner)) {
-                        vtx_heap_object_t *inner_obj = (vtx_heap_object_t *)vtx_heap_ptr(inner);
-                        if (vtx_gc_in_old(gc, inner_obj)) {
-                            mark_object(gc, inner_obj);
-                        }
-                    }
-                }
-                /* Note: we don't clear gc_mark on young-gen objects here
-                 * because young-gen collection handles its own marking. */
+                field_obj->gc_mark = 1; /* mark as visited to prevent cycles */
+                mark_object(gc, field_obj); /* recursive: finds transitive old-gen refs */
             }
         }
     }
@@ -1132,7 +1143,7 @@ static void sweep_phase(vtx_gc_t *gc)
         if (obj->gc_mark == 0xFF) {
             /* This is a free block — skip it */
             vtx_free_node_t *free_node = (vtx_free_node_t *)ptr;
-            size_t free_size = align_up_8(free_node->size);
+            size_t free_size = align_up_8(vtx_free_node_get_size(free_node));
             if (free_size < sizeof(vtx_free_node_t)) {
                 free_size = sizeof(vtx_free_node_t);
             }
@@ -1169,6 +1180,23 @@ void vtx_gc_collect_old(vtx_gc_t *gc)
 
     /* Sweep phase */
     sweep_phase(gc);
+
+    /* BUGFIX: Clear gc_mark on young-gen objects that were temporarily
+     * marked during old-gen mark phase (used as visited flags to prevent
+     * infinite loops). Without this, young-gen objects would retain
+     * gc_mark=1, causing the next young-gen collection to skip them
+     * during mark phase (thinking they're already marked) and potentially
+     * collect live objects. */
+    if (gc->young_from.start != NULL) {
+        uint8_t *ptr = gc->young_from.start;
+        uint8_t *end = gc->young_from.current;
+        while (ptr < end) {
+            vtx_heap_object_t *obj = (vtx_heap_object_t *)ptr;
+            if (obj->size == 0) break;
+            obj->gc_mark = 0;
+            ptr += align_up_8(obj->size);
+        }
+    }
 }
 
 /* ========================================================================== */
