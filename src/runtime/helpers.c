@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
+#include "interp/dispatch.h"
 
 /* ========================================================================== */
 /* Type checking                                                               */
@@ -225,4 +226,146 @@ int vtx_helpers_string_compare(vtx_value_t a, vtx_value_t b)
     const char *str_b = vtx_helpers_string_data(b);
 
     return strcmp(str_a, str_b);
+}
+
+/* ========================================================================== */
+/* D8: Register-based call helpers                                             */
+/* ========================================================================== */
+
+/**
+ * Register-based call: static method dispatch.
+ *
+ * This function is the runtime entry point for JIT-compiled CALL_STATIC
+ * instructions. Instead of using variadic argument marshaling (which
+ * requires pushing each argument as a va_arg and then unpacking them
+ * in the callee), the JIT codegen places arguments directly into the
+ * System V AMD64 ABI registers.
+ *
+ * The JIT-compiled code at the call site:
+ *   1. Moves the interp pointer → RDI
+ *   2. Moves the method descriptor pointer → RSI
+ *   3. Moves arg[0] → RDX, arg[1] → RCX, arg[2] → R8, arg[3] → R9
+ *   4. Pushes remaining args onto the stack (if arg_count > 4)
+ *   5. Calls this function
+ *
+ * Inside this function, we use the interpreter's vtx_interp_run() to
+ * execute the method. The args array is already in the right order.
+ */
+vtx_value_t vtx_runtime_call_reg(void *interp,
+                                   const vtx_method_desc_t *method,
+                                   vtx_value_t *args,
+                                   uint32_t arg_count)
+{
+    vtx_interp_t *interp_ptr = (vtx_interp_t *)interp;
+    VTX_ASSERT(interp_ptr != NULL, "interp must not be NULL");
+    VTX_ASSERT(method != NULL, "method must not be NULL");
+
+    if (method->bytecode == NULL) {
+        return VTX_VALUE_UNDEFINED;
+    }
+
+    /* Record invocation in profiler */
+    vtx_profiler_record_invocation(&interp_ptr->profiler, method);
+
+    /* Delegate to the interpreter's run function which handles
+     * frame creation, argument copying, and the dispatch loop.
+     *
+     * The key difference from the variadic path: the args are already
+     * in a contiguous array in the correct order. No va_arg unpacking
+     * needed. The JIT codegen placed them there directly from the
+     * expression stack registers. */
+    return vtx_interp_run(interp_ptr, method, args, arg_count);
+}
+
+/**
+ * Register-based call: virtual method dispatch.
+ *
+ * Resolves the virtual method based on the receiver's type, then
+ * calls it with register-based argument passing.
+ */
+vtx_value_t vtx_runtime_call_virtual_reg(void *interp,
+                                           const char *method_name,
+                                           vtx_value_t receiver,
+                                           vtx_value_t *args,
+                                           uint32_t arg_count)
+{
+    vtx_interp_t *interp_ptr = (vtx_interp_t *)interp;
+    VTX_ASSERT(interp_ptr != NULL, "interp must not be NULL");
+    VTX_ASSERT(method_name != NULL, "method_name must not be NULL");
+
+    /* Resolve the virtual method based on the receiver's type */
+    const vtx_method_desc_t *target_method = NULL;
+
+    if (vtx_is_heap_ptr(receiver)) {
+        vtx_heap_object_t *obj = (vtx_heap_object_t *)vtx_heap_ptr(receiver);
+        vtx_typeid_t typeid_ = obj->type_id;
+        target_method = vtx_type_resolve_method(interp_ptr->type_system, typeid_, method_name);
+    }
+
+    if (target_method == NULL || target_method->bytecode == NULL) {
+        return VTX_VALUE_UNDEFINED;
+    }
+
+    /* Build the full args array: receiver + remaining args.
+     * The receiver is always the first argument (local[0]) in the callee. */
+    uint32_t total_arg_count = arg_count + 1; /* +1 for receiver */
+    vtx_value_t *full_args = (vtx_value_t *)alloca(total_arg_count * sizeof(vtx_value_t));
+    full_args[0] = receiver;
+    if (arg_count > 0 && args != NULL) {
+        memcpy(full_args + 1, args, arg_count * sizeof(vtx_value_t));
+    }
+
+    /* Record invocation */
+    vtx_profiler_record_invocation(&interp_ptr->profiler, target_method);
+
+    return vtx_interp_run(interp_ptr, target_method, full_args, total_arg_count);
+}
+
+/**
+ * Register-based call: interface method dispatch.
+ *
+ * Resolves the interface method based on the receiver's type,
+ * verifies that the receiver's type implements the interface,
+ * then calls it with register-based argument passing.
+ */
+vtx_value_t vtx_runtime_call_interface_reg(void *interp,
+                                             vtx_typeid_t interface_typeid,
+                                             const char *method_name,
+                                             vtx_value_t receiver,
+                                             vtx_value_t *args,
+                                             uint32_t arg_count)
+{
+    vtx_interp_t *interp_ptr = (vtx_interp_t *)interp;
+    VTX_ASSERT(interp_ptr != NULL, "interp must not be NULL");
+    VTX_ASSERT(method_name != NULL, "method_name must not be NULL");
+
+    /* Resolve the interface method */
+    const vtx_method_desc_t *target_method = NULL;
+
+    if (vtx_is_heap_ptr(receiver)) {
+        vtx_heap_object_t *obj = (vtx_heap_object_t *)vtx_heap_ptr(receiver);
+        vtx_typeid_t typeid_ = obj->type_id;
+
+        /* Verify the receiver implements the interface */
+        if (vtx_type_is_instance(interp_ptr->type_system, typeid_, interface_typeid)) {
+            target_method = vtx_type_resolve_method(interp_ptr->type_system, typeid_, method_name);
+        }
+    }
+
+    if (target_method == NULL || target_method->bytecode == NULL) {
+        return VTX_VALUE_UNDEFINED;
+    }
+
+    /* Build the full args array: receiver + remaining args */
+    uint32_t total_arg_count = arg_count + 1;
+    vtx_value_t *full_args = (vtx_value_t *)alloca(total_arg_count * sizeof(vtx_value_t));
+    full_args[0] = receiver;
+    if (arg_count > 0 && args != NULL) {
+        memcpy(full_args + 1, args, arg_count * sizeof(vtx_value_t));
+    }
+
+    /* Record invocation */
+    vtx_profiler_record_invocation(&interp_ptr->profiler, target_method);
+
+    return vtx_interp_run(interp_ptr, target_method, full_args, total_arg_count);
 }

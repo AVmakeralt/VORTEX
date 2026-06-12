@@ -5,6 +5,11 @@
  * Each guard is a compare + conditional jump. On failure, execution
  * jumps to a deopt stub that saves state and transfers to the deopt
  * runtime for interpreter re-entry.
+ *
+ * P6: CMP+JCC Fusion — Modern x86-64 CPUs can fuse CMP+JCC into a
+ * single macro-op, but only if they are adjacent with no intervening
+ * instructions. This module ensures that CMP and JCC for guards are
+ * always emitted adjacently and marked with VTX_INST_FLAG_FUSED.
  */
 
 #include "lower/guard_emit.h"
@@ -220,6 +225,26 @@ int vtx_guard_emit_lower(vtx_guard_desc_array_t *guards,
                                            &jcc_block, &jcc_inst) == 0) {
             vtx_inst_t *jcc = &inst_stream->blocks[jcc_block].insts[jcc_inst];
             guard->jcc_native_offset = jcc->native_offset;
+
+            /* P6: CMP+JCC Fusion — Mark the CMP+JCC pair as fused.
+             * Modern x86-64 CPUs (since Intel Nehalem / AMD Bulldozer) can
+             * fuse a CMP or TEST instruction followed immediately by a JCC
+             * into a single macro-op. This eliminates a uop and improves
+             * branch prediction accuracy. The fusion only works if:
+             *   1. CMP and JCC are adjacent (no intervening instructions)
+             *   2. JCC tests the flags set by the CMP
+             *
+             * We mark both the CMP and JCC with VTX_INST_FLAG_FUSED so
+             * the scheduler knows they must stay adjacent. */
+            if (jcc_inst > 0) {
+                vtx_inst_t *prev = &inst_stream->blocks[jcc_block].insts[jcc_inst - 1];
+                /* Check if the previous instruction is a CMP or TEST — the
+                 * compare that feeds this JCC. If so, mark both as fused. */
+                if (prev->opcode == VTX_X86_CMP || prev->opcode == VTX_X86_TEST) {
+                    prev->flags |= VTX_INST_FLAG_FUSED;
+                    jcc->flags |= VTX_INST_FLAG_FUSED;
+                }
+            }
         } else {
             /* Fallback: if we can't find the JCC in the stream, mark as invalid.
              * This guard will be skipped during patching. */

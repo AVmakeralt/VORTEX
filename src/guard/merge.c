@@ -304,11 +304,18 @@ static void perform_merge(vtx_graph_t *graph,
          *   temp = (type == A) | (type == B)
          *   guard(temp != 0)
          *
+         * F8/Bug7 fix: Instead of using LoadField(offset=0) to read the
+         * object's type (which assumes a specific memory layout and is
+         * incorrect for objects whose header isn't at offset 0), we use
+         * CmpP (pointer compare) to compare the object's type_id directly.
+         * The Guard node's type_id field carries the expected type, so we
+         * create CmpP nodes that compare the value against type_id constants.
+         *
          * We create this expanded form in the SoN graph. */
 
         vtx_nodeid_t value_node = guard_checked_value(a);
 
-        /* Create: cmp_a = CmpP(value.type, const_a) */
+        /* Create type_id constants for comparison */
         vtx_nodeid_t const_a = vtx_node_create(&graph->node_table, VTX_OP_Constant);
         vtx_nodeid_t const_b = vtx_node_create(&graph->node_table, VTX_OP_Constant);
 
@@ -326,23 +333,11 @@ static void perform_merge(vtx_graph_t *graph,
             c_b->constval = vtx_constval_int((int64_t)b->type_id);
         }
 
-        /* Create: load_type = LoadField(value, type_offset=0)
-         * In our IR, the type is at offset 0 of the object header. */
-        vtx_nodeid_t load_type = vtx_node_create(&graph->node_table,
-                                                    VTX_OP_LoadField);
-        if (load_type == VTX_NODEID_INVALID) break;
-
-        vtx_node_t *lt = vtx_node_get(&graph->node_table, load_type);
-        if (lt != NULL) {
-            lt->flags = VTX_NF_DATA | VTX_NF_MEMORY;
-            lt->field_offset = 0; /* type is at offset 0 */
-            vtx_node_add_input(&graph->node_table, load_type, value_node);
-            vtx_node_add_input(&graph->node_table, load_type, const_a); /* type_id constant as placeholder input */
-        }
-
-        /* Create: cmp_a = Cmp(load_type, const_a) */
-        vtx_nodeid_t cmp_a_id = vtx_node_create(&graph->node_table, VTX_OP_Cmp);
-        vtx_nodeid_t cmp_b_id = vtx_node_create(&graph->node_table, VTX_OP_Cmp);
+        /* Create: cmp_a = CmpP(value, const_a) — type pointer comparison.
+         * CmpP is the proper opcode for comparing pointer/type values,
+         * rather than LoadField(offset=0) which assumes a specific layout. */
+        vtx_nodeid_t cmp_a_id = vtx_node_create(&graph->node_table, VTX_OP_CmpP);
+        vtx_nodeid_t cmp_b_id = vtx_node_create(&graph->node_table, VTX_OP_CmpP);
 
         if (cmp_a_id == VTX_NODEID_INVALID || cmp_b_id == VTX_NODEID_INVALID) break;
 
@@ -353,7 +348,7 @@ static void perform_merge(vtx_graph_t *graph,
             cmp_a_node->type = VTX_TYPE_Int;
             cmp_a_node->flags = VTX_NF_DATA;
             cmp_a_node->cond = VTX_COND_EQ;
-            vtx_node_add_input(&graph->node_table, cmp_a_id, load_type);
+            vtx_node_add_input(&graph->node_table, cmp_a_id, value_node);
             vtx_node_add_input(&graph->node_table, cmp_a_id, const_a);
         }
 
@@ -361,7 +356,7 @@ static void perform_merge(vtx_graph_t *graph,
             cmp_b_node->type = VTX_TYPE_Int;
             cmp_b_node->flags = VTX_NF_DATA;
             cmp_b_node->cond = VTX_COND_EQ;
-            vtx_node_add_input(&graph->node_table, cmp_b_id, load_type);
+            vtx_node_add_input(&graph->node_table, cmp_b_id, value_node);
             vtx_node_add_input(&graph->node_table, cmp_b_id, const_b);
         }
 
@@ -425,8 +420,11 @@ static void perform_merge(vtx_graph_t *graph,
          * 2. Compute max_idx = Max(i, j)
          * 3. Create guard(min_idx >= 0 && max_idx < len)
          *
-         * We use Sub and conditional moves (or Phi-based min/max) for this.
-         * For simplicity, we create the comparison structure directly. */
+         * F8 fix: We use proper Min/Max opcodes instead of Phi nodes.
+         * Phi nodes require a Region node as their first input in the
+         * SoN IR; creating a Phi without a Region produces malformed IR
+         * that will crash the verifier/scheduler. Min/Max are pure data
+         * nodes that take two inputs and return the minimum/maximum. */
 
         /* Get the two index values from the Cmp nodes */
         vtx_nodeid_t cmp_a_id = (a->input_count > 1) ? a->inputs[1] : VTX_NODEID_INVALID;
@@ -444,40 +442,26 @@ static void perform_merge(vtx_graph_t *graph,
         vtx_nodeid_t idx_b = cmp_b->inputs[0]; /* second index */
         vtx_nodeid_t len = cmp_a->inputs[1];   /* array length (shared) */
 
-        /* Compute min = (idx_a < idx_b) ? idx_a : idx_b using Cmp + Phi */
-        vtx_nodeid_t min_cmp = vtx_node_create(&graph->node_table, VTX_OP_Cmp);
-        vtx_nodeid_t min_phi = vtx_node_create(&graph->node_table, VTX_OP_Phi);
-        vtx_nodeid_t max_phi = vtx_node_create(&graph->node_table, VTX_OP_Phi);
+        /* Compute min_idx = Min(idx_a, idx_b) */
+        vtx_nodeid_t min_id = vtx_node_create(&graph->node_table, VTX_OP_Min);
+        vtx_nodeid_t max_id = vtx_node_create(&graph->node_table, VTX_OP_Max);
 
-        if (min_cmp == VTX_NODEID_INVALID ||
-            min_phi == VTX_NODEID_INVALID ||
-            max_phi == VTX_NODEID_INVALID) break;
+        if (min_id == VTX_NODEID_INVALID || max_id == VTX_NODEID_INVALID) break;
 
-        vtx_node_t *mc = vtx_node_get(&graph->node_table, min_cmp);
-        if (mc != NULL) {
-            mc->type = VTX_TYPE_Int;
-            mc->flags = VTX_NF_DATA;
-            mc->cond = VTX_COND_LT;
-            vtx_node_add_input(&graph->node_table, min_cmp, idx_a);
-            vtx_node_add_input(&graph->node_table, min_cmp, idx_b);
+        vtx_node_t *mn = vtx_node_get(&graph->node_table, min_id);
+        if (mn != NULL) {
+            mn->type = VTX_TYPE_Int;
+            mn->flags = VTX_NF_DATA;
+            vtx_node_add_input(&graph->node_table, min_id, idx_a);
+            vtx_node_add_input(&graph->node_table, min_id, idx_b);
         }
 
-        /* min_phi: if (a < b) then a else b */
-        vtx_node_t *mp = vtx_node_get(&graph->node_table, min_phi);
-        if (mp != NULL) {
-            mp->type = VTX_TYPE_Int;
-            mp->flags = VTX_NF_PINNED | VTX_NF_DATA;
-            vtx_node_add_input(&graph->node_table, min_phi, idx_a); /* "then" */
-            vtx_node_add_input(&graph->node_table, min_phi, idx_b); /* "else" */
-        }
-
-        /* max_phi: if (a < b) then b else a */
-        vtx_node_t *xp = vtx_node_get(&graph->node_table, max_phi);
-        if (xp != NULL) {
-            xp->type = VTX_TYPE_Int;
-            xp->flags = VTX_NF_PINNED | VTX_NF_DATA;
-            vtx_node_add_input(&graph->node_table, max_phi, idx_b); /* "then" (b is max) */
-            vtx_node_add_input(&graph->node_table, max_phi, idx_a); /* "else" (a is max) */
+        vtx_node_t *mx = vtx_node_get(&graph->node_table, max_id);
+        if (mx != NULL) {
+            mx->type = VTX_TYPE_Int;
+            mx->flags = VTX_NF_DATA;
+            vtx_node_add_input(&graph->node_table, max_id, idx_a);
+            vtx_node_add_input(&graph->node_table, max_id, idx_b);
         }
 
         /* Create merged lower bound check: guard(min >= 0) */
@@ -499,7 +483,7 @@ static void perform_merge(vtx_graph_t *graph,
                 lc->type = VTX_TYPE_Int;
                 lc->flags = VTX_NF_DATA;
                 lc->cond = VTX_COND_GE;
-                vtx_node_add_input(&graph->node_table, lower_cmp, min_phi);
+                vtx_node_add_input(&graph->node_table, lower_cmp, min_id);
                 vtx_node_add_input(&graph->node_table, lower_cmp, zero_const);
             }
         }
@@ -530,7 +514,7 @@ static void perform_merge(vtx_graph_t *graph,
                 uc->type = VTX_TYPE_Int;
                 uc->flags = VTX_NF_DATA;
                 uc->cond = VTX_COND_LT;
-                vtx_node_add_input(&graph->node_table, upper_cmp, max_phi);
+                vtx_node_add_input(&graph->node_table, upper_cmp, max_id);
                 vtx_node_add_input(&graph->node_table, upper_cmp, len);
             }
         }

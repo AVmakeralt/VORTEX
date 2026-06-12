@@ -68,7 +68,7 @@ VTX_TEST(interp_iadd)
 
     vtx_method_desc_t method = {
         .name = "add", .signature = "(II)I", .bytecode = &bc,
-        .vtable_index = 0xFFFFFFFF, .is_virtual = false
+        .vtable_index = 0xFFFFFFFF, .arg_count = 2, .is_virtual = false
     };
 
     vtx_value_t args[] = { vtx_make_smi(3), vtx_make_smi(4) };
@@ -105,7 +105,7 @@ VTX_TEST(interp_isub)
 
     vtx_method_desc_t method = {
         .name = "sub", .signature = "(II)I", .bytecode = &bc,
-        .vtable_index = 0xFFFFFFFF, .is_virtual = false
+        .vtable_index = 0xFFFFFFFF, .arg_count = 2, .is_virtual = false
     };
 
     vtx_value_t args[] = { vtx_make_smi(10), vtx_make_smi(3) };
@@ -142,7 +142,7 @@ VTX_TEST(interp_imul)
 
     vtx_method_desc_t method = {
         .name = "mul", .signature = "(II)I", .bytecode = &bc,
-        .vtable_index = 0xFFFFFFFF, .is_virtual = false
+        .vtable_index = 0xFFFFFFFF, .arg_count = 2, .is_virtual = false
     };
 
     vtx_value_t args[] = { vtx_make_smi(6), vtx_make_smi(7) };
@@ -174,7 +174,7 @@ VTX_TEST(interp_return_void)
 
     vtx_method_desc_t method = {
         .name = "void_fn", .signature = "()V", .bytecode = &bc,
-        .vtable_index = 0xFFFFFFFF, .is_virtual = false
+        .vtable_index = 0xFFFFFFFF, .arg_count = 0, .is_virtual = false
     };
 
     vtx_value_t result = vtx_interp_run(&interp, &method, NULL, 0);
@@ -211,7 +211,7 @@ VTX_TEST(interp_load_const_int)
 
     vtx_method_desc_t method = {
         .name = "const_add", .signature = "()I", .bytecode = &bc,
-        .vtable_index = 0xFFFFFFFF, .is_virtual = false
+        .vtable_index = 0xFFFFFFFF, .arg_count = 0, .is_virtual = false
     };
 
     vtx_value_t result = vtx_interp_run(&interp, &method, NULL, 0);
@@ -250,7 +250,7 @@ VTX_TEST(interp_load_specials)
         vtx_bytecode_t bc = make_bytecode_simple(code_null, sizeof(code_null), 0, 2);
         vtx_method_desc_t method = {
             .name = "ret_null", .signature = "()Ljava/lang/Object;", .bytecode = &bc,
-            .vtable_index = 0xFFFFFFFF, .is_virtual = false
+            .vtable_index = 0xFFFFFFFF, .arg_count = 0, .is_virtual = false
         };
         vtx_value_t result = vtx_interp_run(&interp, &method, NULL, 0);
         VTX_ASSERT_TRUE(vtx_is_null(result));
@@ -261,7 +261,7 @@ VTX_TEST(interp_load_specials)
         vtx_bytecode_t bc = make_bytecode_simple(code_true, sizeof(code_true), 0, 2);
         vtx_method_desc_t method = {
             .name = "ret_true", .signature = "()Z", .bytecode = &bc,
-            .vtable_index = 0xFFFFFFFF, .is_virtual = false
+            .vtable_index = 0xFFFFFFFF, .arg_count = 0, .is_virtual = false
         };
         vtx_value_t result = vtx_interp_run(&interp, &method, NULL, 0);
         VTX_ASSERT_TRUE(vtx_is_bool(result));
@@ -273,7 +273,7 @@ VTX_TEST(interp_load_specials)
         vtx_bytecode_t bc = make_bytecode_simple(code_false, sizeof(code_false), 0, 2);
         vtx_method_desc_t method = {
             .name = "ret_false", .signature = "()Z", .bytecode = &bc,
-            .vtable_index = 0xFFFFFFFF, .is_virtual = false
+            .vtable_index = 0xFFFFFFFF, .arg_count = 0, .is_virtual = false
         };
         vtx_value_t result = vtx_interp_run(&interp, &method, NULL, 0);
         VTX_ASSERT_TRUE(vtx_is_bool(result));
@@ -285,7 +285,7 @@ VTX_TEST(interp_load_specials)
         vtx_bytecode_t bc = make_bytecode_simple(code_undef, sizeof(code_undef), 0, 2);
         vtx_method_desc_t method = {
             .name = "ret_undef", .signature = "()V", .bytecode = &bc,
-            .vtable_index = 0xFFFFFFFF, .is_virtual = false
+            .vtable_index = 0xFFFFFFFF, .arg_count = 0, .is_virtual = false
         };
         vtx_value_t result = vtx_interp_run(&interp, &method, NULL, 0);
         VTX_ASSERT_TRUE(vtx_is_undefined(result));
@@ -326,7 +326,7 @@ VTX_TEST(interp_icmp_and_branch)
 
     vtx_method_desc_t method = {
         .name = "min", .signature = "(II)I", .bytecode = &bc,
-        .vtable_index = 0xFFFFFFFF, .is_virtual = false
+        .vtable_index = 0xFFFFFFFF, .arg_count = 2, .is_virtual = false
     };
 
     /* Test: min(3, 5) == 3 */
@@ -461,7 +461,7 @@ VTX_TEST(interp_loop_countdown)
 
     vtx_method_desc_t method = {
         .name = "countdown", .signature = "(I)I", .bytecode = &bc,
-        .vtable_index = 0xFFFFFFFF, .is_virtual = false
+        .vtable_index = 0xFFFFFFFF, .arg_count = 1, .is_virtual = false
     };
 
     /* Countdown from 5 should reach 0 */
@@ -500,7 +500,7 @@ VTX_TEST(interp_dup_pop)
 
     vtx_method_desc_t method = {
         .name = "double", .signature = "(I)I", .bytecode = &bc,
-        .vtable_index = 0xFFFFFFFF, .is_virtual = false
+        .vtable_index = 0xFFFFFFFF, .arg_count = 1, .is_virtual = false
     };
 
     vtx_value_t args[] = { vtx_make_smi(21) };

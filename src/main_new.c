@@ -475,6 +475,7 @@ static int run_self_test(void)
                 .bytecode = bc,
                 .compiled_code = NULL,
                 .vtable_index = 0,
+                .arg_count = 1,
                 .is_virtual = false
             };
 
@@ -731,6 +732,7 @@ static int run_benchmarks(void)
             .bytecode = bc,
             .compiled_code = NULL,
             .vtable_index = 0,
+            .arg_count = 1,
             .is_virtual = false
         };
 
@@ -1183,6 +1185,7 @@ static int run_benchmarks_v2(void)
             .bytecode = bc,
             .compiled_code = NULL,
             .vtable_index = 0,
+            .arg_count = 1,
             .is_virtual = false
         };
 
@@ -1294,6 +1297,7 @@ static int run_benchmarks_v2(void)
             .bytecode = bc,
             .compiled_code = NULL,
             .vtable_index = 0,
+            .arg_count = 1,
             .is_virtual = false
         };
 
@@ -1395,6 +1399,7 @@ static int run_benchmarks_v2(void)
             .bytecode = bc,
             .compiled_code = NULL,
             .vtable_index = 0,
+            .arg_count = 1,
             .is_virtual = false
         };
 
@@ -1487,6 +1492,7 @@ static int run_benchmarks_v2(void)
             .bytecode = bc,
             .compiled_code = NULL,
             .vtable_index = 0,
+            .arg_count = 1,
             .is_virtual = false
         };
 
@@ -1765,6 +1771,7 @@ int main(int argc, char *argv[])
             .bytecode = bc,
             .compiled_code = NULL,
             .vtable_index = 0,
+            .arg_count = 0,
             .is_virtual = false
         };
 

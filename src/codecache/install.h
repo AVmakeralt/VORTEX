@@ -28,6 +28,21 @@
  */
 
 /* ========================================================================== */
+/* Clock eviction state                                                        */
+/* ========================================================================== */
+
+/**
+ * Per-method state for the clock (Second Chance) eviction algorithm.
+ * The use_bit is set when the method is called (touch) and cleared
+ * by the clock hand during eviction scanning. Methods with a cleared
+ * use_bit are eviction candidates.
+ */
+typedef struct {
+    uint32_t clock_hand;       /* current position of the clock hand */
+    bool     use_bit;          /* "recently used" bit (set on call, cleared by clock) */
+} vtx_clock_state_t;
+
+/* ========================================================================== */
 /* Compiled method metadata                                                    */
 /* ========================================================================== */
 
@@ -59,9 +74,12 @@ struct vtx_compiled_method {
     uint32_t                *dep_shape_ids;     /* array of ShapeIDs */
     uint32_t                 dep_shape_count;
 
-    /* LRU timestamp for eviction */
+    /* LRU timestamp for eviction (kept for diagnostics) */
     uint64_t                 last_used_timestamp;
     uint32_t                 call_count;        /* call counter for LRU */
+
+    /* Clock eviction state */
+    vtx_clock_state_t        clock_state;       /* use-bit and clock-hand position */
 
     /* State */
     bool                     is_installed;      /* true if code is installed */
@@ -75,12 +93,14 @@ struct vtx_compiled_method {
 /* Method registry                                                             */
 /* ========================================================================== */
 
-#define VTX_METHOD_REGISTRY_INITIAL_CAPACITY 256
+#define VTX_METHOD_REGISTRY_INITIAL_CAPACITY 256  /* must be power of 2 */
 
 typedef struct vtx_method_registry {
     vtx_compiled_method_t **methods;        /* array indexed by method_id */
     uint32_t                method_count;   /* number of registered methods */
-    uint32_t                capacity;       /* allocated capacity */
+    uint32_t                capacity;       /* allocated capacity (always power of 2) */
+    uint32_t                capacity_mask;  /* capacity - 1, for fast modulo via bitwise AND */
+    uint32_t                clock_hand;     /* current position of the clock hand */
 } vtx_method_registry_t;
 
 /**

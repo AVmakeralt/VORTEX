@@ -5,6 +5,115 @@
 #include <stdio.h>
 
 /* ========================================================================== */
+/* Internal helper: emit a FrameState node                                     */
+/* ========================================================================== */
+
+/**
+ * Create a FrameState node that captures the current execution state for
+ * deoptimization. The FrameState records the current control, memory, and
+ * local variable values so the interpreter can reconstruct the execution
+ * state if a guard fails.
+ *
+ * Inputs: [control, memory, local0, local1, ..., localN]
+ * The FrameState also records the bytecode PC for deopt stack reconstruction.
+ *
+ * Returns the FrameState node ID, or VTX_NODEID_INVALID on failure.
+ */
+static vtx_nodeid_t emit_frame_state(vtx_graph_t *graph,
+                                      vtx_block_info_t *block,
+                                      uint16_t max_locals,
+                                      size_t bytecode_pc)
+{
+    vtx_node_table_t *nt = &graph->node_table;
+
+    vtx_nodeid_t fs = vtx_node_create(nt, VTX_OP_FrameState);
+    if (fs == VTX_NODEID_INVALID) return VTX_NODEID_INVALID;
+
+    vtx_node_t *fs_node = vtx_node_get(nt, fs);
+    fs_node->bytecode_pc = (uint32_t)bytecode_pc;
+
+    /* Input 0: current control */
+    if (block->control_node != VTX_NODEID_INVALID) {
+        vtx_node_add_input(nt, fs, block->control_node);
+    }
+
+    /* Input 1: current memory state */
+    if (block->memory_node != VTX_NODEID_INVALID) {
+        vtx_node_add_input(nt, fs, block->memory_node);
+    }
+
+    /* Inputs 2..2+max_locals: current local variable values */
+    if (block->locals != NULL) {
+        for (uint16_t i = 0; i < max_locals; i++) {
+            if (block->locals[i] != VTX_NODEID_INVALID) {
+                vtx_node_add_input(nt, fs, block->locals[i]);
+            } else {
+                /* Use a void constant as placeholder for undefined locals */
+                vtx_nodeid_t undef = vtx_node_create(nt, VTX_OP_Constant);
+                if (undef == VTX_NODEID_INVALID) return VTX_NODEID_INVALID;
+                vtx_node_t *n = vtx_node_get(nt, undef);
+                n->constval = vtx_constval_void();
+                n->type = VTX_TYPE_Void;
+                vtx_node_add_input(nt, fs, undef);
+                block->locals[i] = undef;
+            }
+        }
+    }
+
+    return fs;
+}
+
+/**
+ * Emit a Guard node that checks a condition and deoptimizes if the
+ * condition is false. The Guard captures a FrameState for deopt.
+ *
+ * The Guard node:
+ *   - Input 0: current control
+ *   - Input 1: condition (data node that evaluates to true/false)
+ *   - Input 2: FrameState (for deopt reconstruction)
+ *   - cond: the condition code (e.g., VTX_COND_NE for "not null")
+ *
+ * On guard failure (condition is false), execution deoptimizes using
+ * the captured FrameState. On success, the Guard passes control through.
+ *
+ * Returns the Guard node ID, or VTX_NODEID_INVALID on failure.
+ */
+static vtx_nodeid_t emit_guard(vtx_graph_t *graph,
+                                vtx_block_info_t *block,
+                                vtx_nodeid_t condition,
+                                vtx_cond_t guard_cond,
+                                uint16_t max_locals,
+                                size_t bytecode_pc)
+{
+    vtx_node_table_t *nt = &graph->node_table;
+
+    /* Create FrameState before the Guard */
+    vtx_nodeid_t fs = emit_frame_state(graph, block, max_locals, bytecode_pc);
+    if (fs == VTX_NODEID_INVALID) return VTX_NODEID_INVALID;
+
+    /* Create the Guard node */
+    vtx_nodeid_t guard = vtx_node_create(nt, VTX_OP_Guard);
+    if (guard == VTX_NODEID_INVALID) return VTX_NODEID_INVALID;
+
+    vtx_node_t *g = vtx_node_get(nt, guard);
+    g->cond = guard_cond;
+    g->bytecode_pc = (uint32_t)bytecode_pc;
+    g->frame_state = fs;
+
+    /* Input 0: control */
+    vtx_node_add_input(nt, guard, block->control_node);
+    /* Input 1: condition */
+    vtx_node_add_input(nt, guard, condition);
+    /* Input 2: FrameState */
+    vtx_node_add_input(nt, guard, fs);
+
+    /* Guard becomes the new control output */
+    block->control_node = guard;
+
+    return guard;
+}
+
+/* ========================================================================== */
 /* Internal helper: count method arguments from signature                       */
 /* ========================================================================== */
 
@@ -1225,6 +1334,29 @@ int vtx_graph_build(vtx_graph_t *graph,
             case VT_OP_LOAD_FIELD: {
                 VTX_ASSERT(sp >= 1, "stack underflow on LOAD_FIELD");
                 vtx_nodeid_t obj = op_stack[--sp];
+
+                /* F3: Emit null-check Guard before field load.
+                 * A field load on a null reference must throw NPE.
+                 * We create a CmpP(obj, null) and Guard(NE) to guard against null. */
+                {
+                    vtx_nodeid_t null_const = vtx_node_create(&graph->node_table, VTX_OP_Constant);
+                    if (null_const == VTX_NODEID_INVALID) return -1;
+                    vtx_node_t *nc = vtx_node_get(&graph->node_table, null_const);
+                    nc->constval = vtx_constval_ptr(NULL);
+                    nc->type = VTX_TYPE_Ptr;
+
+                    vtx_nodeid_t null_cmp = vtx_node_create(&graph->node_table, VTX_OP_CmpP);
+                    if (null_cmp == VTX_NODEID_INVALID) return -1;
+                    vtx_node_t *cmp_n = vtx_node_get(&graph->node_table, null_cmp);
+                    cmp_n->cond = VTX_COND_NE; /* obj != null */
+                    vtx_node_add_input(&graph->node_table, null_cmp, obj);
+                    vtx_node_add_input(&graph->node_table, null_cmp, null_const);
+
+                    vtx_nodeid_t guard = emit_guard(graph, block, null_cmp, VTX_COND_NE,
+                                                     max_locals, pc);
+                    if (guard == VTX_NODEID_INVALID) return -1;
+                }
+
                 result = vtx_node_create(&graph->node_table, VTX_OP_LoadField);
                 if (result == VTX_NODEID_INVALID) return -1;
                 vtx_node_t *n = vtx_node_get(&graph->node_table, result);
@@ -1240,6 +1372,27 @@ int vtx_graph_build(vtx_graph_t *graph,
                 VTX_ASSERT(sp >= 2, "stack underflow on STORE_FIELD");
                 vtx_nodeid_t val = op_stack[--sp];
                 vtx_nodeid_t obj = op_stack[--sp];
+
+                /* F3: Emit null-check Guard before field store */
+                {
+                    vtx_nodeid_t null_const = vtx_node_create(&graph->node_table, VTX_OP_Constant);
+                    if (null_const == VTX_NODEID_INVALID) return -1;
+                    vtx_node_t *nc = vtx_node_get(&graph->node_table, null_const);
+                    nc->constval = vtx_constval_ptr(NULL);
+                    nc->type = VTX_TYPE_Ptr;
+
+                    vtx_nodeid_t null_cmp = vtx_node_create(&graph->node_table, VTX_OP_CmpP);
+                    if (null_cmp == VTX_NODEID_INVALID) return -1;
+                    vtx_node_t *cmp_n = vtx_node_get(&graph->node_table, null_cmp);
+                    cmp_n->cond = VTX_COND_NE;
+                    vtx_node_add_input(&graph->node_table, null_cmp, obj);
+                    vtx_node_add_input(&graph->node_table, null_cmp, null_const);
+
+                    vtx_nodeid_t guard = emit_guard(graph, block, null_cmp, VTX_COND_NE,
+                                                     max_locals, pc);
+                    if (guard == VTX_NODEID_INVALID) return -1;
+                }
+
                 result = vtx_node_create(&graph->node_table, VTX_OP_StoreField);
                 if (result == VTX_NODEID_INVALID) return -1;
                 vtx_node_t *n = vtx_node_get(&graph->node_table, result);
@@ -1428,9 +1581,24 @@ int vtx_graph_build(vtx_graph_t *graph,
                  * The operand is the method index; arg count comes from
                  * the method descriptor. If no descriptor is available,
                  * we don't consume any args (conservative fallback). */
+
+                /* F3: Emit FrameState before call (deopt point) */
+                {
+                    vtx_nodeid_t fs = emit_frame_state(graph, block, max_locals, pc);
+                    if (fs == VTX_NODEID_INVALID) return -1;
+                    /* The FrameState is attached to the call for deopt */
+                }
+
                 uint32_t call_arg_count = 0;
-                if (method != NULL && method->signature != NULL) {
-                    call_arg_count = vtx_graph_count_method_args(method->signature);
+                if (method != NULL) {
+                    /* Use precomputed arg_count when available;
+                     * fall back to parsing signature for methods
+                     * not registered with the type system. */
+                    if (method->arg_count > 0) {
+                        call_arg_count = method->arg_count;
+                    } else if (method->signature != NULL) {
+                        call_arg_count = vtx_graph_count_method_args(method->signature);
+                    }
                 }
                 /* Pop arguments from stack (reverse order) */
                 vtx_nodeid_t call_args[16];
@@ -1443,6 +1611,7 @@ int vtx_graph_build(vtx_graph_t *graph,
                 if (call == VTX_NODEID_INVALID) return -1;
                 vtx_node_t *n = vtx_node_get(&graph->node_table, call);
                 n->method_index = operand;
+                n->bytecode_pc = (uint32_t)pc;
                 vtx_node_add_input(&graph->node_table, call, block->control_node);
                 vtx_node_add_input(&graph->node_table, call, block->memory_node);
                 /* Add arguments as inputs */
@@ -1457,10 +1626,32 @@ int vtx_graph_build(vtx_graph_t *graph,
             case VT_OP_CALL_VIRTUAL: {
                 VTX_ASSERT(sp >= 1, "stack underflow on CALL_VIRTUAL (need receiver)");
                 vtx_nodeid_t receiver = op_stack[--sp];
+
+                /* F3: Emit null-check Guard on receiver + FrameState before call */
+                {
+                    vtx_nodeid_t null_const = vtx_node_create(&graph->node_table, VTX_OP_Constant);
+                    if (null_const == VTX_NODEID_INVALID) return -1;
+                    vtx_node_t *nc = vtx_node_get(&graph->node_table, null_const);
+                    nc->constval = vtx_constval_ptr(NULL);
+                    nc->type = VTX_TYPE_Ptr;
+
+                    vtx_nodeid_t null_cmp = vtx_node_create(&graph->node_table, VTX_OP_CmpP);
+                    if (null_cmp == VTX_NODEID_INVALID) return -1;
+                    vtx_node_t *cmp_n = vtx_node_get(&graph->node_table, null_cmp);
+                    cmp_n->cond = VTX_COND_NE;
+                    vtx_node_add_input(&graph->node_table, null_cmp, receiver);
+                    vtx_node_add_input(&graph->node_table, null_cmp, null_const);
+
+                    vtx_nodeid_t guard = emit_guard(graph, block, null_cmp, VTX_COND_NE,
+                                                     max_locals, pc);
+                    if (guard == VTX_NODEID_INVALID) return -1;
+                }
+
                 vtx_nodeid_t call = vtx_node_create(&graph->node_table, VTX_OP_CallVirtual);
                 if (call == VTX_NODEID_INVALID) return -1;
                 vtx_node_t *n = vtx_node_get(&graph->node_table, call);
                 n->method_index = operand;
+                n->bytecode_pc = (uint32_t)pc;
                 vtx_node_add_input(&graph->node_table, call, block->control_node);
                 vtx_node_add_input(&graph->node_table, call, block->memory_node);
                 vtx_node_add_input(&graph->node_table, call, receiver);
@@ -1472,10 +1663,32 @@ int vtx_graph_build(vtx_graph_t *graph,
             case VT_OP_CALL_INTERFACE: {
                 VTX_ASSERT(sp >= 1, "stack underflow on CALL_INTERFACE (need receiver)");
                 vtx_nodeid_t receiver = op_stack[--sp];
+
+                /* F3: Emit null-check Guard on receiver + FrameState before call */
+                {
+                    vtx_nodeid_t null_const = vtx_node_create(&graph->node_table, VTX_OP_Constant);
+                    if (null_const == VTX_NODEID_INVALID) return -1;
+                    vtx_node_t *nc = vtx_node_get(&graph->node_table, null_const);
+                    nc->constval = vtx_constval_ptr(NULL);
+                    nc->type = VTX_TYPE_Ptr;
+
+                    vtx_nodeid_t null_cmp = vtx_node_create(&graph->node_table, VTX_OP_CmpP);
+                    if (null_cmp == VTX_NODEID_INVALID) return -1;
+                    vtx_node_t *cmp_n = vtx_node_get(&graph->node_table, null_cmp);
+                    cmp_n->cond = VTX_COND_NE;
+                    vtx_node_add_input(&graph->node_table, null_cmp, receiver);
+                    vtx_node_add_input(&graph->node_table, null_cmp, null_const);
+
+                    vtx_nodeid_t guard = emit_guard(graph, block, null_cmp, VTX_COND_NE,
+                                                     max_locals, pc);
+                    if (guard == VTX_NODEID_INVALID) return -1;
+                }
+
                 vtx_nodeid_t call = vtx_node_create(&graph->node_table, VTX_OP_CallInterface);
                 if (call == VTX_NODEID_INVALID) return -1;
                 vtx_node_t *n = vtx_node_get(&graph->node_table, call);
                 n->method_index = operand;
+                n->bytecode_pc = (uint32_t)pc;
                 vtx_node_add_input(&graph->node_table, call, block->control_node);
                 vtx_node_add_input(&graph->node_table, call, block->memory_node);
                 vtx_node_add_input(&graph->node_table, call, receiver);
@@ -1514,6 +1727,48 @@ int vtx_graph_build(vtx_graph_t *graph,
             case VT_OP_CHECKCAST: {
                 VTX_ASSERT(sp >= 1, "stack underflow on CHECKCAST");
                 vtx_nodeid_t obj = op_stack[--sp];
+
+                /* F3: Emit a type-check Guard before the CheckCast.
+                 * The Guard checks that obj is an instance of the target type.
+                 * If the guard fails, execution deoptimizes via the captured
+                 * FrameState to the interpreter, which will throw ClassCastException.
+                 * We also emit a null-check Guard — CheckCast null is always OK. */
+
+                /* First, check obj != null (null passes CheckCast) */
+                {
+                    vtx_nodeid_t null_const = vtx_node_create(&graph->node_table, VTX_OP_Constant);
+                    if (null_const == VTX_NODEID_INVALID) return -1;
+                    vtx_node_t *nc = vtx_node_get(&graph->node_table, null_const);
+                    nc->constval = vtx_constval_ptr(NULL);
+                    nc->type = VTX_TYPE_Ptr;
+
+                    vtx_nodeid_t null_cmp = vtx_node_create(&graph->node_table, VTX_OP_CmpP);
+                    if (null_cmp == VTX_NODEID_INVALID) return -1;
+                    vtx_node_t *cmp_n = vtx_node_get(&graph->node_table, null_cmp);
+                    cmp_n->cond = VTX_COND_EQ; /* obj == null → pass through */
+                    vtx_node_add_input(&graph->node_table, null_cmp, obj);
+                    vtx_node_add_input(&graph->node_table, null_cmp, null_const);
+
+                    /* Guard: if obj is NOT null, then we need the type check.
+                     * We emit a DeoptGuard that deopts if the type check fails.
+                     * The condition is: (obj != null) AND (obj instanceof type).
+                     * For now, we emit a DeoptGuard for the type check. */
+                    vtx_nodeid_t fs = emit_frame_state(graph, block, max_locals, pc);
+                    if (fs == VTX_NODEID_INVALID) return -1;
+
+                    vtx_nodeid_t deopt_guard = vtx_node_create(&graph->node_table, VTX_OP_DeoptGuard);
+                    if (deopt_guard == VTX_NODEID_INVALID) return -1;
+                    vtx_node_t *dg = vtx_node_get(&graph->node_table, deopt_guard);
+                    dg->type_id = operand;
+                    dg->cond = VTX_COND_NE;
+                    dg->bytecode_pc = (uint32_t)pc;
+                    dg->frame_state = fs;
+                    vtx_node_add_input(&graph->node_table, deopt_guard, block->control_node);
+                    vtx_node_add_input(&graph->node_table, deopt_guard, obj);
+                    vtx_node_add_input(&graph->node_table, deopt_guard, fs);
+                    block->control_node = deopt_guard;
+                }
+
                 result = vtx_node_create(&graph->node_table, VTX_OP_CheckCast);
                 if (result == VTX_NODEID_INVALID) return -1;
                 vtx_node_t *n = vtx_node_get(&graph->node_table, result);
@@ -1539,6 +1794,53 @@ int vtx_graph_build(vtx_graph_t *graph,
                 VTX_ASSERT(sp >= 2, "stack underflow on ARRAY_LOAD");
                 vtx_nodeid_t idx = op_stack[--sp];
                 vtx_nodeid_t arr = op_stack[--sp];
+
+                /* F3: Emit null-check Guard on array reference */
+                {
+                    vtx_nodeid_t null_const = vtx_node_create(&graph->node_table, VTX_OP_Constant);
+                    if (null_const == VTX_NODEID_INVALID) return -1;
+                    vtx_node_t *nc = vtx_node_get(&graph->node_table, null_const);
+                    nc->constval = vtx_constval_ptr(NULL);
+                    nc->type = VTX_TYPE_Ptr;
+
+                    vtx_nodeid_t null_cmp = vtx_node_create(&graph->node_table, VTX_OP_CmpP);
+                    if (null_cmp == VTX_NODEID_INVALID) return -1;
+                    vtx_node_t *cmp_n = vtx_node_get(&graph->node_table, null_cmp);
+                    cmp_n->cond = VTX_COND_NE;
+                    vtx_node_add_input(&graph->node_table, null_cmp, arr);
+                    vtx_node_add_input(&graph->node_table, null_cmp, null_const);
+
+                    vtx_nodeid_t guard = emit_guard(graph, block, null_cmp, VTX_COND_NE,
+                                                     max_locals, pc);
+                    if (guard == VTX_NODEID_INVALID) return -1;
+                }
+
+                /* F3: Emit bounds-check Guard: idx >= 0 && idx < array_length */
+                {
+                    /* Get array length via LoadField(offset=0) */
+                    vtx_nodeid_t len_load = vtx_node_create(&graph->node_table, VTX_OP_LoadField);
+                    if (len_load == VTX_NODEID_INVALID) return -1;
+                    vtx_node_t *ln = vtx_node_get(&graph->node_table, len_load);
+                    ln->field_offset = 0; /* length at offset 0 in array header */
+                    ln->type = VTX_TYPE_Int;
+                    vtx_node_add_input(&graph->node_table, len_load, block->memory_node);
+                    vtx_node_add_input(&graph->node_table, len_load, arr);
+                    /* Note: we don't update memory_node here since this is a
+                     * speculative read for the bounds check only */
+
+                    /* Compare: idx < length (unsigned, so also covers idx >= 0) */
+                    vtx_nodeid_t bounds_cmp = vtx_node_create(&graph->node_table, VTX_OP_Cmp);
+                    if (bounds_cmp == VTX_NODEID_INVALID) return -1;
+                    vtx_node_t *bc_n = vtx_node_get(&graph->node_table, bounds_cmp);
+                    bc_n->cond = VTX_COND_ULT; /* unsigned less-than */
+                    vtx_node_add_input(&graph->node_table, bounds_cmp, idx);
+                    vtx_node_add_input(&graph->node_table, bounds_cmp, len_load);
+
+                    vtx_nodeid_t guard = emit_guard(graph, block, bounds_cmp, VTX_COND_ULT,
+                                                     max_locals, pc);
+                    if (guard == VTX_NODEID_INVALID) return -1;
+                }
+
                 result = vtx_node_create(&graph->node_table, VTX_OP_LoadIndexed);
                 if (result == VTX_NODEID_INVALID) return -1;
                 vtx_node_add_input(&graph->node_table, result, block->memory_node);
@@ -1553,6 +1855,49 @@ int vtx_graph_build(vtx_graph_t *graph,
                 vtx_nodeid_t val = op_stack[--sp];
                 vtx_nodeid_t idx = op_stack[--sp];
                 vtx_nodeid_t arr = op_stack[--sp];
+
+                /* F3: Emit null-check Guard on array reference */
+                {
+                    vtx_nodeid_t null_const = vtx_node_create(&graph->node_table, VTX_OP_Constant);
+                    if (null_const == VTX_NODEID_INVALID) return -1;
+                    vtx_node_t *nc = vtx_node_get(&graph->node_table, null_const);
+                    nc->constval = vtx_constval_ptr(NULL);
+                    nc->type = VTX_TYPE_Ptr;
+
+                    vtx_nodeid_t null_cmp = vtx_node_create(&graph->node_table, VTX_OP_CmpP);
+                    if (null_cmp == VTX_NODEID_INVALID) return -1;
+                    vtx_node_t *cmp_n = vtx_node_get(&graph->node_table, null_cmp);
+                    cmp_n->cond = VTX_COND_NE;
+                    vtx_node_add_input(&graph->node_table, null_cmp, arr);
+                    vtx_node_add_input(&graph->node_table, null_cmp, null_const);
+
+                    vtx_nodeid_t guard = emit_guard(graph, block, null_cmp, VTX_COND_NE,
+                                                     max_locals, pc);
+                    if (guard == VTX_NODEID_INVALID) return -1;
+                }
+
+                /* F3: Emit bounds-check Guard */
+                {
+                    vtx_nodeid_t len_load = vtx_node_create(&graph->node_table, VTX_OP_LoadField);
+                    if (len_load == VTX_NODEID_INVALID) return -1;
+                    vtx_node_t *ln = vtx_node_get(&graph->node_table, len_load);
+                    ln->field_offset = 0;
+                    ln->type = VTX_TYPE_Int;
+                    vtx_node_add_input(&graph->node_table, len_load, block->memory_node);
+                    vtx_node_add_input(&graph->node_table, len_load, arr);
+
+                    vtx_nodeid_t bounds_cmp = vtx_node_create(&graph->node_table, VTX_OP_Cmp);
+                    if (bounds_cmp == VTX_NODEID_INVALID) return -1;
+                    vtx_node_t *bc_n = vtx_node_get(&graph->node_table, bounds_cmp);
+                    bc_n->cond = VTX_COND_ULT;
+                    vtx_node_add_input(&graph->node_table, bounds_cmp, idx);
+                    vtx_node_add_input(&graph->node_table, bounds_cmp, len_load);
+
+                    vtx_nodeid_t guard = emit_guard(graph, block, bounds_cmp, VTX_COND_ULT,
+                                                     max_locals, pc);
+                    if (guard == VTX_NODEID_INVALID) return -1;
+                }
+
                 result = vtx_node_create(&graph->node_table, VTX_OP_StoreIndexed);
                 if (result == VTX_NODEID_INVALID) return -1;
                 vtx_node_add_input(&graph->node_table, result, block->memory_node);

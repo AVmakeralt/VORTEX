@@ -470,6 +470,7 @@ static int run_self_test(void)
                 .bytecode = bc,
                 .compiled_code = NULL,
                 .vtable_index = 0,
+                .arg_count = 1,
                 .is_virtual = false
             };
 
@@ -522,6 +523,7 @@ static int run_self_test(void)
                 .bytecode = bc,
                 .compiled_code = NULL,
                 .vtable_index = 0,
+                .arg_count = 1,
                 .is_virtual = false
             };
 
@@ -581,7 +583,8 @@ static int run_self_test(void)
         vtx_type_system_init(&ts);
 
         vtx_method_desc_t m1 = { .name = "test_method", .signature = "()V",
-                                  .bytecode = NULL, .compiled_code = NULL, .vtable_index = 0, .is_virtual = false };
+                                  .bytecode = NULL, .compiled_code = NULL, .vtable_index = 0,
+                                  .arg_count = 0, .is_virtual = false };
         vtx_profile_method_t *pm = vtx_profile_add_method(&profile, &m1);
         if (pm) {
             pm->invocation_count = 5000;
@@ -741,6 +744,7 @@ static int run_benchmarks(void)
             .bytecode = bc,
             .compiled_code = NULL,
             .vtable_index = 0,
+            .arg_count = 1,
             .is_virtual = false
         };
 
@@ -856,6 +860,7 @@ int main(int argc, char *argv[])
             .bytecode = bc,
             .compiled_code = NULL,
             .vtable_index = 0,
+            .arg_count = 0,
             .is_virtual = false
         };
 

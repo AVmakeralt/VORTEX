@@ -100,6 +100,12 @@ struct vtx_trace {
 
     /* Bytecode length (number of bytecode instructions recorded) */
     uint32_t          bytecode_length;
+
+    /* D6: Native code pointer for trace linking.
+     * After the trace is compiled to native code, this points to the
+     * entry point of the compiled code. Side exits from other traces
+     * can link directly to this address, bypassing the interpreter. */
+    void             *native_code;
 };
 
 /* ========================================================================== */

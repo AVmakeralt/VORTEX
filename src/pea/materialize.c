@@ -68,6 +68,36 @@ static uint32_t collect_field_values(vtx_graph_t *graph, vtx_nodeid_t alloc_id,
 }
 
 /* ========================================================================== */
+/* Internal: collect field values from virtual object tracking                 */
+/* ========================================================================== */
+
+/**
+ * Collect field values from the virtual object's field map.
+ * This is used when virtual.c has already rewritten StoreField nodes
+ * (marking them dead) and moved field values into the virtual object's
+ * field map. Reading from dead StoreField nodes would yield stale values,
+ * so we read from the virtual result instead.
+ */
+static uint32_t collect_field_values_from_virtual(
+    const vtx_virtual_result_t *virtual_result,
+    vtx_nodeid_t alloc_id,
+    uint32_t *offsets,
+    vtx_nodeid_t *values,
+    uint32_t max_fields)
+{
+    const vtx_virtual_obj_t *vobj = vtx_virtual_get_obj(virtual_result, alloc_id);
+    if (vobj == NULL) return 0;
+
+    uint32_t count = 0;
+    for (uint32_t f = 0; f < vobj->field_count && count < max_fields; f++) {
+        offsets[count] = vobj->field_offsets[f];
+        values[count]  = vobj->field_values[f];
+        count++;
+    }
+    return count;
+}
+
+/* ========================================================================== */
 /* Internal: check if a node references a scalar-replaced allocation           */
 /* ========================================================================== */
 
@@ -194,6 +224,7 @@ static int insert_materialization_code(vtx_graph_t *graph,
 
 vtx_materialize_result_t *vtx_materialize_run(vtx_graph_t *graph,
                                                 const vtx_pea_analysis_t *analysis,
+                                                const vtx_virtual_result_t *virtual_result,
                                                 vtx_arena_t *arena)
 {
     VTX_ASSERT(graph != NULL, "graph must not be NULL");
@@ -281,9 +312,21 @@ vtx_materialize_result_t *vtx_materialize_run(vtx_graph_t *graph,
                 MAX_FIELDS_PER_OBJ * sizeof(vtx_nodeid_t));
             if (!pt->field_offsets || !pt->field_local_ids) return NULL;
 
-            pt->field_count = collect_field_values(
-                graph, input_id, pt->field_offsets, pt->field_local_ids,
-                MAX_FIELDS_PER_OBJ);
+            /* F4 fix: when virtual_result is available and the allocation
+             * is classified as virtual, read field values from the virtual
+             * object's field map instead of scanning dead StoreField nodes.
+             * virtual.c marks StoreField nodes as dead after rewriting them
+             * to local variables, so collect_field_values() would miss them. */
+            if (virtual_result != NULL &&
+                vtx_virtual_is_virtual(virtual_result, input_id)) {
+                pt->field_count = collect_field_values_from_virtual(
+                    virtual_result, input_id, pt->field_offsets,
+                    pt->field_local_ids, MAX_FIELDS_PER_OBJ);
+            } else {
+                pt->field_count = collect_field_values(
+                    graph, input_id, pt->field_offsets, pt->field_local_ids,
+                    MAX_FIELDS_PER_OBJ);
+            }
 
             /* Insert materialization code */
             if (insert_materialization_code(graph, pt, arena) != 0) {
@@ -351,9 +394,17 @@ vtx_materialize_result_t *vtx_materialize_run(vtx_graph_t *graph,
                 MAX_FIELDS_PER_OBJ * sizeof(vtx_nodeid_t));
             if (!pt->field_offsets || !pt->field_local_ids) return NULL;
 
-            pt->field_count = collect_field_values(
-                graph, input_id, pt->field_offsets, pt->field_local_ids,
-                MAX_FIELDS_PER_OBJ);
+            /* F4 fix: use virtual field map when available */
+            if (virtual_result != NULL &&
+                vtx_virtual_is_virtual(virtual_result, input_id)) {
+                pt->field_count = collect_field_values_from_virtual(
+                    virtual_result, input_id, pt->field_offsets,
+                    pt->field_local_ids, MAX_FIELDS_PER_OBJ);
+            } else {
+                pt->field_count = collect_field_values(
+                    graph, input_id, pt->field_offsets, pt->field_local_ids,
+                    MAX_FIELDS_PER_OBJ);
+            }
 
             if (insert_materialization_code(graph, pt, arena) != 0) {
                 return NULL;
@@ -459,9 +510,17 @@ vtx_materialize_result_t *vtx_materialize_run(vtx_graph_t *graph,
                 MAX_FIELDS_PER_OBJ * sizeof(vtx_nodeid_t));
             if (!pt->field_offsets || !pt->field_local_ids) return NULL;
 
-            pt->field_count = collect_field_values(
-                graph, input_id, pt->field_offsets, pt->field_local_ids,
-                MAX_FIELDS_PER_OBJ);
+            /* F4 fix: use virtual field map when available */
+            if (virtual_result != NULL &&
+                vtx_virtual_is_virtual(virtual_result, input_id)) {
+                pt->field_count = collect_field_values_from_virtual(
+                    virtual_result, input_id, pt->field_offsets,
+                    pt->field_local_ids, MAX_FIELDS_PER_OBJ);
+            } else {
+                pt->field_count = collect_field_values(
+                    graph, input_id, pt->field_offsets, pt->field_local_ids,
+                    MAX_FIELDS_PER_OBJ);
+            }
 
             /* Insert materialization code (NewObject + StoreField).
              * The predecessor_control field is set, so the NewObject

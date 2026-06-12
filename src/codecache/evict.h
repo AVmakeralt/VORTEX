@@ -8,32 +8,27 @@
 #include "codecache/install.h"
 
 /**
- * VORTEX LRU Eviction
+ * VORTEX Clock (Second Chance) Eviction
  *
- * When the code cache exceeds VORTEX_CACHE_MAX_SIZE, evict the
- * least-recently-used methods. LRU tracking uses an amortized
- * timestamp: updated every VTX_LRU_UPDATE_INTERVAL calls to avoid
- * write contention on hot call paths.
+ * When the code cache exceeds VORTEX_CACHE_MAX_SIZE, evict methods
+ * using the clock (second chance) algorithm. This is O(1) amortized
+ * per eviction, replacing the previous O(n) full-scan LRU approach.
  *
- * Eviction policy:
- *   1. Find the method with the oldest last_used_timestamp
- *   2. Mark it as not-compiled (code pointer → NULL)
- *   3. Free its side table and deopt info
- *   4. Code in segments is freed only when the segment is completely empty
+ * Each method has a use_bit that is set on call (touch) and cleared
+ * by the clock hand during eviction scanning. Methods with a cleared
+ * use_bit are eviction candidates; those with a set use_bit get a
+ * "second chance" (bit cleared, hand advances).
  *
  * Evicted methods will be recompiled if they become hot again.
  */
 
 /* ========================================================================== */
-/* LRU eviction                                                                */
+/* Clock eviction                                                              */
 /* ========================================================================== */
 
 /**
- * Evict methods using LRU policy until the cache is under the max size.
- *
- * For each method, the last_used_timestamp is updated every
- * VTX_LRU_UPDATE_INTERVAL calls (amortized cost). This function
- * finds the oldest methods and evicts them.
+ * Evict methods using the clock (second chance) algorithm until the
+ * cache is under the max size. O(1) amortized per eviction.
  *
  * @param cache       Code cache
  * @param registry    Method registry
@@ -45,9 +40,11 @@ int vtx_evict_lru(vtx_code_cache_t *cache,
                    uint64_t current_ts);
 
 /**
- * Update the LRU timestamp for a method.
- * Called when a method is invoked. The timestamp is only updated
- * every VTX_LRU_UPDATE_INTERVAL calls to amortize the cost.
+ * Update the use bit for a method (clock eviction touch).
+ * Called when a method is invoked. Sets the use_bit so the clock
+ * algorithm gives the method a "second chance" during eviction.
+ * The timestamp is also updated every VTX_LRU_UPDATE_INTERVAL calls
+ * for diagnostics.
  *
  * @param method  The compiled method
  * @param ts      Current global timestamp
@@ -55,7 +52,8 @@ int vtx_evict_lru(vtx_code_cache_t *cache,
 void vtx_evict_touch(vtx_compiled_method_t *method, uint64_t ts);
 
 /**
- * Find the least recently used method in the registry.
+ * Find the next eviction candidate using the clock (second chance)
+ * algorithm. O(1) amortized per call.
  * Returns the method, or NULL if the registry is empty.
  */
 vtx_compiled_method_t *vtx_evict_find_lru(vtx_method_registry_t *registry);

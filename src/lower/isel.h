@@ -154,6 +154,7 @@ typedef struct {
 #define VTX_INST_FLAG_PHI_COPY   (1u << 16) /* MOV inserted for Phi resolution */
 #define VTX_INST_FLAG_SPILL_LOAD (1u << 17) /* load from spill slot to register */
 #define VTX_INST_FLAG_SPILL_STORE (1u << 18) /* store from register to spill slot */
+#define VTX_INST_FLAG_FUSED     (1u << 19) /* P6: CMP+JCC fused pair — scheduler must keep adjacent */
 
 typedef struct {
     vtx_x86_opcode_t opcode;

@@ -24,10 +24,13 @@ int vtx_method_registry_init(vtx_method_registry_t *registry, vtx_arena_t *arena
     if (!registry) return -1;
     registry->method_count = 0;
     registry->capacity = VTX_METHOD_REGISTRY_INITIAL_CAPACITY;
+    registry->capacity_mask = registry->capacity - 1;
+    registry->clock_hand = 0;
     registry->methods = (vtx_compiled_method_t **)vtx_arena_alloc(
         arena, registry->capacity * sizeof(vtx_compiled_method_t *));
     if (!registry->methods) {
         registry->capacity = 0;
+        registry->capacity_mask = 0;
         return -1;
     }
     memset(registry->methods, 0, registry->capacity * sizeof(vtx_compiled_method_t *));
@@ -51,6 +54,8 @@ void vtx_method_registry_destroy(vtx_method_registry_t *registry)
     registry->methods = NULL;
     registry->method_count = 0;
     registry->capacity = 0;
+    registry->capacity_mask = 0;
+    registry->clock_hand = 0;
 }
 
 int vtx_method_registry_add(vtx_method_registry_t *registry,
@@ -58,7 +63,8 @@ int vtx_method_registry_add(vtx_method_registry_t *registry,
 {
     if (!registry || !method) return -1;
 
-    /* Grow array if needed */
+    /* Grow array if needed. Capacity is always kept as a power of 2
+     * so that (index & capacity_mask) is equivalent to (index % capacity). */
     if (method->method_id >= registry->capacity) {
         uint32_t new_cap = registry->capacity;
         while (new_cap <= method->method_id) new_cap *= 2;
@@ -72,6 +78,7 @@ int vtx_method_registry_add(vtx_method_registry_t *registry,
         }
         registry->methods = new_arr;
         registry->capacity = new_cap;
+        registry->capacity_mask = new_cap - 1;
     }
 
     registry->methods[method->method_id] = method;

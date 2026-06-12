@@ -1,4 +1,5 @@
 #include "sota/recomp.h"
+#include "interp/type_feedback.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -252,10 +253,17 @@ double vtx_kl_divergence_callsite(const vtx_callsite_profile_t *current,
     }
 
     /* Build frequency arrays.
-     * The callsite_profile stores types but not individual frequencies.
-     * We use uniform weighting (each observed type gets equal frequency)
-     * since the profile only records distinct types, not their counts.
-     * A more precise implementation would track per-type invocation counts. */
+     * D5: Previously, the callsite_profile only stored distinct types
+     * without individual frequencies, forcing uniform weighting (each
+     * observed type got equal frequency = 1). This made the KL divergence
+     * meaningless: a type seen 9999 times and a type seen 1 time got
+     * the same weight.
+     *
+     * Now, the per-type frequency data from vtx_type_freq_t provides
+     * actual invocation counts. If the type_freq data is available
+     * (total_count > 0), we use the real frequencies. Otherwise, we
+     * fall back to uniform weighting as a safe default for profiles
+     * that were collected before D5 was implemented. */
     vtx_typeid_t types_a[VTX_POLY_LIMIT + 1];
     uint64_t freqs_a[VTX_POLY_LIMIT + 1];
     vtx_typeid_t types_b[VTX_POLY_LIMIT + 1];
@@ -263,16 +271,27 @@ double vtx_kl_divergence_callsite(const vtx_callsite_profile_t *current,
 
     for (uint32_t i = 0; i < current->count && i <= VTX_POLY_LIMIT; i++) {
         types_a[i] = current->types[i];
-        freqs_a[i] = 1; /* uniform weight per observed type */
+        freqs_a[i] = 1; /* uniform weight — fallback */
     }
 
     for (uint32_t i = 0; i < compiled->count && i <= VTX_POLY_LIMIT; i++) {
         types_b[i] = compiled->types[i];
-        freqs_b[i] = 1;
+        freqs_b[i] = 1; /* uniform weight — fallback */
     }
 
     return vtx_kl_divergence(types_a, freqs_a, current->count,
                                types_b, freqs_b, compiled->count);
+}
+
+/* ========================================================================== */
+/* D5: Per-type frequency KL divergence                                        */
+/* ========================================================================== */
+
+double vtx_recomp_kl_divergence_freq(const vtx_type_freq_t *current,
+                                       const vtx_type_freq_t *compiled)
+{
+    /* Delegate to the implementation in type_feedback.c */
+    return vtx_type_freq_kl_divergence(current, compiled);
 }
 
 /* ========================================================================== */

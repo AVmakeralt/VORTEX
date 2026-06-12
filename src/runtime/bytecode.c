@@ -101,6 +101,7 @@ const vtx_opcode_info_t vtx_opcode_table[VT_OP_COUNT] = {
     /* Exceptions */
     OP(VT_OP_THROW, 1, 0, false, 0),
     OP(VT_OP_CATCH, 0, 1, true, 2),
+    OP(VT_OP_CATCH_TYPED, 0, 1, true, 4),  /* 4-byte operand: 2-byte handler PC + 2-byte typeid */
 
     /* Monitors */
     OP(VT_OP_MONITOR_ENTER, 1, 0, false, 0),
@@ -114,6 +115,9 @@ const vtx_opcode_info_t vtx_opcode_table[VT_OP_COUNT] = {
     /* Type queries */
     OP(VT_OP_ISNULL,  1, 1, false, 0),
     OP(VT_OP_TYPEOF,  1, 1, false, 0),
+
+    /* Runtime calls */
+    OP(VT_OP_CALL_RUNTIME, 0, 1, true, 2),  /* 2-byte operand: runtime function ID */
 };
 
 #undef OP

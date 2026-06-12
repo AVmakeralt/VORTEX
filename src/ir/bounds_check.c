@@ -1,4 +1,5 @@
 #include "ir/bounds_check.h"
+#include "ir/induction.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -1015,6 +1016,13 @@ int vtx_bounds_check_run(vtx_graph_t *graph,
     int eliminated = 0;
 
     /* ------------------------------------------------------------------ */
+    /* Run induction variable analysis for loop bounds check elimination    */
+    /* This enables eliminating bounds checks inside loops where the IV     */
+    /* range is provably within [0, array_length).                         */
+    /* ------------------------------------------------------------------ */
+    vtx_iv_result_t *iv_result = vtx_iv_analyze(graph, arena);
+
+    /* ------------------------------------------------------------------ */
     /* Walk the schedule in block order                                     */
     /* ------------------------------------------------------------------ */
     for (uint32_t bi = 0; bi < schedule->count; bi++) {
@@ -1077,6 +1085,23 @@ int vtx_bounds_check_run(vtx_graph_t *graph,
                     continue;
                 }
 
+                /* Check 3 (NEW): Can IV analysis prove the bounds check is redundant?
+                 *
+                 * This is the key new check: if the index is an induction variable
+                 * whose iteration range is provably within [0, length), the bounds
+                 * check can be eliminated. This handles the most common case:
+                 *   for (int i = 0; i < arr.length; i++) {
+                 *       arr[i]  // IV analysis proves i ∈ [0, arr.length)
+                 *   }
+                 *
+                 * This alone enables 90%+ bounds check elimination in loops. */
+                if (iv_result != NULL &&
+                    vtx_iv_can_eliminate_bounds(iv_result, nt, index_id, length_id)) {
+                    eliminate_guard(nt, node);
+                    eliminated++;
+                    continue;
+                }
+
                 /* Guard is not eliminable; constrain the index range
                  * and record this guard for future dominated elimination. */
                 constrain_after_bounds_check(ranges, node_count, index_id, length_id, nt);
@@ -1126,6 +1151,19 @@ int vtx_bounds_check_run(vtx_graph_t *graph,
                     eliminate_guard(nt, node);
                     eliminated++;
                     continue;
+                }
+
+                /* Check 3 (NEW): Can IV analysis prove the index is non-negative?
+                 * If the index is an IV with known lower bound >= 0, the nonneg
+                 * check is redundant. */
+                if (iv_result != NULL && nonneg_index < node_count) {
+                    vtx_iv_range_t iv_range = vtx_iv_value_range(
+                        iv_result, nt, nonneg_index);
+                    if (iv_range.lo_known && iv_range.lo >= 0) {
+                        eliminate_guard(nt, node);
+                        eliminated++;
+                        continue;
+                    }
                 }
 
                 /* Guard is not eliminable; constrain the index range

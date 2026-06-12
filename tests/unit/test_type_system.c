@@ -114,9 +114,9 @@ VTX_TEST(type_register_with_methods)
     vtx_method_desc_t *methods = (vtx_method_desc_t *)calloc(2, sizeof(vtx_method_desc_t));
     VTX_ASSERT_NOT_NULL(methods);
     methods[0].name = "speak"; methods[0].signature = "()V";
-    methods[0].bytecode = NULL; methods[0].vtable_index = 0xFFFFFFFF; methods[0].is_virtual = true;
+    methods[0].bytecode = NULL; methods[0].vtable_index = 0xFFFFFFFF; methods[0].arg_count = 0; methods[0].is_virtual = true;
     methods[1].name = "eat"; methods[1].signature = "()V";
-    methods[1].bytecode = NULL; methods[1].vtable_index = 0xFFFFFFFF; methods[1].is_virtual = false;
+    methods[1].bytecode = NULL; methods[1].vtable_index = 0xFFFFFFFF; methods[1].arg_count = 0; methods[1].is_virtual = false;
 
     vtx_typeid_t animal_id = vtx_type_register(&ts, "Animal", VTX_TYPE_OBJECT,
                                                  0, NULL, 2, methods);
@@ -230,7 +230,7 @@ VTX_TEST(type_resolve_method_own)
     vtx_method_desc_t *methods = (vtx_method_desc_t *)calloc(1, sizeof(vtx_method_desc_t));
     VTX_ASSERT_NOT_NULL(methods);
     methods[0].name = "speak"; methods[0].signature = "()V";
-    methods[0].bytecode = NULL; methods[0].vtable_index = 0; methods[0].is_virtual = true;
+    methods[0].bytecode = NULL; methods[0].vtable_index = 0; methods[0].arg_count = 0; methods[0].is_virtual = true;
 
     vtx_typeid_t animal = vtx_type_register(&ts, "Animal", VTX_TYPE_OBJECT,
                                               0, NULL, 1, methods);
@@ -250,7 +250,7 @@ VTX_TEST(type_resolve_method_inherited)
     vtx_method_desc_t *animal_methods = (vtx_method_desc_t *)calloc(1, sizeof(vtx_method_desc_t));
     VTX_ASSERT_NOT_NULL(animal_methods);
     animal_methods[0].name = "speak"; animal_methods[0].signature = "()V";
-    animal_methods[0].bytecode = NULL; animal_methods[0].vtable_index = 0; animal_methods[0].is_virtual = true;
+    animal_methods[0].bytecode = NULL; animal_methods[0].vtable_index = 0; animal_methods[0].arg_count = 0; animal_methods[0].is_virtual = true;
 
     vtx_typeid_t animal = vtx_type_register(&ts, "Animal", VTX_TYPE_OBJECT,
                                               0, NULL, 1, animal_methods);
@@ -344,8 +344,7 @@ VTX_TEST(ic_update_monomorphic)
     vtx_ic_init(&ic);
 
     vtx_method_desc_t method = {
-        .name = "foo", .signature = "()V", .bytecode = NULL,
-        .vtable_index = 0, .is_virtual = true
+        .name = "foo", .signature = "()V", .bytecode = NULL,        .vtable_index = 0, .arg_count = 0, .is_virtual = true
     };
 
     vtx_ic_update(&ic, 1, &method);
@@ -363,10 +362,8 @@ VTX_TEST(ic_update_polymorphic)
     vtx_inline_cache_t ic;
     vtx_ic_init(&ic);
 
-    vtx_method_desc_t m1 = { .name = "foo", .signature = "()V", .bytecode = NULL,
-                              .vtable_index = 0, .is_virtual = true };
-    vtx_method_desc_t m2 = { .name = "bar", .signature = "()V", .bytecode = NULL,
-                              .vtable_index = 1, .is_virtual = true };
+    vtx_method_desc_t m1 = { .name = "foo", .signature = "()V", .bytecode = NULL,                              .vtable_index = 0, .arg_count = 0, .is_virtual = true };
+    vtx_method_desc_t m2 = { .name = "bar", .signature = "()V", .bytecode = NULL,                              .vtable_index = 1, .arg_count = 0, .is_virtual = true };
 
     vtx_ic_update(&ic, 1, &m1);
     vtx_ic_update(&ic, 2, &m2);
@@ -386,8 +383,7 @@ VTX_TEST(ic_update_megamorphic)
     vtx_inline_cache_t ic;
     vtx_ic_init(&ic);
 
-    vtx_method_desc_t m = { .name = "f", .signature = "()V", .bytecode = NULL,
-                             .vtable_index = 0, .is_virtual = true };
+    vtx_method_desc_t m = { .name = "f", .signature = "()V", .bytecode = NULL,                             .vtable_index = 0, .arg_count = 0, .is_virtual = true };
 
     /* Fill up to VTX_POLY_LIMIT entries */
     for (uint32_t i = 0; i < VTX_POLY_LIMIT; i++) {
@@ -408,8 +404,7 @@ VTX_TEST(ic_update_duplicate)
     vtx_inline_cache_t ic;
     vtx_ic_init(&ic);
 
-    vtx_method_desc_t m = { .name = "f", .signature = "()V", .bytecode = NULL,
-                             .vtable_index = 0, .is_virtual = true };
+    vtx_method_desc_t m = { .name = "f", .signature = "()V", .bytecode = NULL,                             .vtable_index = 0, .arg_count = 0, .is_virtual = true };
 
     vtx_ic_update(&ic, 1, &m);
     vtx_ic_update(&ic, 1, &m); /* duplicate — should not increase count */

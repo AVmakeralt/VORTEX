@@ -189,6 +189,10 @@ vtx_profile_data_t *vtx_profiler_get_method_data(vtx_profiler_t *profiler,
     pd->call_site_types = NULL;
     pd->call_site_count = 0;
 
+    /* D7: Initialize tier-up counter */
+    pd->tier_up.tier_up_counter = VTX_TIER_UP_INITIAL_COUNT;
+    pd->tier_up.compilation_requested = false;
+
     /* Allocate per-PC arrays based on bytecode length */
     ensure_profile_arrays(pd);
 
@@ -514,4 +518,65 @@ void vtx_profiler_set_compiled_tier(vtx_profiler_t *profiler,
     }
 
     pd->compiled_tier = tier;
+}
+
+/* ========================================================================== */
+/* D7: Tier-up counter                                                         */
+/* ========================================================================== */
+
+bool vtx_profiler_tier_up_check(vtx_profiler_t *profiler,
+                                  const vtx_method_desc_t *method)
+{
+    VTX_ASSERT(profiler != NULL, "profiler must not be NULL");
+    VTX_ASSERT(method != NULL, "method must not be NULL");
+
+    vtx_profile_data_t *pd = vtx_profiler_get_method_data(profiler, method);
+    if (pd == NULL) {
+        return false;
+    }
+
+    /* If compilation was already requested, this is a no-op.
+     * This prevents re-queueing a method that's already waiting
+     * to be compiled. */
+    if (pd->tier_up.compilation_requested) {
+        return false;
+    }
+
+    /* Decrement the counter.
+     * This is the key insight: on x86-64, this compiles to a single
+     * `dec [mem]` instruction (2-3 bytes). The subsequent check is
+     * a `jle` (2 bytes). Total: 4-5 bytes of overhead per backward
+     * branch, which is essentially zero compared to the cost of the
+     * branch itself and the safepoint check. */
+    pd->tier_up.tier_up_counter--;
+
+    if (pd->tier_up.tier_up_counter <= 0) {
+        /* Threshold reached — mark as compilation requested.
+         * The actual compilation is triggered by the dispatch loop
+         * after this function returns true. */
+        pd->tier_up.compilation_requested = true;
+        return true;
+    }
+
+    return false;
+}
+
+void vtx_profiler_tier_up_reset(vtx_profiler_t *profiler,
+                                  const vtx_method_desc_t *method,
+                                  int32_t new_initial_count)
+{
+    VTX_ASSERT(profiler != NULL, "profiler must not be NULL");
+    VTX_ASSERT(method != NULL, "method must not be NULL");
+
+    vtx_profile_data_t *pd = vtx_profiler_get_method_data(profiler, method);
+    if (pd == NULL) {
+        return;
+    }
+
+    if (new_initial_count <= 0) {
+        new_initial_count = VTX_TIER_UP_INITIAL_COUNT;
+    }
+
+    pd->tier_up.tier_up_counter = new_initial_count;
+    pd->tier_up.compilation_requested = false;
 }

@@ -1,9 +1,17 @@
 /**
- * VORTEX LRU Eviction
+ * VORTEX Clock (Second Chance) Eviction
  *
- * Evicts least-recently-used methods from the code cache when it
- * exceeds the maximum size. Uses amortized timestamps to minimize
- * overhead on hot call paths.
+ * Evicts methods from the code cache using the clock (second chance)
+ * algorithm, which is O(1) amortized per eviction instead of the
+ * previous O(n) full-scan LRU approach.
+ *
+ * Each method has a use_bit that is set on call (touch) and cleared
+ * by the clock hand during eviction scanning. Methods with a cleared
+ * use_bit are eviction candidates; those with a set use_bit get a
+ * "second chance" (bit cleared, hand advances).
+ *
+ * The methods array capacity is always a power of 2, enabling
+ * (pos & capacity_mask) instead of (pos % capacity).
  */
 
 #include "codecache/evict.h"
@@ -12,7 +20,7 @@
 #include <stdatomic.h>
 
 /* ========================================================================== */
-/* LRU touch (update timestamp)                                                */
+/* Touch — set use bit for clock eviction                                      */
 /* ========================================================================== */
 
 void vtx_evict_touch(vtx_compiled_method_t *method, uint64_t ts)
@@ -20,41 +28,65 @@ void vtx_evict_touch(vtx_compiled_method_t *method, uint64_t ts)
     if (!method || !method->is_installed) return;
 
     method->call_count++;
+    method->clock_state.use_bit = true;
 
     /* Only update the timestamp every VTX_LRU_UPDATE_INTERVAL calls
-     * to amortize the cost of the atomic write. */
+     * to amortize the cost of the atomic write. Kept for diagnostics. */
     if (method->call_count % VTX_LRU_UPDATE_INTERVAL == 0) {
         method->last_used_timestamp = ts;
     }
 }
 
 /* ========================================================================== */
-/* Find LRU method                                                             */
+/* Clock (Second Chance) eviction — O(1) amortized per eviction                */
 /* ========================================================================== */
 
 vtx_compiled_method_t *vtx_evict_find_lru(vtx_method_registry_t *registry)
 {
     if (!registry || registry->method_count == 0) return NULL;
 
-    vtx_compiled_method_t *lru = NULL;
-    uint64_t oldest_ts = UINT64_MAX;
+    /* Clock (Second Chance) algorithm:
+     * Walk the method array starting from clock_hand.
+     * For each method:
+     *   - If use_bit is set: clear it and advance (give "second chance")
+     *   - If use_bit is clear: this is our victim
+     * This is O(1) amortized per eviction instead of O(n).
+     *
+     * We use (pos & capacity_mask) instead of (pos % capacity)
+     * because capacity is always a power of 2. */
 
-    for (uint32_t i = 0; i < registry->method_count; i++) {
-        vtx_compiled_method_t *m = registry->methods[i];
-        if (!m || !m->is_installed || !m->is_valid) continue;
+    uint32_t capacity = registry->capacity;
+    uint32_t mask = registry->capacity_mask;
+    uint32_t start = registry->clock_hand & mask;
+    uint32_t pos = start;
 
-        /* Prefer evicting methods with the oldest timestamp.
-         * If timestamps are equal, prefer the one with fewer calls. */
-        if (m->last_used_timestamp < oldest_ts) {
-            oldest_ts = m->last_used_timestamp;
-            lru = m;
-        } else if (m->last_used_timestamp == oldest_ts && lru &&
-                   m->call_count < lru->call_count) {
-            lru = m;
+    do {
+        vtx_compiled_method_t *m = registry->methods[pos];
+        if (m && m->is_installed && m->is_valid) {
+            if (m->clock_state.use_bit) {
+                /* Recently used — give second chance */
+                m->clock_state.use_bit = false;
+            } else {
+                /* Not recently used — this is our victim */
+                registry->clock_hand = (pos + 1) & mask;
+                return m;
+            }
         }
-    }
+        pos = (pos + 1) & mask;
+    } while (pos != start);
 
-    return lru;
+    /* All valid methods had use bits set — evict the first valid one */
+    pos = start;
+    do {
+        vtx_compiled_method_t *m = registry->methods[pos];
+        if (m && m->is_installed && m->is_valid) {
+            registry->clock_hand = (pos + 1) & mask;
+            return m;
+        }
+        pos = (pos + 1) & mask;
+    } while (pos != start);
+
+    return NULL; /* no evictable methods */
 }
 
 /* ========================================================================== */

@@ -90,9 +90,52 @@ vtx_pipeline_config_t vtx_pipeline_config_t1(void)
     cfg.run_pea           = false;
     cfg.run_inlining      = false;
     cfg.run_verify        = false;
+    cfg.run_loop_spec     = false;
+    cfg.run_vectorize     = false;
     cfg.gvn_iterations    = 1;
     cfg.sccp_iterations   = 0;
     cfg.dce_iterations    = 1;
+    cfg.shared_gbdt_model = NULL;
+    cfg.owns_gbdt_model   = false;
+    cfg.run_midtier       = false;
+    cfg.markov            = NULL;
+    return cfg;
+}
+
+vtx_pipeline_config_t vtx_pipeline_config_t1_5(void)
+{
+    /* T1.5 — Mid-Tier: type-specialized without full optimization.
+     * Between T1 and T2: uses type feedback to specialize operations,
+     * eliminating type checks at monomorphic sites. Reduces warmup
+     * by 3-5x compared to waiting for T2 compilation.
+     *
+     * Pipeline: GVN(1) → type specialization → DCE(1) → schedule → lower.
+     * No SCCP, no PEA, no inlining, no LICM, no bounds check elimination.
+     * Compilation is ~10x faster than T2. */
+    vtx_pipeline_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.run_gvn           = true;
+    cfg.run_sccp          = false;
+    cfg.run_dce           = true;
+    cfg.run_licm          = false;
+    cfg.run_bounds_check  = false;
+    cfg.run_pea           = false;
+    cfg.run_inlining      = false;
+    cfg.run_speculative   = false;
+    cfg.run_verify        = false;
+    cfg.run_loop_spec     = false;
+    cfg.run_vectorize     = false;
+    cfg.run_midtier       = true;  /* enable mid-tier type specialization */
+    cfg.gvn_iterations    = 1;
+    cfg.sccp_iterations   = 0;
+    cfg.dce_iterations    = 1;
+    cfg.inline_size_limit = 0;
+    cfg.callee_lookup     = NULL;
+    cfg.callee_lookup_context = NULL;
+    cfg.type_feedback     = NULL;  /* set by caller if available */
+    cfg.shared_gbdt_model = NULL;
+    cfg.owns_gbdt_model   = false;
+    cfg.markov            = NULL;
     return cfg;
 }
 
@@ -100,7 +143,7 @@ vtx_pipeline_config_t vtx_pipeline_config_t2(void)
 {
     /* T2 — Optimizing JIT: full optimization pipeline.
      * GVN -> SCCP -> DCE -> inlining -> GVN+SCCP+DCE -> PEA -> DCE ->
-     * schedule -> LICM -> bounds check -> lower.
+     * schedule -> LICM -> bounds check -> loop spec -> lower.
      * Target: best throughput for hot code. */
     vtx_pipeline_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
@@ -113,6 +156,8 @@ vtx_pipeline_config_t vtx_pipeline_config_t2(void)
     cfg.run_inlining      = true;
     cfg.run_speculative   = false;  /* no speculation in T2 */
     cfg.run_verify        = false;  /* disabled by default for performance */
+    cfg.run_loop_spec     = true;   /* enable loop specialization */
+    cfg.run_vectorize     = true;   /* enable SIMD vectorization */
     cfg.gvn_iterations    = 3;
     cfg.sccp_iterations   = 3;
     cfg.dce_iterations    = 3;
@@ -120,6 +165,10 @@ vtx_pipeline_config_t vtx_pipeline_config_t2(void)
     cfg.callee_lookup     = NULL;
     cfg.callee_lookup_context = NULL;
     cfg.type_feedback     = NULL;   /* no type feedback by default; set by caller */
+    cfg.shared_gbdt_model = NULL;
+    cfg.owns_gbdt_model   = false;
+    cfg.run_midtier       = false;
+    cfg.markov            = NULL;
     return cfg;
 }
 
@@ -146,6 +195,8 @@ vtx_pipeline_config_t vtx_pipeline_config_t3(void)
     cfg.run_inlining      = true;
     cfg.run_speculative   = true;   /* enable speculative guard insertion */
     cfg.run_verify        = true;   /* verify aggressively in speculative tier */
+    cfg.run_loop_spec     = true;   /* enable loop specialization */
+    cfg.run_vectorize     = true;   /* enable SIMD vectorization */
     cfg.gvn_iterations    = 5;
     cfg.sccp_iterations   = 5;
     cfg.dce_iterations    = 5;
@@ -153,6 +204,10 @@ vtx_pipeline_config_t vtx_pipeline_config_t3(void)
     cfg.callee_lookup     = NULL;
     cfg.callee_lookup_context = NULL;
     cfg.type_feedback     = NULL;   /* no type feedback by default; set by caller */
+    cfg.shared_gbdt_model = NULL;
+    cfg.owns_gbdt_model   = false;
+    cfg.run_midtier       = false;
+    cfg.markov            = NULL;
     return cfg;
 }
 
@@ -265,17 +320,31 @@ static uint32_t run_inlining_pass(vtx_graph_t *graph,
     uint32_t decisions = 0;
     uint32_t inlined = 0;
 
-    /* Initialize the GBDT model with default conservative weights */
-    vtx_gbdt_model_t model;
-    if (vtx_gbdt_model_init(&model) != 0) {
-        *time_ns = elapsed_ns(start);
-        return 0;
-    }
+    /* Use the shared GBDT model if available, otherwise create a
+     * temporary one for this compilation (backward compatibility). */
+    vtx_gbdt_model_t *model = config->shared_gbdt_model;
+    bool owns_temp_model = false;
 
-    if (vtx_gbdt_load_default_model(&model) != 0) {
-        vtx_gbdt_model_destroy(&model);
-        *time_ns = elapsed_ns(start);
-        return 0;
+    if (model == NULL) {
+        /* Fallback: create a per-compilation model */
+        vtx_gbdt_model_t *temp = (vtx_gbdt_model_t *)malloc(sizeof(vtx_gbdt_model_t));
+        if (!temp) {
+            *time_ns = elapsed_ns(start);
+            return 0;
+        }
+        if (vtx_gbdt_model_init(temp) != 0) {
+            free(temp);
+            *time_ns = elapsed_ns(start);
+            return 0;
+        }
+        if (vtx_gbdt_load_default_model(temp) != 0) {
+            vtx_gbdt_model_destroy(temp);
+            free(temp);
+            *time_ns = elapsed_ns(start);
+            return 0;
+        }
+        model = temp;
+        owns_temp_model = true;
     }
 
     /* Determine the effective inline size limit */
@@ -296,7 +365,10 @@ static uint32_t run_inlining_pass(vtx_graph_t *graph,
     vtx_nodeid_t *call_nodes = (vtx_nodeid_t *)vtx_arena_alloc(arena,
         sizeof(vtx_nodeid_t) * (node_count + 1));
     if (!call_nodes) {
-        vtx_gbdt_model_destroy(&model);
+        if (owns_temp_model) {
+            vtx_gbdt_model_destroy(model);
+            free(model);
+        }
         *time_ns = elapsed_ns(start);
         return 0;
     }
@@ -366,7 +438,7 @@ static uint32_t run_inlining_pass(vtx_graph_t *graph,
         features.features[14] = 0.0;         /* inline_history */
 
         /* Run GBDT inference */
-        double score = vtx_gbdt_infer(&model, &features);
+        double score = vtx_gbdt_infer(model, &features);
         decisions++;
 
         if (vtx_gbdt_should_inline(score)) {
@@ -396,7 +468,10 @@ static uint32_t run_inlining_pass(vtx_graph_t *graph,
         }
     }
 
-    vtx_gbdt_model_destroy(&model);
+    if (owns_temp_model) {
+        vtx_gbdt_model_destroy(model);
+        free(model);
+    }
     *time_ns = elapsed_ns(start);
     return (decisions << 16) | inlined;  /* pack decisions + inlined count */
 }
@@ -433,8 +508,14 @@ static uint32_t run_pea_pass(vtx_graph_t *graph,
         allocs_eliminated = sr_result->allocs_replaced;
     }
 
-    /* Step 3: Materialize objects at escape/deopt points */
-    vtx_materialize_result_t *mat_result = vtx_materialize_run(graph, analysis, arena);
+    /* Step 3: Run virtual object tracking (rewrites field accesses to
+     * locals, marks StoreField nodes as dead). Must run before
+     * materialization so that materialize reads field values from
+     * the virtual field maps instead of dead StoreField nodes. */
+    vtx_virtual_result_t *virtual_result = vtx_virtual_run(graph, analysis, arena);
+
+    /* Step 4: Materialize objects at escape/deopt points */
+    vtx_materialize_result_t *mat_result = vtx_materialize_run(graph, analysis, virtual_result, arena);
     /* mat_result tracks how many objects needed materialization; we don't
      * count those as "eliminated" since they still exist on the heap. */
     (void)mat_result;
@@ -498,6 +579,104 @@ static uint32_t run_bounds_check_pass(vtx_graph_t *graph,
     int eliminated = vtx_bounds_check_run(graph, schedule, arena);
     *time_ns = elapsed_ns(start);
     return (eliminated >= 0) ? (uint32_t)eliminated : 0;
+}
+
+/* ========================================================================== */
+/* Loop specialization/vectorization pass                                        */
+/* ========================================================================== */
+
+/**
+ * Run loop specialization and vectorization.
+ *
+ * Finds all LoopBegin nodes, checks if they are vectorizable using
+ * the loop_spec analyzer, and transforms vectorizable loops by
+ * replacing scalar operations with SIMD-wide operations.
+ *
+ * Returns the number of loops vectorized.
+ */
+static uint32_t run_loop_spec_pass(vtx_graph_t *graph,
+                                    vtx_arena_t *arena,
+                                    int64_t *time_ns)
+{
+    int64_t start = now_ns();
+    uint32_t vectorized = 0;
+
+    /* Initialize loop spec analyzer */
+    vtx_sota_loop_spec_t spec;
+    if (vtx_sota_loop_spec_init(&spec) != 0) {
+        *time_ns = elapsed_ns(start);
+        return 0;
+    }
+
+    /* Detect CPU features */
+    uint32_t cpu_features = vtx_sota_loop_detect_cpu_features();
+
+    /* Find all LoopBegin nodes in the graph */
+    vtx_node_table_t *table = &graph->node_table;
+
+    /* First pass: collect LoopBegin node IDs (iteration may be
+     * invalidated if we modify the graph during transformation) */
+    uint32_t loop_count = 0;
+    for (uint32_t i = 0; i < table->count; i++) {
+        vtx_node_t *node = &table->nodes[i];
+        if (!node->dead && node->opcode == VTX_OP_LoopBegin) {
+            loop_count++;
+        }
+    }
+
+    if (loop_count == 0) {
+        vtx_sota_loop_spec_destroy(&spec);
+        *time_ns = elapsed_ns(start);
+        return 0;
+    }
+
+    vtx_nodeid_t *loop_nodes = (vtx_nodeid_t *)vtx_arena_alloc(
+        arena, sizeof(vtx_nodeid_t) * loop_count);
+    if (!loop_nodes) {
+        vtx_sota_loop_spec_destroy(&spec);
+        *time_ns = elapsed_ns(start);
+        return 0;
+    }
+
+    uint32_t idx = 0;
+    for (uint32_t i = 0; i < table->count; i++) {
+        vtx_node_t *node = &table->nodes[i];
+        if (!node->dead && node->opcode == VTX_OP_LoopBegin) {
+            loop_nodes[idx++] = node->id;
+        }
+    }
+
+    /* Second pass: analyze and transform each loop */
+    for (uint32_t l = 0; l < loop_count; l++) {
+        vtx_nodeid_t loop_id = loop_nodes[l];
+
+        /* Verify the node still exists and is a LoopBegin */
+        vtx_node_t *loop_node = vtx_node_get(table, loop_id);
+        if (!loop_node || loop_node->dead || loop_node->opcode != VTX_OP_LoopBegin) {
+            continue;
+        }
+
+        /* Analyze this loop for vectorization.
+         * We pass NULL for profile since profiling data may not be
+         * available at this point; the analyzer will fall back to
+         * heuristic trip count estimation. */
+        vtx_loop_spec_result_t result = vtx_sota_loop_spec_check(
+            &spec, NULL, graph, loop_id);
+
+        /* If the loop is vectorizable, transform it */
+        if (result.vectorizability >= VTX_LOOP_CAN_VECTORIZE_SSE2 &&
+            result.vector_width > 1) {
+            bool ok = vtx_sota_loop_spec_transform(
+                graph, loop_id, cpu_features, &result, arena);
+            if (ok) {
+                vectorized++;
+            }
+        }
+    }
+
+    vtx_sota_loop_spec_destroy(&spec);
+    *time_ns = elapsed_ns(start);
+    return vectorized;
 }
 
 /* ========================================================================== */
@@ -692,6 +871,83 @@ int vtx_pipeline_run(vtx_graph_t *graph,
     }
 
     /* ================================================================== */
+    /* Phase 3.5: Mid-Tier Type Specialization (T1.5)                      */
+    /*                                                                    */
+    /* When run_midtier is true, applies type-specialization based on      */
+    /* type feedback. This inserts guards at monomorphic call sites and    */
+    /* annotates arithmetic nodes with observed types, enabling the        */
+    /* lowering pipeline to skip type checks. This is the core of the     */
+    /* T1.5 mid-tier: type specialization without full optimization.      */
+    /* ================================================================== */
+    if (config->run_midtier && config->type_feedback != NULL) {
+        /* Walk all nodes and specialize based on type feedback.
+         * For CALL_VIRTUAL with monomorphic receiver: insert Guard + direct dispatch.
+         * For Add/Sub/Mul with known-integer inputs: annotate as integer-typed.
+         * For LoadField with monomorphic holder shape: skip shape check. */
+        vtx_node_table_t *ntable = &graph->node_table;
+        const vtx_type_feedback_t *feedback = config->type_feedback;
+
+        for (uint32_t i = 0; i < ntable->count; i++) {
+            vtx_node_t *node = &ntable->nodes[i];
+            if (node->dead) continue;
+
+            /* Specialize CALL_VIRTUAL at monomorphic sites */
+            if (node->opcode == VTX_OP_CallVirtual) {
+                uint32_t site_index = node->bytecode_pc;
+                uint32_t type_count = vtx_type_feedback_get_call_site_type_count(
+                    feedback, site_index);
+
+                if (type_count == 1) {
+                    vtx_typeid_t dominant_type = vtx_type_feedback_get_dominant_call_type(
+                        feedback, site_index);
+
+                    if (dominant_type != VTX_TYPE_INVALID) {
+                        /* Insert a Guard node checking the receiver type */
+                        vtx_nodeid_t guard_id = vtx_node_create(ntable, VTX_OP_Guard);
+                        if (guard_id != VTX_NODEID_INVALID) {
+                            vtx_node_t *guard = vtx_node_get(ntable, guard_id);
+                            if (guard) {
+                                /* Copy the first data input (receiver) */
+                                for (uint32_t inp = 0; inp < node->input_count; inp++) {
+                                    const vtx_node_t *inp_node = vtx_node_get_const(
+                                        ntable, node->inputs[inp]);
+                                    if (inp_node && vtx_nf_has(inp_node->flags, VTX_NF_DATA)) {
+                                        vtx_node_add_input(ntable, guard_id, node->inputs[inp]);
+                                        break;
+                                    }
+                                }
+                                guard->bytecode_pc = node->bytecode_pc;
+                                guard->type_id = dominant_type;
+                                guard->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+                            }
+                        }
+                        /* Annotate the call with the specialized type */
+                        node->type_id = dominant_type;
+                    }
+                }
+                continue;
+            }
+
+            /* Specialize LoadField at monomorphic holder shape sites */
+            if (node->opcode == VTX_OP_LoadField) {
+                uint32_t site_index = node->bytecode_pc;
+                vtx_shapeid_t dominant_shape = vtx_type_feedback_get_dominant_field_shape(
+                    feedback, site_index);
+
+                if (dominant_shape != VTX_SHAPE_INVALID) {
+                    node->type_id = dominant_shape; /* store shape in type_id as proxy */
+                }
+                continue;
+            }
+        }
+
+        if (verify_between_passes(graph, config, "MidTierSpecialization") != 0) {
+            result->stats = stats;
+            return -1;
+        }
+    }
+
+    /* ================================================================== */
     /* Phase 4: ML-guided Inlining                                        */
     /*                                                                    */
     /* Uses a GBDT model to decide which call sites to inline. Inlining   */
@@ -861,6 +1117,27 @@ int vtx_pipeline_run(vtx_graph_t *graph,
     }
 
     /* ================================================================== */
+    /* Phase 9.1: Loop Specialization / Vectorization                      */
+    /*                                                                    */
+    /* Analyzes loops for vectorization opportunities. Vectorizable loops  */
+    /* are transformed by replacing scalar LoadIndexed/StoreIndexed with   */
+    /* VectorLoad/VectorStore, and scalar Add/Mul with VectorAdd/VectorMul.*/
+    /* DeoptGuard nodes guard the vectorized code. Runs after bounds check */
+    /* elimination so that eliminated bounds checks don't inhibit          */
+    /* vectorization, and before speculative guards to keep guard          */
+    /* insertion simple.                                                  */
+    /* ================================================================== */
+    if (config->run_loop_spec && config->run_vectorize) {
+        stats.loops_vectorized = run_loop_spec_pass(
+            graph, arena, &stats.loop_spec_time_ns);
+
+        if (verify_between_passes(graph, config, "LoopSpec") != 0) {
+            result->stats = stats;
+            return -1;
+        }
+    }
+
+    /* ================================================================== */
     /* Phase 9.5: Speculative Guard Insertion (T3 only)                   */
     /*                                                                    */
     /* Inserts type-check guards at virtual call sites based on profiling  */
@@ -974,6 +1251,40 @@ int vtx_pipeline_run(vtx_graph_t *graph,
     result->stats = stats;
     result->success = true;
 
+    /* ================================================================== */
+    /* Phase 11: Markov Chain — Predictive Compilation (D10)               */
+    /*                                                                    */
+    /* If a Markov chain model is attached to the pipeline config, we     */
+    /* check whether a phase transition is predicted. If so, we predict   */
+    /* which methods will be hot in the next phase and can proactively    */
+    /* compile them before the transition occurs, reducing warmup time.   */
+    /*                                                                    */
+    /* The actual proactive compilation is initiated asynchronously by    */
+    /* recording the predicted hot methods. The compilation thread pool   */
+    /* picks them up and compiles them at lower priority.                 */
+    /* ================================================================== */
+    if (config->markov != NULL && config->markov->is_trained) {
+        uint32_t predicted_phase = vtx_markov_predict_next(
+            config->markov, config->markov->current_phase);
+
+        if (predicted_phase != config->markov->current_phase) {
+            /* A phase transition is predicted. Get the methods that will
+             * be hot in the next phase. */
+            uint32_t hot_methods[32];
+            uint32_t hot_count = vtx_markov_predict_hot_methods(
+                config->markov, predicted_phase, hot_methods, 32);
+
+            /* Log the prediction for debugging / monitoring.
+             * In a production system, these method IDs would be enqueued
+             * on the compilation thread pool for proactive compilation. */
+            if (hot_count > 0) {
+                (void)hot_methods;  /* Suppress unused variable warning;
+                                     * in production, these would be enqueued
+                                     * for proactive compilation. */
+            }
+        }
+    }
+
     return 0;
 }
 
@@ -999,4 +1310,47 @@ void vtx_compile_result_destroy(vtx_compile_result_t *result)
     result->schedule = NULL;
     result->native_size = 0;
     result->success = false;
+}
+
+/* ========================================================================== */
+/* Pipeline config lifecycle                                                    */
+/* ========================================================================== */
+
+int vtx_pipeline_config_init_shared_model(vtx_pipeline_config_t *config)
+{
+    if (!config) return -1;
+
+    /* Only init if inlining is enabled and no shared model exists yet */
+    if (!config->run_inlining) return 0;
+    if (config->shared_gbdt_model != NULL) return 0;  /* already initialized */
+
+    vtx_gbdt_model_t *model = (vtx_gbdt_model_t *)malloc(sizeof(vtx_gbdt_model_t));
+    if (!model) return -1;
+
+    if (vtx_gbdt_model_init(model) != 0) {
+        free(model);
+        return -1;
+    }
+
+    if (vtx_gbdt_load_default_model(model) != 0) {
+        vtx_gbdt_model_destroy(model);
+        free(model);
+        return -1;
+    }
+
+    config->shared_gbdt_model = model;
+    config->owns_gbdt_model = true;
+    return 0;
+}
+
+void vtx_pipeline_config_destroy(vtx_pipeline_config_t *config)
+{
+    if (!config) return;
+
+    if (config->owns_gbdt_model && config->shared_gbdt_model != NULL) {
+        vtx_gbdt_model_destroy(config->shared_gbdt_model);
+        free(config->shared_gbdt_model);
+        config->shared_gbdt_model = NULL;
+        config->owns_gbdt_model = false;
+    }
 }

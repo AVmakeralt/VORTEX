@@ -179,6 +179,13 @@ void vtx_type_feedback_record_call(vtx_type_feedback_t *feedback,
 {
     VTX_ASSERT(feedback != NULL, "feedback must not be NULL");
 
+    /* Bug #12 fix: Filter out VTX_TYPE_INVALID as result_typeid.
+     * Recording VTX_TYPE_INVALID provides no useful information to the
+     * optimizer — it only pollutes the circular buffer with useless
+     * observations. This commonly happens at virtual call sites where
+     * the result type is not yet known. */
+    if (result_typeid == VTX_TYPE_INVALID) return;
+
     /* Ensure the site exists (grow if needed) */
     if (site_index >= feedback->call_site_count) {
         if (grow_call_sites(feedback, site_index) != 0) {
@@ -199,6 +206,32 @@ void vtx_type_feedback_record_call(vtx_type_feedback_t *feedback,
     if (site->count < VTX_TYPE_FEEDBACK_BUFFER_SIZE) {
         site->count++;
     }
+
+    /* D5: Update per-type frequency tracking.
+     * This enables accurate KL divergence computation for recompilation.
+     * Without it, the KL divergence uses uniform weights (each observed type
+     * gets equal weight), which makes the divergence metric meaningless. */
+    vtx_type_freq_t *freq = &site->type_freq;
+    freq->total_count++;
+
+    /* Find existing entry for this type, or create a new one */
+    for (uint32_t i = 0; i < freq->entry_count; i++) {
+        if (freq->entries[i].type_id == receiver_typeid) {
+            freq->entries[i].count++;
+            return;
+        }
+    }
+
+    /* New type — add entry if there's room */
+    if (freq->entry_count < VTX_TYPE_FREQ_MAX_SLOTS) {
+        freq->entries[freq->entry_count].type_id = receiver_typeid;
+        freq->entries[freq->entry_count].count = 1;
+        freq->entry_count++;
+    }
+    /* If we've exceeded VTX_TYPE_FREQ_MAX_SLOTS, total_count still
+     * increments (tracking overall observation volume) but this new
+     * type doesn't get its own slot. The KL divergence computation
+     * handles this via the "unseen type penalty" path. */
 }
 
 void vtx_type_feedback_record_field(vtx_type_feedback_t *feedback,
@@ -565,4 +598,57 @@ uint32_t vtx_type_feedback_get_call_site_type_count(
     }
 
     return unique;
+}
+
+/* ========================================================================== */
+/* D5: Per-type frequency queries and KL divergence                            */
+/* ========================================================================== */
+
+const vtx_type_freq_t *vtx_type_feedback_get_type_freq(
+    const vtx_type_feedback_t *feedback, uint32_t site_index)
+{
+    VTX_ASSERT(feedback != NULL, "feedback must not be NULL");
+
+    if (site_index >= feedback->call_site_count) {
+        return NULL;
+    }
+
+    const vtx_tf_call_site_t *site = &feedback->call_sites[site_index];
+    return &site->type_freq;
+}
+
+double vtx_type_freq_kl_divergence(const vtx_type_freq_t *current,
+                                     const vtx_type_freq_t *compiled)
+{
+    if (current == NULL || compiled == NULL) return 0.0;
+    if (current->total_count == 0 || compiled->total_count == 0) return 0.0;
+
+    double kl = 0.0;
+
+    for (uint32_t i = 0; i < current->entry_count; i++) {
+        double p_i = (double)current->entries[i].count / (double)current->total_count;
+
+        /* Find matching type in compiled profile */
+        double q_i = 0.0;
+        for (uint32_t j = 0; j < compiled->entry_count; j++) {
+            if (compiled->entries[j].type_id == current->entries[i].type_id) {
+                q_i = (double)compiled->entries[j].count / (double)compiled->total_count;
+                break;
+            }
+        }
+
+        if (q_i > 0.0 && p_i > 0.0) {
+            kl += p_i * log(p_i / q_i);
+        } else if (q_i == 0.0 && p_i > 0.0) {
+            /* New type not seen at compilation time → high divergence.
+             * This is the key insight: if a type appears in the current
+             * profile that wasn't observed when the code was compiled,
+             * the compiled code's guards may miss this type entirely.
+             * The penalty of 10.0 ensures this triggers recompilation. */
+            kl += p_i * 10.0;
+        }
+    }
+
+    /* KL divergence is non-negative by definition */
+    return kl > 0.0 ? kl : 0.0;
 }

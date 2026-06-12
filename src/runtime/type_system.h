@@ -48,6 +48,8 @@ typedef struct {
     vtx_bytecode_t   *bytecode;      /* method bytecode (may be NULL for native) */
     void             *compiled_code; /* JIT-compiled native code (NULL if not compiled) */
     uint32_t          vtable_index;  /* index in the vtable (0xFFFFFFFF if not virtual) */
+    uint32_t          arg_count;     /* precomputed number of arguments from signature */
+    uint32_t          method_symbol_id; /* interned symbol ID for fast name comparison */
     bool              is_virtual;    /* true if this is a virtual method */
 } vtx_method_desc_t;
 
@@ -74,16 +76,45 @@ struct vtx_type_desc {
 };
 
 /* ========================================================================== */
+/* Symbol table                                                                */
+/* ========================================================================== */
+
+/* Symbol table: interned strings with unique IDs for fast comparison.
+ * Instead of using strcmp() on every method resolution (O(name_length)
+ * per comparison), we intern each method name once and use integer
+ * comparison (O(1)) for lookups. */
+
+#define VTX_SYMBOL_TABLE_INITIAL_CAPACITY 256
+#define VTX_SYMBOL_INVALID 0xFFFFFFFF
+
+typedef struct {
+    const char *name;     /* the interned string (must remain valid) */
+    uint32_t    hash;     /* precomputed FNV-1a hash */
+    uint32_t    length;   /* string length (without NUL) */
+} vtx_symbol_t;
+
+typedef struct {
+    vtx_symbol_t *symbols;       /* array of symbols */
+    uint32_t      symbol_count;  /* number of symbols */
+    uint32_t      symbol_capacity;
+
+    /* Hash table for fast lookup: name hash → symbol ID */
+    uint32_t     *hash_buckets;  /* array of symbol IDs (or VTX_SYMBOL_INVALID) */
+    uint32_t      hash_bucket_count;
+} vtx_symbol_table_t;
+
+/* ========================================================================== */
 /* Type system                                                                 */
 /* ========================================================================== */
 
 #define VTX_TYPE_SYSTEM_INITIAL_CAPACITY 64
 
 typedef struct {
-    vtx_type_desc_t  *types;       /* array of type descriptors, indexed by typeid */
-    uint32_t          type_count;  /* number of registered types */
-    uint32_t          capacity;    /* capacity of the types array */
-    vtx_shapeid_t     shape_counter; /* next shape ID to assign */
+    vtx_type_desc_t      *types;       /* array of type descriptors, indexed by typeid */
+    uint32_t              type_count;  /* number of registered types */
+    uint32_t              capacity;    /* capacity of the types array */
+    vtx_shapeid_t         shape_counter; /* next shape ID to assign */
+    vtx_symbol_table_t    symbol_table;   /* interned method name symbols */
 } vtx_type_system_t;
 
 /**
@@ -96,6 +127,26 @@ int vtx_type_system_init(vtx_type_system_t *ts);
  * Destroy the type system and free all allocated memory.
  */
 void vtx_type_system_destroy(vtx_type_system_t *ts);
+
+/* ========================================================================== */
+/* Symbol table operations                                                     */
+/* ========================================================================== */
+
+/**
+ * Intern a string: returns the symbol ID, creating a new entry if needed.
+ * The name pointer must remain valid for the lifetime of the type system.
+ */
+uint32_t vtx_symbol_intern(vtx_type_system_t *ts, const char *name);
+
+/**
+ * Look up a symbol by name: returns VTX_SYMBOL_INVALID if not found.
+ */
+uint32_t vtx_symbol_lookup(const vtx_type_system_t *ts, const char *name);
+
+/**
+ * Get a symbol's name by ID. Returns NULL if the symbol ID is invalid.
+ */
+const char *vtx_symbol_name(const vtx_type_system_t *ts, uint32_t symbol_id);
 
 /**
  * Get/set the global type system instance.

@@ -171,6 +171,40 @@ typedef struct {
 } vtx_branch_fixup_t;
 
 /* ========================================================================== */
+/* Polymorphic inline cache (per call site)                                    */
+/* ========================================================================== */
+
+#define VTX_POLY_IC_SIZE 4  /* 4-entry inline cache */
+
+/**
+ * Polymorphic inline cache for virtual/interface dispatch.
+ *
+ * Each CALL_VIRTUAL / CALL_INTERFACE site gets its own IC.
+ * The emitted machine code probes the type_ids array; on a hit,
+ * it calls the corresponding target directly.  On a miss, it
+ * falls through to the runtime helper which updates the IC.
+ *
+ * Layout (designed for cache-friendly access from emitted code):
+ *   offset  0: type_ids[0..3]  — 4 × uint32_t = 16 bytes, contiguous
+ *   offset 16: targets[0..3]   — 4 × void*    = 32 bytes, contiguous
+ *   offset 48: count            — uint32_t
+ *   offset 52: misses           — uint32_t
+ */
+typedef struct {
+    uint32_t type_ids[VTX_POLY_IC_SIZE];   /* cached type IDs */
+    void    *targets[VTX_POLY_IC_SIZE];     /* cached code targets (method desc pointers) */
+    uint32_t count;                          /* number of valid entries */
+    uint32_t misses;                         /* miss counter for IC training */
+} vtx_poly_ic_t;
+
+/* Offsets into vtx_poly_ic_t for emitted code */
+#define VTX_POLY_IC_TYPE_IDS_OFFSET   0
+#define VTX_POLY_IC_TARGETS_OFFSET    16
+#define VTX_POLY_IC_COUNT_OFFSET      48
+#define VTX_POLY_IC_ENTRY_SIZE_TYPE   4   /* sizeof(uint32_t) */
+#define VTX_POLY_IC_ENTRY_SIZE_TARGET 8   /* sizeof(void*) */
+
+/* ========================================================================== */
 /* Compiled code result (defined in codecache/types.h)                        */
 /* ========================================================================== */
 

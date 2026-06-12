@@ -14,9 +14,13 @@
 #include "pea/analysis.h"
 #include "pea/cross_object_sr.h"
 #include "pea/materialize.h"
+#include "pea/virtual.h"
 #include "inliner/inference.h"
 #include "inliner/transform.h"
 #include "inliner/feedback.h"
+#include "sota/loop_spec.h"
+#include "sota/markov.h"
+#include "midtier/midtier.h"
 #include "lower/isel.h"
 #include "lower/regalloc.h"
 #include "lower/emit.h"
@@ -41,6 +45,9 @@ typedef struct {
     bool run_inlining;          /* ML-guided inlining */
     bool run_verify;            /* IR verification between passes */
     bool run_speculative;       /* Speculative guard insertion (T3 only) */
+    bool run_loop_spec;         /* run loop specialization/vectorization */
+    bool run_vectorize;         /* actually emit SIMD instructions for vectorizable loops */
+    bool run_midtier;           /* run mid-tier type specialization (T1.5) */
     int  gvn_iterations;        /* Max GVN iterations */
     int  sccp_iterations;       /* Max SCCP iterations */
     int  dce_iterations;        /* Max DCE iterations */
@@ -57,6 +64,20 @@ typedef struct {
      * to look up the actual observed dominant receiver type at each
      * call site, indexed by the node's bytecode_pc. */
     const vtx_type_feedback_t *type_feedback;
+
+    /* Shared GBDT model for inlining decisions.
+     * Initialized once and reused across compilations to avoid
+     * creating and loading a new model on every compilation.
+     * Call vtx_pipeline_config_init_shared_model() to initialize,
+     * and vtx_pipeline_config_destroy() to clean up. */
+    vtx_gbdt_model_t *shared_gbdt_model;
+    bool              owns_gbdt_model;  /* true if pipeline should free the model */
+
+    /* Phase transition Markov chain for predictive compilation.
+     * If non-NULL, the pipeline checks for predicted phase transitions
+     * after compilation and proactively compiles methods that will
+     * be hot in the next phase. */
+    vtx_markov_t     *markov;
 } vtx_pipeline_config_t;
 
 /* Pipeline statistics */
@@ -69,6 +90,7 @@ typedef struct {
     uint32_t pea_allocs_eliminated;
     uint32_t inlining_decisions;
     uint32_t inlines_performed;   /* number of call sites actually inlined */
+    uint32_t loops_vectorized;    /* number of loops vectorized by loop spec */
     int64_t  total_pipeline_time_ns;
     int64_t  gvn_time_ns;
     int64_t  sccp_time_ns;
@@ -77,6 +99,7 @@ typedef struct {
     int64_t  bounds_check_time_ns;
     int64_t  pea_time_ns;
     int64_t  inlining_time_ns;
+    int64_t  loop_spec_time_ns;
     int64_t  schedule_time_ns;
     int64_t  lowering_time_ns;
 } vtx_pipeline_stats_t;
@@ -92,9 +115,29 @@ typedef struct {
 } vtx_compile_result_t;
 
 /* Get default config for each tier */
-vtx_pipeline_config_t vtx_pipeline_config_t1(void);  /* baseline: minimal opts */
-vtx_pipeline_config_t vtx_pipeline_config_t2(void);  /* optimizing: full opts */
-vtx_pipeline_config_t vtx_pipeline_config_t3(void);  /* speculative: full + speculation */
+vtx_pipeline_config_t vtx_pipeline_config_t1(void);   /* baseline: minimal opts */
+vtx_pipeline_config_t vtx_pipeline_config_t1_5(void); /* mid-tier: type-specialized */
+vtx_pipeline_config_t vtx_pipeline_config_t2(void);   /* optimizing: full opts */
+vtx_pipeline_config_t vtx_pipeline_config_t3(void);   /* speculative: full + speculation */
+
+/**
+ * Initialize the shared GBDT model on a pipeline config.
+ * Call this once before the first compilation to avoid creating
+ * a new model on every compilation. The model is reused across
+ * all subsequent compilations with this config.
+ *
+ * @param config  Pipeline configuration (must not be NULL)
+ * @return        0 on success, -1 on failure
+ */
+int vtx_pipeline_config_init_shared_model(vtx_pipeline_config_t *config);
+
+/**
+ * Destroy a pipeline config's shared resources (GBDT model).
+ * Call this when the config is no longer needed.
+ *
+ * @param config  Pipeline configuration (must not be NULL)
+ */
+void vtx_pipeline_config_destroy(vtx_pipeline_config_t *config);
 
 /* Run the optimization pipeline on a graph */
 int vtx_pipeline_run(vtx_graph_t *graph,

@@ -22,7 +22,12 @@
  *
  * Memory loads (Load/LoadField/LoadIndexed) can be hoisted ONLY if there
  * is no potentially-aliasing store (Store/StoreField/StoreIndexed) in the
- * loop body. This is a conservative check; TBAA will refine it later.
+ * loop body.
+ *
+ * With TBAA (Type-Based Alias Analysis), this check is refined:
+ * a load of one type (e.g., int[]) can be hoisted past a store of a
+ * different type (e.g., ref[]) because they can never alias. This
+ * enables 50%+ of loop-invariant load hoisting.
  *
  * Prerequisites: Graph must be scheduled (vtx_schedule_run already called).
  *

@@ -9,6 +9,7 @@
 #include "compile/version.h"
 #include "runtime/arena.h"
 #include "profile/phase.h"
+#include "interp/type_feedback.h"
 
 /**
  * VORTEX SOTA — Continuous Background Recompilation
@@ -174,6 +175,18 @@ double vtx_kl_divergence(const vtx_typeid_t *types_a, const uint64_t *freqs_a, u
  */
 double vtx_kl_divergence_callsite(const vtx_callsite_profile_t *current,
                                     const vtx_callsite_profile_t *compiled);
+
+/**
+ * Compute KL divergence between two per-type frequency distributions.
+ * Uses the D5 per-type frequency data for accurate divergence measurement.
+ * New types not seen at compilation time receive a large penalty (10.0).
+ *
+ * @param current   Current per-type frequency distribution
+ * @param compiled  Per-type frequency distribution at compilation time
+ * @return          KL divergence value (>= 0)
+ */
+double vtx_recomp_kl_divergence_freq(const vtx_type_freq_t *current,
+                                       const vtx_type_freq_t *compiled);
 
 /* ========================================================================== */
 /* Profile divergence computation                                              */

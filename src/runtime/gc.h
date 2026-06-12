@@ -35,6 +35,25 @@
 #define VTX_GC_ROOT_STACK_SIZE 4096                 /* max root stack entries */
 #define VTX_GC_REMEMBERED_SET_INIT 256              /* initial remembered set capacity */
 
+/* Card table for write barrier.
+ * The heap is divided into "cards" of VTX_CARD_SIZE bytes each.
+ * Each card has a 1-byte entry in the card table.
+ * A dirty card (value = VTX_CARD_DIRTY) means that some old-gen
+ * object in that card region has had a young-gen pointer stored into it.
+ * During young-gen collection, only objects in dirty cards need to
+ * be scanned for young-gen pointers.
+ *
+ * Card marking reduces the write barrier from ~10 branches (range checks
+ * + remembered set insert) to ~3 instructions on the fast path:
+ *   1. Check if value is a young-gen pointer (1 branch)
+ *   2. Compute card index from object address (1 subtraction + shift)
+ *   3. Mark the card as dirty (1 byte store)
+ */
+#define VTX_CARD_SIZE      512     /* 512 bytes per card */
+#define VTX_CARD_SHIFT     9       /* log2(512) */
+#define VTX_CARD_CLEAN     0x00    /* card is clean */
+#define VTX_CARD_DIRTY     0x01    /* card is dirty (has young-gen ref) */
+
 /* ========================================================================== */
 /* GC mode enumeration                                                         */
 /* ========================================================================== */
@@ -133,6 +152,12 @@ typedef struct vtx_gc_t {
 
     /* Arena mode: entry/leave stack */
     uint8_t          *arena_save_point;  /* saved bump pointer for arena_enter/leave */
+
+    /* Card table for write barrier (generational mode) */
+    uint8_t          *card_table;       /* card table (1 byte per card) */
+    size_t            card_table_size;   /* number of card entries */
+    uint8_t          *heap_base;        /* base address of the heap (for card index computation) */
+    size_t            heap_size;         /* total heap size covered by the card table */
 } vtx_gc_t;
 
 /* ========================================================================== */
@@ -197,6 +222,14 @@ vtx_value_t vtx_gc_root_pop(vtx_gc_t *gc);
  */
 void vtx_gc_write_barrier(vtx_gc_t *gc, vtx_heap_object_t *obj,
                           uint32_t field_offset, vtx_value_t value);
+
+/**
+ * Card marking write barrier. Replaces the old 10-branch barrier with
+ * ~3 instructions on the fast path: check if value is young-gen, compute
+ * card index, mark card dirty. Used in generational mode.
+ */
+void vtx_gc_write_barrier_card(vtx_gc_t *gc, vtx_heap_object_t *obj,
+                               uint32_t field_offset, vtx_value_t value);
 
 /* ========================================================================== */
 /* Collection                                                                  */

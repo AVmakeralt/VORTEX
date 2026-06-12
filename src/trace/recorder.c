@@ -941,7 +941,12 @@ static int vtx_record_instruction(vtx_record_state_t *state)
             const vtx_call_site_profile_t *csp = vtx_profiler_get_call_site_profile(
                 state->profiler, state->method, state->pc);
             if (csp != NULL && csp->count > 0 && csp->entries[0].method != NULL) {
-                arg_count = vtx_count_method_args_from_sig(csp->entries[0].method->signature);
+                /* Use precomputed arg_count when available */
+                if (csp->entries[0].method->arg_count > 0) {
+                    arg_count = csp->entries[0].method->arg_count;
+                } else {
+                    arg_count = vtx_count_method_args_from_sig(csp->entries[0].method->signature);
+                }
             }
         }
 
@@ -994,7 +999,12 @@ static int vtx_record_instruction(vtx_record_state_t *state)
             csp = vtx_profiler_get_call_site_profile(
                 state->profiler, state->method, state->pc);
             if (csp != NULL && csp->count > 0 && csp->entries[0].method != NULL) {
-                arg_count = vtx_count_method_args_from_sig(csp->entries[0].method->signature) + 1;
+                /* Use precomputed arg_count when available */
+                if (csp->entries[0].method->arg_count > 0) {
+                    arg_count = csp->entries[0].method->arg_count + 1;
+                } else {
+                    arg_count = vtx_count_method_args_from_sig(csp->entries[0].method->signature) + 1;
+                }
             }
         }
 
@@ -1077,7 +1087,12 @@ static int vtx_record_instruction(vtx_record_state_t *state)
             const vtx_call_site_profile_t *csp = vtx_profiler_get_call_site_profile(
                 state->profiler, state->method, state->pc);
             if (csp != NULL && csp->count > 0 && csp->entries[0].method != NULL) {
-                arg_count = vtx_count_method_args_from_sig(csp->entries[0].method->signature) + 1;
+                /* Use precomputed arg_count when available */
+                if (csp->entries[0].method->arg_count > 0) {
+                    arg_count = csp->entries[0].method->arg_count + 1;
+                } else {
+                    arg_count = vtx_count_method_args_from_sig(csp->entries[0].method->signature) + 1;
+                }
             }
         }
 

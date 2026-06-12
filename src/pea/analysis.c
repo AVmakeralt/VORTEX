@@ -321,21 +321,47 @@ static void transfer_node(vtx_node_t *node, vtx_node_table_t *table,
         /* Guards don't cause escape — they just check a condition */
         break;
 
-    /* ---- Phi: a Phi of allocations — join the input states ---- */
+    /* ---- Phi: a Phi of allocations — propagate escape states ---- */
     case VTX_OP_Phi:
         /* Phi nodes merge values from multiple control flow paths.
-         * If any input allocation has a higher escape state, propagate it.
-         * We do NOT make the Phi itself an allocation — Phis of allocations
-         * are handled by the virtual object tracking pass.
-         * However, we must propagate escape states through Phis:
-         * if one Phi input escapes, the allocation it references escapes. */
-        for (uint32_t i = 0; i < node->input_count; i++) {
-            vtx_nodeid_t input_id = node->inputs[i];
-            if (input_id < state_count) {
-                vtx_node_t *input = vtx_node_get(table, input_id);
-                if (input && !input->dead && is_allocation(input->opcode)) {
-                    /* The Phi uses this allocation — its state is already
-                     * tracked. The Phi itself isn't an allocation. */
+         * If any input allocation has a non-NoEscape state, all allocation
+         * inputs of the Phi must have at least that escape state, because
+         * the Phi merges them into a single value that may escape.
+         *
+         * Bug 8 fix: Previously, the Phi transfer was a no-op — it just
+         * iterated over inputs without propagating escape states. This meant
+         * that if Phi(A, B) where A escapes but B doesn't, B would remain
+         * NoEscape even though the merged value escapes. Now we compute
+         * the maximum escape state across all Phi inputs and propagate it
+         * to every allocation input of the Phi. */
+        {
+            vtx_escape_state_t max_state = VTX_ESCAPE_NONE;
+            /* First pass: compute the maximum escape state across all inputs */
+            for (uint32_t i = 0; i < node->input_count; i++) {
+                vtx_nodeid_t input_id = node->inputs[i];
+                if (input_id < state_count) {
+                    vtx_node_t *input = vtx_node_get(table, input_id);
+                    if (input && !input->dead && is_allocation(input->opcode)) {
+                        max_state = vtx_escape_join(max_state, state[input_id]);
+                    }
+                }
+            }
+            /* Second pass: propagate max_state to all allocation inputs.
+             * If any input allocation has a lower escape state than the
+             * Phi's maximum, it must be elevated because the Phi's result
+             * (which merges all inputs) carries the highest escape state. */
+            for (uint32_t i = 0; i < node->input_count; i++) {
+                vtx_nodeid_t input_id = node->inputs[i];
+                if (input_id < state_count) {
+                    vtx_node_t *input = vtx_node_get(table, input_id);
+                    if (input && !input->dead && is_allocation(input->opcode)) {
+                        if (state[input_id] < max_state) {
+                            state[input_id] = max_state;
+                            /* changed flag is not accessible here, but the
+                             * caller (transfer_block -> worklist) will detect
+                             * the state change when comparing exit states. */
+                        }
+                    }
                 }
             }
         }

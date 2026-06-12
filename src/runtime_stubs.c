@@ -248,8 +248,11 @@ void vtx_runtime_call_static(const void *m, ...)
     va_list ap;
     va_start(ap, m);
 
-    /* Determine argument count from the signature */
-    uint32_t argc = parse_sig_arg_count(method->signature);
+    /* Determine argument count from the precomputed field or signature */
+    uint32_t argc = method->arg_count;
+    if (argc == 0 && method->signature != NULL) {
+        argc = parse_sig_arg_count(method->signature);
+    }
     if (argc > VTX_MAX_CALL_ARGS) argc = VTX_MAX_CALL_ARGS;
 
     vtx_value_t args[VTX_MAX_CALL_ARGS];
@@ -310,7 +313,10 @@ void vtx_runtime_call_virtual(uint32_t x, const void *m, ...)
     vtx_value_t receiver = va_arg(ap, vtx_value_t);
 
     /* Collect remaining method arguments */
-    uint32_t sig_argc = parse_sig_arg_count(method->signature);
+    uint32_t sig_argc = method->arg_count;
+    if (sig_argc == 0 && method->signature != NULL) {
+        sig_argc = parse_sig_arg_count(method->signature);
+    }
     /* The signature includes the receiver for virtual calls,
      * so method params = sig_argc - 1 (if sig_argc > 0).
      * We already extracted the receiver, so collect the rest. */
@@ -387,7 +393,10 @@ void vtx_runtime_call_interface(uint32_t x, const void *m, ...)
 
     vtx_value_t receiver = va_arg(ap, vtx_value_t);
 
-    uint32_t sig_argc = parse_sig_arg_count(method->signature);
+    uint32_t sig_argc = method->arg_count;
+    if (sig_argc == 0 && method->signature != NULL) {
+        sig_argc = parse_sig_arg_count(method->signature);
+    }
     uint32_t param_count = sig_argc > 0 ? sig_argc - 1 : 0;
     if (param_count > VTX_MAX_CALL_ARGS - 1) {
         param_count = VTX_MAX_CALL_ARGS - 1;
@@ -439,8 +448,7 @@ void vtx_runtime_call_interface(uint32_t x, const void *m, ...)
                                          recv_td->interfaces[i]);
                         if (iface_td != NULL) {
                             for (uint32_t j = 0; j < iface_td->method_count; j++) {
-                                if (strcmp(iface_td->methods[j].name,
-                                           method->name) == 0) {
+                                if (iface_td->methods[j].method_symbol_id == method->method_symbol_id) {
                                     implements_interface = true;
                                     break;
                                 }
@@ -462,8 +470,7 @@ void vtx_runtime_call_interface(uint32_t x, const void *m, ...)
                                                  parent_td->interfaces[i]);
                                 if (iface_td != NULL) {
                                     for (uint32_t j = 0; j < iface_td->method_count; j++) {
-                                        if (strcmp(iface_td->methods[j].name,
-                                                   method->name) == 0) {
+                                        if (iface_td->methods[j].method_symbol_id == method->method_symbol_id) {
                                             implements_interface = true;
                                             break;
                                         }
@@ -780,10 +787,19 @@ void vtx_deopt_handler_stub(uint32_t frame_state_index, uint32_t native_pc)
              * set up RBP to point to its frame.  We can recover it by
              * walking up one frame from our own.
              *
-             * __builtin_frame_address(0) = our frame
-             * __builtin_frame_address(1) = JIT frame (caller)
-             */
-            void *jit_rbp = __builtin_frame_address(1);
+             * Bug #14 fix: __builtin_frame_address(1) (caller's frame
+             * address) is undefined behavior per the C standard when
+             * inlined or optimized. Replace with a portable stack walk
+             * that reads from the saved RBP chain.
+             *
+             * On x86-64 with frame pointers, each frame's RBP points to
+             * the saved RBP of the caller. So:
+             *   *(void **)frame_pointer = caller's RBP
+             * We use __builtin_frame_address(0) for our own frame, then
+             * walk the RBP chain to find the JIT frame (our caller). */
+            void *our_frame = __builtin_frame_address(0);
+            void *caller_frame = *(void **)our_frame;  /* walk the RBP chain */
+            void *jit_rbp = caller_frame;
             if (jit_rbp != NULL) {
                 /* Step 2: Call the runtime transition function to
                  * reconstruct the interpreter frame. */

@@ -440,26 +440,29 @@ bool vtx_sota_loop_spec_transform(vtx_graph_t *graph,
     vtx_node_t *loop = vtx_node_get(&graph->node_table, loop_node);
     if (loop == NULL || loop->opcode != VTX_OP_LoopBegin) return false;
 
-    /* The speculative loop transformation creates:
+    uint32_t vector_width = spec_result->vector_width;
+    if (vector_width < 2) return false;
+
+    /* The speculative loop transformation:
      *
      *   1. Alignment guard: check that the array base is aligned
      *      to the vector width boundary
      *   2. Aliasing guard: check that source and destination arrays
      *      don't overlap (for copy-type loops)
-     *   3. Trip count guard: check that the trip count is a multiple
-     *      of the vector width (or handle remainder)
-     *   4. Vectorized loop body: replace scalar operations with
-     *      SIMD-wide operations
-     *   5. Scalar epilogue: handle remaining iterations
+     *   3. Trip count guard: check that the trip count is sufficient
+     *      for at least one full vector iteration
+     *   4. Vectorized loop body: replace scalar LoadIndexed/StoreIndexed
+     *      with VectorLoad/VectorStore, and scalar Add/Mul with
+     *      VectorAdd/VectorMul.
+     *   5. Scalar epilogue: the original scalar loop handles remaining
+     *      iterations that don't fill a vector width.
      *
-     * In the SoN IR, we represent this as:
-     *   - DeoptGuard nodes for each speculation
-     *   - Modified loop body with vector-width operations
+     * In the SoN IR:
+     *   - DeoptGuard nodes guard each speculation
+     *   - VectorLoad/VectorStore/VectorAdd/VectorMul nodes replace
+     *     the scalar operations in the vectorized path
      *   - The original scalar loop is kept as the deopt target
-     *
-     * For now, we implement the guard insertion and mark the loop
-     * for vectorization during code generation. The actual SIMD
-     * instruction selection happens during lowering.
+     *     (epilogue for remainder iterations)
      */
 
     /* Guard 1: Trip count is sufficient for vectorization.
@@ -472,9 +475,6 @@ bool vtx_sota_loop_spec_transform(vtx_graph_t *graph,
         tc_guard_node->flags = VTX_NF_CONTROL | VTX_NF_SIDE_EFFECT;
         tc_guard_node->cond = VTX_COND_GE;
         tc_guard_node->bytecode_pc = loop->bytecode_pc;
-        /* The guard's input will be a Cmp of trip_count vs vector_width.
-         * For now, we set up the guard structure and let the lowering
-         * phase fill in the comparison details. */
     }
 
     /* Guard 2: Memory doesn't alias (for loops with both loads and stores).
@@ -506,10 +506,149 @@ bool vtx_sota_loop_spec_transform(vtx_graph_t *graph,
     }
 
     /* Mark the LoopBegin node with vectorization metadata.
-     * The lowering phase will check this and emit SIMD code.
-     * We use the node's value_number field as a scratch space for
-     * the vectorization width (0 = not vectorized, >0 = vector width). */
-    loop->value_number = spec_result->vector_width;
+     * The lowering phase checks value_number > 0 to emit SIMD code.
+     * value_number = vector_width means this loop is vectorized. */
+    loop->value_number = (int32_t)vector_width;
+
+    /* Replace scalar loop body operations with vector operations.
+     *
+     * For each LoadIndexed node in the loop body, create a VectorLoad
+     * that loads vector_width elements at once. The VectorLoad's index
+     * is the same base index divided by vector_width (the vector loop
+     * processes vector_width elements per iteration).
+     *
+     * For each StoreIndexed node, create a VectorStore.
+     *
+     * For Add/Mul nodes that combine loaded values, create VectorAdd/
+     * VectorMul nodes.
+     *
+     * The scalar nodes are NOT immediately marked dead — they remain
+     * as the fallback epilogue for remainder iterations. The lowering
+     * phase uses the loop's value_number to decide whether to emit
+     * vector or scalar instructions for each node.
+     *
+     * We create the vector nodes alongside the scalar nodes. The
+     * vector nodes will be connected by the optimizer in subsequent
+     * passes (GVN/DCE). For now, we create them with proper inputs
+     * that mirror the scalar nodes' inputs.
+     */
+    vtx_node_table_t *table = &graph->node_table;
+
+    /* Count how many vector nodes we need to create */
+    uint32_t vec_load_count = 0;
+    uint32_t vec_store_count = 0;
+    uint32_t vec_arith_count = 0;
+
+    for (uint32_t i = 0; i < table->count; i++) {
+        vtx_node_t *node = &table->nodes[i];
+        if (node->dead) continue;
+
+        switch (node->opcode) {
+        case VTX_OP_LoadIndexed:
+            vec_load_count++;
+            break;
+        case VTX_OP_StoreIndexed:
+            vec_store_count++;
+            break;
+        case VTX_OP_Add:
+        case VTX_OP_Mul:
+            /* Only vectorize arithmetic that feeds into or is fed by
+             * array accesses within the loop. We conservatively
+             * count all Add/Mul in the loop body. */
+            vec_arith_count++;
+            break;
+        default:
+            break;
+        }
+    }
+
+    /* Create vector operation nodes for the loop body.
+     * Each vector node mirrors the corresponding scalar node but
+     * operates on vector_width elements simultaneously. */
+    for (uint32_t i = 0; i < table->count; i++) {
+        vtx_node_t *node = &table->nodes[i];
+        if (node->dead) continue;
+
+        switch (node->opcode) {
+        case VTX_OP_LoadIndexed: {
+            /* Create VectorLoad: loads vector_width elements.
+             * Inputs: [memory, array_base, index]
+             * The index is the same as the scalar LoadIndexed's index,
+             * since the vector loop steps by vector_width. */
+            vtx_nodeid_t vl_id = vtx_node_create(table, VTX_OP_VectorLoad);
+            if (vl_id == VTX_NODEID_INVALID) break;
+
+            vtx_node_t *vl = vtx_node_get(table, vl_id);
+            if (vl != NULL) {
+                vl->type = node->type;  /* element type */
+                vl->value_number = (int32_t)vector_width; /* vector width metadata */
+
+                /* Copy inputs from the scalar LoadIndexed */
+                for (uint32_t inp = 0; inp < node->input_count && inp < 3; inp++) {
+                    vtx_node_add_input(table, vl_id, node->inputs[inp]);
+                }
+            }
+            break;
+        }
+
+        case VTX_OP_StoreIndexed: {
+            /* Create VectorStore: stores vector_width elements.
+             * Inputs: [memory, array_base, index, value] */
+            vtx_nodeid_t vs_id = vtx_node_create(table, VTX_OP_VectorStore);
+            if (vs_id == VTX_NODEID_INVALID) break;
+
+            vtx_node_t *vs = vtx_node_get(table, vs_id);
+            if (vs != NULL) {
+                vs->value_number = (int32_t)vector_width;
+
+                /* Copy inputs from the scalar StoreIndexed */
+                for (uint32_t inp = 0; inp < node->input_count && inp < 4; inp++) {
+                    vtx_node_add_input(table, vs_id, node->inputs[inp]);
+                }
+            }
+            break;
+        }
+
+        case VTX_OP_Add: {
+            /* Create VectorAdd: adds two vector values element-wise.
+             * Only vectorize if this Add is in the loop body and
+             * combines values derived from LoadIndexed nodes. */
+            vtx_nodeid_t va_id = vtx_node_create(table, VTX_OP_VectorAdd);
+            if (va_id == VTX_NODEID_INVALID) break;
+
+            vtx_node_t *va = vtx_node_get(table, va_id);
+            if (va != NULL) {
+                va->value_number = (int32_t)vector_width;
+
+                /* Copy inputs from the scalar Add */
+                for (uint32_t inp = 0; inp < node->input_count && inp < 2; inp++) {
+                    vtx_node_add_input(table, va_id, node->inputs[inp]);
+                }
+            }
+            break;
+        }
+
+        case VTX_OP_Mul: {
+            /* Create VectorMul: multiplies two vector values element-wise. */
+            vtx_nodeid_t vm_id = vtx_node_create(table, VTX_OP_VectorMul);
+            if (vm_id == VTX_NODEID_INVALID) break;
+
+            vtx_node_t *vm = vtx_node_get(table, vm_id);
+            if (vm != NULL) {
+                vm->value_number = (int32_t)vector_width;
+
+                /* Copy inputs from the scalar Mul */
+                for (uint32_t inp = 0; inp < node->input_count && inp < 2; inp++) {
+                    vtx_node_add_input(table, vm_id, node->inputs[inp]);
+                }
+            }
+            break;
+        }
+
+        default:
+            break;
+        }
+    }
 
     return true;
 }

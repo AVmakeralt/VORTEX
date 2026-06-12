@@ -7,6 +7,7 @@
 #include "vortex_config.h"
 #include "lower/isel.h"
 #include "lower/regalloc.h"
+#include "lower/reloc.h"
 #include "runtime/arena.h"
 
 /**
@@ -35,6 +36,17 @@ typedef struct {
     uint8_t  *buffer;      /* code buffer (dynamically allocated) */
     uint32_t  position;    /* current write position */
     uint32_t  capacity;    /* allocated capacity in bytes */
+
+    /* Relocation table for branch patching (F1 fix).
+     * Initialized by vtx_x86_emit_function(), used to record branch
+     * relocations that are resolved and applied after all emission. */
+    vtx_reloc_table_t *relocs;
+    vtx_arena_t       *reloc_arena;
+
+    /* Label offset tracking: maps block index → native code offset.
+     * Used to resolve branch targets after all blocks are emitted. */
+    uint32_t *label_offsets;
+    uint32_t  label_count;
 } vtx_x86_emit_t;
 
 /* ========================================================================== */

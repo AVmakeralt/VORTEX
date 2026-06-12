@@ -102,7 +102,7 @@ VTX_TEST(graph_build_trivial_return)
 
     vtx_method_desc_t method = {
         .name = "test", .signature = "()V", .bytecode = &bc,
-        .vtable_index = 0xFFFFFFFF, .is_virtual = false
+        .vtable_index = 0xFFFFFFFF, .arg_count = 0, .is_virtual = false
     };
 
     int rc = vtx_graph_build(&graph, &bc, &method, &arena);
@@ -134,7 +134,7 @@ VTX_TEST(graph_build_arithmetic)
 
     vtx_method_desc_t method = {
         .name = "add", .signature = "(II)I", .bytecode = &bc,
-        .vtable_index = 0xFFFFFFFF, .is_virtual = false
+        .vtable_index = 0xFFFFFFFF, .arg_count = 2, .is_virtual = false
     };
 
     int rc = vtx_graph_build(&graph, &bc, &method, &arena);
@@ -174,7 +174,7 @@ VTX_TEST(graph_build_if_branch)
 
     vtx_method_desc_t method = {
         .name = "branch", .signature = "(Z)Z", .bytecode = &bc,
-        .vtable_index = 0xFFFFFFFF, .is_virtual = false
+        .vtable_index = 0xFFFFFFFF, .arg_count = 1, .is_virtual = false
     };
 
     int rc = vtx_graph_build(&graph, &bc, &method, &arena);
@@ -217,7 +217,7 @@ VTX_TEST(graph_build_goto_loop)
 
     vtx_method_desc_t method = {
         .name = "loop", .signature = "(I)I", .bytecode = &bc,
-        .vtable_index = 0xFFFFFFFF, .is_virtual = false
+        .vtable_index = 0xFFFFFFFF, .arg_count = 1, .is_virtual = false
     };
 
     int rc = vtx_graph_build(&graph, &bc, &method, &arena);

@@ -7,6 +7,7 @@
 #include "vortex_config.h"
 #include "ir/graph.h"
 #include "pea/analysis.h"
+#include "pea/virtual.h"
 #include "runtime/arena.h"
 
 /**
@@ -102,13 +103,18 @@ typedef struct {
  * identify which objects were scalar-replaced and what their field values
  * are.
  *
- * @param graph    The SoN graph (modified in place — new nodes inserted)
- * @param analysis The escape analysis result
- * @param arena    Arena for allocating temporary data
- * @return         Materialization result, or NULL on failure
+ * @param graph          The SoN graph (modified in place — new nodes inserted)
+ * @param analysis       The escape analysis result
+ * @param virtual_result The virtual object tracking result (may be NULL if
+ *                       virtual pass was not run; when provided, field values
+ *                       are read from virtual field maps instead of dead
+ *                       StoreField nodes)
+ * @param arena          Arena for allocating temporary data
+ * @return               Materialization result, or NULL on failure
  */
 vtx_materialize_result_t *vtx_materialize_run(vtx_graph_t *graph,
                                                 const vtx_pea_analysis_t *analysis,
+                                                const vtx_virtual_result_t *virtual_result,
                                                 vtx_arena_t *arena);
 
 /**

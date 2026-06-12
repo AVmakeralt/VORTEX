@@ -72,13 +72,27 @@ static const uint8_t vtx_callee_saved_regs[VTX_CALLEE_SAVED_COUNT] = {
 #define VTX_NO_SPILL ((uint32_t)0xFFFFFFFF)
 
 /* ========================================================================== */
+/* Live range (sub-range of a live interval)                                   */
+/* ========================================================================== */
+
+typedef struct vtx_live_range {
+    uint32_t start;           /* first instruction position (inclusive) */
+    uint32_t end;             /* last instruction position (inclusive) */
+    uint8_t  phys_reg;        /* assigned register for this range (0xFF = spilled) */
+    uint32_t spill_slot;      /* spill slot for this range (VTX_NO_SPILL = none) */
+    struct vtx_live_range *next; /* linked list of ranges */
+} vtx_live_range_t;
+
+/* ========================================================================== */
 /* Live interval                                                               */
 /* ========================================================================== */
 
-typedef struct {
+typedef struct vtx_live_interval {
     uint32_t vreg;         /* virtual register */
-    uint32_t start;        /* first instruction position (inclusive) */
-    uint32_t end;          /* last instruction position (inclusive) */
+    vtx_live_range_t *first_range;  /* head of range list */
+    vtx_live_range_t *last_range;   /* tail for fast append */
+    uint32_t start;        /* earliest start (from first range) */
+    uint32_t end;          /* latest end (from last range) */
     uint8_t  phys_reg;     /* assigned physical register (0xFF = unassigned) */
     uint32_t spill_slot;   /* assigned spill slot (VTX_NO_SPILL = none) */
     bool     is_fixed;     /* true if vreg is fixed to a physical register */
@@ -87,6 +101,9 @@ typedef struct {
     uint32_t use_count;    /* number of uses of this vreg (for spill cost) */
     uint32_t loop_depth;   /* estimated loop nesting depth (for spill cost) */
     uint32_t coalesce_src; /* vreg this was coalesced from (VTX_VREG_INVALID = none) */
+    /* Split children for interval splitting (P5) */
+    struct vtx_live_interval *split_parent; /* parent interval (NULL = root) */
+    struct vtx_live_interval *split_child;  /* child interval (NULL = leaf) */
 } vtx_live_interval_t;
 
 /* ========================================================================== */
@@ -157,6 +174,25 @@ uint8_t vtx_regalloc_phys_reg(const vtx_regalloc_result_t *result, uint32_t vreg
  * Returns VTX_NO_SPILL if not spilled.
  */
 uint32_t vtx_regalloc_spill_slot(const vtx_regalloc_result_t *result, uint32_t vreg);
+
+/**
+ * Split a live interval at the given position.
+ *
+ * The interval is divided into two parts:
+ *   - First half: [start, position) — keeps the current register assignment
+ *   - Second half: [position, end) — becomes a new interval needing a register
+ *
+ * If the second half can get a free register, it does; otherwise it's spilled.
+ * At the split point, spill/reload code is inserted as needed.
+ *
+ * @param interval  The interval to split (modified in place to become first half)
+ * @param position  The split position (must be within the interval's range)
+ * @param arena     Arena for allocations
+ * @return          The new second-half interval, or NULL on failure
+ */
+vtx_live_interval_t *vtx_regalloc_split_interval(vtx_live_interval_t *interval,
+                                                   uint32_t position,
+                                                   vtx_arena_t *arena);
 
 /**
  * Find the NodeID that is currently in a given physical register at a

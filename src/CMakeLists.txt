@@ -50,6 +50,8 @@ add_library(vortex_ir STATIC
     ir/verify.c
     ir/licm.c
     ir/bounds_check.c
+    ir/induction.c
+    ir/tbaa.c
 )
 target_include_directories(vortex_ir PUBLIC ${VORTEX_INCLUDE_DIRS})
 target_link_libraries(vortex_ir PUBLIC vortex_common)
@@ -166,10 +168,18 @@ add_library(vortex_sota STATIC
     sota/recomp.c
     sota/loop_spec.c
     sota/fdi.c
+    sota/markov.c
 )
 target_include_directories(vortex_sota PUBLIC ${VORTEX_INCLUDE_DIRS})
 target_link_libraries(vortex_sota PUBLIC vortex_ir vortex_profile vortex_inliner vortex_compile)
 endif()
+
+# Mid-Tier JIT T1.5
+add_library(vortex_midtier STATIC
+    midtier/midtier.c
+)
+target_include_directories(vortex_midtier PUBLIC ${VORTEX_INCLUDE_DIRS})
+target_link_libraries(vortex_midtier PUBLIC vortex_ir vortex_interp vortex_lower vortex_deopt)
 
 # Main VORTEX executable
 add_executable(vortex
@@ -192,6 +202,7 @@ target_link_libraries(vortex PRIVATE
     vortex_codecache
     vortex_compile
     vortex_guard
+    vortex_midtier
     $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota>
     m
     pthread

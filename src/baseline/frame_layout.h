@@ -14,12 +14,14 @@
  * JIT stack frames are RBP-based, mirroring the interpreter frame layout
  * but optimized for machine-code access. The frame is divided into:
  *
- * Prologue:
- *   push method_ptr       ; arg passed in register
- *   push deopt_info       ; arg passed in register
- *   push profile_data     ; arg passed in register
+ * Prologue (push-based, header above RBP):
+ *   push rdi              ; method_ptr   (1st arg register)
+ *   push rsi              ; deopt_info   (2nd arg register)
+ *   push rdx              ; profile_data (3rd arg register)
  *   push rbp              ; save caller RBP
  *   mov rbp, rsp
+ *   push rbx              ; save callee-saved (used for expr stack)
+ *   push r12              ; save callee-saved (scratch)
  *   sub rsp, total_frame_size  ; allocate locals + spills
  *
  * Stack layout after prologue:
@@ -35,13 +37,16 @@
  *
  *   Low addresses (below RBP):
  *     +--------------------+
- *     | local[0]           |  [RBP - 8]
- *     | local[1]           |  [RBP - 16]
- *     | ...                |
- *     | local[N-1]         |  [RBP - N*8]
+ *     | saved RBX          |  [RBP - 8]  callee-saved register
+ *     | saved R12          |  [RBP - 16] callee-saved register
  *     +--------------------+
- *     | spill[0]           |  [RBP - (N+1)*8]
- *     | spill[1]           |  [RBP - (N+2)*8]
+ *     | local[0]           |  [RBP - 24]
+ *     | local[1]           |  [RBP - 32]
+ *     | ...                |
+ *     | local[N-1]         |  [RBP - 24 - (N-1)*8]
+ *     +--------------------+
+ *     | spill[0]           |  [RBP - 24 - N*8]
+ *     | spill[1]           |  [RBP - 24 - (N+1)*8]
  *     | ...                |
  *     | spill[M-1]         |
  *     +--------------------+  <- RSP (after frame setup)
@@ -50,18 +55,34 @@
  * Values beyond the first 4 are spilled to the spill area.
  *
  * Total frame size is rounded up to VTX_FRAME_ALIGNMENT (16 bytes).
+ *
+ * Epilogue:
+ *   mov rbx, [rbp - 8]    ; restore callee-saved
+ *   mov r12, [rbp - 16]   ; restore callee-saved
+ *   mov rsp, rbp          ; unwind frame
+ *   pop rbp               ; restore caller RBP
+ *   add rsp, 24           ; skip method_ptr, deopt_info, profile_data
+ *   ret                   ; return to caller
  */
 
 /* ========================================================================== */
 /* Frame header offsets (relative to RBP)                                      */
 /* ========================================================================== */
 
-/* Fixed offsets for every JIT frame */
+/* Fixed offsets for every JIT frame — above RBP */
 #define VTX_FRAME_CALLER_RBP_OFFSET    0   /* [RBP+0]  */
 #define VTX_FRAME_PROFILE_DATA_OFFSET  8   /* [RBP+8]  */
 #define VTX_FRAME_DEOPT_INFO_OFFSET    16  /* [RBP+16] */
 #define VTX_FRAME_METHOD_PTR_OFFSET    24  /* [RBP+24] */
 #define VTX_FRAME_RETURN_ADDR_OFFSET   32  /* [RBP+32] */
+
+/* Callee-saved register slots — below RBP */
+#define VTX_FRAME_SAVED_RBX_OFFSET    -8   /* [RBP-8]  saved RBX (expr stack reg) */
+#define VTX_FRAME_SAVED_R12_OFFSET    -16  /* [RBP-16] saved R12 (scratch) */
+
+/* Number and size of callee-saved register slots below RBP */
+#define VTX_FRAME_SAVED_REGS_COUNT     2
+#define VTX_FRAME_SAVED_REGS_SIZE     16   /* 2 * 8 bytes */
 
 /* Number of 8-byte slots in the frame header above RBP (excluding caller RBP at [RBP]) */
 #define VTX_FRAME_HEADER_SLOTS_ABOVE   4   /* profile_data, deopt_info, method_ptr, return_addr */

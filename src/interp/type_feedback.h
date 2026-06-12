@@ -53,6 +53,41 @@ typedef struct {
 } vtx_tf_branch_observation_t;
 
 /* ========================================================================== */
+/* Per-type frequency tracking (D5)                                            */
+/* ========================================================================== */
+
+/**
+ * Maximum number of distinct types tracked per call site.
+ * 8 slots captures >99% of real-world call sites (most are monomorphic
+ * or polymorphic with 2-3 types). Sites exceeding this become megamorphic
+ * and the frequency data degrades gracefully (oldest entry is simply not
+ * updated but total_count still increments).
+ */
+#define VTX_TYPE_FREQ_MAX_SLOTS 8
+
+/**
+ * A single (type_id, count) entry in the per-type frequency table.
+ * Tracks how many times a specific receiver type was observed at a call site.
+ */
+typedef struct {
+    vtx_typeid_t type_id;    /* observed type */
+    uint32_t     count;      /* how many times this type was seen */
+} vtx_type_freq_entry_t;
+
+/**
+ * Per-type frequency distribution for a single call site.
+ * Enables accurate KL divergence computation for recompilation decisions.
+ * Without this, the KL divergence is meaningless because uniform weights
+ * are used (each observed type gets equal weight regardless of actual
+ * frequency).
+ */
+typedef struct {
+    vtx_type_freq_entry_t entries[VTX_TYPE_FREQ_MAX_SLOTS];
+    uint32_t              entry_count;   /* number of populated entries (<= VTX_TYPE_FREQ_MAX_SLOTS) */
+    uint32_t              total_count;   /* total observations across all types */
+} vtx_type_freq_t;
+
+/* ========================================================================== */
 /* Per-site feedback structures                                                */
 /* ========================================================================== */
 
@@ -63,6 +98,13 @@ typedef struct {
     vtx_tf_call_observation_t observations[VTX_TYPE_FEEDBACK_BUFFER_SIZE];
     uint8_t  write_index;   /* next write position in the circular buffer */
     uint8_t  count;         /* number of valid observations (max 32) */
+
+    /* D5: Per-type frequency distribution.
+     * Complementary to the circular buffer: the buffer captures raw
+     * observations with temporal ordering (for decay-weighted queries),
+     * while the frequency table captures cumulative counts per type
+     * (for accurate KL divergence). */
+    vtx_type_freq_t type_freq;
 } vtx_tf_call_site_t;
 
 /**
@@ -193,5 +235,29 @@ double vtx_type_feedback_get_branch_probability(
  */
 uint32_t vtx_type_feedback_get_call_site_type_count(
     const vtx_type_feedback_t *feedback, uint32_t site_index);
+
+/**
+ * Get the per-type frequency distribution for a call site.
+ * Returns a pointer to the type_freq structure embedded in the call site.
+ * Returns NULL if the site does not exist.
+ *
+ * The returned pointer is valid as long as the feedback structure is valid
+ * and the site is not re-allocated (i.e., until vtx_type_feedback_destroy).
+ */
+const vtx_type_freq_t *vtx_type_feedback_get_type_freq(
+    const vtx_type_feedback_t *feedback, uint32_t site_index);
+
+/**
+ * Compute KL divergence between two per-type frequency distributions.
+ * KL(P || Q) = sum_i P(i) * log(P(i) / Q(i))
+ * where P = current distribution, Q = compiled-time distribution.
+ *
+ * New types not seen at compilation time receive a large penalty (10.0)
+ * to ensure they trigger recompilation.
+ *
+ * Returns 0.0 if either distribution has zero total observations.
+ */
+double vtx_type_freq_kl_divergence(const vtx_type_freq_t *current,
+                                     const vtx_type_freq_t *compiled);
 
 #endif /* VORTEX_TYPE_FEEDBACK_H */

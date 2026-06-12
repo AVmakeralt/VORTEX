@@ -70,6 +70,10 @@ typedef enum {
     VTX_OP_CmpF,           /* float compare */
     VTX_OP_CmpD,           /* double compare */
 
+    /* ---- Data: min/max ---- */
+    VTX_OP_Min,            /* takes two inputs, returns minimum */
+    VTX_OP_Max,            /* takes two inputs, returns maximum */
+
     /* ---- Memory ---- */
     VTX_OP_Load,
     VTX_OP_Store,
@@ -104,6 +108,12 @@ typedef enum {
     VTX_OP_Deopt,
     VTX_OP_DeoptGuard,
     VTX_OP_FrameState,
+
+    /* ---- SIMD Vector operations ---- */
+    VTX_OP_VectorLoad,    /* load vector from memory */
+    VTX_OP_VectorStore,   /* store vector to memory */
+    VTX_OP_VectorAdd,     /* vector add */
+    VTX_OP_VectorMul,     /* vector multiply */
 
     /* ---- Total ---- */
     VTX_NODE_OP_COUNT
@@ -245,10 +255,28 @@ static inline vtx_cond_t vtx_cond_negate(vtx_cond_t c)
 }
 
 /* ========================================================================== */
+/* Use-def list entries                                                        */
+/* ========================================================================== */
+
+/**
+ * Use-def list: nodes that reference this node as an input.
+ * This is the inverse of the inputs array. For each node N that
+ * has N->inputs[i] == this->id, there is a use entry (N, i).
+ *
+ * This enables O(K) traversal of a node's users (where K is the
+ * number of users) instead of O(N²) scanning of all nodes.
+ */
+typedef struct vtx_use_entry {
+    vtx_nodeid_t  user_id;     /* the node that uses this node */
+    uint32_t      input_index; /* which input of the user references this node */
+} vtx_use_entry_t;
+
+/* ========================================================================== */
 /* Node structure                                                              */
 /* ========================================================================== */
 
 #define VTX_NODE_INITIAL_INPUT_CAPACITY 4
+#define VTX_NODE_INITIAL_USE_CAPACITY   4
 
 typedef struct {
     vtx_nodeid_t      id;              /* unique, never reused */
@@ -276,6 +304,14 @@ typedef struct {
     /* Output count (number of other nodes that reference this node as input).
      * Maintained incrementally by add_input/replace_input/remove_input. */
     uint32_t          output_count;
+
+    /* Use-def list: the inverse of the inputs array.
+     * For each node U that has U->inputs[i] == this->id,
+     * there is a use entry {user_id=U, input_index=i}.
+     * This enables O(K) user traversal for optimizations. */
+    vtx_use_entry_t  *uses;            /* dynamically allocated array of use entries */
+    uint32_t          use_count;       /* number of used slots */
+    uint32_t          use_capacity;    /* allocated capacity of uses array */
 
     /* GVN value number (0 = not yet computed) */
     uint32_t          value_number;
@@ -423,5 +459,70 @@ void vtx_node_table_clear_marks(vtx_node_table_t *table);
  * Clear all dead flags in the node table.
  */
 void vtx_node_table_clear_dead(vtx_node_table_t *table);
+
+/* ========================================================================== */
+/* Use-def list API                                                            */
+/* ========================================================================== */
+
+/**
+ * Get a pointer to the first use entry of a node.
+ * Returns NULL if the node has no uses.
+ */
+vtx_use_entry_t *vtx_node_uses_begin(vtx_node_t *node);
+
+/**
+ * Get a pointer one past the last use entry of a node.
+ */
+vtx_use_entry_t *vtx_node_uses_end(vtx_node_t *node);
+
+/**
+ * Get a const pointer to the first use entry of a node.
+ */
+const vtx_use_entry_t *vtx_node_uses_begin_const(const vtx_node_t *node);
+
+/**
+ * Get a const pointer one past the last use entry of a node.
+ */
+const vtx_use_entry_t *vtx_node_uses_end_const(const vtx_node_t *node);
+
+/**
+ * Replace ALL uses of old_id with new_id throughout the graph.
+ * This is the O(K) version of what was previously O(N²) —
+ * it walks old_id's use list and updates each user's input.
+ *
+ * Returns 0 on success, -1 on failure.
+ */
+int vtx_node_replace_all_uses(vtx_node_table_t *table,
+                               vtx_nodeid_t old_id, vtx_nodeid_t new_id);
+
+/**
+ * Callback type for vtx_node_for_each_user.
+ * Called with (table, user_id, input_index, context).
+ * Return 0 to continue iteration, non-zero to stop.
+ */
+typedef int (*vtx_user_callback_t)(vtx_node_table_t *table,
+                                    vtx_nodeid_t user_id,
+                                    uint32_t input_index,
+                                    void *context);
+
+/**
+ * Iterate over all users of a node, calling fn for each use entry.
+ * Stops early if fn returns non-zero.
+ * Returns the last return value from fn (0 if all calls returned 0).
+ */
+int vtx_node_for_each_user(vtx_node_table_t *table, vtx_nodeid_t node_id,
+                            vtx_user_callback_t fn, void *context);
+
+/**
+ * Convenience macro: iterate over all use entries of a node.
+ * Usage:
+ *   vtx_node_t *n = vtx_node_get(table, id);
+ *   for (vtx_use_entry_t *u = vtx_node_uses_begin(n);
+ *        u != vtx_node_uses_end(n); ++u) {
+ *       vtx_nodeid_t user = u->user_id;
+ *       uint32_t inp_idx = u->input_index;
+ *       ...
+ *   }
+ */
 
 #endif /* VORTEX_NODE_H */

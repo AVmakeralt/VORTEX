@@ -278,6 +278,19 @@ vtx_trace_branch_t *vtx_trace_tree_add_branch(
     /* Mark the side exit as having a branch */
     exit->has_branch = true;
 
+    /* D6: Trace linking — if the branch trace has compiled native code,
+     * link the side exit directly to it. This eliminates interpreter
+     * re-entry overhead when the side exit is taken at runtime.
+     *
+     * The branch_trace->native_code field is set after compilation.
+     * If it's already available at this point, we link immediately.
+     * Otherwise, linking happens lazily when
+     * vtx_side_exit_link_all_hot() is called after compilation. */
+    if (branch_trace->native_code != NULL) {
+        vtx_side_exit_link(exit, (vtx_nodeid_t)branch_trace->trace_id,
+                            branch_trace->native_code);
+    }
+
     /* Add to the tree's flat branch list */
     if (vtx_trace_tree_add_to_flat_list(tree, branch, arena) != 0) {
         return NULL;

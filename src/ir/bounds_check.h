@@ -11,21 +11,27 @@
 /**
  * VORTEX Bounds Check Elimination
  *
- * Eliminates redundant array bounds check guards using range analysis.
+ * Eliminates redundant array bounds check guards using range analysis
+ * and induction variable analysis.
  * A bounds check is redundant if:
  *   - The index's range is provably within the array length
  *   - A dominating guard already proves the same condition
+ *   - (NEW) Induction variable analysis proves the index is within
+ *     bounds across all loop iterations
  *
  * Algorithm:
- *   1. Walk the schedule and find all Guard nodes that are bounds checks
+ *   1. Run induction variable analysis to identify IVs and their ranges
+ *   2. Walk the schedule and find all Guard nodes that are bounds checks
  *      (Guard(i < len) or Guard(i >= 0 && i < len))
- *   2. Build a range analysis: for each node, compute [min, max] range
- *   3. After Guard(i < len), constrain i's max to len-1
- *   4. After Guard(i >= 0), constrain i's min to 0
- *   5. If a subsequent Guard(i < len) sees i in range [0, len-1], eliminate it
- *   6. Also eliminate dominated guards: if Guard(i < len) at block B1
+ *   3. Build a range analysis: for each node, compute [min, max] range
+ *   4. After Guard(i < len), constrain i's max to len-1
+ *   5. After Guard(i >= 0), constrain i's min to 0
+ *   6. If a subsequent Guard(i < len) sees i in range [0, len-1], eliminate it
+ *   7. Also eliminate dominated guards: if Guard(i < len) at block B1
  *      dominates Guard(i < len) at block B2 with the same len, the dominated
  *      guard is redundant
+ *   8. (NEW) If the index is an IV whose range is provably within [0, len),
+ *      eliminate the guard
  */
 
 /* ========================================================================== */

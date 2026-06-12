@@ -68,6 +68,8 @@ static vtx_live_interval_t *compute_live_intervals(vtx_inst_stream_t *stream,
     /* Initialize intervals: start=MAX, end=0 (will be updated) */
     for (uint32_t v = 0; v < vreg_count; v++) {
         intervals[v].vreg = v;
+        intervals[v].first_range = NULL;
+        intervals[v].last_range = NULL;
         intervals[v].start = UINT32_MAX;
         intervals[v].end = 0;
         intervals[v].phys_reg = 0xFF;
@@ -78,6 +80,8 @@ static vtx_live_interval_t *compute_live_intervals(vtx_inst_stream_t *stream,
         intervals[v].use_count = 0;
         intervals[v].loop_depth = 0;
         intervals[v].coalesce_src = VTX_VREG_INVALID;
+        intervals[v].split_parent = NULL;
+        intervals[v].split_child = NULL;
 
         /* Check if this vreg has a fixed register constraint */
         if (v < stream->vreg_fixed_reg_count && stream->vreg_fixed_reg[v] != 0xFF) {
@@ -207,7 +211,26 @@ static vtx_live_interval_t *compute_live_intervals(vtx_inst_stream_t *stream,
 
     /* Remove intervals that were never defined/used (start > end).
      * We do NOT compact the array here — compaction happens after
-     * coalescing so that coalesce_copies can index by vreg number. */
+     * coalescing so that coalesce_copies can index by vreg number.
+     *
+     * P5: Create a single live range for each valid interval. Intervals
+     * with start > end are invalid and get no range. */
+    for (uint32_t v = 0; v < vreg_count; v++) {
+        if (intervals[v].start <= intervals[v].end) {
+            vtx_live_range_t *range = (vtx_live_range_t *)vtx_arena_alloc(
+                arena, sizeof(vtx_live_range_t));
+            if (range) {
+                range->start = intervals[v].start;
+                range->end = intervals[v].end;
+                range->phys_reg = 0xFF;
+                range->spill_slot = VTX_NO_SPILL;
+                range->next = NULL;
+                intervals[v].first_range = range;
+                intervals[v].last_range = range;
+            }
+        }
+    }
+
     *out_count = vreg_count;
     return intervals;
 }
@@ -364,6 +387,85 @@ static uint32_t coalesce_copies(vtx_inst_stream_t *stream,
 
     free(parent);
     return coalesced;
+}
+
+/* ========================================================================== */
+/* Interval splitting (P5)                                                     */
+/* ========================================================================== */
+
+/**
+ * Split a live interval at the given position.
+ *
+ * The interval is divided into two parts:
+ *   - First half: [start, position) — keeps the current register assignment
+ *   - Second half: [position, end) — becomes a new interval needing a register
+ *
+ * The first half's range list is truncated, and a new interval is created
+ * for the second half. The split_parent/split_child pointers link them.
+ *
+ * At the split point, the caller should insert:
+ *   - Spill instruction (store register to spill slot) at the end of the first half
+ *   - Reload instruction (load from spill slot to register) at the start of the second half
+ */
+vtx_live_interval_t *vtx_regalloc_split_interval(vtx_live_interval_t *interval,
+                                                   uint32_t position,
+                                                   vtx_arena_t *arena)
+{
+    if (!interval) return NULL;
+    if (position <= interval->start || position > interval->end) return NULL;
+
+    /* Create the second half interval */
+    vtx_live_interval_t *second = (vtx_live_interval_t *)vtx_arena_alloc(
+        arena, sizeof(vtx_live_interval_t));
+    if (!second) return NULL;
+    memset(second, 0, sizeof(*second));
+
+    /* Initialize second half */
+    second->vreg = interval->vreg;        /* same vreg — needs separate spill slot */
+    second->start = position;
+    second->end = interval->end;
+    second->phys_reg = 0xFF;               /* needs a new register */
+    second->spill_slot = VTX_NO_SPILL;
+    second->is_fixed = interval->is_fixed;
+    second->fixed_reg = interval->fixed_reg;
+    second->is_spilled = false;
+    second->use_count = 0;                  /* will be counted separately */
+    second->loop_depth = interval->loop_depth;
+    second->coalesce_src = VTX_VREG_INVALID;
+    second->split_parent = interval;
+    second->split_child = NULL;
+
+    /* Create a range for the second half */
+    vtx_live_range_t *second_range = (vtx_live_range_t *)vtx_arena_alloc(
+        arena, sizeof(vtx_live_range_t));
+    if (!second_range) return NULL;
+    second_range->start = position;
+    second_range->end = interval->end;
+    second_range->phys_reg = 0xFF;
+    second_range->spill_slot = VTX_NO_SPILL;
+    second_range->next = NULL;
+    second->first_range = second_range;
+    second->last_range = second_range;
+
+    /* Count uses in the second half from the original use_count.
+     * We approximate by splitting proportionally. */
+    uint32_t total_len = interval->end - interval->start;
+    uint32_t second_len = interval->end - position;
+    if (total_len > 0 && interval->use_count > 0) {
+        second->use_count = (interval->use_count * second_len) / total_len;
+        if (second->use_count == 0) second->use_count = 1; /* at least 1 */
+    }
+
+    /* Truncate the first half */
+    interval->end = position > 0 ? position - 1 : 0;
+    interval->split_child = second;
+
+    /* Update the first half's range list: truncate the last range */
+    if (interval->last_range) {
+        interval->last_range->end = interval->end;
+    }
+
+    return second;
 }
 
 /* ========================================================================== */
@@ -560,10 +662,13 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
                 active[active_count++] = current;
             }
         } else {
-            /* No free register — spill the interval with the lowest spill cost.
-             * Spill cost = use_count * 10^loop_depth.
-             * Intervals in deep loops have much higher cost, so they are
-             * less likely to be spilled. */
+            /* No free register — P5: Use interval splitting instead of
+             * spilling the entire lifetime. We split the evicted interval
+             * at the current position so that only the overlapping part
+             * is spilled. The non-overlapping parts can keep their register.
+             *
+             * If splitting is not possible (e.g., the interval is too short),
+             * we fall back to full-lifetime spilling. */
             uint32_t spill_idx = 0;
             uint64_t min_cost = UINT64_MAX;
             for (uint32_t j = 0; j < active_count; j++) {
@@ -578,22 +683,121 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
             uint64_t current_cost = compute_spill_cost(current);
 
             if (active_count > 0 && min_cost < current_cost) {
-                /* Spill the active interval with lowest cost, assign its register to current */
+                /* Evict the active interval with lowest cost.
+                 * P5: Try to split the interval at current->start so that
+                 * the part before current->start keeps its register, and
+                 * only the overlapping part is spilled. */
                 vtx_live_interval_t *spill = active[spill_idx];
-                current->phys_reg = spill->phys_reg;
-                spill->is_spilled = true;
-                spill->spill_slot = next_spill_slot++;
-                result->vreg_to_phys[spill->vreg] = 0xFF;
-                result->vreg_to_spill[spill->vreg] = spill->spill_slot;
-                result->vreg_to_phys[current->vreg] = current->phys_reg;
 
-                /* Replace in active list */
-                active[spill_idx] = current;
+                /* Check if splitting is worthwhile: the interval must extend
+                 * beyond the current start position by a meaningful amount.
+                 * If spill->end <= current->start, the interval has already
+                 * expired and there's nothing to split. If the interval only
+                 * overlaps by a small amount, splitting is still worthwhile
+                 * because the non-overlapping part keeps its register. */
+                if (spill->end > current->start && spill->start < current->start) {
+                    /* Split the interval at current->start.
+                     * The first half [spill->start, current->start) keeps the register.
+                     * The second half [current->start, spill->end) is spilled. */
+                    vtx_live_interval_t *second_half = vtx_regalloc_split_interval(
+                        spill, current->start, arena);
+                    if (second_half) {
+                        /* Spill the second half */
+                        second_half->is_spilled = true;
+                        second_half->spill_slot = next_spill_slot++;
+                        second_half->phys_reg = 0xFF;
+                        result->vreg_to_spill[second_half->vreg] = second_half->spill_slot;
+                        result->vreg_to_phys[second_half->vreg] = 0xFF;
+
+                        /* The first half (spill) keeps its register but is
+                         * no longer active since it ends before current->start.
+                         * Its register is freed. */
+                        free_regs |= (1u << spill->phys_reg);
+
+                        /* Assign the freed register to current */
+                        uint32_t reg_bit = (1u << spill->phys_reg);
+                        uint8_t reg = spill->phys_reg;
+                        current->phys_reg = reg;
+                        free_regs &= ~reg_bit;
+                        result->vreg_to_phys[current->vreg] = reg;
+
+                        /* Replace in active list */
+                        active[spill_idx] = current;
+                    } else {
+                        /* Split failed — fall back to full spill */
+                        current->phys_reg = spill->phys_reg;
+                        spill->is_spilled = true;
+                        spill->spill_slot = next_spill_slot++;
+                        result->vreg_to_phys[spill->vreg] = 0xFF;
+                        result->vreg_to_spill[spill->vreg] = spill->spill_slot;
+                        result->vreg_to_phys[current->vreg] = current->phys_reg;
+                        active[spill_idx] = current;
+                    }
+                } else {
+                    /* Can't split (interval starts at or after current position),
+                     * or splitting isn't worthwhile — fall back to full spill */
+                    current->phys_reg = spill->phys_reg;
+                    spill->is_spilled = true;
+                    spill->spill_slot = next_spill_slot++;
+                    result->vreg_to_phys[spill->vreg] = 0xFF;
+                    result->vreg_to_spill[spill->vreg] = spill->spill_slot;
+                    result->vreg_to_phys[current->vreg] = current->phys_reg;
+                    active[spill_idx] = current;
+                }
             } else {
-                /* Spill the current interval */
-                current->is_spilled = true;
-                current->spill_slot = next_spill_slot++;
-                result->vreg_to_spill[current->vreg] = current->spill_slot;
+                /* P5: Try to split the current interval instead of spilling
+                 * its entire lifetime. If it overlaps with an active interval
+                 * only partially, split at the active interval's start. */
+                bool did_split = false;
+                /* Find the active interval that ends latest (the one most
+                 * blocking us) and try to split current before it. */
+                uint32_t latest_end = 0;
+                for (uint32_t j = 0; j < active_count; j++) {
+                    if (active[j]->end > latest_end) {
+                        latest_end = active[j]->end;
+                    }
+                }
+
+                /* If the current interval extends beyond the last active
+                 * interval, we can split it: first half gets no register
+                 * (spilled), second half can try again when registers free up. */
+                if (latest_end < current->end && latest_end > current->start) {
+                    vtx_live_interval_t *second_half = vtx_regalloc_split_interval(
+                        current, latest_end + 1, arena);
+                    if (second_half) {
+                        /* Spill the first half (current, now shortened) */
+                        current->is_spilled = true;
+                        current->spill_slot = next_spill_slot++;
+                        result->vreg_to_spill[current->vreg] = current->spill_slot;
+
+                        /* The second half needs a register — try to allocate
+                         * one later. For now, add it to a deferred list or
+                         * just spill it too. Since the linear scan processes
+                         * intervals in order, and the second half starts
+                         * after the current position, it will be processed
+                         * in a future iteration. However, since we're iterating
+                         * over valid_intervals (which is sorted by start),
+                         * the second half might not be in the array.
+                         *
+                         * For simplicity, spill the second half too but record
+                         * that it exists for the apply phase to insert
+                         * reload instructions. */
+                        second_half->is_spilled = true;
+                        second_half->spill_slot = next_spill_slot++;
+                        second_half->phys_reg = 0xFF;
+                        result->vreg_to_spill[second_half->vreg] = second_half->spill_slot;
+                        result->vreg_to_phys[second_half->vreg] = 0xFF;
+
+                        did_split = true;
+                    }
+                }
+
+                if (!did_split) {
+                    /* Spill the current interval entirely */
+                    current->is_spilled = true;
+                    current->spill_slot = next_spill_slot++;
+                    result->vreg_to_spill[current->vreg] = current->spill_slot;
+                }
             }
         }
     }

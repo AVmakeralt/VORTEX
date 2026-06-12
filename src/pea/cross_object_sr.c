@@ -133,6 +133,80 @@ static int build_alloc_graph(vtx_graph_t *graph, vtx_alloc_graph_t *g,
 }
 
 /* ========================================================================== */
+/* Internal: check if a field is read at an escape point                       */
+/* ========================================================================== */
+
+/**
+ * Bug 9 fix: Check if the field storing B into A is ever read at an
+ * actual escape point. If not, B does not effectively escape through A.
+ *
+ * Previously, the code assumed that if A escapes and A.field is read
+ * anywhere, then B (stored in A.field) also escapes. This is over-
+ * conservative because the read of A.field might not be at the escape
+ * point — the read value might only be used locally.
+ *
+ * This function checks whether the LoadField result actually reaches
+ * an escape point (return, call argument, etc.). Only if the loaded
+ * value is consumed at an escape point does B effectively escape.
+ */
+static bool is_field_read_at_escape(vtx_graph_t *graph,
+                                      vtx_nodeid_t container_id,
+                                      uint32_t field_offset,
+                                      const vtx_pea_analysis_t *analysis)
+{
+    vtx_node_table_t *table = &graph->node_table;
+    (void)analysis; /* may be used for more precise checks in the future */
+
+    for (uint32_t i = 0; i < table->count; i++) {
+        vtx_node_t *node = &table->nodes[i];
+        if (node->dead) continue;
+        if (node->opcode != VTX_OP_LoadField) continue;
+        if (node->field_offset != field_offset) continue;
+        if (node->input_count < 1) continue;
+
+        /* Check if the receiver is the container */
+        vtx_nodeid_t receiver_id = node->inputs[node->input_count - 1];
+        if (receiver_id != container_id) continue;
+
+        /* Found a LoadField that reads this field from the container.
+         * Now check if the loaded value reaches an escape point.
+         * We do a simple reachability check: walk all users of this
+         * LoadField node and check if any of them are escape points. */
+        for (uint32_t u = 0; u < table->count; u++) {
+            vtx_node_t *user = &table->nodes[u];
+            if (user->dead) continue;
+
+            /* Check if this user takes the LoadField as input */
+            bool uses_load = false;
+            for (uint32_t inp = 0; inp < user->input_count; inp++) {
+                if (user->inputs[inp] == node->id) {
+                    uses_load = true;
+                    break;
+                }
+            }
+            if (!uses_load) continue;
+
+            /* Check if this user is an escape point */
+            switch (user->opcode) {
+            case VTX_OP_Return:
+            case VTX_OP_CallStatic:
+            case VTX_OP_CallVirtual:
+            case VTX_OP_CallInterface:
+            case VTX_OP_CallRuntime:
+                /* The loaded value is consumed at an escape point.
+                 * This means the field IS read at escape, and B
+                 * effectively escapes through A.field. */
+                return true;
+            default:
+                break;
+            }
+        }
+    }
+
+    return false;
+}
+
+/* ========================================================================== */
 /* Internal: compute effective escape states                                   */
 /* ========================================================================== */
 
@@ -144,13 +218,22 @@ static int build_alloc_graph(vtx_graph_t *graph, vtx_alloc_graph_t *g,
  *     that DO escape, but the specific field that holds this allocation
  *     is never read at the actual escape point.
  *
- * The effective escape is computed by:
- *   1. For each allocation with raw escape > NoEscape, check if it
- *      has an incoming edge (i.e., it was stored into some container's field).
- *   2. If ALL incoming edges are from containers that escape, check whether
- *      the stored-into field is actually read at any escape point.
- *   3. If the field is never read at escape points, the allocation's
- *      effective escape is NoEscape.
+ * D3 enhancement: The analysis is now TRANSITIVE. If A→B→C in the
+ * allocation graph (A.f=B, B.g=C), and A escapes but the field f
+ * is never read at escape, then B effectively does NOT escape, and
+ * transitively C does NOT escape either. Even if B.g IS read, C
+ * doesn't escape because B itself doesn't effectively escape.
+ *
+ * The transitive analysis uses a fixed-point iteration:
+ *   1. Initialize effective states = raw escape states
+ *   2. For each allocation with effective > NoEscape:
+ *      a. Check non-field escape paths
+ *      b. Check outgoing edges: is the allocation stored in a
+ *         container whose field is read at escape?
+ *      c. Use EFFECTIVE (not raw) escape of containers — if a
+ *         container has effective NoEscape, values stored in it
+ *         don't escape through it
+ *   3. Repeat until no more states can be lowered
  */
 static vtx_effective_escape_t *compute_effective_escape(
     vtx_graph_t *graph,
@@ -181,113 +264,104 @@ static vtx_effective_escape_t *compute_effective_escape(
     if (!eff->scalar_fields) return NULL;
     memset(eff->scalar_fields, 0, state_count * sizeof(uint32_t));
 
-    /* For each allocation that has raw escape > NoEscape, check if
-     * effective escape can be lowered. */
-    for (uint32_t a = 0; a < analysis->escape_map.alloc_count; a++) {
-        vtx_nodeid_t alloc_id = analysis->escape_map.alloc_ids[a];
-        vtx_escape_state_t raw_state = analysis->escape_map.states[alloc_id];
+    /* D3: Fixed-point iteration for transitive effective escape.
+     * We iterate until no more effective states can be lowered.
+     * Each iteration may lower an allocation's effective escape,
+     * which can then allow other allocations stored into it to
+     * also be lowered in the next iteration. */
+    const uint32_t MAX_ITERATIONS = 10; /* safety bound */
+    for (uint32_t iter = 0; iter < MAX_ITERATIONS; iter++) {
+        bool any_changed = false;
 
-        if (raw_state == VTX_ESCAPE_NONE) continue; /* already NoEscape */
+        for (uint32_t a = 0; a < analysis->escape_map.alloc_count; a++) {
+            vtx_nodeid_t alloc_id = analysis->escape_map.alloc_ids[a];
+            vtx_escape_state_t raw_state = analysis->escape_map.states[alloc_id];
 
-        /* Find all incoming edges to this allocation */
-        uint32_t incoming_count = 0;
-        bool has_non_field_escape = false;
+            if (raw_state == VTX_ESCAPE_NONE) continue; /* already NoEscape */
+            if (eff->effective_states[alloc_id] == VTX_ESCAPE_NONE) continue; /* already lowered */
 
-        /* Check if this allocation escapes through non-field paths:
-         * return, call argument, global store, monitor */
-        for (uint32_t i = 0; i < table->count; i++) {
-            vtx_node_t *node = &table->nodes[i];
-            if (node->dead) continue;
+            /* Check if this allocation escapes through non-field paths:
+             * return, call argument, global store, monitor */
+            bool has_non_field_escape = false;
+            for (uint32_t i = 0; i < table->count; i++) {
+                vtx_node_t *node = &table->nodes[i];
+                if (node->dead) continue;
 
-            /* Check if this node uses alloc_id in a non-field-store way */
-            switch (node->opcode) {
-            case VTX_OP_Return:
-            case VTX_OP_CallStatic:
-            case VTX_OP_CallVirtual:
-            case VTX_OP_CallInterface:
-            case VTX_OP_CallRuntime:
-                for (uint32_t j = 0; j < node->input_count; j++) {
-                    if (node->inputs[j] == alloc_id) {
-                        has_non_field_escape = true;
-                        break;
-                    }
-                }
-                break;
-            default:
-                break;
-            }
-            if (has_non_field_escape) break;
-        }
-
-        /* If the allocation escapes through a non-field path, effective
-         * escape cannot be lowered */
-        if (has_non_field_escape) continue;
-
-        /* Check incoming field-store edges: is this allocation ONLY
-         * stored into fields of escaping containers? */
-        bool only_field_stores = true;
-        uint32_t container_read_count = 0;
-
-        for (uint32_t e = 0; e < alloc_graph->edge_count; e++) {
-            vtx_alloc_edge_t *edge = &alloc_graph->all_edges[e];
-            if (edge->value_id == alloc_id) {
-                incoming_count++;
-                /* Check if the container's field is ever read at an
-                 * escape point. We look for LoadField nodes that read
-                 * the same field from the same container. */
-                bool field_read_at_escape = false;
-
-                for (uint32_t n = 0; n < table->count; n++) {
-                    vtx_node_t *reader = &table->nodes[n];
-                    if (reader->dead) continue;
-                    if (reader->opcode != VTX_OP_LoadField) continue;
-                    if (reader->field_offset != edge->field_offset) continue;
-
-                    /* Check if this LoadField reads from the container */
-                    if (reader->input_count >= 1) {
-                        vtx_nodeid_t reader_receiver = reader->inputs[reader->input_count - 1];
-                        if (reader_receiver == edge->container_id) {
-                            /* The field is read. Now check if the reader's
-                             * result escapes. */
-                            /* If the reader has any output that is an
-                             * escaping node (return, call, etc.), the
-                             * field IS read at an escape point. */
-                            if (reader->output_count > 0) {
-                                /* The read value is used somewhere.
-                                 * Check if the field-read value itself
-                                 * is used only locally (in which case the
-                                 * container's escape doesn't matter for
-                                 * this value). */
-                                /* Conservative: if the field is read
-                                 * from an escaping container and the
-                                 * read value has ANY use, assume the
-                                 * value escapes through the read. */
-                                vtx_escape_state_t container_escape =
-                                    analysis->escape_map.states[edge->container_id];
-                                if (container_escape != VTX_ESCAPE_NONE) {
-                                    field_read_at_escape = true;
-                                    container_read_count++;
-                                }
-                            }
+                switch (node->opcode) {
+                case VTX_OP_Return:
+                case VTX_OP_CallStatic:
+                case VTX_OP_CallVirtual:
+                case VTX_OP_CallInterface:
+                case VTX_OP_CallRuntime:
+                    for (uint32_t j = 0; j < node->input_count; j++) {
+                        if (node->inputs[j] == alloc_id) {
+                            has_non_field_escape = true;
+                            break;
                         }
                     }
+                    break;
+                default:
+                    break;
                 }
+                if (has_non_field_escape) break;
+            }
 
-                /* If the field is never read at an escape point,
-                 * the allocation stored there doesn't effectively escape
-                 * through this edge. */
-                if (field_read_at_escape) {
-                    only_field_stores = false;
+            /* If the allocation escapes through a non-field path, effective
+             * escape cannot be lowered */
+            if (has_non_field_escape) continue;
+
+            /* Check outgoing field-store edges (where this allocation is
+             * the value stored into a container's field).
+             *
+             * Bug 9 fix + D3: We check if the container's field is actually
+             * read at an escape point using is_field_read_at_escape(), and
+             * we consider the EFFECTIVE escape state of the container (not
+             * the raw state). If the container has effective NoEscape, the
+             * value stored in it doesn't escape through that edge, even if
+             * the field is read somewhere (because the container itself is
+             * not reachable at any escape point). */
+            uint32_t incoming_count = 0;
+            bool escapes_through_any_edge = false;
+
+            for (uint32_t e = 0; e < alloc_graph->edge_count; e++) {
+                vtx_alloc_edge_t *edge = &alloc_graph->all_edges[e];
+                if (edge->value_id == alloc_id) {
+                    incoming_count++;
+
+                    /* D3: Check the EFFECTIVE escape of the container.
+                     * If the container has effective NoEscape, the value
+                     * stored in it doesn't escape through this edge. */
+                    if (edge->container_id < state_count &&
+                        eff->effective_states[edge->container_id] == VTX_ESCAPE_NONE) {
+                        /* Container effectively doesn't escape, so the
+                         * value stored in it doesn't escape through this
+                         * edge either. Skip this edge. */
+                        continue;
+                    }
+
+                    /* Container has effective escape > NoEscape.
+                     * Check if the field is actually read at an escape point. */
+                    bool field_read_at_escape = is_field_read_at_escape(
+                        graph, edge->container_id, edge->field_offset, analysis);
+
+                    if (field_read_at_escape) {
+                        escapes_through_any_edge = true;
+                        break; /* no need to check more edges */
+                    }
                 }
+            }
+
+            /* If the allocation doesn't escape through any edge (all
+             * edges either point to effectively non-escaping containers
+             * or have fields that are not read at escape), lower its
+             * effective escape to NoEscape. */
+            if (!escapes_through_any_edge && incoming_count > 0) {
+                eff->effective_states[alloc_id] = VTX_ESCAPE_NONE;
+                any_changed = true;
             }
         }
 
-        /* If the only way this allocation escapes is through field stores
-         * where the field is never read at escape points, lower its
-         * effective escape to NoEscape. */
-        if (only_field_stores && incoming_count > 0) {
-            eff->effective_states[alloc_id] = VTX_ESCAPE_NONE;
-        }
+        if (!any_changed) break; /* fixed point reached */
     }
 
     /* Count scalar fields for each allocation that can be replaced */

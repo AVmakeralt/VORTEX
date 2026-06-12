@@ -103,6 +103,11 @@ vtx_side_exit_t *vtx_side_exit_create(vtx_side_exit_table_t *table,
     exit->trace_id = trace_id;
     exit->has_branch = false;
 
+    /* D6: Initialize trace link fields */
+    exit->linked_trace_id = VTX_NODEID_INVALID;
+    exit->linked_trace_code = NULL;
+    exit->is_linked = false;
+
     /* Copy the operand stack state */
     exit->stack_state.stack_depth = stack_depth;
     if (stack_depth > 0) {
@@ -191,4 +196,75 @@ uint32_t vtx_side_exit_find_hot(const vtx_side_exit_table_t *table,
         }
     }
     return found;
+}
+
+/* ========================================================================== */
+/* D6: Trace linking                                                           */
+/* ========================================================================== */
+
+int vtx_side_exit_link(vtx_side_exit_t *exit,
+                        vtx_nodeid_t target_trace_id,
+                        void *target_trace_code)
+{
+    if (exit == NULL || target_trace_code == NULL) return -1;
+
+    exit->linked_trace_id = target_trace_id;
+    exit->linked_trace_code = target_trace_code;
+    exit->is_linked = true;
+    return 0;
+}
+
+void vtx_side_exit_unlink(vtx_side_exit_t *exit)
+{
+    if (exit == NULL) return;
+
+    exit->linked_trace_id = VTX_NODEID_INVALID;
+    exit->linked_trace_code = NULL;
+    exit->is_linked = false;
+}
+
+bool vtx_side_exit_is_linked(const vtx_side_exit_t *exit)
+{
+    if (exit == NULL) return false;
+    return exit->is_linked && exit->linked_trace_code != NULL;
+}
+
+uint32_t vtx_side_exit_link_all_hot(vtx_side_exit_table_t *table,
+                                      void *(*lookup_fn)(void *ctx, uint32_t target_pc),
+                                      void *lookup_ctx,
+                                      vtx_nodeid_t (*trace_id_fn)(void *ctx, uint32_t target_pc),
+                                      void *trace_id_ctx)
+{
+    if (table == NULL || lookup_fn == NULL) return 0;
+
+    uint32_t linked = 0;
+    for (uint32_t i = 0; i < table->count; i++) {
+        vtx_side_exit_t *exit = table->exits[i];
+        if (exit == NULL) continue;
+
+        /* Skip already-linked exits */
+        if (exit->is_linked) continue;
+
+        /* Only link exits that are hot enough (have a branch) or have
+         * been taken enough times to warrant direct linking.
+         * We link any exit that has been taken at least once and whose
+         * target_pc has a compiled trace available. */
+        if (exit->exit_counter == 0) continue;
+
+        /* Look up compiled code at the side exit's target PC */
+        void *target_code = lookup_fn(lookup_ctx, exit->target_pc);
+        if (target_code == NULL) continue;
+
+        /* Look up the trace ID at this PC */
+        vtx_nodeid_t tid = VTX_NODEID_INVALID;
+        if (trace_id_fn != NULL) {
+            tid = trace_id_fn(trace_id_ctx, exit->target_pc);
+        }
+
+        /* Link the side exit */
+        vtx_side_exit_link(exit, tid, target_code);
+        linked++;
+    }
+
+    return linked;
 }

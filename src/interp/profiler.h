@@ -35,6 +35,32 @@ typedef enum {
 #define VTX_TIER_T3 VT_TIER_T3
 
 /* ========================================================================== */
+/* D7: Tier-up counter state                                                   */
+/* ========================================================================== */
+
+/**
+ * Per-method tier-up counter for zero-overhead hot method detection.
+ *
+ * The counter is decremented on each backward branch (loop back-edge).
+ * When it reaches zero, the method is queued for compilation. This
+ * eliminates the need for a polling thread or expensive counter checks.
+ *
+ * In the interpreter dispatch loop, the decrement-and-test compiles to
+ * just two x86-64 instructions:
+ *   dec [profile_data->tier_up_counter]    ; 2-3 bytes
+ *   jle .request_compilation               ; 2 bytes
+ *
+ * This is the technique used by V8's Sparkplug igniter — essentially
+ * zero overhead compared to a bare branch instruction.
+ */
+#define VTX_TIER_UP_INITIAL_COUNT 10000  /* compile after this many back-edges */
+
+typedef struct {
+    int32_t tier_up_counter;           /* decremented on each back-edge; when <= 0, trigger compilation */
+    bool    compilation_requested;     /* true if we've already requested compilation for this method */
+} vtx_tier_up_state_t;
+
+/* ========================================================================== */
 /* Per-method profile data                                                     */
 /* ========================================================================== */
 
@@ -79,6 +105,13 @@ typedef struct {
     /* Compilation state */
     vtx_compile_tier_t compiled_tier;  /* current compilation tier */
     uint32_t           deopt_count;    /* number of deoptimizations from this method */
+
+    /* D7: Tier-up counter state.
+     * Embedded directly in the profile data so the dispatch loop can
+     * access it with a single pointer dereference:
+     *   pd->tier_up.tier_up_counter--
+     * No separate lookup needed. */
+    vtx_tier_up_state_t tier_up;
 } vtx_profile_data_t;
 
 /* ========================================================================== */
@@ -230,5 +263,38 @@ void vtx_profiler_record_deopt(vtx_profiler_t *profiler,
 void vtx_profiler_set_compiled_tier(vtx_profiler_t *profiler,
                                      const vtx_method_desc_t *method,
                                      vtx_compile_tier_t tier);
+
+/**
+ * D7: Check and decrement the tier-up counter for a method.
+ *
+ * This is designed to be called from the interpreter dispatch loop at
+ * backward branches. It decrements the counter and returns true when
+ * the counter reaches zero (indicating the method should be compiled).
+ *
+ * After returning true, the compilation_requested flag is set so that
+ * subsequent calls are no-ops (the method has already been queued).
+ *
+ * The caller is responsible for triggering the actual compilation
+ * (e.g., via vtx_request_compilation or the compilation thread pool).
+ *
+ * @param profiler  The profiler
+ * @param method    The method being executed
+ * @return          true if the method should be compiled, false otherwise
+ */
+bool vtx_profiler_tier_up_check(vtx_profiler_t *profiler,
+                                  const vtx_method_desc_t *method);
+
+/**
+ * D7: Reset the tier-up counter for a method (e.g., after recompilation
+ * for a higher tier). This allows the method to be detected as hot
+ * again for the next tier transition.
+ *
+ * @param profiler          The profiler
+ * @param method            The method to reset
+ * @param new_initial_count The new initial counter value (0 for default)
+ */
+void vtx_profiler_tier_up_reset(vtx_profiler_t *profiler,
+                                  const vtx_method_desc_t *method,
+                                  int32_t new_initial_count);
 
 #endif /* VORTEX_PROFILER_H */

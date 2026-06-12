@@ -86,6 +86,21 @@ struct vtx_side_exit {
     vtx_nodeid_t        guard_node;    /* the Guard node in SoN graph */
     uint32_t            trace_id;      /* which trace this exit belongs to */
     bool                has_branch;    /* true if a branch trace has been recorded */
+
+    /* D6: Trace linking.
+     * When a side exit is taken at runtime, instead of returning to the
+     * interpreter (which requires reconstructing the frame state, resuming
+     * the dispatch loop, and potentially re-warming the trace), we can
+     * jump directly to another compiled trace. This eliminates the
+     * interpreter re-entry overhead that can cost 100-1000ns per exit.
+     *
+     * LuaJIT does this — it's a major reason for its performance.
+     * The linking is done lazily: when a side exit becomes hot and a
+     * trace starting at the exit point is compiled, the side exit's
+     * native code is patched to jump directly to the new trace. */
+    vtx_nodeid_t        linked_trace_id;   /* target trace to jump to (VTX_NODEID_INVALID = no link) */
+    void               *linked_trace_code; /* native code address of the linked trace */
+    bool                is_linked;         /* has this exit been linked to a compiled trace? */
 };
 
 /* ========================================================================== */
@@ -177,5 +192,71 @@ uint32_t vtx_side_exit_table_count(const vtx_side_exit_table_t *table);
 uint32_t vtx_side_exit_find_hot(const vtx_side_exit_table_t *table,
                                  vtx_side_exit_t **out,
                                  uint32_t max_out);
+
+/* ========================================================================== */
+/* D6: Trace linking                                                           */
+/* ========================================================================== */
+
+/**
+ * Link a side exit to a compiled trace.
+ *
+ * When the side exit is taken at runtime, execution jumps directly to the
+ * linked trace's native code instead of returning to the interpreter.
+ * This eliminates the overhead of interpreter re-entry and dispatch.
+ *
+ * The target_trace_code pointer must remain valid for the lifetime of the
+ * link. If the target trace is evicted from the code cache, the link must
+ * be removed via vtx_side_exit_unlink() before the code is freed.
+ *
+ * @param exit              Side exit to link
+ * @param target_trace_id   ID of the target compiled trace
+ * @param target_trace_code Native code entry point of the target trace
+ * @return                  0 on success, -1 on invalid arguments
+ */
+int vtx_side_exit_link(vtx_side_exit_t *exit,
+                        vtx_nodeid_t target_trace_id,
+                        void *target_trace_code);
+
+/**
+ * Unlink a side exit (e.g., when the target trace is evicted from code cache).
+ *
+ * After unlinking, the side exit falls back to the interpreter on next taken.
+ *
+ * @param exit  Side exit to unlink
+ */
+void vtx_side_exit_unlink(vtx_side_exit_t *exit);
+
+/**
+ * Check whether a side exit is currently linked to a compiled trace.
+ *
+ * @param exit  Side exit to check
+ * @return      true if the exit has a valid link to compiled code
+ */
+bool vtx_side_exit_is_linked(const vtx_side_exit_t *exit);
+
+/**
+ * Try to link all hot side exits in the table to existing compiled traces.
+ *
+ * For each hot (counter > threshold) side exit that is not yet linked,
+ * checks if a compiled trace starting at the exit's target_pc exists.
+ * If so, links the side exit to that trace.
+ *
+ * This is called after new traces are compiled to eagerly link any
+ * side exits that can now benefit from direct jumps.
+ *
+ * @param table             Side exit table
+ * @param lookup_fn         Function to look up compiled code by bytecode PC.
+ *                          Returns the native code address, or NULL if not compiled.
+ * @param lookup_ctx        Opaque context passed to lookup_fn.
+ * @param trace_id_fn       Function to look up trace ID by bytecode PC.
+ *                          Returns the trace ID, or VTX_NODEID_INVALID if not compiled.
+ * @param trace_id_ctx      Opaque context passed to trace_id_fn.
+ * @return                  Number of side exits that were newly linked
+ */
+uint32_t vtx_side_exit_link_all_hot(vtx_side_exit_table_t *table,
+                                      void *(*lookup_fn)(void *ctx, uint32_t target_pc),
+                                      void *lookup_ctx,
+                                      vtx_nodeid_t (*trace_id_fn)(void *ctx, uint32_t target_pc),
+                                      void *trace_id_ctx);
 
 #endif /* VORTEX_SIDE_EXIT_H */

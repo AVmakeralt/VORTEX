@@ -5,6 +5,248 @@
 #include <stddef.h>
 
 /* ========================================================================== */
+/* Symbol table operations                                                     */
+/* ========================================================================== */
+
+/**
+ * Compute FNV-1a hash of a string with given length.
+ */
+static uint32_t fnv1a_hash(const char *str, uint32_t length)
+{
+    uint32_t hash = 2166136261u; /* FNV offset basis */
+    for (uint32_t i = 0; i < length; i++) {
+        hash ^= (uint8_t)str[i];
+        hash *= 16777619u; /* FNV prime */
+    }
+    return hash;
+}
+
+/**
+ * Initialize the symbol table.
+ */
+static int symbol_table_init(vtx_symbol_table_t *st)
+{
+    st->symbol_capacity = VTX_SYMBOL_TABLE_INITIAL_CAPACITY;
+    st->symbols = (vtx_symbol_t *)calloc(st->symbol_capacity, sizeof(vtx_symbol_t));
+    if (st->symbols == NULL) {
+        st->symbol_count = 0;
+        st->hash_bucket_count = 0;
+        st->hash_buckets = NULL;
+        return -1;
+    }
+    st->symbol_count = 0;
+
+    /* Initialize hash table with 2x the capacity for good load factor */
+    st->hash_bucket_count = st->symbol_capacity * 2;
+    st->hash_buckets = (uint32_t *)malloc(st->hash_bucket_count * sizeof(uint32_t));
+    if (st->hash_buckets == NULL) {
+        free(st->symbols);
+        st->symbols = NULL;
+        st->symbol_capacity = 0;
+        st->symbol_count = 0;
+        st->hash_bucket_count = 0;
+        return -1;
+    }
+    /* Initialize all buckets to VTX_SYMBOL_INVALID */
+    for (uint32_t i = 0; i < st->hash_bucket_count; i++) {
+        st->hash_buckets[i] = VTX_SYMBOL_INVALID;
+    }
+
+    return 0;
+}
+
+/**
+ * Destroy the symbol table and free all memory.
+ */
+static void symbol_table_destroy(vtx_symbol_table_t *st)
+{
+    free(st->symbols);
+    st->symbols = NULL;
+    free(st->hash_buckets);
+    st->hash_buckets = NULL;
+    st->symbol_count = 0;
+    st->symbol_capacity = 0;
+    st->hash_bucket_count = 0;
+}
+
+/**
+ * Grow the symbol table's symbol array and hash table.
+ */
+static int symbol_table_grow(vtx_symbol_table_t *st)
+{
+    /* Double the symbol array capacity */
+    uint32_t new_capacity = st->symbol_capacity * 2;
+    vtx_symbol_t *new_symbols = (vtx_symbol_t *)realloc(
+        st->symbols, new_capacity * sizeof(vtx_symbol_t));
+    if (new_symbols == NULL) {
+        return -1;
+    }
+    /* Zero-initialize new slots */
+    memset(new_symbols + st->symbol_capacity, 0,
+           (new_capacity - st->symbol_capacity) * sizeof(vtx_symbol_t));
+    st->symbols = new_symbols;
+    st->symbol_capacity = new_capacity;
+
+    /* Rebuild the hash table with 2x the new capacity */
+    uint32_t new_bucket_count = new_capacity * 2;
+    uint32_t *new_buckets = (uint32_t *)malloc(new_bucket_count * sizeof(uint32_t));
+    if (new_buckets == NULL) {
+        return -1; /* symbols grew but hash rebuild failed — not fatal */
+    }
+    for (uint32_t i = 0; i < new_bucket_count; i++) {
+        new_buckets[i] = VTX_SYMBOL_INVALID;
+    }
+    /* Rehash all existing symbols */
+    for (uint32_t i = 0; i < st->symbol_count; i++) {
+        uint32_t bucket_idx = st->symbols[i].hash % new_bucket_count;
+        /* Use linear probing */
+        while (new_buckets[bucket_idx] != VTX_SYMBOL_INVALID) {
+            bucket_idx = (bucket_idx + 1) % new_bucket_count;
+        }
+        new_buckets[bucket_idx] = i;
+    }
+    free(st->hash_buckets);
+    st->hash_buckets = new_buckets;
+    st->hash_bucket_count = new_bucket_count;
+
+    return 0;
+}
+
+uint32_t vtx_symbol_intern(vtx_type_system_t *ts, const char *name)
+{
+    VTX_ASSERT(ts != NULL, "type system must not be NULL");
+    VTX_ASSERT(name != NULL, "symbol name must not be NULL");
+
+    vtx_symbol_table_t *st = &ts->symbol_table;
+    uint32_t length = (uint32_t)strlen(name);
+    uint32_t hash = fnv1a_hash(name, length);
+
+    /* Look up existing symbol in hash table */
+    if (st->hash_bucket_count > 0) {
+        uint32_t bucket_idx = hash % st->hash_bucket_count;
+        /* Linear probing */
+        for (uint32_t probe = 0; probe < st->hash_bucket_count; probe++) {
+            uint32_t sym_id = st->hash_buckets[bucket_idx];
+            if (sym_id == VTX_SYMBOL_INVALID) {
+                break; /* not found */
+            }
+            /* Check for match: same hash, same length, same string */
+            if (st->symbols[sym_id].hash == hash &&
+                st->symbols[sym_id].length == length &&
+                memcmp(st->symbols[sym_id].name, name, length) == 0) {
+                return sym_id; /* found */
+            }
+            bucket_idx = (bucket_idx + 1) % st->hash_bucket_count;
+        }
+    }
+
+    /* Symbol not found — create a new entry */
+    if (st->symbol_count >= st->symbol_capacity) {
+        if (symbol_table_grow(st) != 0) {
+            return VTX_SYMBOL_INVALID; /* out of memory */
+        }
+    }
+
+    uint32_t new_id = st->symbol_count;
+    st->symbols[new_id].name = name;
+    st->symbols[new_id].hash = hash;
+    st->symbols[new_id].length = length;
+    st->symbol_count++;
+
+    /* Insert into hash table */
+    if (st->hash_bucket_count > 0) {
+        uint32_t bucket_idx = hash % st->hash_bucket_count;
+        /* Linear probing to find empty slot */
+        while (st->hash_buckets[bucket_idx] != VTX_SYMBOL_INVALID) {
+            bucket_idx = (bucket_idx + 1) % st->hash_bucket_count;
+        }
+        st->hash_buckets[bucket_idx] = new_id;
+    }
+
+    return new_id;
+}
+
+uint32_t vtx_symbol_lookup(const vtx_type_system_t *ts, const char *name)
+{
+    VTX_ASSERT(ts != NULL, "type system must not be NULL");
+    VTX_ASSERT(name != NULL, "symbol name must not be NULL");
+
+    const vtx_symbol_table_t *st = &ts->symbol_table;
+    uint32_t length = (uint32_t)strlen(name);
+    uint32_t hash = fnv1a_hash(name, length);
+
+    if (st->hash_bucket_count == 0) {
+        return VTX_SYMBOL_INVALID;
+    }
+
+    uint32_t bucket_idx = hash % st->hash_bucket_count;
+    /* Linear probing */
+    for (uint32_t probe = 0; probe < st->hash_bucket_count; probe++) {
+        uint32_t sym_id = st->hash_buckets[bucket_idx];
+        if (sym_id == VTX_SYMBOL_INVALID) {
+            return VTX_SYMBOL_INVALID; /* not found */
+        }
+        if (st->symbols[sym_id].hash == hash &&
+            st->symbols[sym_id].length == length &&
+            memcmp(st->symbols[sym_id].name, name, length) == 0) {
+            return sym_id;
+        }
+        bucket_idx = (bucket_idx + 1) % st->hash_bucket_count;
+    }
+
+    return VTX_SYMBOL_INVALID;
+}
+
+const char *vtx_symbol_name(const vtx_type_system_t *ts, uint32_t symbol_id)
+{
+    VTX_ASSERT(ts != NULL, "type system must not be NULL");
+
+    const vtx_symbol_table_t *st = &ts->symbol_table;
+    if (symbol_id >= st->symbol_count) {
+        return NULL;
+    }
+    return st->symbols[symbol_id].name;
+}
+
+/* ========================================================================== */
+
+/**
+ * Count the number of arguments from a method signature string.
+ * Signatures are like "(II)I" or "(Ljava/lang/String;F)V".
+ * Returns 0 if signature is NULL or has no args.
+ * This is the same logic as count_method_args() in dispatch.c,
+ * but available at type registration time.
+ */
+static uint32_t count_method_args_from_sig(const char *signature)
+{
+    if (!signature) return 0;
+    uint32_t count = 0;
+    const char *p = strchr(signature, '(');
+    if (!p) return 0;
+    p++; /* skip '(' */
+    while (*p && *p != ')') {
+        count++;
+        if (*p == 'L') {
+            /* Object type: skip to ';' */
+            while (*p && *p != ';') p++;
+            if (*p) p++;
+        } else if (*p == '[') {
+            /* Array type: skip '[' markers, then count the element type */
+            while (*p == '[') p++;
+            if (*p == 'L') {
+                while (*p && *p != ';') p++;
+                if (*p) p++;
+            } else {
+                p++; /* primitive element type */
+            }
+        } else {
+            p++; /* primitive type (I, F, D, J, etc.) */
+        }
+    }
+    return count;
+}
+
+/* ========================================================================== */
 /* Global type system instance (used by interpreter and runtime stubs)          */
 /* ========================================================================== */
 
@@ -24,6 +266,15 @@ int vtx_type_system_init(vtx_type_system_t *ts)
     ts->capacity = VTX_TYPE_SYSTEM_INITIAL_CAPACITY;
     ts->types = (vtx_type_desc_t *)calloc(ts->capacity, sizeof(vtx_type_desc_t));
     if (ts->types == NULL) {
+        ts->type_count = 0;
+        ts->shape_counter = 0;
+        return -1;
+    }
+
+    /* Initialize symbol table */
+    if (symbol_table_init(&ts->symbol_table) != 0) {
+        free(ts->types);
+        ts->types = NULL;
         ts->type_count = 0;
         ts->shape_counter = 0;
         return -1;
@@ -83,6 +334,8 @@ void vtx_type_system_destroy(vtx_type_system_t *ts)
     ts->type_count = 0;
     ts->capacity = 0;
     ts->shape_counter = 0;
+
+    symbol_table_destroy(&ts->symbol_table);
 }
 
 /* ========================================================================== */
@@ -175,9 +428,13 @@ vtx_typeid_t vtx_type_register(vtx_type_system_t *ts,
     td->interfaces      = NULL;
     td->shape_id        = VTX_SHAPE_INVALID; /* computed later */
 
-    /* Ensure compiled_code is initialized to NULL for all methods */
+    /* Ensure compiled_code is initialized to NULL for all methods,
+     * precompute arg_count from the signature string, and intern
+     * method names for fast symbol ID comparison. */
     for (uint32_t i = 0; i < method_count; i++) {
         methods[i].compiled_code = NULL;
+        methods[i].arg_count = count_method_args_from_sig(methods[i].signature);
+        methods[i].method_symbol_id = vtx_symbol_intern(ts, methods[i].name);
     }
 
     /* Compute field offsets and instance size */
@@ -230,7 +487,10 @@ vtx_typeid_t vtx_type_register(vtx_type_system_t *ts,
                 if (parent_id != VTX_TYPE_INVALID && parent_id < ts->type_count) {
                     const vtx_type_desc_t *parent = &ts->types[parent_id];
                     for (uint32_t j = 0; j < parent->method_count; j++) {
-                        if (strcmp(parent->methods[j].name, methods[i].name) == 0 &&
+                        /* Use symbol ID comparison instead of strcmp.
+                         * Both method names were interned during registration,
+                         * so this is an O(1) integer comparison. */
+                        if (parent->methods[j].method_symbol_id == methods[i].method_symbol_id &&
                             parent->methods[j].is_virtual) {
                             /* Override: use the parent's vtable slot.
                              * RT-10 fix: set the vtable entry to the child's
@@ -354,12 +614,32 @@ const vtx_method_desc_t *vtx_type_resolve_method(const vtx_type_system_t *ts,
         return NULL;
     }
 
+    /* Intern the lookup name for fast integer comparison.
+     * If the name has already been interned (common case for repeated
+     * lookups), vtx_symbol_intern returns the existing ID in O(1) amortized.
+     * This replaces O(N * name_length) strcmp with O(N) integer comparison.
+     *
+     * We cast away const because vtx_symbol_intern may create a new entry
+     * if the name hasn't been seen before (which is valid for lookup names
+     * that aren't registered as method names). */
+    uint32_t sym_id = vtx_symbol_intern((vtx_type_system_t *)ts, method_name);
+
     /* Walk the type hierarchy from the given type upward */
     vtx_typeid_t current = typeid_;
     while (current != VTX_TYPE_INVALID && current < ts->type_count) {
         const vtx_type_desc_t *td = &ts->types[current];
         for (uint32_t i = 0; i < td->method_count; i++) {
-            if (strcmp(td->methods[i].name, method_name) == 0) {
+            /* Fast path: compare symbol IDs (O(1) integer comparison)
+             * instead of O(name_length) strcmp */
+            if (td->methods[i].method_symbol_id == sym_id &&
+                sym_id != VTX_SYMBOL_INVALID) {
+                return &td->methods[i];
+            }
+            /* Fallback: if either symbol ID is invalid (intern failed),
+             * use strcmp for correctness */
+            if ((sym_id == VTX_SYMBOL_INVALID ||
+                 td->methods[i].method_symbol_id == VTX_SYMBOL_INVALID) &&
+                strcmp(td->methods[i].name, method_name) == 0) {
                 return &td->methods[i];
             }
         }

@@ -49,6 +49,10 @@ const vtx_node_opcode_info_t vtx_node_opcode_table[VTX_NODE_OP_COUNT] = {
     OP_INFO(CmpF,           VTX_NF_DATA, 2),
     OP_INFO(CmpD,           VTX_NF_DATA, 2),
 
+    /* Data: min/max */
+    OP_INFO(Min,            VTX_NF_DATA, 2),
+    OP_INFO(Max,            VTX_NF_DATA, 2),
+
     /* Memory */
     OP_INFO(Load,           VTX_NF_MEMORY | VTX_NF_DATA, 2),    /* memory state + address */
     OP_INFO(Store,          VTX_NF_MEMORY | VTX_NF_SIDE_EFFECT, 3), /* memory + address + value */
@@ -83,6 +87,12 @@ const vtx_node_opcode_info_t vtx_node_opcode_table[VTX_NODE_OP_COUNT] = {
     OP_INFO(Deopt,          VTX_NF_CONTROL | VTX_NF_SIDE_EFFECT, 2), /* control + FrameState */
     OP_INFO(DeoptGuard,     VTX_NF_CONTROL | VTX_NF_DATA | VTX_NF_SIDE_EFFECT, 3),
     OP_INFO(FrameState,     VTX_NF_DATA | VTX_NF_PINNED, 0),  /* variable: locals + stack */
+
+    /* SIMD Vector operations */
+    OP_INFO(VectorLoad,     VTX_NF_MEMORY | VTX_NF_DATA, 3),    /* memory + base + index */
+    OP_INFO(VectorStore,    VTX_NF_MEMORY | VTX_NF_SIDE_EFFECT, 4), /* memory + base + index + value */
+    OP_INFO(VectorAdd,      VTX_NF_DATA, 2),   /* vec_a + vec_b */
+    OP_INFO(VectorMul,      VTX_NF_DATA, 2),   /* vec_a * vec_b */
 };
 
 #undef OP_INFO
@@ -142,6 +152,7 @@ vtx_nodetype_t vtx_node_default_type(vtx_node_opcode_t opcode)
     case VTX_OP_DeoptGuard:
     case VTX_OP_Guard:
     case VTX_OP_InitializeKlass:
+    case VTX_OP_VectorStore:
         return VTX_TYPE_Void;
 
     /* Integer-producing nodes */
@@ -161,6 +172,10 @@ vtx_nodetype_t vtx_node_default_type(vtx_node_opcode_t opcode)
     case VTX_OP_Cmp:
     case VTX_OP_CmpP:
     case VTX_OP_InstanceOf:
+    case VTX_OP_Min:
+    case VTX_OP_Max:
+    case VTX_OP_VectorAdd:
+    case VTX_OP_VectorMul:
         return VTX_TYPE_Int;
 
     /* Float comparison results are Int (boolean), not Float.
@@ -181,6 +196,7 @@ vtx_nodetype_t vtx_node_default_type(vtx_node_opcode_t opcode)
     case VTX_OP_CallVirtual:
     case VTX_OP_CallInterface:
     case VTX_OP_CallRuntime:
+    case VTX_OP_VectorLoad:
         return VTX_TYPE_Bottom; /* could be anything until we know more */
 
     /* Constant: type set from constval */
@@ -284,6 +300,79 @@ uint32_t vtx_constval_hash(vtx_constval_t v)
 }
 
 /* ========================================================================== */
+/* Use-def list internal helpers                                               */
+/* ========================================================================== */
+
+/**
+ * Ensure the uses array of a node has room for at least min_cap entries.
+ * Returns 0 on success, -1 on failure.
+ */
+static int node_ensure_use_capacity(vtx_node_t *node, uint32_t min_cap)
+{
+    if (node->use_capacity >= min_cap) {
+        return 0;
+    }
+
+    uint32_t new_cap = node->use_capacity;
+    if (new_cap == 0) {
+        new_cap = VTX_NODE_INITIAL_USE_CAPACITY;
+    }
+    while (new_cap < min_cap) {
+        uint32_t doubled = new_cap * 2;
+        if (doubled <= new_cap) {
+            new_cap = min_cap;
+            break;
+        }
+        new_cap = doubled;
+    }
+
+    vtx_use_entry_t *new_uses = (vtx_use_entry_t *)realloc(
+        node->uses, new_cap * sizeof(vtx_use_entry_t));
+    if (new_uses == NULL) {
+        return -1;
+    }
+
+    node->uses = new_uses;
+    node->use_capacity = new_cap;
+    return 0;
+}
+
+/**
+ * Add a use entry to a producer node's uses array.
+ * Called when consumer->inputs[input_index] = producer.
+ */
+static int node_add_use(vtx_node_t *producer, vtx_nodeid_t user_id, uint32_t input_index)
+{
+    if (node_ensure_use_capacity(producer, producer->use_count + 1) != 0) {
+        return -1;
+    }
+    producer->uses[producer->use_count].user_id = user_id;
+    producer->uses[producer->use_count].input_index = input_index;
+    producer->use_count++;
+    return 0;
+}
+
+/**
+ * Remove the use entry matching (user_id, input_index) from the producer's uses array.
+ * Searches for the entry and removes it by swapping with the last element.
+ * Returns 0 on success, -1 if the entry was not found.
+ */
+static int node_remove_use(vtx_node_t *producer, vtx_nodeid_t user_id, uint32_t input_index)
+{
+    for (uint32_t i = 0; i < producer->use_count; i++) {
+        if (producer->uses[i].user_id == user_id &&
+            producer->uses[i].input_index == input_index) {
+            /* Swap with last element */
+            producer->uses[i] = producer->uses[producer->use_count - 1];
+            producer->use_count--;
+            return 0;
+        }
+    }
+    /* Entry not found — this can happen if the use-def list is out of sync */
+    return -1;
+}
+
+/* ========================================================================== */
 /* Node table operations                                                       */
 /* ========================================================================== */
 
@@ -314,12 +403,16 @@ void vtx_node_table_destroy(vtx_node_table_t *table)
     VTX_ASSERT(table != NULL, "table must not be NULL");
 
     if (table->nodes != NULL) {
-        /* Free each node's inputs array */
+        /* Free each node's inputs and uses arrays */
         for (uint32_t i = 0; i < table->count; i++) {
             vtx_node_t *node = &table->nodes[i];
             if (node->inputs != NULL) {
                 free(node->inputs);
                 node->inputs = NULL;
+            }
+            if (node->uses != NULL) {
+                free(node->uses);
+                node->uses = NULL;
             }
         }
         free(table->nodes);
@@ -387,6 +480,9 @@ vtx_nodeid_t vtx_node_create(vtx_node_table_t *table, vtx_node_opcode_t opcode)
     node->input_capacity = 0;
     node->inputs = NULL;
     node->output_count = 0;
+    node->uses = NULL;
+    node->use_count = 0;
+    node->use_capacity = 0;
     node->value_number = 0;
     node->dead = false;
     node->mark = false;
@@ -482,6 +578,14 @@ int vtx_node_add_input(vtx_node_table_t *table, vtx_nodeid_t consumer, vtx_nodei
 
     /* Increment producer's output count */
     table->nodes[producer].output_count++;
+
+    /* Add use entry to the producer's use-def list */
+    vtx_node_t *prod = &table->nodes[producer];
+    if (node_add_use(prod, consumer, c->input_count - 1) != 0) {
+        /* Non-fatal: use-def list is a performance optimization.
+         * If allocation fails, we continue without it. Optimizations
+         * that rely on it will fall back to O(N²) scanning. */
+    }
     return 0;
 }
 
@@ -495,6 +599,12 @@ int vtx_node_remove_input(vtx_node_table_t *table, vtx_nodeid_t consumer, uint32
 
     vtx_nodeid_t old_producer = c->inputs[index];
 
+    /* Remove use entry from old producer's use-def list */
+    if (old_producer != VTX_NODEID_INVALID && old_producer < table->count) {
+        vtx_node_t *old = &table->nodes[old_producer];
+        node_remove_use(old, consumer, index);
+    }
+
     /* Decrement old producer's output count */
     if (old_producer != VTX_NODEID_INVALID && old_producer < table->count) {
         vtx_node_t *old = &table->nodes[old_producer];
@@ -502,9 +612,18 @@ int vtx_node_remove_input(vtx_node_table_t *table, vtx_nodeid_t consumer, uint32
         old->output_count--;
     }
 
-    /* Shift subsequent inputs down */
+    /* Shift subsequent inputs down, updating use-def entries for each shifted input */
     for (uint32_t i = index; i + 1 < c->input_count; i++) {
         c->inputs[i] = c->inputs[i + 1];
+        /* Update the use entry for the shifted input:
+         * the producer at position i+1 now has its input_index changed to i */
+        vtx_nodeid_t shifted_producer = c->inputs[i];
+        if (shifted_producer != VTX_NODEID_INVALID && shifted_producer < table->count) {
+            vtx_node_t *sp = &table->nodes[shifted_producer];
+            /* Remove old entry (user=consumer, index=i+1), add new (user=consumer, index=i) */
+            node_remove_use(sp, consumer, i + 1);
+            node_add_use(sp, consumer, i);
+        }
     }
     c->input_count--;
 
@@ -529,6 +648,12 @@ int vtx_node_replace_input(vtx_node_table_t *table, vtx_nodeid_t consumer,
         return 0; /* no-op */
     }
 
+    /* Remove use entry from old producer's use-def list */
+    if (old_producer != VTX_NODEID_INVALID && old_producer < table->count) {
+        vtx_node_t *old = &table->nodes[old_producer];
+        node_remove_use(old, consumer, index);
+    }
+
     /* Decrement old producer's output count */
     if (old_producer != VTX_NODEID_INVALID && old_producer < table->count) {
         vtx_node_t *old = &table->nodes[old_producer];
@@ -541,6 +666,12 @@ int vtx_node_replace_input(vtx_node_table_t *table, vtx_nodeid_t consumer,
 
     /* Increment new producer's output count */
     table->nodes[new_producer].output_count++;
+
+    /* Add use entry to new producer's use-def list */
+    vtx_node_t *new_prod = &table->nodes[new_producer];
+    if (node_add_use(new_prod, consumer, index) != 0) {
+        /* Non-fatal: use-def list is a performance optimization */
+    }
 
     return 0;
 }
@@ -570,4 +701,142 @@ void vtx_node_table_clear_dead(vtx_node_table_t *table)
     for (uint32_t i = 0; i < table->count; i++) {
         table->nodes[i].dead = false;
     }
+}
+
+/* ========================================================================== */
+/* Use-def list API implementation                                             */
+/* ========================================================================== */
+
+vtx_use_entry_t *vtx_node_uses_begin(vtx_node_t *node)
+{
+    if (node == NULL || node->uses == NULL || node->use_count == 0) {
+        return NULL;
+    }
+    return &node->uses[0];
+}
+
+vtx_use_entry_t *vtx_node_uses_end(vtx_node_t *node)
+{
+    if (node == NULL || node->uses == NULL || node->use_count == 0) {
+        return NULL;
+    }
+    return &node->uses[node->use_count];
+}
+
+const vtx_use_entry_t *vtx_node_uses_begin_const(const vtx_node_t *node)
+{
+    if (node == NULL || node->uses == NULL || node->use_count == 0) {
+        return NULL;
+    }
+    return &node->uses[0];
+}
+
+const vtx_use_entry_t *vtx_node_uses_end_const(const vtx_node_t *node)
+{
+    if (node == NULL || node->uses == NULL || node->use_count == 0) {
+        return NULL;
+    }
+    return &node->uses[node->use_count];
+}
+
+int vtx_node_replace_all_uses(vtx_node_table_t *table,
+                               vtx_nodeid_t old_id, vtx_nodeid_t new_id)
+{
+    VTX_ASSERT(table != NULL, "table must not be NULL");
+    VTX_ASSERT(old_id != VTX_NODEID_INVALID, "old_id must be valid");
+    VTX_ASSERT(new_id != VTX_NODEID_INVALID, "new_id must be valid");
+
+    if (old_id >= table->count || new_id >= table->count) {
+        return -1;
+    }
+
+    if (old_id == new_id) {
+        return 0; /* no-op */
+    }
+
+    vtx_node_t *old_node = &table->nodes[old_id];
+    vtx_node_t *new_node = &table->nodes[new_id];
+
+    /* Walk the use list of old_id and replace each input reference.
+     * We must be careful: each replacement modifies the use list of old_id
+     * and the use list of new_id, plus the input arrays of the users.
+     *
+     * Strategy: collect all (user_id, input_index) pairs first, then apply.
+     * This avoids mutating the use list while iterating over it. */
+    uint32_t count = old_node->use_count;
+    if (count == 0) return 0;
+
+    /* Snapshot the current use entries (they may be invalidated by replacements) */
+    vtx_use_entry_t *snapshot = (vtx_use_entry_t *)malloc(count * sizeof(vtx_use_entry_t));
+    if (snapshot == NULL) {
+        /* Fallback: iterate in-place, but we must be careful about mutation.
+         * Since vtx_node_replace_input removes from old and adds to new,
+         * and we're iterating old_node->uses, we can iterate from the end
+         * (since remove swaps with the last element). */
+        while (old_node->use_count > 0) {
+            vtx_use_entry_t *use = &old_node->uses[old_node->use_count - 1];
+            vtx_nodeid_t user_id = use->user_id;
+            uint32_t inp_idx = use->input_index;
+            /* replace_input will remove the use from old_node and add to new_node */
+            if (vtx_node_replace_input(table, user_id, inp_idx, new_id) != 0) {
+                return -1;
+            }
+        }
+        return 0;
+    }
+
+    memcpy(snapshot, old_node->uses, count * sizeof(vtx_use_entry_t));
+
+    for (uint32_t i = 0; i < count; i++) {
+        vtx_nodeid_t user_id = snapshot[i].user_id;
+        uint32_t inp_idx = snapshot[i].input_index;
+        /* replace_input handles use-def list maintenance internally */
+        if (vtx_node_replace_input(table, user_id, inp_idx, new_id) != 0) {
+            free(snapshot);
+            return -1;
+        }
+    }
+
+    free(snapshot);
+    return 0;
+}
+
+int vtx_node_for_each_user(vtx_node_table_t *table, vtx_nodeid_t node_id,
+                            vtx_user_callback_t fn, void *context)
+{
+    VTX_ASSERT(table != NULL, "table must not be NULL");
+    VTX_ASSERT(fn != NULL, "callback must not be NULL");
+
+    if (node_id >= table->count) {
+        return -1;
+    }
+
+    vtx_node_t *node = &table->nodes[node_id];
+
+    /* Snapshot the use entries to handle mutations during iteration */
+    uint32_t count = node->use_count;
+    if (count == 0) return 0;
+
+    vtx_use_entry_t *snapshot = (vtx_use_entry_t *)malloc(count * sizeof(vtx_use_entry_t));
+    if (snapshot == NULL) {
+        /* Fallback: iterate directly (unsafe if callback modifies use list) */
+        for (uint32_t i = 0; i < node->use_count; i++) {
+            int result = fn(table, node->uses[i].user_id,
+                           node->uses[i].input_index, context);
+            if (result != 0) return result;
+        }
+        return 0;
+    }
+
+    memcpy(snapshot, node->uses, count * sizeof(vtx_use_entry_t));
+
+    int last_result = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        last_result = fn(table, snapshot[i].user_id,
+                        snapshot[i].input_index, context);
+        if (last_result != 0) break;
+    }
+
+    free(snapshot);
+    return last_result;
 }
