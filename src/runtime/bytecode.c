@@ -136,7 +136,7 @@ vtx_opcode_t vtx_bytecode_opcode_at(const vtx_bytecode_t *bc, size_t pc)
 uint16_t vtx_bytecode_read_operand(const vtx_bytecode_t *bc, size_t pc)
 {
     VTX_ASSERT(bc != NULL, "bytecode must not be NULL");
-    VTX_ASSERT(pc + 2 < bc->length, "operand bytes out of bounds");
+    if (pc + 2 >= bc->length) return 0; /* operand bytes out of bounds */
 
     /* Big-endian: first byte is high byte, second is low byte */
     uint16_t operand = ((uint16_t)bc->code[pc + 1] << 8) | (uint16_t)bc->code[pc + 2];

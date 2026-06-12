@@ -194,7 +194,7 @@ int vtx_version_install(vtx_version_manager_t *manager,
 {
     VTX_ASSERT(manager != NULL, "manager must not be NULL");
     VTX_ASSERT(version != NULL, "version must not be NULL");
-    VTX_ASSERT(compiled != NULL, "compiled must not be NULL");
+    if (compiled == NULL) return -1; /* compiled must not be NULL */
 
     vtx_method_versions_t *mv = get_method_versions(manager, method_id, false);
     if (!mv) return -1;

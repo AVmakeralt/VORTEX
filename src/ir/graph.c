@@ -1348,13 +1348,13 @@ int vtx_graph_build(vtx_graph_t *graph,
 
             /* ---- Local variables ---- */
             case VT_OP_LOAD_LOCAL: {
-                VTX_ASSERT(operand < max_locals, "local index out of range");
+                if (operand >= max_locals) return -1; /* local index out of range */
                 op_stack[sp++] = block->locals[operand];
                 break;
             }
             case VT_OP_STORE_LOCAL: {
-                VTX_ASSERT(operand < max_locals, "local index out of range");
-                VTX_ASSERT(sp >= 1, "stack underflow on STORE_LOCAL");
+                if (operand >= max_locals) return -1; /* local index out of range */
+                if (sp < 1) return -1; /* stack underflow: STORE_LOCAL */
                 sp--;
                 block->locals[operand] = op_stack[sp];
                 break;
@@ -1362,7 +1362,7 @@ int vtx_graph_build(vtx_graph_t *graph,
 
             /* ---- Field access ---- */
             case VT_OP_LOAD_FIELD: {
-                VTX_ASSERT(sp >= 1, "stack underflow on LOAD_FIELD");
+                if (sp < 1) return -1; /* stack underflow: LOAD_FIELD */
                 vtx_nodeid_t obj = op_stack[--sp];
 
                 /* F3: Emit null-check Guard before field load.
@@ -1399,7 +1399,7 @@ int vtx_graph_build(vtx_graph_t *graph,
                 break;
             }
             case VT_OP_STORE_FIELD: {
-                VTX_ASSERT(sp >= 2, "stack underflow on STORE_FIELD");
+                if (sp < 2) return -1; /* stack underflow: STORE_FIELD */
                 vtx_nodeid_t val = op_stack[--sp];
                 vtx_nodeid_t obj = op_stack[--sp];
 
@@ -1437,7 +1437,7 @@ int vtx_graph_build(vtx_graph_t *graph,
             /* ---- Integer arithmetic (pop 2, push 1) ---- */
             case VT_OP_IADD: case VT_OP_ISUB: case VT_OP_IMUL:
             case VT_OP_IDIV: case VT_OP_IMOD: {
-                VTX_ASSERT(sp >= 2, "stack underflow on binary arith");
+                if (sp < 2) return -1; /* stack underflow: binary arith */
                 vtx_nodeid_t b = op_stack[--sp];
                 vtx_nodeid_t a = op_stack[--sp];
                 vtx_node_opcode_t ir_op;
@@ -1459,7 +1459,7 @@ int vtx_graph_build(vtx_graph_t *graph,
 
             /* ---- Float arithmetic ---- */
             case VT_OP_FADD: case VT_OP_FSUB: case VT_OP_FMUL: case VT_OP_FDIV: {
-                VTX_ASSERT(sp >= 2, "stack underflow on float arith");
+                if (sp < 2) return -1; /* stack underflow: float arith */
                 vtx_nodeid_t b = op_stack[--sp];
                 vtx_nodeid_t a = op_stack[--sp];
                 vtx_node_opcode_t ir_op;
@@ -1483,7 +1483,7 @@ int vtx_graph_build(vtx_graph_t *graph,
             /* ---- Bitwise / unary ---- */
             case VT_OP_ISHL: case VT_OP_ISHR:
             case VT_OP_IAND: case VT_OP_IOR: case VT_OP_IXOR: {
-                VTX_ASSERT(sp >= 2, "stack underflow on bitwise");
+                if (sp < 2) return -1; /* stack underflow: bitwise */
                 vtx_nodeid_t b_val = op_stack[--sp];
                 vtx_nodeid_t a_val = op_stack[--sp];
                 vtx_node_opcode_t ir_op;
@@ -1503,7 +1503,7 @@ int vtx_graph_build(vtx_graph_t *graph,
                 break;
             }
             case VT_OP_INEG: {
-                VTX_ASSERT(sp >= 1, "stack underflow on INEG");
+                if (sp < 1) return -1; /* stack underflow: INEG */
                 vtx_nodeid_t v = op_stack[--sp];
                 result = vtx_node_create(&graph->node_table, VTX_OP_Neg);
                 if (result == VTX_NODEID_INVALID) return -1;
@@ -1512,7 +1512,7 @@ int vtx_graph_build(vtx_graph_t *graph,
                 break;
             }
             case VT_OP_INOT: {
-                VTX_ASSERT(sp >= 1, "stack underflow on INOT");
+                if (sp < 1) return -1; /* stack underflow: INOT */
                 vtx_nodeid_t v = op_stack[--sp];
                 result = vtx_node_create(&graph->node_table, VTX_OP_Not);
                 if (result == VTX_NODEID_INVALID) return -1;
@@ -1525,7 +1525,7 @@ int vtx_graph_build(vtx_graph_t *graph,
             case VT_OP_ICMP_EQ: case VT_OP_ICMP_NE:
             case VT_OP_ICMP_LT: case VT_OP_ICMP_LE:
             case VT_OP_ICMP_GT: case VT_OP_ICMP_GE: {
-                VTX_ASSERT(sp >= 2, "stack underflow on comparison");
+                if (sp < 2) return -1; /* stack underflow: comparison */
                 vtx_nodeid_t b_val = op_stack[--sp];
                 vtx_nodeid_t a_val = op_stack[--sp];
                 result = vtx_node_create(&graph->node_table, VTX_OP_Cmp);
@@ -1546,7 +1546,7 @@ int vtx_graph_build(vtx_graph_t *graph,
             case VT_OP_FCMP_EQ: case VT_OP_FCMP_NE:
             case VT_OP_FCMP_LT: case VT_OP_FCMP_LE:
             case VT_OP_FCMP_GT: case VT_OP_FCMP_GE: {
-                VTX_ASSERT(sp >= 2, "stack underflow on float comparison");
+                if (sp < 2) return -1; /* stack underflow: float comparison */
                 vtx_nodeid_t b_val = op_stack[--sp];
                 vtx_nodeid_t a_val = op_stack[--sp];
                 result = vtx_node_create(&graph->node_table, VTX_OP_CmpF);
@@ -1573,7 +1573,7 @@ int vtx_graph_build(vtx_graph_t *graph,
             }
             case VT_OP_IF_TRUE:
             case VT_OP_IF_FALSE: {
-                VTX_ASSERT(sp >= 1, "stack underflow on IF");
+                if (sp < 1) return -1; /* stack underflow: IF */
                 vtx_nodeid_t cond = op_stack[--sp];
                 vtx_nodeid_t if_n = vtx_node_create(&graph->node_table, VTX_OP_If);
                 if (if_n == VTX_NODEID_INVALID) return -1;
@@ -1594,7 +1594,7 @@ int vtx_graph_build(vtx_graph_t *graph,
                 break;
             }
             case VT_OP_RETURN_VALUE: {
-                VTX_ASSERT(sp >= 1, "stack underflow on RETURN_VALUE");
+                if (sp < 1) return -1; /* stack underflow: RETURN_VALUE */
                 vtx_nodeid_t val = op_stack[--sp];
                 vtx_nodeid_t ret = vtx_node_create(&graph->node_table, VTX_OP_Return);
                 if (ret == VTX_NODEID_INVALID) return -1;
@@ -1654,7 +1654,7 @@ int vtx_graph_build(vtx_graph_t *graph,
                 break;
             }
             case VT_OP_CALL_VIRTUAL: {
-                VTX_ASSERT(sp >= 1, "stack underflow on CALL_VIRTUAL (need receiver)");
+                if (sp < 1) return -1; /* stack underflow: CALL_VIRTUAL (need receiver) */
                 vtx_nodeid_t receiver = op_stack[--sp];
 
                 /* F3: Emit null-check Guard on receiver + FrameState before call */
@@ -1691,7 +1691,7 @@ int vtx_graph_build(vtx_graph_t *graph,
                 break;
             }
             case VT_OP_CALL_INTERFACE: {
-                VTX_ASSERT(sp >= 1, "stack underflow on CALL_INTERFACE (need receiver)");
+                if (sp < 1) return -1; /* stack underflow: CALL_INTERFACE (need receiver) */
                 vtx_nodeid_t receiver = op_stack[--sp];
 
                 /* F3: Emit null-check Guard on receiver + FrameState before call */
@@ -1740,7 +1740,7 @@ int vtx_graph_build(vtx_graph_t *graph,
                 break;
             }
             case VT_OP_NEWARRAY: {
-                VTX_ASSERT(sp >= 1, "stack underflow on NEWARRAY (need size)");
+                if (sp < 1) return -1; /* stack underflow: NEWARRAY (need size) */
                 vtx_nodeid_t size = op_stack[--sp];
                 result = vtx_node_create(&graph->node_table, VTX_OP_NewArray);
                 if (result == VTX_NODEID_INVALID) return -1;
@@ -1755,7 +1755,7 @@ int vtx_graph_build(vtx_graph_t *graph,
 
             /* ---- Type checks ---- */
             case VT_OP_CHECKCAST: {
-                VTX_ASSERT(sp >= 1, "stack underflow on CHECKCAST");
+                if (sp < 1) return -1; /* stack underflow: CHECKCAST */
                 vtx_nodeid_t obj = op_stack[--sp];
 
                 /* F3: Emit a type-check Guard before the CheckCast.
@@ -1808,7 +1808,7 @@ int vtx_graph_build(vtx_graph_t *graph,
                 break;
             }
             case VT_OP_INSTANCEOF: {
-                VTX_ASSERT(sp >= 1, "stack underflow on INSTANCEOF");
+                if (sp < 1) return -1; /* stack underflow: INSTANCEOF */
                 vtx_nodeid_t obj = op_stack[--sp];
                 result = vtx_node_create(&graph->node_table, VTX_OP_InstanceOf);
                 if (result == VTX_NODEID_INVALID) return -1;
@@ -1821,7 +1821,7 @@ int vtx_graph_build(vtx_graph_t *graph,
 
             /* ---- Array operations ---- */
             case VT_OP_ARRAY_LOAD: {
-                VTX_ASSERT(sp >= 2, "stack underflow on ARRAY_LOAD");
+                if (sp < 2) return -1; /* stack underflow: ARRAY_LOAD */
                 vtx_nodeid_t idx = op_stack[--sp];
                 vtx_nodeid_t arr = op_stack[--sp];
 
@@ -1881,7 +1881,7 @@ int vtx_graph_build(vtx_graph_t *graph,
                 break;
             }
             case VT_OP_ARRAY_STORE: {
-                VTX_ASSERT(sp >= 3, "stack underflow on ARRAY_STORE");
+                if (sp < 3) return -1; /* stack underflow: ARRAY_STORE */
                 vtx_nodeid_t val = op_stack[--sp];
                 vtx_nodeid_t idx = op_stack[--sp];
                 vtx_nodeid_t arr = op_stack[--sp];
@@ -1938,7 +1938,7 @@ int vtx_graph_build(vtx_graph_t *graph,
                 break;
             }
             case VT_OP_ARRAY_LENGTH: {
-                VTX_ASSERT(sp >= 1, "stack underflow on ARRAY_LENGTH");
+                if (sp < 1) return -1; /* stack underflow: ARRAY_LENGTH */
                 vtx_nodeid_t arr = op_stack[--sp];
                 result = vtx_node_create(&graph->node_table, VTX_OP_LoadField);
                 if (result == VTX_NODEID_INVALID) return -1;
@@ -1954,7 +1954,7 @@ int vtx_graph_build(vtx_graph_t *graph,
 
             /* ---- Exceptions ---- */
             case VT_OP_THROW: {
-                VTX_ASSERT(sp >= 1, "stack underflow on THROW");
+                if (sp < 1) return -1; /* stack underflow: THROW */
                 vtx_nodeid_t exc = op_stack[--sp];
                 vtx_nodeid_t unwind = vtx_node_create(&graph->node_table, VTX_OP_Unwind);
                 if (unwind == VTX_NODEID_INVALID) return -1;
@@ -1974,7 +1974,7 @@ int vtx_graph_build(vtx_graph_t *graph,
 
             /* ---- Monitors ---- */
             case VT_OP_MONITOR_ENTER: {
-                VTX_ASSERT(sp >= 1, "stack underflow on MONITOR_ENTER");
+                if (sp < 1) return -1; /* stack underflow: MONITOR_ENTER */
                 vtx_nodeid_t obj = op_stack[--sp];
                 vtx_nodeid_t rt = vtx_node_create(&graph->node_table, VTX_OP_CallRuntime);
                 if (rt == VTX_NODEID_INVALID) return -1;
@@ -1986,7 +1986,7 @@ int vtx_graph_build(vtx_graph_t *graph,
                 break;
             }
             case VT_OP_MONITOR_EXIT: {
-                VTX_ASSERT(sp >= 1, "stack underflow on MONITOR_EXIT");
+                if (sp < 1) return -1; /* stack underflow: MONITOR_EXIT */
                 vtx_nodeid_t obj = op_stack[--sp];
                 vtx_nodeid_t rt = vtx_node_create(&graph->node_table, VTX_OP_CallRuntime);
                 if (rt == VTX_NODEID_INVALID) return -1;
@@ -2000,18 +2000,18 @@ int vtx_graph_build(vtx_graph_t *graph,
 
             /* ---- Stack manipulation ---- */
             case VT_OP_DUP: {
-                VTX_ASSERT(sp >= 1, "stack underflow on DUP");
+                if (sp < 1) return -1; /* stack underflow: DUP */
                 op_stack[sp] = op_stack[sp - 1];
                 sp++;
                 break;
             }
             case VT_OP_POP: {
-                VTX_ASSERT(sp >= 1, "stack underflow on POP");
+                if (sp < 1) return -1; /* stack underflow: POP */
                 sp--;
                 break;
             }
             case VT_OP_SWAP: {
-                VTX_ASSERT(sp >= 2, "stack underflow on SWAP");
+                if (sp < 2) return -1; /* stack underflow: SWAP */
                 vtx_nodeid_t tmp = op_stack[sp - 1];
                 op_stack[sp - 1] = op_stack[sp - 2];
                 op_stack[sp - 2] = tmp;
@@ -2020,7 +2020,7 @@ int vtx_graph_build(vtx_graph_t *graph,
 
             /* ---- Type queries ---- */
             case VT_OP_ISNULL: {
-                VTX_ASSERT(sp >= 1, "stack underflow on ISNULL");
+                if (sp < 1) return -1; /* stack underflow: ISNULL */
                 vtx_nodeid_t v = op_stack[--sp];
                 /* Create a null-pointer comparison */
                 vtx_nodeid_t null_const = vtx_node_create(&graph->node_table, VTX_OP_Constant);
@@ -2038,7 +2038,7 @@ int vtx_graph_build(vtx_graph_t *graph,
                 break;
             }
             case VT_OP_TYPEOF: {
-                VTX_ASSERT(sp >= 1, "stack underflow on TYPEOF");
+                if (sp < 1) return -1; /* stack underflow: TYPEOF */
                 vtx_nodeid_t v = op_stack[--sp];
                 result = vtx_node_create(&graph->node_table, VTX_OP_Proj);
                 if (result == VTX_NODEID_INVALID) return -1;

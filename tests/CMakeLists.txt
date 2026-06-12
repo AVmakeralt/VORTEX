@@ -66,3 +66,89 @@ target_link_libraries(test_interp_basics PRIVATE
     m
 )
 add_test(NAME test_interp_basics COMMAND test_interp_basics)
+
+# ---- Stress tests (1000 tests) ----
+
+# test_stress_runtime: Arena, Object, Type System, Bytecode, GC (200 tests)
+add_executable(test_stress_runtime
+    stress/test_stress_runtime.c
+)
+target_link_libraries(test_stress_runtime PRIVATE
+    vortex_test_framework
+    vortex_runtime
+    m
+)
+add_test(NAME test_stress_runtime COMMAND test_stress_runtime)
+
+# test_stress_ir: Node, Graph, GVN, SCCP, DCE, Schedule, TBAA, LICM, Bounds, Induction (200 tests)
+add_executable(test_stress_ir
+    stress/test_stress_ir.c
+)
+target_link_libraries(test_stress_ir PRIVATE
+    vortex_test_framework
+    vortex_ir
+    vortex_runtime
+    m
+)
+add_test(NAME test_stress_ir COMMAND test_stress_ir)
+
+# test_stress_profile_trace: Profile, Trace, Region, Guard, Deopt (200 tests)
+add_executable(test_stress_profile_trace
+    stress/test_stress_profile_trace.c
+)
+target_link_libraries(test_stress_profile_trace PRIVATE
+    vortex_test_framework
+    vortex_profile
+    vortex_trace
+    vortex_region
+    vortex_guard
+    vortex_deopt
+    vortex_ir
+    vortex_interp
+    vortex_runtime
+    m
+)
+add_test(NAME test_stress_profile_trace COMMAND test_stress_profile_trace)
+
+# test_stress_compile_lower: Compile, Inliner, Lower, CodeCache, SOTA, PEA (200 tests)
+add_executable(test_stress_compile_lower
+    stress/test_stress_compile_lower.c
+    ${CMAKE_SOURCE_DIR}/src/runtime_stubs.c
+)
+target_link_libraries(test_stress_compile_lower PRIVATE
+    vortex_test_framework
+    vortex_compile
+    vortex_inliner
+    vortex_lower
+    vortex_codecache
+    vortex_sota
+    vortex_pea
+    vortex_ir
+    vortex_runtime
+    vortex_profile
+    vortex_deopt
+    vortex_guard
+    vortex_interp
+    vortex_baseline
+    m
+)
+add_test(NAME test_stress_compile_lower COMMAND test_stress_compile_lower)
+
+# test_stress_integration: Full pipeline, Interpreter, Profile+Graph, Deopt+Graph, Multi-subsystem (200 tests)
+add_executable(test_stress_integration
+    stress/test_stress_integration.c
+)
+target_link_libraries(test_stress_integration PRIVATE
+    vortex_test_framework
+    vortex_interp
+    vortex_ir
+    vortex_runtime
+    vortex_profile
+    vortex_guard
+    vortex_deopt
+    vortex_trace
+    vortex_region
+    m
+    pthread
+)
+add_test(NAME test_stress_integration COMMAND test_stress_integration)

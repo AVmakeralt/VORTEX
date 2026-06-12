@@ -248,7 +248,7 @@ bool vtx_profile_save(const vtx_profile_global_t *global, const char *filename)
     memcpy(tmpname, filename, flen);
     memcpy(tmpname + flen, ".tmp", 5);
 
-    FILE *fp = fopen(tmpname, "wb");
+    FILE *fp = fopen(tmpname, "w+b");
     if (!fp) {
         free(tmpname);
         return false;
@@ -292,6 +292,7 @@ bool vtx_profile_save(const vtx_profile_global_t *global, const char *filename)
     }
 
     writer_flush(&w);
+    fflush(fp);
     if (w.error) {
         fclose(fp);
         remove(tmpname);
@@ -330,6 +331,7 @@ bool vtx_profile_save(const vtx_profile_global_t *global, const char *filename)
         free(tmpname);
         return false;
     }
+    fflush(fp);
 
     fclose(fp);
 
