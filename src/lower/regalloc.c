@@ -569,10 +569,10 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
 
     /* Free register pools: separate bitmasks for GPR and XMM.
      * GPR: caller-saved + callee-saved, minus reserved (RSP, RBP).
-     * XMM: all 16 XMM registers available. */
+     * XMM: XMM0-XMM13 (XMM14/XMM15 reserved for spill temps in emitter). */
     uint32_t free_gpr_regs = VTX_CALLER_SAVED_MASK | VTX_CALLEE_SAVED_MASK;
     free_gpr_regs &= ~VTX_REG_RESERVED_MASK;
-    uint32_t free_xmm_regs = VTX_XMM_ALL_MASK;
+    uint32_t free_xmm_regs = VTX_XMM_ALLOCATABLE_MASK;
 
     /* Track which callee-saved registers are used */
     uint32_t callee_saved_used = 0;

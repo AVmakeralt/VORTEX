@@ -431,6 +431,133 @@ int vtx_schedule_run(vtx_graph_t *graph, vtx_arena_t *arena, vtx_schedule_t *sch
     /* Fill in actual block count if we miscounted */
     schedule->count = bi;
 
+    /* Phase 2.5: Assign control and pinned nodes to their blocks.
+     *
+     * BUGFIX: The original code skipped control nodes (If, LoopEnd, Goto,
+     * Return) and pinned nodes (Phi) in Phase 5's data-node placement,
+     * causing them to fall through to the "assign to block 0" fallback.
+     * This put all If/LoopEnd/Return/Phi nodes in block 0 regardless of
+     * where they actually belong, producing completely wrong instruction
+     * ordering and branch targets.
+     *
+     * The correct rule: a control/pinned node goes in the same block as
+     * its control input. We walk each node's first input (the control
+     * dependency) until we find a node already assigned to a block
+     * (i.e., a Region/LoopBegin/Start). This must iterate until fixed-
+     * point because some control chains are multi-hop:
+     *   If → Proj → If → Region  (nested if in same block)
+     *   LoopEnd → If → Region
+     *   Phi → Region
+     */
+    {
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            for (uint32_t i = 0; i < node_count; i++) {
+                vtx_node_t *node = &nt->nodes[i];
+                if (node->dead) continue;
+                if (schedule->node_block[i] != (uint32_t)-1) continue;
+
+                /* Only process control and pinned nodes here */
+                bool is_ctrl = vtx_nf_has(node->flags, VTX_NF_CONTROL);
+                bool is_pinned = vtx_nf_has(node->flags, VTX_NF_PINNED);
+                if (!is_ctrl && !is_pinned) continue;
+
+                /* Walk the control chain to find an assigned block.
+                 * For control nodes, input[0] is the control dependency.
+                 * For Phi, we search all inputs for a Region/LoopBegin. */
+                vtx_nodeid_t ctrl = VTX_NODEID_INVALID;
+                if (node->opcode == VTX_OP_Phi) {
+                    /* Phi: find the Region/LoopBegin among inputs.
+                     * The Phi goes in the same block as its Region/LoopBegin.
+                     * We look for the control input (Region/LoopBegin) specifically,
+                     * not just any assigned input, because a Phi in a loop header
+                     * should be in the loop header block, not in the preheader
+                     * where param_n might be. */
+                    for (uint32_t pi = 0; pi < node->input_count; pi++) {
+                        vtx_nodeid_t inp = node->inputs[pi];
+                        if (inp != VTX_NODEID_INVALID && inp < node_count) {
+                            vtx_node_t *inp_node = &nt->nodes[inp];
+                            if (inp_node->opcode == VTX_OP_Region ||
+                                inp_node->opcode == VTX_OP_LoopBegin) {
+                                uint32_t blk = schedule->node_block[inp];
+                                if (blk != (uint32_t)-1) {
+                                    ctrl = inp;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    /* Fallback: if no Region/LoopBegin found, use any assigned input */
+                    if (ctrl == VTX_NODEID_INVALID) {
+                        for (uint32_t pi = 0; pi < node->input_count; pi++) {
+                            vtx_nodeid_t inp = node->inputs[pi];
+                            if (inp != VTX_NODEID_INVALID && inp < node_count) {
+                                uint32_t blk = schedule->node_block[inp];
+                                if (blk != (uint32_t)-1) {
+                                    ctrl = inp;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    /* Control nodes: first input is the control dependency */
+                    if (node->input_count > 0)
+                        ctrl = node->inputs[0];
+                }
+
+                while (ctrl != VTX_NODEID_INVALID && ctrl < node_count) {
+                    uint32_t blk = schedule->node_block[ctrl];
+                    if (blk != (uint32_t)-1) {
+                        schedule->node_block[i] = blk;
+                        changed = true;
+                        break;
+                    }
+                    /* Walk further up the control chain */
+                    vtx_node_t *cn = &nt->nodes[ctrl];
+                    if (cn->input_count > 0)
+                        ctrl = cn->inputs[0];
+                    else
+                        break;
+                }
+            }
+        }
+    }
+
+    /* Phase 2.75: Create entry edges from Start block to its successors.
+     * The Start node may directly feed into Region/LoopBegin nodes
+     * (the entry points of the function). Without this, there's no
+     * edge from block 0 to the first control block, breaking the
+     * dominator computation. */
+    {
+        uint32_t start_blk = (uint32_t)-1;
+        if (graph->start_node < node_count) {
+            start_blk = schedule->node_block[graph->start_node];
+        }
+        if (start_blk != (uint32_t)-1) {
+            /* Find all Region/LoopBegin nodes that have Start as input */
+            for (uint32_t i = 0; i < node_count; i++) {
+                vtx_node_t *node = &nt->nodes[i];
+                if (node->dead) continue;
+                if (node->opcode != VTX_OP_Region && node->opcode != VTX_OP_LoopBegin)
+                    continue;
+                for (uint32_t k = 0; k < node->input_count; k++) {
+                    if (node->inputs[k] == graph->start_node) {
+                        uint32_t target_blk = schedule->node_block[i];
+                        if (target_blk != (uint32_t)-1 && target_blk != start_blk) {
+                            vtx_schedule_block_t *fb = &schedule->blocks[start_blk];
+                            vtx_schedule_block_t *tb = &schedule->blocks[target_blk];
+                            if (schedule_block_add_succ(fb, target_blk) != 0) return -1;
+                            if (schedule_block_add_pred(tb, start_blk) != 0) return -1;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     /* Phase 3: Build block successor/predecessor edges.
      * We do this by examining control flow: for each If node, its Proj
      * nodes determine successors. For Goto, it goes to the next Region.
@@ -527,6 +654,151 @@ int vtx_schedule_run(vtx_graph_t *graph, vtx_arena_t *arena, vtx_schedule_t *sch
             }
         }
 
+        /* Handle If nodes that connect directly to Region/LoopBegin
+         * without intermediate Proj nodes.
+         *
+         * BUGFIX: The original code only built CFG edges for Proj and Goto
+         * nodes. When a graph builder connected If → Region/LoopBegin
+         * directly (without Proj intermediaries), no successor/predecessor
+         * edges were created, breaking dominator computation, loop depth,
+         * branch target resolution, and Phi copy emission.
+         *
+         * This fallback handles the common pattern:
+         *   If → LoopEnd (continue branch)
+         *   If → Region  (exit branch)
+         * We scan all Region/LoopBegin nodes for If inputs and create
+         * the corresponding CFG edges. Each Region/LoopBegin that has
+         * an If as input is a successor of the If's block. */
+        if (node->opcode == VTX_OP_If) {
+            /* Find the If's block via its control input */
+            vtx_nodeid_t ctrl = node->input_count > 0 ? node->inputs[0] : VTX_NODEID_INVALID;
+            uint32_t if_block = (uint32_t)-1;
+            while (ctrl != VTX_NODEID_INVALID && ctrl < node_count) {
+                if_block = schedule->node_block[ctrl];
+                if (if_block != (uint32_t)-1) break;
+                vtx_node_t *cn = &nt->nodes[ctrl];
+                ctrl = cn->input_count > 0 ? cn->inputs[0] : VTX_NODEID_INVALID;
+            }
+            if (if_block == (uint32_t)-1) continue;
+
+            /* Find all Region/LoopBegin nodes that have this If as input */
+            for (uint32_t j = 0; j < node_count; j++) {
+                vtx_node_t *region = &nt->nodes[j];
+                if (region->dead) continue;
+                if (region->opcode != VTX_OP_Region && region->opcode != VTX_OP_LoopBegin)
+                    continue;
+                for (uint32_t k = 0; k < region->input_count; k++) {
+                    if (region->inputs[k] == i) {
+                        /* This If feeds directly into this Region/LoopBegin */
+                        uint32_t region_block = schedule->node_block[j];
+                        if (region_block != (uint32_t)-1 && region_block != if_block) {
+                            vtx_schedule_block_t *fb = &schedule->blocks[if_block];
+                            vtx_schedule_block_t *tb = &schedule->blocks[region_block];
+                            if (schedule_block_add_succ(fb, region_block) != 0) return -1;
+                            if (schedule_block_add_pred(tb, if_block) != 0) return -1;
+                        }
+                        break; /* Each If input appears once per Region */
+                    }
+                }
+            }
+
+            /* Also handle LoopEnd nodes that have this If as input.
+             * LoopEnd creates a back-edge from the If's block to the
+             * LoopBegin's block (which is the same block). We add this
+             * self-edge so that the dominator/loop-depth computation
+             * can detect the back-edge. */
+            for (uint32_t j = 0; j < node_count; j++) {
+                vtx_node_t *le = &nt->nodes[j];
+                if (le->dead) continue;
+                if (le->opcode != VTX_OP_LoopEnd) continue;
+                if (le->input_count < 1 || le->inputs[0] != i) continue;
+
+                /* LoopEnd is in the If's block (if_block). The back-edge
+                 * goes to the LoopBegin that is the region_node of if_block. */
+                vtx_schedule_block_t *fb = &schedule->blocks[if_block];
+                /* Add self-edge (back-edge) for the loop */
+                if (schedule_block_add_succ(fb, if_block) != 0) return -1;
+                if (schedule_block_add_pred(fb, if_block) != 0) return -1;
+                break; /* At most one LoopEnd per If */
+            }
+
+            /* Also check for LoopEnd nodes that have a Proj of this If
+             * as input (e.g., If → Proj(true) → LoopEnd). */
+            for (uint32_t j = 0; j < node_count; j++) {
+                vtx_node_t *le = &nt->nodes[j];
+                if (le->dead) continue;
+                if (le->opcode != VTX_OP_LoopEnd) continue;
+                if (le->input_count < 1) continue;
+
+                /* Check if LoopEnd's input is a Proj of this If */
+                vtx_nodeid_t le_input = le->inputs[0];
+                if (le_input < node_count) {
+                    vtx_node_t *le_input_node = &nt->nodes[le_input];
+                    if (le_input_node->opcode == VTX_OP_Proj &&
+                        le_input_node->input_count > 0 &&
+                        le_input_node->inputs[0] == i) {
+                        /* This LoopEnd is reached through a Proj of this If */
+                        vtx_schedule_block_t *fb = &schedule->blocks[if_block];
+                        if (schedule_block_add_succ(fb, if_block) != 0) return -1;
+                        if (schedule_block_add_pred(fb, if_block) != 0) return -1;
+                        break;
+                    }
+                }
+            }
+        }
+
+        /* Handle LoopEnd nodes that are not connected through If directly.
+         * LoopEnd creates a back-edge from its block to the LoopBegin block
+         * it belongs to. We find the LoopBegin by checking which LoopBegin
+         * has Phi nodes whose back-edge inputs come from the LoopEnd's block.
+         *
+         * This handles cases like: Proj → Region → LoopEnd where the
+         * LoopEnd doesn't have an If as its direct control input. */
+        if (node->opcode == VTX_OP_LoopEnd) {
+            vtx_nodeid_t ctrl = node->input_count > 0 ? node->inputs[0] : VTX_NODEID_INVALID;
+            uint32_t le_block = (uint32_t)-1;
+            while (ctrl != VTX_NODEID_INVALID && ctrl < node_count) {
+                le_block = schedule->node_block[ctrl];
+                if (le_block != (uint32_t)-1) break;
+                vtx_node_t *cn = &nt->nodes[ctrl];
+                ctrl = cn->input_count > 0 ? cn->inputs[0] : VTX_NODEID_INVALID;
+            }
+            if (le_block == (uint32_t)-1) continue;
+
+            /* Find the LoopBegin that this LoopEnd goes back to.
+             * Scan all blocks for LoopBegin headers, then check if
+             * any Phi in that block has a back-edge input in le_block. */
+            for (uint32_t j = 0; j < schedule->count; j++) {
+                if (!schedule->blocks[j].is_loop_header) continue;
+                if (j == le_block) continue; /* self-edge handled elsewhere */
+
+                vtx_nodeid_t lb_node = schedule->blocks[j].region_node;
+                /* Check Phi nodes in this LoopBegin's block for
+                 * back-edge inputs from le_block */
+                for (uint32_t p = 0; p < node_count; p++) {
+                    vtx_node_t *phi = &nt->nodes[p];
+                    if (phi->dead || phi->opcode != VTX_OP_Phi) continue;
+                    if (schedule->node_block[p] != j) continue;
+
+                    /* Check if any Phi input is in le_block */
+                    for (uint32_t pi = 0; pi < phi->input_count; pi++) {
+                        vtx_nodeid_t phi_inp = phi->inputs[pi];
+                        if (phi_inp != VTX_NODEID_INVALID && phi_inp < node_count) {
+                            if (schedule->node_block[phi_inp] == le_block) {
+                                /* Found a back-edge from le_block to loop header j */
+                                vtx_schedule_block_t *fb = &schedule->blocks[le_block];
+                                vtx_schedule_block_t *tb = &schedule->blocks[j];
+                                if (schedule_block_add_succ(fb, j) != 0) return -1;
+                                if (schedule_block_add_pred(tb, le_block) != 0) return -1;
+                                goto next_loopend; /* Found the back-edge, move on */
+                            }
+                        }
+                    }
+                }
+            }
+            next_loopend:;
+        }
+
         /* Handle ExceptProj nodes: they represent exception edges.
          * An ExceptProj connects a throwing node's block to the catch
          * handler block (the block containing the Catch node that the
@@ -582,6 +854,23 @@ int vtx_schedule_run(vtx_graph_t *graph, vtx_arena_t *arena, vtx_schedule_t *sch
                 }
             }
         }
+    }
+
+    /* DEBUG: Print CFG edges */
+    fprintf(stderr, "[schedule] CFG edges after Phase 3:\n");
+    for (uint32_t dbi = 0; dbi < schedule->count; dbi++) {
+        vtx_schedule_block_t *dbl = &schedule->blocks[dbi];
+        fprintf(stderr, "  Block %u: succ=[", dbi);
+        for (uint32_t ds = 0; ds < dbl->succ_count; ds++) {
+            if (ds > 0) fprintf(stderr, ",");
+            fprintf(stderr, "%u", dbl->succ_blocks[ds]);
+        }
+        fprintf(stderr, "] pred=[");
+        for (uint32_t dp = 0; dp < dbl->pred_count; dp++) {
+            if (dp > 0) fprintf(stderr, ",");
+            fprintf(stderr, "%u", dbl->pred_blocks[dp]);
+        }
+        fprintf(stderr, "]\n");
     }
 
     /* Phase 4: Compute dominators and loop depth.
@@ -702,12 +991,27 @@ int vtx_schedule_run(vtx_graph_t *graph, vtx_arena_t *arena, vtx_schedule_t *sch
             /* Compute LCA of all input blocks using dominator tree.
              * BUGFIX: The original code used `ib > best_block` which
              * compares block indices — these have no dominance semantics.
-             * The correct approach is LCA in the dominator tree. */
+             * The correct approach is LCA in the dominator tree.
+             *
+             * IR-4 fix: Skip globally-available inputs (Constants,
+             * Parameters, Start) when computing the LCA. These values
+             * can be materialized in any block, so they should not
+             * constrain the placement of their consumers. Without this,
+             * a Sub(phi_n, constant_1) would be placed in block 0 (the
+             * LCA of the loop header and the constant's block), which is
+             * wrong — the Sub should be in the loop header block. */
             lca_block = start_block; /* default: start block */
             bool has_inputs = false;
             for (uint32_t j = 0; j < node->input_count; j++) {
                 vtx_nodeid_t inp = node->inputs[j];
                 if (inp != VTX_NODEID_INVALID && inp < node_count) {
+                    /* Skip globally-available inputs */
+                    const vtx_node_t *inp_node = &nt->nodes[inp];
+                    if (inp_node->opcode == VTX_OP_Constant ||
+                        inp_node->opcode == VTX_OP_Parameter ||
+                        inp_node->opcode == VTX_OP_Start) {
+                        continue;
+                    }
                     uint32_t ib = schedule->node_block[inp];
                     if (ib != (uint32_t)-1) {
                         if (!has_inputs) {
@@ -814,7 +1118,19 @@ int vtx_schedule_run(vtx_graph_t *graph, vtx_arena_t *arena, vtx_schedule_t *sch
 
     /* Phase 8: Within each block, sort nodes to respect dependencies.
      * We use a simple insertion-sort-like approach: for each node,
-     * ensure it comes after its inputs in the same block. */
+     * ensure it comes after its inputs in the same block.
+     *
+     * BUGFIX: Phi nodes are pinned at the top of their block and should
+     * NOT be moved, because their back-edge inputs create circular
+     * dependencies (Phi uses loop body result, loop body uses Phi).
+     * Without this exclusion, the sort would try to move the Phi after
+     * its back-edge input, breaking the evaluation order.
+     *
+     * BUGFIX: Also skip back-edge inputs when checking dependencies.
+     * A node in a loop body may have an input from a Phi that has a
+     * back-edge input from a later node in the same block. We should
+     * only reorder based on forward-edge inputs (inputs from earlier
+     * blocks or from Constants/Parameters). */
     for (uint32_t bi = 0; bi < schedule->count; bi++) {
         vtx_schedule_block_t *blk = &schedule->blocks[bi];
         bool sorted = false;
@@ -828,9 +1144,24 @@ int vtx_schedule_run(vtx_graph_t *graph, vtx_arena_t *arena, vtx_schedule_t *sch
                 if (nid >= node_count) continue;
                 vtx_node_t *node = &nt->nodes[nid];
 
-                /* Check if any input of this node appears later in the block */
+                /* Phi nodes are pinned — never move them */
+                if (node->opcode == VTX_OP_Phi) continue;
+
+                /* Check if any input of this node appears later in the block.
+                 * Skip back-edge inputs: if the input is a Phi that has this
+                 * block's region as an input, it's a loop-carried dependency
+                 * that creates a cycle. The Phi provides the value at the
+                 * start of the iteration, not after the back-edge. */
                 for (uint32_t j = 0; j < node->input_count; j++) {
                     vtx_nodeid_t inp = node->inputs[j];
+                    /* Skip inputs not in this block */
+                    if (inp == VTX_NODEID_INVALID || inp >= node_count) continue;
+                    if (schedule->node_block[inp] != bi) continue;
+
+                    /* Skip back-edge inputs (Phi with loop-carried value) */
+                    vtx_node_t *inp_node = &nt->nodes[inp];
+                    if (inp_node->opcode == VTX_OP_Phi) continue;
+
                     /* Find position of inp in this block */
                     for (uint32_t k = i + 1; k < blk->node_count; k++) {
                         if (blk->nodes[k] == inp) {

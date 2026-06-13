@@ -74,6 +74,13 @@ static const char *vtx_x86_opcode_names[VTX_X86_OPCODE_COUNT] = {
     [VTX_X86_MOVSD]  = "movsd",
     [VTX_X86_SAFEPOINT_POLL] = "safepoint_poll",
     [VTX_X86_SAFEPOINT_POLL_GUARD_PAGE] = "safepoint_poll_guard_page",
+    [VTX_X86_MOVAPD] = "movapd",
+    [VTX_X86_ADDPD]  = "addpd",
+    [VTX_X86_MULPD]  = "mulpd",
+    [VTX_X86_MINPD]  = "minpd",
+    [VTX_X86_MAXPD]  = "maxpd",
+    [VTX_X86_ANDPD]  = "andpd",
+    [VTX_X86_XORPD]  = "xorpd",
 };
 
 const char *vtx_x86_opcode_name(vtx_x86_opcode_t opcode)
@@ -1044,6 +1051,65 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         break;
     }
 
+    /* ---- Min/Max (P1 isel: CMP+CMOV) ---- */
+    case VTX_OP_Min: {
+        if (node->input_count < 2) return -1;
+        uint32_t lhs = vtx_isel_node_vreg(stream, node->inputs[0]);
+        uint32_t rhs = vtx_isel_node_vreg(stream, node->inputs[1]);
+        uint32_t dst = ensure_node_vreg(stream, node_id, arena);
+        if (lhs == VTX_VREG_INVALID || rhs == VTX_VREG_INVALID) return -1;
+
+        /* min(a, b) = b if a > b, else a
+         *   mov dst, lhs
+         *   cmp dst, rhs
+         *   cmovg dst, rhs    ; if dst > rhs, dst = rhs */
+        if (dst != lhs)
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs, node_id), arena);
+        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_CMP, dst, rhs, node_id), arena);
+
+        vtx_inst_t cmov;
+        memset(&cmov, 0, sizeof(cmov));
+        cmov.opcode = VTX_X86_CMOV;
+        cmov.opnd_kinds[0] = VTX_OPND_VREG;
+        cmov.operands[0] = dst;
+        cmov.opnd_kinds[1] = VTX_OPND_VREG;
+        cmov.operands[1] = rhs;
+        cmov.cond = VTX_COND_GT;
+        cmov.flags = VTX_INST_FLAG_HAS_COND;
+        cmov.source_node = node_id;
+        vtx_isel_emit_inst(block, cmov, arena);
+        break;
+    }
+
+    case VTX_OP_Max: {
+        if (node->input_count < 2) return -1;
+        uint32_t lhs = vtx_isel_node_vreg(stream, node->inputs[0]);
+        uint32_t rhs = vtx_isel_node_vreg(stream, node->inputs[1]);
+        uint32_t dst = ensure_node_vreg(stream, node_id, arena);
+        if (lhs == VTX_VREG_INVALID || rhs == VTX_VREG_INVALID) return -1;
+
+        /* max(a, b) = a if a > b, else b
+         *   mov dst, lhs
+         *   cmp dst, rhs
+         *   cmovle dst, rhs   ; if dst <= rhs, dst = rhs */
+        if (dst != lhs)
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs, node_id), arena);
+        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_CMP, dst, rhs, node_id), arena);
+
+        vtx_inst_t cmov;
+        memset(&cmov, 0, sizeof(cmov));
+        cmov.opcode = VTX_X86_CMOV;
+        cmov.opnd_kinds[0] = VTX_OPND_VREG;
+        cmov.operands[0] = dst;
+        cmov.opnd_kinds[1] = VTX_OPND_VREG;
+        cmov.operands[1] = rhs;
+        cmov.cond = VTX_COND_LE;
+        cmov.flags = VTX_INST_FLAG_HAS_COND;
+        cmov.source_node = node_id;
+        vtx_isel_emit_inst(block, cmov, arena);
+        break;
+    }
+
     /* ---- Comparison ---- */
     case VTX_OP_Cmp:
     case VTX_OP_CmpP: {
@@ -1768,6 +1834,112 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         vtx_isel_emit_inst(block, sp, arena);
         break;
     }
+    /* ---- SIMD Vector operations (P1 isel: SSE2 packed double) ---- */
+    case VTX_OP_VectorLoad: {
+        if (node->input_count < 1) return -1;
+        /* VectorLoad: load 128-bit vector from [base + index*scale + disp]
+         * Input 0: base address, Input 1: index (optional)
+         * Emits: movapd dst, [base + index*scale + disp] */
+        uint32_t base = vtx_isel_node_vreg(stream, node->inputs[0]);
+        uint32_t dst = ensure_node_vreg(stream, node_id, arena);
+        if (base == VTX_VREG_INVALID) return -1;
+
+        /* Mark dst as XMM class */
+        if (dst < stream->vreg_fixed_reg_count) {
+            /* We set the XMM flag via the vreg_flags mechanism during regalloc */
+        }
+
+        vtx_inst_t vload;
+        memset(&vload, 0, sizeof(vload));
+        vload.opcode = VTX_X86_MOVAPD;
+        vload.opnd_kinds[0] = VTX_OPND_VREG;
+        vload.operands[0] = dst;
+        vload.flags = VTX_INST_FLAG_HAS_MEM | VTX_INST_FLAG_IS_SSE;
+        vload.mem.base_vreg = base;
+        vload.mem.base_phys = 0xFF;
+        vload.mem.index_vreg = VTX_VREG_INVALID;
+        vload.mem.index_phys = 0xFF;
+        vload.mem.scale = 1;
+        vload.mem.disp = (int32_t)node->field_offset;
+        vload.source_node = node_id;
+
+        /* If we have an index input, set up SIB */
+        if (node->input_count >= 2) {
+            uint32_t idx = vtx_isel_node_vreg(stream, node->inputs[1]);
+            if (idx != VTX_VREG_INVALID) {
+                vload.mem.index_vreg = idx;
+                vload.mem.index_phys = 0xFF;
+                vload.mem.scale = 8; /* 8 bytes per double, 2 doubles = 16 bytes */
+            }
+        }
+
+        vtx_isel_emit_inst(block, vload, arena);
+        break;
+    }
+
+    case VTX_OP_VectorStore: {
+        if (node->input_count < 2) return -1;
+        /* VectorStore: store 128-bit vector to [base + index*scale + disp]
+         * Input 0: base address, Input 1: index (optional), Input last: value */
+        uint32_t base = vtx_isel_node_vreg(stream, node->inputs[0]);
+        /* Find the value input (last input) */
+        uint32_t val = vtx_isel_node_vreg(stream, node->inputs[node->input_count - 1]);
+        if (base == VTX_VREG_INVALID || val == VTX_VREG_INVALID) return -1;
+
+        vtx_inst_t vstore;
+        memset(&vstore, 0, sizeof(vstore));
+        vstore.opcode = VTX_X86_MOVAPD;
+        vstore.opnd_kinds[0] = VTX_OPND_VREG;
+        vstore.operands[0] = val;
+        vstore.flags = VTX_INST_FLAG_HAS_MEM | VTX_INST_FLAG_IS_SSE;
+        vstore.mem.base_vreg = base;
+        vstore.mem.base_phys = 0xFF;
+        vstore.mem.index_vreg = VTX_VREG_INVALID;
+        vstore.mem.index_phys = 0xFF;
+        vstore.mem.scale = 1;
+        vstore.mem.disp = (int32_t)node->field_offset;
+        vstore.source_node = node_id;
+
+        /* If we have an index input, set up SIB */
+        if (node->input_count >= 3) {
+            uint32_t idx = vtx_isel_node_vreg(stream, node->inputs[1]);
+            if (idx != VTX_VREG_INVALID) {
+                vstore.mem.index_vreg = idx;
+                vstore.mem.index_phys = 0xFF;
+                vstore.mem.scale = 8;
+            }
+        }
+
+        vtx_isel_emit_inst(block, vstore, arena);
+        break;
+    }
+
+    case VTX_OP_VectorAdd: {
+        if (node->input_count < 2) return -1;
+        uint32_t lhs = vtx_isel_node_vreg(stream, node->inputs[0]);
+        uint32_t rhs = vtx_isel_node_vreg(stream, node->inputs[1]);
+        uint32_t dst = ensure_node_vreg(stream, node_id, arena);
+        if (lhs == VTX_VREG_INVALID || rhs == VTX_VREG_INVALID) return -1;
+
+        if (dst != lhs)
+            vtx_isel_emit_inst(block, make_sse_rr_inst(VTX_X86_MOVAPD, dst, lhs, node_id), arena);
+        vtx_isel_emit_inst(block, make_sse_rr_inst(VTX_X86_ADDPD, dst, rhs, node_id), arena);
+        break;
+    }
+
+    case VTX_OP_VectorMul: {
+        if (node->input_count < 2) return -1;
+        uint32_t lhs = vtx_isel_node_vreg(stream, node->inputs[0]);
+        uint32_t rhs = vtx_isel_node_vreg(stream, node->inputs[1]);
+        uint32_t dst = ensure_node_vreg(stream, node_id, arena);
+        if (lhs == VTX_VREG_INVALID || rhs == VTX_VREG_INVALID) return -1;
+
+        if (dst != lhs)
+            vtx_isel_emit_inst(block, make_sse_rr_inst(VTX_X86_MOVAPD, dst, lhs, node_id), arena);
+        vtx_isel_emit_inst(block, make_sse_rr_inst(VTX_X86_MULPD, dst, rhs, node_id), arena);
+        break;
+    }
+
     case VTX_OP_Switch:
     case VTX_OP_Unwind:
     case VTX_OP_Catch:
@@ -2106,6 +2278,19 @@ vtx_inst_stream_t *vtx_isel_select(const vtx_schedule_t *schedule,
         for (uint32_t n = 0; n < sched_blk->node_count; n++) {
             vtx_nodeid_t node_id = sched_blk->nodes[n];
             if (select_node(stream, inst_blk, graph, node_id, arena) != 0) {
+                const vtx_node_t *dbg_node = vtx_node_get_const(&graph->node_table, node_id);
+                fprintf(stderr, "[isel] FAILED: block %u, node %u, opcode %s, inputs:",
+                        b, node_id, dbg_node ? vtx_node_opcode_name(dbg_node->opcode) : "NULL");
+                if (dbg_node) {
+                    for (uint32_t di = 0; di < dbg_node->input_count; di++) {
+                        vtx_nodeid_t dinp = dbg_node->inputs[di];
+                        const vtx_node_t *dinp_n = vtx_node_get_const(&graph->node_table, dinp);
+                        uint32_t dvreg = vtx_isel_node_vreg(stream, dinp);
+                        fprintf(stderr, " N%u(%s,vreg=%u)", dinp,
+                                dinp_n ? vtx_node_opcode_name(dinp_n->opcode) : "?", dvreg);
+                    }
+                }
+                fprintf(stderr, "\n");
                 return NULL;
             }
         }

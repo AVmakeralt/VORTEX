@@ -60,3 +60,22 @@ target_link_libraries(bench_jit_exec PRIVATE
     vortex_lower
     m
 )
+
+# ---- Real workload benchmarks ----
+
+# bench_real_workload
+add_executable(bench_real_workload
+    bench_real_workload.c
+    ${CMAKE_SOURCE_DIR}/src/runtime_stubs.c
+)
+target_link_libraries(bench_real_workload PRIVATE
+    vortex_bench_framework
+    vortex_interp
+    vortex_runtime
+    vortex_codecache
+    vortex_lower
+    vortex_baseline
+    vortex_deopt
+    m
+    pthread
+)

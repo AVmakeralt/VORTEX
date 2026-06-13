@@ -2282,6 +2282,119 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
         }
         break;
 
+    /* ---- SSE2 Packed Double instructions ---- */
+    case VTX_X86_MOVAPD:
+        /* MOVAPS/MOVAPD xmm, xmm — register-register 128-bit move.
+         * Encoding: 66 0F 28 /r (load direction), 66 0F 29 /r (store direction).
+         * For reg-reg move we use 66 0F 28.
+         * Handles spilled XMM registers same as MOVSD. */
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 == 0xFF && r1 != 0xFF) {
+            uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+            if (slot0 != VTX_NO_SPILL) {
+                emit_spill_store_xmm(e, slot0, r1);
+            }
+        } else if (r0 != 0xFF && r1 == 0xFF) {
+            uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+            if (slot1 != VTX_NO_SPILL) {
+                emit_spill_load_xmm(e, slot1, r0);
+            }
+        } else if (r0 == 0xFF && r1 == 0xFF) {
+            uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+            uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+            if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
+                emit_spill_load_xmm(e, slot1, VTX_SPILL_XMM_TMP);
+                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+            }
+        } else if (r0 != r1) {
+            /* movaps xmm, xmm: 66 0F 28 ModR/M(mod=11) */
+            emit_rex(e, 0, reg_hi(r0), 0, reg_hi(r1));
+            emit_byte(e, 0x66);
+            emit_byte(e, 0x0F);
+            emit_byte(e, 0x28);
+            emit_modrm(e, 3, reg_lo(r0), reg_lo(r1));
+        }
+        break;
+
+    case VTX_X86_ADDPD:
+        /* ADDPD xmm, xmm: 66 0F 58 /r — packed double add */
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) {
+            emit_rex(e, 0, reg_hi(r0), 0, reg_hi(r1));
+            emit_byte(e, 0x66);
+            emit_byte(e, 0x0F);
+            emit_byte(e, 0x58);
+            emit_modrm(e, 3, reg_lo(r0), reg_lo(r1));
+        }
+        break;
+
+    case VTX_X86_MULPD:
+        /* MULPD xmm, xmm: 66 0F 59 /r — packed double multiply */
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) {
+            emit_rex(e, 0, reg_hi(r0), 0, reg_hi(r1));
+            emit_byte(e, 0x66);
+            emit_byte(e, 0x0F);
+            emit_byte(e, 0x59);
+            emit_modrm(e, 3, reg_lo(r0), reg_lo(r1));
+        }
+        break;
+
+    case VTX_X86_MINPD:
+        /* MINPD xmm, xmm: 66 0F 5D /r — packed double min */
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) {
+            emit_rex(e, 0, reg_hi(r0), 0, reg_hi(r1));
+            emit_byte(e, 0x66);
+            emit_byte(e, 0x0F);
+            emit_byte(e, 0x5D);
+            emit_modrm(e, 3, reg_lo(r0), reg_lo(r1));
+        }
+        break;
+
+    case VTX_X86_MAXPD:
+        /* MAXPD xmm, xmm: 66 0F 5F /r — packed double max */
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) {
+            emit_rex(e, 0, reg_hi(r0), 0, reg_hi(r1));
+            emit_byte(e, 0x66);
+            emit_byte(e, 0x0F);
+            emit_byte(e, 0x5F);
+            emit_modrm(e, 3, reg_lo(r0), reg_lo(r1));
+        }
+        break;
+
+    case VTX_X86_ANDPD:
+        /* ANDPD xmm, xmm: 66 0F 54 /r — packed double bitwise AND */
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) {
+            emit_rex(e, 0, reg_hi(r0), 0, reg_hi(r1));
+            emit_byte(e, 0x66);
+            emit_byte(e, 0x0F);
+            emit_byte(e, 0x54);
+            emit_modrm(e, 3, reg_lo(r0), reg_lo(r1));
+        }
+        break;
+
+    case VTX_X86_XORPD:
+        /* XORPD xmm, xmm: 66 0F 57 /r — packed double bitwise XOR */
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) {
+            emit_rex(e, 0, reg_hi(r0), 0, reg_hi(r1));
+            emit_byte(e, 0x66);
+            emit_byte(e, 0x0F);
+            emit_byte(e, 0x57);
+            emit_modrm(e, 3, reg_lo(r0), reg_lo(r1));
+        }
+        break;
+
     default:
         /* Unknown opcode — emit nop as safe fallback */
         vtx_x86_emit_nop(e);

@@ -1059,6 +1059,9 @@ int vtx_pipeline_run(vtx_graph_t *graph,
         return -1;
     }
 
+    /* DEBUG: Print schedule for diagnosis */
+    vtx_schedule_print(&schedule, graph);
+
     if (verify_between_passes(graph, config, "Schedule") != 0) {
         vtx_schedule_destroy(&schedule);
         result->stats = stats;

@@ -103,8 +103,16 @@ static const uint8_t vtx_callee_saved_regs[VTX_CALLEE_SAVED_COUNT] = {
 
 /* XMM registers use the same encoding as GPR for ModR/M (0-15).
  * XMM8-XMM15 require REX.R/B in the REX prefix.
- * Bitmask: all 16 XMM registers are allocatable. */
+ *
+ * P0 FIX: XMM14 and XMM15 are reserved as spill/fill temporaries
+ * in the emitter (see VTX_SPILL_XMM_TMP and the both-spilled path).
+ * They must NOT be allocated to variables, or the emitter will
+ * clobber live values when inserting spill/fill code.
+ *
+ * XMM_ALLOCATABLE_MASK excludes XMM14 and XMM15 from allocation. */
+#define VTX_XMM_RESERVED_MASK ((1u << 14) | (1u << 15))  /* XMM14, XMM15 */
 #define VTX_XMM_ALL_MASK 0xFFFFu
+#define VTX_XMM_ALLOCATABLE_MASK (VTX_XMM_ALL_MASK & ~VTX_XMM_RESERVED_MASK)
 
 /* No spill slot sentinel */
 #define VTX_NO_SPILL ((uint32_t)0xFFFFFFFF)

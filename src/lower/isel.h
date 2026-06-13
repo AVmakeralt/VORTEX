@@ -110,6 +110,15 @@ typedef enum {
     VTX_X86_SAFEPOINT_POLL,         /* cmpq [vtx_safepoint_flag], 0; jne deopt_stub */
     VTX_X86_SAFEPOINT_POLL_GUARD_PAGE, /* movq rax, [guard_page] — zero-cost poll */
 
+    /* SSE2 packed double operations (for vectorized loops) */
+    VTX_X86_MOVAPD,     /* movaps/movapd xmm, xmm — 128-bit aligned move */
+    VTX_X86_ADDPD,      /* addpd xmm, xmm — packed double add (2 doubles) */
+    VTX_X86_MULPD,      /* mulpd xmm, xmm — packed double multiply (2 doubles) */
+    VTX_X86_MINPD,      /* minpd xmm, xmm — packed double min */
+    VTX_X86_MAXPD,      /* maxpd xmm, xmm — packed double max */
+    VTX_X86_ANDPD,      /* andpd xmm, xmm — packed double bitwise AND */
+    VTX_X86_XORPD,      /* xorpd xmm, xmm — packed double bitwise XOR */
+
     VTX_X86_OPCODE_COUNT
 } vtx_x86_opcode_t;
 
