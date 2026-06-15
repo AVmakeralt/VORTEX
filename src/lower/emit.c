@@ -799,13 +799,16 @@ int vtx_x86_emit_safepoint_poll_guard_page(vtx_x86_emit_t *e)
 /* ========================================================================== */
 
 void vtx_x86_emit_prologue(vtx_x86_emit_t *e, uint32_t frame_size,
-                            uint32_t callee_saved_mask)
+                            uint32_t callee_saved_mask,
+                            uint32_t arg_count, uint32_t max_locals)
 {
     /* JIT calling convention prologue — matches T1 baseline layout:
      *
      *   Entry: RDI = method pointer (1st arg, System V ABI)
      *          RSI = deopt_info pointer (2nd arg)
      *          RDX = profile_data pointer (3rd arg)
+     *          RCX = args array pointer (4th arg)
+     *          R8  = arg_count (5th arg)
      *
      *   push rdi              ; method_ptr   -> [RBP+24]
      *   push rsi              ; deopt_info   -> [RBP+16]
@@ -814,6 +817,14 @@ void vtx_x86_emit_prologue(vtx_x86_emit_t *e, uint32_t frame_size,
      *   mov rbp, rsp
      *   push callee-saved regs (RBX, R12-R15 as needed)
      *   sub rsp, frame_size   ; locals + spills
+     *
+     *   Then: copy args[i] from the args array (RCX) into the
+     *   System V argument registers (RDI, RSI, RDX, RCX, R8, R9)
+     *   so that the T2 instruction selector's Parameter mapping
+     *   (Parameter i → vtx_arg_regs[i]) works correctly.
+     *   The original register values (method, deopt_info, profile_data)
+     *   have already been saved on the stack, so RDI/RSI/RDX can be
+     *   safely overwritten.
      *
      * This layout ensures that the deopt handler can find the method
      * pointer at [RBP+24] and deopt_info at [RBP+16] — the same
@@ -872,6 +883,56 @@ void vtx_x86_emit_prologue(vtx_x86_emit_t *e, uint32_t frame_size,
             aligned_size += 8; /* toggle between ≡ 0 and ≡ 8 (mod 16) */
         }
         vtx_x86_emit_sub_ri(e, 4, (int32_t)aligned_size); /* RSP = 4 */
+    }
+
+    /* ================================================================== */
+    /* CRITICAL FIX: Copy args from the args array into the System V      */
+    /* argument registers so that the T2 instruction selector's           */
+    /* Parameter node mapping (Parameter i → vtx_arg_regs[i]) works.     */
+    /*                                                                    */
+    /* At function entry:                                                 */
+    /*   RCX = args array pointer (4th arg in System V ABI)              */
+    /*   R8  = arg_count (5th arg in System V ABI)                       */
+    /*                                                                    */
+    /* The T2 isel maps Parameter nodes to these registers:              */
+    /*   Parameter 0 → RDI (vtx_arg_regs[0] = 7)                        */
+    /*   Parameter 1 → RSI (vtx_arg_regs[1] = 6)                        */
+    /*   Parameter 2 → RDX (vtx_arg_regs[2] = 2)                        */
+    /*   Parameter 3 → RCX (vtx_arg_regs[3] = 1)                        */
+    /*   Parameter 4 → R8  (vtx_arg_regs[4] = 8)                        */
+    /*   Parameter 5 → R9  (vtx_arg_regs[5] = 9)                        */
+    /*                                                                    */
+    /* But the JIT entry calling convention passes:                      */
+    /*   RDI = method, RSI = deopt_info, RDX = profile_data             */
+    /*   RCX = args_ptr, R8 = arg_count                                  */
+    /*                                                                    */
+    /* So we must load args[i] from [RCX + i*8] into the registers       */
+    /* that isel expects. Since RDI/RSI/RDX are already saved on the     */
+    /* stack, we can safely overwrite them. For args beyond 3, we need   */
+    /* to be careful not to clobber RCX (args pointer) before we're      */
+    /* done with it. Strategy: copy RCX to R11 first, then load args     */
+    /* in reverse order so we don't clobber the args pointer.            */
+    /* ================================================================== */
+    uint32_t copy_count = arg_count;
+    if (copy_count > max_locals) copy_count = max_locals;
+    if (copy_count > 6) copy_count = 6; /* max 6 args in registers */
+
+    if (copy_count > 0) {
+        /* Save args pointer (RCX) to R11 before we clobber it */
+        vtx_x86_emit_mov_rr(e, 11, 1); /* R11 ← RCX */
+
+        /* Copy args from the array into the expected registers.
+         * We load in reverse order so that when we write to RCX
+         * (Parameter 3), we've already finished using R11 (which
+         * holds the original args pointer).
+         *
+         * vtx_arg_regs[] = { RDI(7), RSI(6), RDX(2), RCX(1), R8(8), R9(9) }
+         * args[i] is at [R11 + i*8] */
+        static const uint8_t arg_dst_regs[6] = { 7, 6, 2, 1, 8, 9 };
+        for (int i = (int)copy_count - 1; i >= 0; i--) {
+            /* mov arg_dst_regs[i], [R11 + i*8] */
+            vtx_x86_emit_mov_rmem(e, arg_dst_regs[i], 11, (int32_t)(i * 8));
+        }
     }
 }
 

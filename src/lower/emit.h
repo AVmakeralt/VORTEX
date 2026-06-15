@@ -385,7 +385,8 @@ int vtx_x86_emit_safepoint_poll_guard_page(vtx_x86_emit_t *e);
  * @param callee_saved_mask  Bitmask of callee-saved registers to save
  */
 void vtx_x86_emit_prologue(vtx_x86_emit_t *e, uint32_t frame_size,
-                            uint32_t callee_saved_mask);
+                            uint32_t callee_saved_mask,
+                            uint32_t arg_count, uint32_t max_locals);
 
 /**
  * Emit function epilogue:

@@ -699,7 +699,9 @@ static int run_lowering_pipeline(vtx_graph_t *graph,
                                   const vtx_schedule_t *schedule,
                                   vtx_arena_t *arena,
                                   vtx_compile_result_t *result,
-                                  int64_t *time_ns)
+                                  int64_t *time_ns,
+                                  uint32_t method_arg_count,
+                                  uint32_t method_max_locals)
 {
     int64_t start = now_ns();
 
@@ -779,9 +781,13 @@ static int run_lowering_pipeline(vtx_graph_t *graph,
         return -1;
     }
 
-    /* Emit prologue */
+    /* Emit prologue — includes arg-to-register copy for T2/T3.
+     * arg_count and max_locals are needed so the prologue can copy
+     * args from the JIT entry's args array into the registers that
+     * the T2 instruction selector expects for Parameter nodes. */
     vtx_x86_emit_prologue(&emitter, ra_result->frame_size,
-                           ra_result->callee_saved_mask);
+                           ra_result->callee_saved_mask,
+                           method_arg_count, method_max_locals);
 
     /* Note: Epilogue is emitted by the RET instruction handler in
      * emit_single_inst(), which calls vtx_x86_emit_epilogue() to
@@ -1320,8 +1326,12 @@ int vtx_pipeline_run(vtx_graph_t *graph,
     /*   - Register allocation assigns physical registers                 */
     /*   - Code emission produces the final machine code bytes            */
     /* ================================================================== */
+    uint32_t m_arg_count = (config->method != NULL) ? config->method->arg_count : 0;
+    uint32_t m_max_locals = (config->method != NULL && config->method->bytecode != NULL)
+                             ? config->method->bytecode->max_locals : 0;
     if (run_lowering_pipeline(graph, &schedule, arena, result,
-                               &stats.lowering_time_ns) != 0) {
+                               &stats.lowering_time_ns,
+                               m_arg_count, m_max_locals) != 0) {
         fprintf(stderr, "[pipeline] lowering failed\n");
         result->stats = stats;
         return -1;

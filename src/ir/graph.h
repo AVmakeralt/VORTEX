@@ -59,6 +59,15 @@ typedef struct {
     uint32_t     *succ_indices;
     uint32_t      succ_count;
     uint32_t      succ_capacity;
+
+    /* Exit operand-stack state (set after Phase 3 walks this block).
+     * Used to propagate stack values across block boundaries so that
+     * successor blocks can reconstruct the operand stack at their
+     * entry point. Without this, values left on the stack at a
+     * branch/return are lost when the successor block starts with sp=0,
+     * causing stack-underflow errors in the IR builder. */
+    vtx_nodeid_t *exit_stack;    /* arena-allocated, size max_stack */
+    int32_t       exit_sp;       /* stack depth at block exit */
 } vtx_block_info_t;
 
 /* ========================================================================== */

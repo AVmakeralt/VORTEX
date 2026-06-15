@@ -482,6 +482,8 @@ static uint32_t identify_blocks(vtx_arena_t *arena,
             blocks[bi].is_loop_header = false;
             blocks[bi].is_loop_end = false;
             blocks[bi].is_catch_handler = false;
+            blocks[bi].exit_stack = NULL;
+            blocks[bi].exit_sp = 0;
             bi++;
         }
     }
@@ -1331,10 +1333,33 @@ int vtx_graph_build(vtx_graph_t *graph,
     }
 
     /* Phase 3: Walk each block's instructions, emitting SoN data and control nodes.
-     * We simulate the operand stack per block using a simple array. */
+     * We simulate the operand stack per block using a simple array.
+     *
+     * CRITICAL FIX: We propagate operand-stack values across block boundaries.
+     * Previously, each block started with sp=0 (empty stack), which meant
+     * values left on the stack at a branch were lost. This caused stack-underflow
+     * errors in successor blocks that expected those values (e.g., RETURN_VALUE
+     * at a merge point where both predecessors left one value on the stack).
+     *
+     * The fix:
+     *   - At block exit, we record the operand stack state (exit_stack, exit_sp).
+     *   - At block entry, we initialize the operand stack from predecessor exit
+     *     states. For merge points (multiple predecessors), we create Phi nodes
+     *     for each stack slot, just like we do for local variables.
+     *   - This ensures the SSA invariant: every use of a value is dominated by
+     *     its definition, even across control-flow merges. */
     vtx_nodeid_t *op_stack = (vtx_nodeid_t *)vtx_arena_alloc(
         arena, (max_stack + 2) * sizeof(vtx_nodeid_t));
     if (op_stack == NULL) return -1;
+
+    /* Pre-allocate exit_stack for every block */
+    for (uint32_t bi = 0; bi < nblocks; bi++) {
+        blocks[bi].exit_stack = (vtx_nodeid_t *)vtx_arena_alloc(
+            arena, (max_stack + 2) * sizeof(vtx_nodeid_t));
+        if (blocks[bi].exit_stack == NULL) return -1;
+        memset(blocks[bi].exit_stack, 0, (max_stack + 2) * sizeof(vtx_nodeid_t));
+        blocks[bi].exit_sp = 0;
+    }
 
     for (uint32_t bi = 0; bi < nblocks; bi++) {
         vtx_block_info_t *block = &blocks[bi];
@@ -1344,6 +1369,93 @@ int vtx_graph_build(vtx_graph_t *graph,
         if (block->is_catch_handler && block->region_node != VTX_NODEID_INVALID) {
             /* The Catch node produces the exception object */
             op_stack[sp++] = block->control_node;
+        }
+
+        /* Initialize operand stack from predecessor exit states.
+         *
+         * For non-entry blocks with predecessors, the operand stack at block
+         * entry should match the exit stack of predecessors. At merge points
+         * (multiple predecessors), we create Phi nodes for each stack slot.
+         * This is the same approach used for local variables. */
+        if (bi > 0 && block->pred_count > 0 && !block->is_catch_handler) {
+            /* Count forward (non-back-edge) predecessors that have been
+             * processed (have exit_sp > 0 or are the entry block). */
+            uint32_t ready_pred_count = 0;
+            int32_t expected_sp = -1;
+            for (uint32_t p = 0; p < block->pred_count; p++) {
+                uint32_t pred_idx = block->pred_indices[p];
+                /* Skip back-edge predecessors for loop headers (not processed yet) */
+                if (block->is_loop_header && blocks[pred_idx].is_loop_end) {
+                    continue;
+                }
+                /* Skip predecessors that haven't been processed yet
+                 * (exit_sp == 0 and not the entry block) */
+                if (blocks[pred_idx].exit_sp == 0 && pred_idx > 0) {
+                    continue;
+                }
+                if (expected_sp < 0) {
+                    expected_sp = blocks[pred_idx].exit_sp;
+                }
+                ready_pred_count++;
+            }
+
+            if (ready_pred_count == 1 && expected_sp > 0) {
+                /* Single ready predecessor: inherit its exit stack directly */
+                for (uint32_t p = 0; p < block->pred_count; p++) {
+                    uint32_t pred_idx = block->pred_indices[p];
+                    if (block->is_loop_header && blocks[pred_idx].is_loop_end) continue;
+                    if (blocks[pred_idx].exit_sp == 0 && pred_idx > 0) continue;
+                    for (int32_t si = 0; si < blocks[pred_idx].exit_sp; si++) {
+                        op_stack[si] = blocks[pred_idx].exit_stack[si];
+                    }
+                    sp = blocks[pred_idx].exit_sp;
+                    break;
+                }
+            } else if (ready_pred_count > 1 && expected_sp > 0) {
+                /* Multiple ready predecessors: create Phi nodes for each stack slot */
+                for (int32_t si = 0; si < expected_sp; si++) {
+                    /* Check if all ready predecessors agree on this stack slot */
+                    bool all_same = true;
+                    vtx_nodeid_t first_val = VTX_NODEID_INVALID;
+                    for (uint32_t p = 0; p < block->pred_count; p++) {
+                        uint32_t pred_idx = block->pred_indices[p];
+                        if (block->is_loop_header && blocks[pred_idx].is_loop_end) continue;
+                        if (blocks[pred_idx].exit_sp == 0 && pred_idx > 0) continue;
+                        vtx_nodeid_t val = blocks[pred_idx].exit_stack[si];
+                        if (first_val == VTX_NODEID_INVALID) {
+                            first_val = val;
+                        } else if (val != first_val) {
+                            all_same = false;
+                            break;
+                        }
+                    }
+
+                    if (all_same) {
+                        op_stack[si] = first_val;
+                    } else {
+                        /* Create a Phi node for this stack slot */
+                        vtx_nodeid_t phi = vtx_node_create(&graph->node_table, VTX_OP_Phi);
+                        if (phi == VTX_NODEID_INVALID) return -1;
+                        /* Add one input per ready predecessor */
+                        for (uint32_t p = 0; p < block->pred_count; p++) {
+                            uint32_t pred_idx = block->pred_indices[p];
+                            if (block->is_loop_header && blocks[pred_idx].is_loop_end) continue;
+                            if (blocks[pred_idx].exit_sp == 0 && pred_idx > 0) continue;
+                            vtx_nodeid_t val = blocks[pred_idx].exit_stack[si];
+                            vtx_node_add_input(&graph->node_table, phi, val);
+                        }
+                        /* Phi depends on Region for control */
+                        if (block->region_node != VTX_NODEID_INVALID) {
+                            vtx_node_add_input(&graph->node_table, phi, block->region_node);
+                        }
+                        op_stack[si] = phi;
+                    }
+                }
+                sp = expected_sp;
+            }
+            /* If no ready predecessors or expected_sp == 0, stack stays empty.
+             * This is correct for unreachable blocks or blocks where no
+             * predecessor leaves values on the stack. */
         }
 
         size_t pc = block->start_pc;
@@ -2183,6 +2295,18 @@ int vtx_graph_build(vtx_graph_t *graph,
             }
 
             pc += insn_len;
+        }
+
+        /* Save exit operand stack state for this block.
+         * This allows successor blocks to reconstruct their entry stack
+         * from predecessor exit states. Critical for propagating values
+         * across block boundaries (e.g., RETURN_VALUE at a merge point
+         * where both predecessors left one value on the stack). */
+        if (sp > 0) {
+            block->exit_sp = sp;
+            for (int32_t si = 0; si < sp; si++) {
+                block->exit_stack[si] = op_stack[si];
+            }
         }
     }
 
