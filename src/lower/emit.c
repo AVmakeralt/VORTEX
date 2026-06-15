@@ -994,6 +994,9 @@ static uint8_t inst_dst_preg(const vtx_inst_t *inst)
  */
 static bool inst_reads_preg(const vtx_inst_t *inst, uint8_t preg)
 {
+    /* RET implicitly reads RAX (return value register) */
+    if (inst->opcode == VTX_X86_RET && preg == 0) /* RAX = register 0 */
+        return true;
     /* Check operand 1 (source) */
     if (inst->opnd_kinds[1] == VTX_OPND_PREG && (uint8_t)inst->operands[1] == preg)
         return true;

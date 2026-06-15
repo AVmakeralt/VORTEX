@@ -1807,7 +1807,12 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
     case VTX_OP_FrameState:
     case VTX_OP_Start:
-    case VTX_OP_End:
+    case VTX_OP_End: {
+        /* Start and End nodes are control markers only — no instructions.
+         * Start marks the entry point; End marks the exit.
+         * Safepoint polls are emitted at LoopEnd (loop back-edges). */
+        break;
+    }
     case VTX_OP_LoopEnd: {
         /* Emit safepoint poll at loop back-edge.
          *
