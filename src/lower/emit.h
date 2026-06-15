@@ -322,6 +322,72 @@ void vtx_x86_emit_xorps(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
  */
 void vtx_x86_emit_movsd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
 
+/* ---- Scalar single-precision float (SSE) ---- */
+void vtx_x86_emit_addss(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_subss(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_mulss(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_divss(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_sqrtss(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_ucomiss(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_movss(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+
+/* ---- Float ↔ Int conversions (SSE2) ---- */
+void vtx_x86_emit_cvtsi2sd(vtx_x86_emit_t *e, uint8_t dst_xmm, uint8_t src_gpr);
+void vtx_x86_emit_cvtsd2si(vtx_x86_emit_t *e, uint8_t dst_gpr, uint8_t src_xmm);
+void vtx_x86_emit_cvttsd2si(vtx_x86_emit_t *e, uint8_t dst_gpr, uint8_t src_xmm);
+void vtx_x86_emit_cvtsi2ss(vtx_x86_emit_t *e, uint8_t dst_xmm, uint8_t src_gpr);
+void vtx_x86_emit_cvtss2si(vtx_x86_emit_t *e, uint8_t dst_gpr, uint8_t src_xmm);
+void vtx_x86_emit_cvttss2si(vtx_x86_emit_t *e, uint8_t dst_gpr, uint8_t src_xmm);
+
+/* ---- GPR ↔ XMM bridge (SSE2) ---- */
+void vtx_x86_emit_movq_xmm_r64(vtx_x86_emit_t *e, uint8_t dst_xmm, uint8_t src_gpr);
+void vtx_x86_emit_movq_r64_xmm(vtx_x86_emit_t *e, uint8_t dst_gpr, uint8_t src_xmm);
+
+/* ---- COMISD / SQRTSD / MOVSD memory ---- */
+void vtx_x86_emit_comisd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_sqrtsd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_movsd_load(vtx_x86_emit_t *e, uint8_t dst_xmm, uint8_t base, int32_t disp);
+void vtx_x86_emit_movsd_store(vtx_x86_emit_t *e, uint8_t base, int32_t disp, uint8_t src_xmm);
+
+/* ---- Bit manipulation ---- */
+void vtx_x86_emit_bswap(vtx_x86_emit_t *e, uint8_t reg);
+void vtx_x86_emit_bsf(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_bsr(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_popcnt(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_rol_ri(vtx_x86_emit_t *e, uint8_t dst, uint8_t count);
+void vtx_x86_emit_rol_cl(vtx_x86_emit_t *e, uint8_t dst);
+void vtx_x86_emit_ror_ri(vtx_x86_emit_t *e, uint8_t dst, uint8_t count);
+void vtx_x86_emit_ror_cl(vtx_x86_emit_t *e, uint8_t dst);
+
+/* ---- CDQE / Unsigned DIV ---- */
+void vtx_x86_emit_cdqe(vtx_x86_emit_t *e);
+void vtx_x86_emit_div_r(vtx_x86_emit_t *e, uint8_t src);
+
+/* ---- Packed double SIMD ---- */
+void vtx_x86_emit_subpd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_divpd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+
+/* ---- Packed integer SIMD (SSE2) ---- */
+void vtx_x86_emit_movdqa(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_movdqu(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_paddd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_psubd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_pmulld(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_pxor(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_pand(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_por(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_pcmpeqd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+
+/* ---- Packed single-precision float SIMD (SSE) ---- */
+void vtx_x86_emit_movaps(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_addps(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_mulps(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_subps(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_divps(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_minps(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_maxps(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_cmpps(vtx_x86_emit_t *e, uint8_t dst, uint8_t src, uint8_t pred);
+
 /**
  * Emit safepoint poll at a loop back-edge.
  * Emits:

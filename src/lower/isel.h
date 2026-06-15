@@ -54,10 +54,12 @@ typedef enum {
     VTX_X86_INC,        /* inc r/m64 */
     VTX_X86_DEC,        /* dec r/m64 */
 
-    /* Shifts */
+    /* Shifts / Rotates */
     VTX_X86_SHL,        /* shl r/m64, imm8  or  shl r/m64, CL */
     VTX_X86_SHR,        /* shr r/m64, imm8  or  shr r/m64, CL */
     VTX_X86_SAR,        /* sar r/m64, imm8  or  sar r/m64, CL */
+    VTX_X86_ROL,        /* rol r/m64, imm8  or  rol r/m64, CL */
+    VTX_X86_ROR,        /* ror r/m64, imm8  or  ror r/m64, CL */
 
     /* Bitwise */
     VTX_X86_AND,        /* and r/m64, r64  or  and r/m64, imm */
@@ -79,9 +81,17 @@ typedef enum {
     /* Sign extension */
     VTX_X86_CQO,        /* sign-extend RAX into RDX:RAX */
     VTX_X86_CDQ,        /* sign-extend EAX into EDX:EAX */
+    VTX_X86_CDQE,       /* sign-extend EAX into RAX (32→64) */
 
     /* Set byte on condition */
     VTX_X86_SETCC,      /* setcc r/m8 */
+
+    /* Bit manipulation */
+    VTX_X86_BSWAP,      /* bswap r64 — byte swap (endianness) */
+    VTX_X86_BSF,        /* bsf r64, r/m64 — bit scan forward (ctz) */
+    VTX_X86_BSR,        /* bsr r64, r/m64 — bit scan reverse (clz) */
+    VTX_X86_POPCNT,     /* popcnt r64, r/m64 — population count (Hamming weight) */
+    VTX_X86_BT,         /* bt r/m64, r64/imm8 — bit test */
 
     /* Stack */
     VTX_X86_PUSH,       /* push r64  or  push imm8  or  push imm32 */
@@ -99,12 +109,28 @@ typedef enum {
 
     /* Floating-point operations (SSE/SSE2) */
     VTX_X86_UCOMISD,    /* ucomisd xmm, xmm — unordered compare double */
+    VTX_X86_COMISD,     /* comisd xmm, xmm — ordered compare double */
     VTX_X86_ADDSD,      /* addsd xmm, xmm — scalar double add */
     VTX_X86_SUBSD,      /* subsd xmm, xmm — scalar double subtract */
     VTX_X86_MULSD,      /* mulsd xmm, xmm — scalar double multiply */
     VTX_X86_DIVSD,      /* divsd xmm, xmm — scalar double divide */
+    VTX_X86_SQRTSD,     /* sqrtsd xmm, xmm — scalar double square root */
     VTX_X86_XORPS,      /* xorps xmm, xmm — bitwise XOR (used for neg) */
-    VTX_X86_MOVSD,      /* movsd xmm, xmm — scalar double move */
+    VTX_X86_MOVSD,      /* movsd xmm, xmm — scalar double move (reg-reg) */
+    VTX_X86_MOVSD_LOAD, /* movsd xmm, [mem] — scalar double load from memory */
+    VTX_X86_MOVSD_STORE,/* movsd [mem], xmm — scalar double store to memory */
+
+    /* Float ↔ Int conversions (SSE2) */
+    VTX_X86_CVTSI2SD,   /* cvtsi2sd xmm, r/m64 — int64 → double */
+    VTX_X86_CVTSD2SI,   /* cvtsd2si r64, xmm — double → int64 (round toward zero) */
+    VTX_X86_CVTTSD2SI,  /* cvttsd2si r64, xmm — double → int64 (truncate) */
+    VTX_X86_CVTSI2SS,   /* cvtsi2ss xmm, r/m64 — int64 → float */
+    VTX_X86_CVTSS2SI,   /* cvtss2si r64, xmm — float → int64 */
+    VTX_X86_CVTTSS2SI,  /* cvttss2si r64, xmm — float → int64 (truncate) */
+
+    /* GPR ↔ XMM bridge (SSE2) */
+    VTX_X86_MOVQ_XMM_R64,  /* movq xmm, r64 — move GPR bits into XMM */
+    VTX_X86_MOVQ_R64_XMM,  /* movq r64, xmm — move XMM bits into GPR */
 
     /* Safepoint poll (pseudo-instruction) */
     VTX_X86_SAFEPOINT_POLL,         /* cmpq [vtx_safepoint_flag], 0; jne deopt_stub */
@@ -118,6 +144,41 @@ typedef enum {
     VTX_X86_MAXPD,      /* maxpd xmm, xmm — packed double max */
     VTX_X86_ANDPD,      /* andpd xmm, xmm — packed double bitwise AND */
     VTX_X86_XORPD,      /* xorpd xmm, xmm — packed double bitwise XOR */
+    VTX_X86_SUBPD,      /* subpd xmm, xmm — packed double subtract */
+    VTX_X86_DIVPD,      /* divpd xmm, xmm — packed double divide */
+
+    /* SSE2 packed integer operations (for vectorized int loops) */
+    VTX_X86_MOVDQA,     /* movdqa xmm, xmm — 128-bit aligned integer move */
+    VTX_X86_MOVDQU,     /* movdqu xmm, xmm — 128-bit unaligned integer move */
+    VTX_X86_PADDD,      /* paddd xmm, xmm — packed 32-bit int add (4 ints) */
+    VTX_X86_PSUBD,      /* psubd xmm, xmm — packed 32-bit int subtract */
+    VTX_X86_PMULLD,     /* pmulld xmm, xmm — packed 32-bit int multiply (SSE4.1) */
+    VTX_X86_PXOR,       /* pxor xmm, xmm — packed integer XOR */
+    VTX_X86_PAND,       /* pand xmm, xmm — packed integer AND */
+    VTX_X86_POR,        /* por xmm, xmm — packed integer OR */
+    VTX_X86_PCMPEQD,    /* pcmpeqd xmm, xmm — packed 32-bit int compare equal */
+
+    /* SSE packed single-precision float operations */
+    VTX_X86_MOVAPS,     /* movaps xmm, xmm — 128-bit aligned float move */
+    VTX_X86_ADDPS,      /* addps xmm, xmm — packed float add (4 floats) */
+    VTX_X86_MULPS,      /* mulps xmm, xmm — packed float multiply */
+    VTX_X86_SUBPS,      /* subps xmm, xmm — packed float subtract */
+    VTX_X86_DIVPS,      /* divps xmm, xmm — packed float divide */
+    VTX_X86_MINPS,      /* minps xmm, xmm — packed float min */
+    VTX_X86_MAXPS,      /* maxps xmm, xmm — packed float max */
+    VTX_X86_CMPPS,      /* cmpps xmm, xmm, imm8 — packed float compare */
+
+    /* SSE2 scalar single-precision float operations */
+    VTX_X86_ADDSS,      /* addss xmm, xmm — scalar float add */
+    VTX_X86_SUBSS,      /* subss xmm, xmm — scalar float subtract */
+    VTX_X86_MULSS,      /* mulss xmm, xmm — scalar float multiply */
+    VTX_X86_DIVSS,      /* divss xmm, xmm — scalar float divide */
+    VTX_X86_SQRTSS,     /* sqrtss xmm, xmm — scalar float square root */
+    VTX_X86_UCOMISS,    /* ucomiss xmm, xmm — unordered compare float */
+    VTX_X86_MOVSS,      /* movss xmm, xmm — scalar float move */
+
+    /* Unsigned division */
+    VTX_X86_DIV,        /* div r/m64 — unsigned RDX:RAX / r/m64 */
 
     VTX_X86_OPCODE_COUNT
 } vtx_x86_opcode_t;

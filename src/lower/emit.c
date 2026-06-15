@@ -650,6 +650,488 @@ void vtx_x86_emit_movsd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
     emit_sse_sd_rr(e, 0x10, dst, src);  /* F2 0F 10 /r (movsd xmm, xmm) */
 }
 
+/* ---- Scalar single-precision float (SSE) ---- */
+
+static void emit_sse_ss_rr(vtx_x86_emit_t *e, uint8_t opcode,
+                             uint8_t dst, uint8_t src)
+{
+    int r = reg_hi(src);
+    int b = reg_hi(dst);
+    if (r || b) {
+        emit_rex(e, 0, r, 0, b);
+    }
+    emit_byte(e, 0xF3);  /* scalar single prefix */
+    emit_byte(e, 0x0F);
+    emit_byte(e, opcode);
+    emit_modrm(e, 3, src & 7, dst & 7);
+}
+
+void vtx_x86_emit_addss(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    emit_sse_ss_rr(e, 0x58, dst, src);  /* F3 0F 58 /r */
+}
+
+void vtx_x86_emit_subss(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    emit_sse_ss_rr(e, 0x5C, dst, src);  /* F3 0F 5C /r */
+}
+
+void vtx_x86_emit_mulss(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    emit_sse_ss_rr(e, 0x59, dst, src);  /* F3 0F 59 /r */
+}
+
+void vtx_x86_emit_divss(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    emit_sse_ss_rr(e, 0x5E, dst, src);  /* F3 0F 5E /r */
+}
+
+void vtx_x86_emit_sqrtss(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    emit_sse_ss_rr(e, 0x51, dst, src);  /* F3 0F 51 /r */
+}
+
+void vtx_x86_emit_ucomiss(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    /* UCOMISS xmm, xmm — no mandatory prefix, 0F 2E /r */
+    int r = reg_hi(src);
+    int b = reg_hi(dst);
+    if (r || b) {
+        emit_rex(e, 0, r, 0, b);
+    }
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0x2E);
+    emit_modrm(e, 3, src & 7, dst & 7);
+}
+
+void vtx_x86_emit_movss(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    emit_sse_ss_rr(e, 0x10, dst, src);  /* F3 0F 10 /r */
+}
+
+/* ---- Float ↔ Int conversions (SSE2) ---- */
+
+void vtx_x86_emit_cvtsi2sd(vtx_x86_emit_t *e, uint8_t dst_xmm, uint8_t src_gpr)
+{
+    /* CVTSI2SD xmm, r/m64: F2 REX.W 0F 2A /r */
+    emit_byte(e, 0xF2);
+    emit_rex(e, 1, reg_hi(dst_xmm), 0, reg_hi(src_gpr));
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0x2A);
+    emit_modrm(e, 3, dst_xmm & 7, src_gpr & 7);
+}
+
+void vtx_x86_emit_cvtsd2si(vtx_x86_emit_t *e, uint8_t dst_gpr, uint8_t src_xmm)
+{
+    /* CVTSD2SI r64, xmm: F2 REX.W 0F 2D /r */
+    emit_byte(e, 0xF2);
+    emit_rex(e, 1, reg_hi(dst_gpr), 0, reg_hi(src_xmm));
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0x2D);
+    emit_modrm(e, 3, dst_gpr & 7, src_xmm & 7);
+}
+
+void vtx_x86_emit_cvttsd2si(vtx_x86_emit_t *e, uint8_t dst_gpr, uint8_t src_xmm)
+{
+    /* CVTTSD2SI r64, xmm: F2 REX.W 0F 2C /r */
+    emit_byte(e, 0xF2);
+    emit_rex(e, 1, reg_hi(dst_gpr), 0, reg_hi(src_xmm));
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0x2C);
+    emit_modrm(e, 3, dst_gpr & 7, src_xmm & 7);
+}
+
+void vtx_x86_emit_cvtsi2ss(vtx_x86_emit_t *e, uint8_t dst_xmm, uint8_t src_gpr)
+{
+    /* CVTSI2SS xmm, r/m64: F3 REX.W 0F 2A /r */
+    emit_byte(e, 0xF3);
+    emit_rex(e, 1, reg_hi(dst_xmm), 0, reg_hi(src_gpr));
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0x2A);
+    emit_modrm(e, 3, dst_xmm & 7, src_gpr & 7);
+}
+
+void vtx_x86_emit_cvtss2si(vtx_x86_emit_t *e, uint8_t dst_gpr, uint8_t src_xmm)
+{
+    /* CVTSS2SI r64, xmm: F3 REX.W 0F 2D /r */
+    emit_byte(e, 0xF3);
+    emit_rex(e, 1, reg_hi(dst_gpr), 0, reg_hi(src_xmm));
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0x2D);
+    emit_modrm(e, 3, dst_gpr & 7, src_xmm & 7);
+}
+
+void vtx_x86_emit_cvttss2si(vtx_x86_emit_t *e, uint8_t dst_gpr, uint8_t src_xmm)
+{
+    /* CVTTSS2SI r64, xmm: F3 REX.W 0F 2C /r */
+    emit_byte(e, 0xF3);
+    emit_rex(e, 1, reg_hi(dst_gpr), 0, reg_hi(src_xmm));
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0x2C);
+    emit_modrm(e, 3, dst_gpr & 7, src_xmm & 7);
+}
+
+/* ---- GPR ↔ XMM bridge (SSE2) ---- */
+
+void vtx_x86_emit_movq_xmm_r64(vtx_x86_emit_t *e, uint8_t dst_xmm, uint8_t src_gpr)
+{
+    /* MOVQ xmm, r64: 66 REX.W 0F 6E /r */
+    emit_byte(e, 0x66);
+    emit_rex(e, 1, reg_hi(dst_xmm), 0, reg_hi(src_gpr));
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0x6E);
+    emit_modrm(e, 3, dst_xmm & 7, src_gpr & 7);
+}
+
+void vtx_x86_emit_movq_r64_xmm(vtx_x86_emit_t *e, uint8_t dst_gpr, uint8_t src_xmm)
+{
+    /* MOVQ r64, xmm: 66 REX.W 0F 7E /r */
+    emit_byte(e, 0x66);
+    emit_rex(e, 1, reg_hi(dst_gpr), 0, reg_hi(src_xmm));
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0x7E);
+    emit_modrm(e, 3, dst_gpr & 7, src_xmm & 7);
+}
+
+/* ---- COMISD (ordered compare) ---- */
+
+void vtx_x86_emit_comisd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    /* COMISD xmm, xmm: 66 0F 2F /r */
+    int r = reg_hi(src);
+    int b = reg_hi(dst);
+    if (r || b) {
+        emit_rex(e, 0, r, 0, b);
+    }
+    emit_byte(e, 0x66);
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0x2F);
+    emit_modrm(e, 3, src & 7, dst & 7);
+}
+
+/* ---- SQRTSD ---- */
+
+void vtx_x86_emit_sqrtsd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    emit_sse_sd_rr(e, 0x51, dst, src);  /* F2 0F 51 /r */
+}
+
+/* ---- MOVSD load/store from memory ---- */
+
+void vtx_x86_emit_movsd_load(vtx_x86_emit_t *e, uint8_t dst_xmm, uint8_t base, int32_t disp)
+{
+    /* MOVSD xmm, [base+disp]: F2 0F 10 /r with mem operand */
+    int b = reg_hi(base);
+    int r = reg_hi(dst_xmm);
+    if (r || b) {
+        emit_rex(e, 0, r, 0, b);
+    }
+    emit_byte(e, 0xF2);
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0x10);
+    /* ModR/M with base register and displacement */
+    if (disp == 0 && (base & 7) != 5) {
+        emit_modrm(e, 0, dst_xmm & 7, base & 7);
+        if ((base & 7) == 4) emit_sib(e, 0, 4, 4); /* SIB for R12/RSP */
+    } else if (disp >= -128 && disp <= 127) {
+        emit_modrm(e, 1, dst_xmm & 7, base & 7);
+        if ((base & 7) == 4) emit_sib(e, 0, 4, 4);
+        emit_byte(e, (uint8_t)disp);
+    } else {
+        emit_modrm(e, 2, dst_xmm & 7, base & 7);
+        if ((base & 7) == 4) emit_sib(e, 0, 4, 4);
+        emit_dword(e, (uint32_t)disp);
+    }
+}
+
+void vtx_x86_emit_movsd_store(vtx_x86_emit_t *e, uint8_t base, int32_t disp, uint8_t src_xmm)
+{
+    /* MOVSD [base+disp], xmm: F2 0F 11 /r with mem operand */
+    int b = reg_hi(base);
+    int r = reg_hi(src_xmm);
+    if (r || b) {
+        emit_rex(e, 0, r, 0, b);
+    }
+    emit_byte(e, 0xF2);
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0x11);
+    if (disp == 0 && (base & 7) != 5) {
+        emit_modrm(e, 0, src_xmm & 7, base & 7);
+        if ((base & 7) == 4) emit_sib(e, 0, 4, 4);
+    } else if (disp >= -128 && disp <= 127) {
+        emit_modrm(e, 1, src_xmm & 7, base & 7);
+        if ((base & 7) == 4) emit_sib(e, 0, 4, 4);
+        emit_byte(e, (uint8_t)disp);
+    } else {
+        emit_modrm(e, 2, src_xmm & 7, base & 7);
+        if ((base & 7) == 4) emit_sib(e, 0, 4, 4);
+        emit_dword(e, (uint32_t)disp);
+    }
+}
+
+/* ---- Bit manipulation ---- */
+
+void vtx_x86_emit_bswap(vtx_x86_emit_t *e, uint8_t reg)
+{
+    /* BSWAP r64: REX.W 0F C8+rd */
+    emit_rex(e, 1, 0, 0, reg_hi(reg));
+    emit_byte(e, 0x0F);
+    emit_byte(e, (uint8_t)(0xC8 | (reg & 7)));
+}
+
+void vtx_x86_emit_bsf(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    /* BSF r64, r/m64: REX.W 0F BC /r */
+    emit_rex(e, 1, reg_hi(dst), 0, reg_hi(src));
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0xBC);
+    emit_modrm(e, 3, dst & 7, src & 7);
+}
+
+void vtx_x86_emit_bsr(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    /* BSR r64, r/m64: REX.W 0F BD /r */
+    emit_rex(e, 1, reg_hi(dst), 0, reg_hi(src));
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0xBD);
+    emit_modrm(e, 3, dst & 7, src & 7);
+}
+
+void vtx_x86_emit_popcnt(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    /* POPCNT r64, r/m64: F3 REX.W 0F B8 /r */
+    emit_byte(e, 0xF3);
+    emit_rex(e, 1, reg_hi(dst), 0, reg_hi(src));
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0xB8);
+    emit_modrm(e, 3, dst & 7, src & 7);
+}
+
+void vtx_x86_emit_rol_ri(vtx_x86_emit_t *e, uint8_t dst, uint8_t count)
+{
+    /* ROL r/m64, imm8: REX.W C1 /0 imm8 */
+    emit_rex(e, 1, 0, 0, reg_hi(dst));
+    emit_byte(e, 0xC1);
+    emit_modrm(e, 3, 0, dst & 7);
+    emit_byte(e, count);
+}
+
+void vtx_x86_emit_rol_cl(vtx_x86_emit_t *e, uint8_t dst)
+{
+    /* ROL r/m64, CL: REX.W D3 /0 */
+    emit_rex(e, 1, 0, 0, reg_hi(dst));
+    emit_byte(e, 0xD3);
+    emit_modrm(e, 3, 0, dst & 7);
+}
+
+void vtx_x86_emit_ror_ri(vtx_x86_emit_t *e, uint8_t dst, uint8_t count)
+{
+    /* ROR r/m64, imm8: REX.W C1 /1 imm8 */
+    emit_rex(e, 1, 0, 0, reg_hi(dst));
+    emit_byte(e, 0xC1);
+    emit_modrm(e, 3, 1, dst & 7);
+    emit_byte(e, count);
+}
+
+void vtx_x86_emit_ror_cl(vtx_x86_emit_t *e, uint8_t dst)
+{
+    /* ROR r/m64, CL: REX.W D3 /1 */
+    emit_rex(e, 1, 0, 0, reg_hi(dst));
+    emit_byte(e, 0xD3);
+    emit_modrm(e, 3, 1, dst & 7);
+}
+
+/* ---- CDQE (sign-extend EAX → RAX) ---- */
+
+void vtx_x86_emit_cdqe(vtx_x86_emit_t *e)
+{
+    /* CDQE: REX.W 98 */
+    emit_rex(e, 1, 0, 0, 0);
+    emit_byte(e, 0x98);
+}
+
+/* ---- Unsigned DIV ---- */
+
+void vtx_x86_emit_div_r(vtx_x86_emit_t *e, uint8_t src)
+{
+    /* DIV r/m64: REX.W F7 /6 */
+    emit_rex(e, 1, 0, 0, reg_hi(src));
+    emit_byte(e, 0xF7);
+    emit_modrm(e, 3, 6, src & 7);
+}
+
+/* ---- Packed double SIMD ---- */
+
+static void emit_sse_pd_rr(vtx_x86_emit_t *e, uint8_t opcode,
+                             uint8_t dst, uint8_t src)
+{
+    int r = reg_hi(src);
+    int b = reg_hi(dst);
+    if (r || b) {
+        emit_rex(e, 0, r, 0, b);
+    }
+    emit_byte(e, 0x66);  /* packed double prefix */
+    emit_byte(e, 0x0F);
+    emit_byte(e, opcode);
+    emit_modrm(e, 3, src & 7, dst & 7);
+}
+
+void vtx_x86_emit_subpd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    emit_sse_pd_rr(e, 0x5C, dst, src);  /* 66 0F 5C /r */
+}
+
+void vtx_x86_emit_divpd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    emit_sse_pd_rr(e, 0x5E, dst, src);  /* 66 0F 5E /r */
+}
+
+/* ---- Packed integer SIMD (SSE2) ---- */
+
+static void emit_sse_pi_rr(vtx_x86_emit_t *e, uint8_t opcode,
+                             uint8_t dst, uint8_t src)
+{
+    /* 66 0F opcode /r — most SSE2 packed integer ops */
+    int r = reg_hi(src);
+    int b = reg_hi(dst);
+    if (r || b) {
+        emit_rex(e, 0, r, 0, b);
+    }
+    emit_byte(e, 0x66);
+    emit_byte(e, 0x0F);
+    emit_byte(e, opcode);
+    emit_modrm(e, 3, src & 7, dst & 7);
+}
+
+void vtx_x86_emit_movdqa(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    emit_sse_pi_rr(e, 0x6F, dst, src);  /* 66 0F 6F /r (load) */
+}
+
+void vtx_x86_emit_movdqu(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    /* MOVDQU: F3 0F 6F /r */
+    int r = reg_hi(src);
+    int b = reg_hi(dst);
+    if (r || b) {
+        emit_rex(e, 0, r, 0, b);
+    }
+    emit_byte(e, 0xF3);
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0x6F);
+    emit_modrm(e, 3, src & 7, dst & 7);
+}
+
+void vtx_x86_emit_paddd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    emit_sse_pi_rr(e, 0xFE, dst, src);  /* 66 0F FE /r */
+}
+
+void vtx_x86_emit_psubd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    emit_sse_pi_rr(e, 0xFA, dst, src);  /* 66 0F FA /r */
+}
+
+void vtx_x86_emit_pmulld(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    /* PMULLD: 66 0F 38 40 /r (SSE4.1 — 3-byte opcode) */
+    int r = reg_hi(src);
+    int b = reg_hi(dst);
+    if (r || b) {
+        emit_rex(e, 0, r, 0, b);
+    }
+    emit_byte(e, 0x66);
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0x38);
+    emit_byte(e, 0x40);
+    emit_modrm(e, 3, src & 7, dst & 7);
+}
+
+void vtx_x86_emit_pxor(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    emit_sse_pi_rr(e, 0xEF, dst, src);  /* 66 0F EF /r */
+}
+
+void vtx_x86_emit_pand(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    emit_sse_pi_rr(e, 0xDB, dst, src);  /* 66 0F DB /r */
+}
+
+void vtx_x86_emit_por(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    emit_sse_pi_rr(e, 0xEB, dst, src);  /* 66 0F EB /r */
+}
+
+void vtx_x86_emit_pcmpeqd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    emit_sse_pi_rr(e, 0x76, dst, src);  /* 66 0F 76 /r */
+}
+
+/* ---- Packed single-precision float SIMD (SSE) ---- */
+
+static void emit_sse_ps_rr(vtx_x86_emit_t *e, uint8_t opcode,
+                             uint8_t dst, uint8_t src)
+{
+    /* 0F opcode /r — no prefix for packed single */
+    int r = reg_hi(src);
+    int b = reg_hi(dst);
+    if (r || b) {
+        emit_rex(e, 0, r, 0, b);
+    }
+    emit_byte(e, 0x0F);
+    emit_byte(e, opcode);
+    emit_modrm(e, 3, src & 7, dst & 7);
+}
+
+void vtx_x86_emit_movaps(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    emit_sse_ps_rr(e, 0x28, dst, src);  /* 0F 28 /r */
+}
+
+void vtx_x86_emit_addps(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    emit_sse_ps_rr(e, 0x58, dst, src);  /* 0F 58 /r */
+}
+
+void vtx_x86_emit_mulps(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    emit_sse_ps_rr(e, 0x59, dst, src);  /* 0F 59 /r */
+}
+
+void vtx_x86_emit_subps(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    emit_sse_ps_rr(e, 0x5C, dst, src);  /* 0F 5C /r */
+}
+
+void vtx_x86_emit_divps(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    emit_sse_ps_rr(e, 0x5E, dst, src);  /* 0F 5E /r */
+}
+
+void vtx_x86_emit_minps(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    emit_sse_ps_rr(e, 0x5D, dst, src);  /* 0F 5D /r */
+}
+
+void vtx_x86_emit_maxps(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    emit_sse_ps_rr(e, 0x5F, dst, src);  /* 0F 5F /r */
+}
+
+void vtx_x86_emit_cmpps(vtx_x86_emit_t *e, uint8_t dst, uint8_t src, uint8_t pred)
+{
+    /* CMPPS xmm, xmm, imm8: 0F C2 /r imm8 */
+    int r = reg_hi(src);
+    int b = reg_hi(dst);
+    if (r || b) {
+        emit_rex(e, 0, r, 0, b);
+    }
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0xC2);
+    emit_modrm(e, 3, src & 7, dst & 7);
+    emit_byte(e, pred);
+}
+
 void vtx_x86_emit_xorps(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
 {
     /* XORPS xmm, xmm — no mandatory prefix, just 0F 57 /r */
@@ -2533,6 +3015,310 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
             emit_byte(e, 0x0F);
             emit_byte(e, 0x57);
             emit_modrm(e, 3, reg_lo(r0), reg_lo(r1));
+        }
+        break;
+
+    /* ---- New P0/P1 instruction emission dispatch ---- */
+
+    case VTX_X86_COMISD:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF)
+            vtx_x86_emit_comisd(e, r0, r1);
+        break;
+
+    case VTX_X86_SQRTSD:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF)
+            vtx_x86_emit_sqrtsd(e, r0, r1);
+        break;
+
+    case VTX_X86_CVTSI2SD:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF)
+            vtx_x86_emit_cvtsi2sd(e, r0, r1);
+        break;
+
+    case VTX_X86_CVTSD2SI:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF)
+            vtx_x86_emit_cvtsd2si(e, r0, r1);
+        break;
+
+    case VTX_X86_CVTTSD2SI:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF)
+            vtx_x86_emit_cvttsd2si(e, r0, r1);
+        break;
+
+    case VTX_X86_CVTSI2SS:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF)
+            vtx_x86_emit_cvtsi2ss(e, r0, r1);
+        break;
+
+    case VTX_X86_CVTSS2SI:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF)
+            vtx_x86_emit_cvtss2si(e, r0, r1);
+        break;
+
+    case VTX_X86_CVTTSS2SI:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF)
+            vtx_x86_emit_cvttss2si(e, r0, r1);
+        break;
+
+    case VTX_X86_MOVQ_XMM_R64:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF)
+            vtx_x86_emit_movq_xmm_r64(e, r0, r1);
+        break;
+
+    case VTX_X86_MOVQ_R64_XMM:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF)
+            vtx_x86_emit_movq_r64_xmm(e, r0, r1);
+        break;
+
+    case VTX_X86_BSWAP:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        if (r0 != 0xFF) vtx_x86_emit_bswap(e, r0);
+        break;
+
+    case VTX_X86_BSF:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_bsf(e, r0, r1);
+        break;
+
+    case VTX_X86_BSR:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_bsr(e, r0, r1);
+        break;
+
+    case VTX_X86_POPCNT:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_popcnt(e, r0, r1);
+        break;
+
+    case VTX_X86_ROL:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        if (r0 != 0xFF) {
+            if (inst->flags & VTX_INST_FLAG_HAS_IMM)
+                vtx_x86_emit_rol_ri(e, r0, (uint8_t)inst->imm);
+            else
+                vtx_x86_emit_rol_cl(e, r0);
+        }
+        break;
+
+    case VTX_X86_ROR:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        if (r0 != 0xFF) {
+            if (inst->flags & VTX_INST_FLAG_HAS_IMM)
+                vtx_x86_emit_ror_ri(e, r0, (uint8_t)inst->imm);
+            else
+                vtx_x86_emit_ror_cl(e, r0);
+        }
+        break;
+
+    case VTX_X86_CDQE:
+        vtx_x86_emit_cdqe(e);
+        break;
+
+    case VTX_X86_DIV:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        if (r0 != 0xFF) vtx_x86_emit_div_r(e, r0);
+        break;
+
+    case VTX_X86_SUBPD:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_subpd(e, r0, r1);
+        break;
+
+    case VTX_X86_DIVPD:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_divpd(e, r0, r1);
+        break;
+
+    case VTX_X86_MOVDQA:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_movdqa(e, r0, r1);
+        break;
+
+    case VTX_X86_MOVDQU:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_movdqu(e, r0, r1);
+        break;
+
+    case VTX_X86_PADDD:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_paddd(e, r0, r1);
+        break;
+
+    case VTX_X86_PSUBD:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_psubd(e, r0, r1);
+        break;
+
+    case VTX_X86_PMULLD:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_pmulld(e, r0, r1);
+        break;
+
+    case VTX_X86_PXOR:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_pxor(e, r0, r1);
+        break;
+
+    case VTX_X86_PAND:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_pand(e, r0, r1);
+        break;
+
+    case VTX_X86_POR:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_por(e, r0, r1);
+        break;
+
+    case VTX_X86_PCMPEQD:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_pcmpeqd(e, r0, r1);
+        break;
+
+    case VTX_X86_MOVAPS:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_movaps(e, r0, r1);
+        break;
+
+    case VTX_X86_ADDPS:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_addps(e, r0, r1);
+        break;
+
+    case VTX_X86_MULPS:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_mulps(e, r0, r1);
+        break;
+
+    case VTX_X86_SUBPS:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_subps(e, r0, r1);
+        break;
+
+    case VTX_X86_DIVPS:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_divps(e, r0, r1);
+        break;
+
+    case VTX_X86_MINPS:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_minps(e, r0, r1);
+        break;
+
+    case VTX_X86_MAXPS:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_maxps(e, r0, r1);
+        break;
+
+    case VTX_X86_CMPPS:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF)
+            vtx_x86_emit_cmpps(e, r0, r1, (uint8_t)inst->imm);
+        break;
+
+    case VTX_X86_ADDSS:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_addss(e, r0, r1);
+        break;
+
+    case VTX_X86_SUBSS:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_subss(e, r0, r1);
+        break;
+
+    case VTX_X86_MULSS:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_mulss(e, r0, r1);
+        break;
+
+    case VTX_X86_DIVSS:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_divss(e, r0, r1);
+        break;
+
+    case VTX_X86_SQRTSS:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_sqrtss(e, r0, r1);
+        break;
+
+    case VTX_X86_UCOMISS:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_ucomiss(e, r0, r1);
+        break;
+
+    case VTX_X86_MOVSS:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_movss(e, r0, r1);
+        break;
+
+    case VTX_X86_MOVSD_LOAD:
+    case VTX_X86_MOVSD_STORE:
+        /* Memory-operand MOVSD handled via mem operand in inst */
+        /* For now, emit as reg-reg MOVSD — memory variant needs memop resolution */
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF)
+            vtx_x86_emit_movsd(e, r0, r1);
+        break;
+
+    case VTX_X86_BT:
+        /* BT r/m64, imm8: REX.W 0F BA /4 imm8 */
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        if (r0 != 0xFF) {
+            emit_rex(e, 1, 0, 0, reg_hi(r0));
+            emit_byte(e, 0x0F);
+            emit_byte(e, 0xBA);
+            emit_modrm(e, 3, 4, r0 & 7);
+            if (inst->flags & VTX_INST_FLAG_HAS_IMM)
+                emit_byte(e, (uint8_t)inst->imm);
         }
         break;
 
