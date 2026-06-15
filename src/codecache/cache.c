@@ -272,7 +272,7 @@ int vtx_code_cache_free(vtx_code_cache_t *cache, void *code_ptr, uint32_t code_s
                     seg->free_count++;
                 }
 
-                cache->total_size -= code_size;
+                cache->total_size -= (code_size + 15u) & ~15u;
             }
             return 0;
         }

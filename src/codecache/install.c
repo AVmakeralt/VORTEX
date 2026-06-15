@@ -132,7 +132,9 @@ bool vtx_install_method(vtx_code_cache_t *cache,
                          uint32_t dep_type_count,
                          const uint32_t *dep_shapes,
                          uint32_t dep_shape_count,
-                         vtx_arena_t *arena)
+                         vtx_arena_t *arena,
+                         vtx_poly_ic_t **poly_ics,
+                         uint32_t poly_ic_count)
 {
     if (!cache || !method || !code || code_size == 0) return false;
 
@@ -184,6 +186,8 @@ bool vtx_install_method(vtx_code_cache_t *cache,
     cm->last_used_timestamp = 0;
     cm->call_count = 0;
     cm->next = NULL;
+    cm->poly_ics = poly_ics;
+    cm->poly_ic_count = poly_ic_count;
 
     /* Copy dependency sets */
     if (dep_type_count > 0 && dep_types) {
@@ -249,6 +253,16 @@ int vtx_uninstall_method(vtx_code_cache_t *cache,
     if (cm->dep_shape_ids) {
         free(cm->dep_shape_ids);
         cm->dep_shape_ids = NULL;
+    }
+
+    /* Free polymorphic inline caches */
+    if (cm->poly_ics) {
+        for (uint32_t i = 0; i < cm->poly_ic_count; i++) {
+            free(cm->poly_ics[i]);
+        }
+        free(cm->poly_ics);
+        cm->poly_ics = NULL;
+        cm->poly_ic_count = 0;
     }
 
     /* Remove from registry */

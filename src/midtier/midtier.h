@@ -35,11 +35,11 @@ typedef struct {
     uint32_t inline_max_size;   /* max callee bytecode size for inlining (0 = no inlining) */
     bool specialize_arithmetic; /* specialize integer/float ops based on type feedback? */
 
-    /* Statistics */
+    /* Statistics — stored in global struct so they persist across compilations */
     uint32_t methods_compiled;
     uint32_t sites_specialized;
     uint32_t guards_inserted;
-    uint32_t compilation_time_ns;
+    uint64_t compilation_time_ns;  /* total compilation time in nanoseconds (uint64 to avoid wrap) */
 } vtx_midtier_config_t;
 
 /* Result of mid-tier compilation */

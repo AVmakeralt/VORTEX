@@ -106,7 +106,7 @@ bool vtx_is_compilation_requested(const vtx_compile_context_t *ctx,
 {
     if (ctx == NULL || ctx->compilation_requested == NULL) return false;
     if (method_id >= ctx->compilation_requested_capacity) return false;
-    return ctx->compilation_requested[method_id];
+    return __atomic_load_n(&ctx->compilation_requested[method_id], __ATOMIC_RELAXED);
 }
 
 void vtx_clear_compilation_requested(vtx_compile_context_t *ctx,
@@ -114,7 +114,7 @@ void vtx_clear_compilation_requested(vtx_compile_context_t *ctx,
 {
     if (ctx == NULL || ctx->compilation_requested == NULL) return;
     if (method_id >= ctx->compilation_requested_capacity) return;
-    ctx->compilation_requested[method_id] = false;
+    __atomic_store_n(&ctx->compilation_requested[method_id], false, __ATOMIC_RELAXED);
 }
 
 /* ========================================================================== */
@@ -139,7 +139,7 @@ void vtx_request_compilation(vtx_compile_context_t *ctx,
     }
 
     /* Mark as requested */
-    ctx->compilation_requested[method_id] = true;
+    __atomic_store_n(&ctx->compilation_requested[method_id], true, __ATOMIC_RELAXED);
 
     /* Submit to thread pool */
     if (ctx->threadpool != NULL) {
@@ -151,7 +151,7 @@ void vtx_request_compilation(vtx_compile_context_t *ctx,
 
         if (vtx_threadpool_submit_task(ctx->threadpool, &task) != 0) {
             /* Submission failed — clear the flag so we can retry later */
-            ctx->compilation_requested[method_id] = false;
+            __atomic_store_n(&ctx->compilation_requested[method_id], false, __ATOMIC_RELAXED);
         }
     }
 }

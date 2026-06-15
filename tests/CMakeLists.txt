@@ -147,6 +147,29 @@ target_link_libraries(test_interp_basics PRIVATE
 )
 add_test(NAME test_interp_basics COMMAND test_interp_basics)
 
+# test_jit_e2e — End-to-end JIT compilation and execution tests
+add_executable(test_jit_e2e
+    integration/test_jit_e2e.c
+    ${CMAKE_SOURCE_DIR}/src/runtime_stubs.c
+)
+target_link_libraries(test_jit_e2e PRIVATE
+    vortex_test_framework
+    -Wl,--start-group
+    vortex_baseline
+    vortex_codecache
+    vortex_compile
+    vortex_interp
+    vortex_runtime
+    vortex_ir
+    vortex_guard
+    vortex_deopt
+    vortex_profile
+    -Wl,--end-group
+    m
+    pthread
+)
+add_test(NAME test_jit_e2e COMMAND test_jit_e2e)
+
 # ---- Stress tests (1000 tests) ----
 
 # test_stress_runtime: Arena, Object, Type System, Bytecode, GC (200 tests)

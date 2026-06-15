@@ -1,4 +1,5 @@
 #include "interp/dispatch.h"
+#include "baseline/codegen.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -472,6 +473,68 @@ static inline uint32_t vtx_hash_site_index(const void *method, uint32_t pc)
     return h % VTX_FEEDBACK_SITE_MAX;
 }
 
+/**
+ * JIT dispatch: call compiled code directly from the interpreter.
+ *
+ * When a method has been JIT-compiled (compiled_code != NULL), we can
+ * call it directly via function pointer instead of creating an interpreter
+ * frame and running through the dispatch loop. This is the key bridge
+ * that makes the JIT actually execute code.
+ *
+ * The compiled code follows the baseline JIT calling convention:
+ *   - RDI = method pointer (1st arg)
+ *   - RSI = deopt_info (2nd arg, can be NULL)
+ *   - RDX = profile_data (3rd arg, can be NULL)
+ *   - Stack args: arg0, arg1, ... (passed as for interpreter)
+ *
+ * The compiled code returns a vtx_value_t.
+ */
+typedef vtx_value_t (*vtx_jit_entry_t)(
+    const vtx_method_desc_t *method,
+    void *deopt_info,
+    void *profile_data,
+    vtx_value_t *args,
+    uint32_t arg_count);
+
+static inline vtx_value_t vtx_dispatch_jit(
+    vtx_interp_t *interp,
+    const vtx_method_desc_t *target_method,
+    vtx_value_t *args,
+    uint32_t arg_count)
+{
+    /* Read compiled_code with acquire semantics to ensure we see
+     * the fully initialized code after the store in vtx_install_method */
+    void *code = __atomic_load_n(&target_method->compiled_code, __ATOMIC_ACQUIRE);
+    if (VTX_UNLIKELY(code == NULL)) {
+        return VTX_VALUE_UNDEFINED; /* Should not happen, but be safe */
+    }
+
+    /* Call the JIT-compiled code directly.
+     * The baseline JIT's prologue expects:
+     *   RDI = method ptr, RSI = deopt_info, RDX = profile_data
+     * And it returns a vtx_value_t in RAX.
+     * We call through the runtime helpers which handle the ABI bridge. */
+    vtx_jit_entry_t entry = (vtx_jit_entry_t)code;
+
+    vtx_value_t result;
+    if (arg_count > 0 && args != NULL) {
+        /* Pass args directly — the JIT prologue copies args[i] → local[i].
+         * No placeholder receiver is needed; for virtual calls the receiver
+         * is already args[0], and for static calls args map 1:1 to locals. */
+        result = entry(target_method, NULL, NULL, args, arg_count);
+    } else {
+        result = entry(target_method, NULL, NULL, NULL, 0);
+    }
+
+    /* If the JIT code returned undefined, it may have hit a deopt.
+     * Fall back to the interpreter for this call. */
+    if (VTX_UNLIKELY(vtx_is_undefined(result))) {
+        return vtx_interp_run(interp, target_method, args, arg_count);
+    }
+
+    return result;
+}
+
 /* ========================================================================== */
 /* Main interpreter dispatch loop                                              */
 /* ========================================================================== */
@@ -483,6 +546,16 @@ vtx_value_t vtx_interp_run(vtx_interp_t *interp,
 {
     VTX_ASSERT(interp != NULL, "interpreter must not be NULL");
     VTX_ASSERT(method != NULL, "method must not be NULL");
+
+    /* ===================================================================
+     * JIT DISPATCH: If the method has been compiled, call JIT code
+     * directly instead of falling through to the interpreter.
+     * This is the key bridge that makes JIT-compiled methods actually
+     * execute native code when invoked through vtx_interp_run().
+     * =================================================================== */
+    if (__atomic_load_n(&method->compiled_code, __ATOMIC_ACQUIRE) != NULL) {
+        return vtx_dispatch_jit(interp, method, args, arg_count);
+    }
 
     /*
      * ===================================================================
@@ -1506,6 +1579,22 @@ dispatch_VT_OP_CALL_STATIC:
         }
         vtx_profiler_record_call_type(&interp->profiler, frame->method,
                                        (uint32_t)pc, receiver_tid);
+
+        /* JIT dispatch: if the target method has been compiled, call it
+         * directly instead of creating an interpreter frame. This is the
+         * key bridge that makes the JIT actually execute code. */
+        if (VTX_UNLIKELY(__atomic_load_n(&target_method->compiled_code, __ATOMIC_ACQUIRE) != NULL)) {
+            uint32_t call_arg_count = target_method->arg_count;
+            if (call_arg_count > 256) call_arg_count = 256;
+            vtx_value_t jit_args_buf[256];
+            for (uint32_t ai = call_arg_count; ai > 0; ai--) {
+                jit_args_buf[ai - 1] = *--sp;
+            }
+            vtx_value_t jit_result = vtx_dispatch_jit(interp, target_method,
+                                                       jit_args_buf, call_arg_count);
+            *sp++ = jit_result;
+            DISPATCH_NEXT();
+        }
 
         /* Pop arguments from caller's stack and copy to callee locals.
          * BUG-2 fix: Cap arg count to prevent stack overflow from

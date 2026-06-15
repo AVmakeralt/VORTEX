@@ -38,6 +38,12 @@
 #include "lower/guard_emit.h"
 #include "ir/node.h"
 
+/**
+ * Global mid-tier statistics.  Persists across calls to vtx_midtier_compile()
+ * so that cumulative counters are not lost when the local cfg goes out of scope.
+ */
+static vtx_midtier_config_t g_midtier_stats;
+
 /* ========================================================================== */
 /* Timing helpers                                                              */
 /* ========================================================================== */
@@ -369,11 +375,11 @@ vtx_midtier_result_t *vtx_midtier_compile(
     result->guards_inserted = guards_inserted;
     result->sites_specialized = sites_specialized;
 
-    /* Record timing */
-    cfg.compilation_time_ns = (uint32_t)(midtier_now_ns() - start_time);
-    cfg.methods_compiled++;
-    cfg.sites_specialized += sites_specialized;
-    cfg.guards_inserted += guards_inserted;
+    /* Record timing — store in the global stats struct, not the local cfg */
+    g_midtier_stats.compilation_time_ns += (uint64_t)(midtier_now_ns() - start_time);
+    g_midtier_stats.methods_compiled++;
+    g_midtier_stats.sites_specialized += sites_specialized;
+    g_midtier_stats.guards_inserted += guards_inserted;
 
     /* Cleanup */
     vtx_x86_emit_destroy(&emit);

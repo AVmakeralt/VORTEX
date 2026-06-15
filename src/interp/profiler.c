@@ -181,6 +181,50 @@ vtx_profile_data_t *vtx_profiler_get_method_data(vtx_profiler_t *profiler,
 
     /* Not found — create a new entry */
     if (profiler_ensure_capacity(profiler, profiler->count + 1) != 0) {
+        /* OOM: try to reuse the least-recently-used entry in the data array.
+         * The LRU entry is the one with the lowest invocation_count (proxy
+         * for coldness). This ensures profiling data is not silently dropped
+         * under memory pressure. */
+        uint32_t lru_idx = 0;
+        uint64_t min_heat = UINT64_MAX;
+        for (uint32_t i = 0; i < profiler->count; i++) {
+            uint64_t heat = profiler->data[i].invocation_count
+                          + profiler->data[i].backward_branch_count * 2;
+            if (heat < min_heat) {
+                min_heat = heat;
+                lru_idx = i;
+            }
+        }
+        if (profiler->count > 0) {
+            /* Free the LRU entry's sub-allocations and reuse the slot */
+            vtx_profile_data_t *pd = &profiler->data[lru_idx];
+            free(pd->call_site_types);
+            pd->call_site_types = NULL;
+            free(pd->branch_taken_counts);
+            pd->branch_taken_counts = NULL;
+            free(pd->branch_total_counts);
+            pd->branch_total_counts = NULL;
+            free(pd->field_shape_ids);
+            pd->field_shape_ids = NULL;
+
+            /* Reinitialize the slot for the new method */
+            memset(pd, 0, sizeof(vtx_profile_data_t));
+            pd->method = method;
+            pd->compiled_tier = VT_TIER_T0;
+            pd->deopt_count = 0;
+            pd->invocation_count = 0;
+            pd->backward_branch_count = 0;
+            pd->call_site_types = NULL;
+            pd->call_site_count = 0;
+            pd->tier_up.tier_up_counter = VTX_TIER_UP_INITIAL_COUNT;
+            pd->tier_up.compilation_requested = false;
+            ensure_profile_arrays(pd);
+
+            /* Invalidate LRU cache — pointers may be stale */
+            memset(profiler->lru, 0, sizeof(profiler->lru));
+            lru_insert(profiler, method, pd);
+            return pd;
+        }
         return NULL;
     }
 

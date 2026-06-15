@@ -1546,7 +1546,7 @@ VTX_TEST(test_cache_12) {
     uint8_t code[] = {0xC3}; /* RET */
     vtx_method_desc_t desc = {"test", "()V", NULL, NULL, 0xFFFFFFFF, 0, 0, false};
     bool ok = vtx_install_method(&cache, &registry, &desc, 1, code, sizeof(code),
-                                  NULL, NULL, NULL, 0, NULL, 0, &arena);
+                                  NULL, NULL, NULL, 0, NULL, 0, &arena, NULL, 0);
     VTX_ASSERT_TRUE(ok);
 
     vtx_code_cache_destroy(&cache);
@@ -1725,8 +1725,8 @@ VTX_TEST(test_evict_08) {
     uint8_t code[] = {0xC3};
     vtx_method_desc_t desc1 = {"m1", "()V", NULL, NULL, 0xFFFFFFFF, 0, 0, false};
     vtx_method_desc_t desc2 = {"m2", "()V", NULL, NULL, 0xFFFFFFFF, 0, 0, false};
-    vtx_install_method(&cache, &registry, &desc1, 10, code, 1, NULL, NULL, NULL, 0, NULL, 0, &arena);
-    vtx_install_method(&cache, &registry, &desc2, 20, code, 1, NULL, NULL, NULL, 0, NULL, 0, &arena);
+    vtx_install_method(&cache, &registry, &desc1, 10, code, 1, NULL, NULL, NULL, 0, NULL, 0, &arena, NULL, 0);
+    vtx_install_method(&cache, &registry, &desc2, 20, code, 1, NULL, NULL, NULL, 0, NULL, 0, &arena, NULL, 0);
 
     int evicted = vtx_evict_lru(&cache, &registry, 1000);
     VTX_ASSERT_TRUE(evicted >= 0);
@@ -1922,7 +1922,7 @@ VTX_TEST(test_inval_10) {
     /* Install a method with dependency, then invalidate */
     uint8_t code[] = {0xC3};
     vtx_method_desc_t desc = {"m", "()V", NULL, NULL, 0xFFFFFFFF, 0, 0, false};
-    vtx_install_method(&cache, &registry, &desc, 100, code, 1, NULL, NULL, NULL, 0, NULL, 0, &arena);
+    vtx_install_method(&cache, &registry, &desc, 100, code, 1, NULL, NULL, NULL, 0, NULL, 0, &arena, NULL, 0);
 
     vtx_inverted_index_add(&index, 42, 100);
     int count = vtx_invalidate_dependencies(42, &cache, &registry, &index);

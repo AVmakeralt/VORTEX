@@ -28,7 +28,7 @@ void vtx_evict_touch(vtx_compiled_method_t *method, uint64_t ts)
     if (!method || !method->is_installed) return;
 
     method->call_count++;
-    method->clock_state.use_bit = true;
+    __atomic_store_n(&method->clock_state.use_bit, true, __ATOMIC_RELEASE);
 
     /* Only update the timestamp every VTX_LRU_UPDATE_INTERVAL calls
      * to amortize the cost of the atomic write. Kept for diagnostics. */
@@ -63,9 +63,9 @@ vtx_compiled_method_t *vtx_evict_find_lru(vtx_method_registry_t *registry)
     do {
         vtx_compiled_method_t *m = registry->methods[pos];
         if (m && m->is_installed && m->is_valid) {
-            if (m->clock_state.use_bit) {
+            if (__atomic_load_n(&m->clock_state.use_bit, __ATOMIC_ACQUIRE)) {
                 /* Recently used — give second chance */
-                m->clock_state.use_bit = false;
+                __atomic_store_n(&m->clock_state.use_bit, false, __ATOMIC_RELAXED);
             } else {
                 /* Not recently used — this is our victim */
                 registry->clock_hand = (pos + 1) & mask;
@@ -125,6 +125,16 @@ int vtx_evict_method(vtx_code_cache_t *cache,
         free(method->dep_shape_ids);
         method->dep_shape_ids = NULL;
         method->dep_shape_count = 0;
+    }
+
+    /* Free polymorphic inline caches */
+    if (method->poly_ics) {
+        for (uint32_t i = 0; i < method->poly_ic_count; i++) {
+            free(method->poly_ics[i]);
+        }
+        free(method->poly_ics);
+        method->poly_ics = NULL;
+        method->poly_ic_count = 0;
     }
 
     /* Remove from registry */

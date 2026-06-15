@@ -11,6 +11,10 @@
 #include "runtime/type_system.h"
 #include "runtime/arena.h"
 
+/* Forward declaration — vtx_poly_ic_t is defined in baseline/codegen.h */
+struct vtx_poly_ic;
+typedef struct vtx_poly_ic vtx_poly_ic_t;
+
 /**
  * VORTEX Method Installation
  *
@@ -80,6 +84,11 @@ struct vtx_compiled_method {
 
     /* Clock eviction state */
     vtx_clock_state_t        clock_state;       /* use-bit and clock-hand position */
+
+    /* Polymorphic inline caches allocated during compilation.
+     * These must be freed when the method is evicted from the code cache. */
+    vtx_poly_ic_t          **poly_ics;          /* array of IC pointers */
+    uint32_t                 poly_ic_count;     /* number of ICs */
 
     /* State */
     bool                     is_installed;      /* true if code is installed */
@@ -157,6 +166,8 @@ int vtx_method_registry_remove(vtx_method_registry_t *registry, uint32_t method_
  * @param dep_shapes  Array of ShapeIDs this method depends on
  * @param dep_shape_count Number of ShapeIDs
  * @param arena       Arena for allocations
+ * @param poly_ics    Array of polymorphic inline cache pointers (ownership transferred)
+ * @param poly_ic_count Number of ICs in the array
  * @return            true on success, false on failure
  */
 bool vtx_install_method(vtx_code_cache_t *cache,
@@ -171,7 +182,9 @@ bool vtx_install_method(vtx_code_cache_t *cache,
                          uint32_t dep_type_count,
                          const uint32_t *dep_shapes,
                          uint32_t dep_shape_count,
-                         vtx_arena_t *arena);
+                         vtx_arena_t *arena,
+                         vtx_poly_ic_t **poly_ics,
+                         uint32_t poly_ic_count);
 
 /**
  * Uninstall a method: mark it as not compiled and free its metadata.

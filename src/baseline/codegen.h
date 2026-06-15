@@ -190,7 +190,7 @@ typedef struct {
  *   offset 48: count            — uint32_t
  *   offset 52: misses           — uint32_t
  */
-typedef struct {
+typedef struct vtx_poly_ic {
     uint32_t type_ids[VTX_POLY_IC_SIZE];   /* cached type IDs */
     void    *targets[VTX_POLY_IC_SIZE];     /* cached code targets (method desc pointers) */
     uint32_t count;                          /* number of valid entries */

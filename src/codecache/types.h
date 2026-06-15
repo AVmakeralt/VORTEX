@@ -10,6 +10,10 @@
 #include "deopt/side_table.h"
 #include "deopt/types.h"
 
+/* Forward declaration — vtx_poly_ic_t is defined in baseline/codegen.h */
+struct vtx_poly_ic;
+typedef struct vtx_poly_ic vtx_poly_ic_t;
+
 /**
  * VORTEX Code Cache — Shared Compiled Code Type Definitions
  *
@@ -64,6 +68,11 @@ typedef struct {
 
     /* Method identity */
     const vtx_method_desc_t *method;      /* the compiled method */
+
+    /* Polymorphic inline caches allocated during compilation.
+     * These must be freed when the compiled code is destroyed. */
+    vtx_poly_ic_t **poly_ics;             /* array of IC pointers */
+    uint32_t         poly_ic_count;       /* number of ICs */
 
     /* Entry point and frame sizing (used by OSR) */
     void             *entry_point;    /* native code entry address */
