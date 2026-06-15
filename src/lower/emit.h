@@ -47,6 +47,18 @@ typedef struct {
      * Used to resolve branch targets after all blocks are emitted. */
     uint32_t *label_offsets;
     uint32_t  label_count;
+
+    /* Constant pool for float immediate materialization.
+     * Constants are emitted after all code blocks, referenced via
+     * RIP-relative MOVSD loads. This is faster than the
+     * MOV r64,imm64 + MOVQ xmm,r64 sequence (10+5=15 bytes vs 8 bytes)
+     * and avoids a GPR↔XMM round-trip through the rename pipeline. */
+    struct {
+        uint64_t *values;       /* 64-bit constant values */
+        uint32_t *ref_offsets;  /* native code offset of each disp32 reference */
+        uint32_t  count;        /* number of constants in the pool */
+        uint32_t  capacity;     /* allocated capacity */
+    } const_pool;
 } vtx_x86_emit_t;
 
 /* ========================================================================== */
@@ -362,6 +374,65 @@ void vtx_x86_emit_ror_cl(vtx_x86_emit_t *e, uint8_t dst);
 /* ---- CDQE / Unsigned DIV ---- */
 void vtx_x86_emit_cdqe(vtx_x86_emit_t *e);
 void vtx_x86_emit_div_r(vtx_x86_emit_t *e, uint8_t src);
+
+/* ---- Timing / Profiling ---- */
+void vtx_x86_emit_rdtsc(vtx_x86_emit_t *e);
+void vtx_x86_emit_rdtscp(vtx_x86_emit_t *e);
+
+/* ---- Atomics ---- */
+void vtx_x86_emit_cmpxchg(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_xadd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+
+/* ---- Memory fences ---- */
+void vtx_x86_emit_lfence(vtx_x86_emit_t *e);
+void vtx_x86_emit_mfence(vtx_x86_emit_t *e);
+void vtx_x86_emit_sfence(vtx_x86_emit_t *e);
+
+/* ---- SSE4.1 rounding ---- */
+void vtx_x86_emit_roundsd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src, uint8_t mode);
+void vtx_x86_emit_roundss(vtx_x86_emit_t *e, uint8_t dst, uint8_t src, uint8_t mode);
+
+/* ---- Constant pool load (RIP-relative MOVSD from literal pool) ---- */
+void vtx_x86_emit_movsd_rip(vtx_x86_emit_t *e, uint8_t dst_xmm, uint64_t double_bits);
+
+/* ---- AVX2 VEX-encoded 256-bit packed double ---- */
+void vtx_x86_emit_vmovapd_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_vaddpd_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2);
+void vtx_x86_emit_vsubpd_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2);
+void vtx_x86_emit_vmulpd_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2);
+void vtx_x86_emit_vdivpd_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2);
+void vtx_x86_emit_vminpd_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2);
+void vtx_x86_emit_vmaxpd_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2);
+void vtx_x86_emit_vxorpd_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2);
+void vtx_x86_emit_vandpd_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2);
+void vtx_x86_emit_vcmppd_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2, uint8_t pred);
+
+/* ---- AVX2 256-bit packed single-precision float ---- */
+void vtx_x86_emit_vmovaps_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_vaddps_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2);
+void vtx_x86_emit_vsubps_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2);
+void vtx_x86_emit_vmulps_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2);
+void vtx_x86_emit_vdivps_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2);
+
+/* ---- AVX2 256-bit packed integer ---- */
+void vtx_x86_emit_vmovdqa_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_vpaddd_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2);
+void vtx_x86_emit_vpsubd_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2);
+void vtx_x86_emit_vpmulld_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2);
+void vtx_x86_emit_vpxor_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2);
+void vtx_x86_emit_vpand_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2);
+void vtx_x86_emit_vpor_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2);
+
+/* ---- AVX2 utility / transition ---- */
+void vtx_x86_emit_vzeroupper(vtx_x86_emit_t *e);
+void vtx_x86_emit_vzeroall(vtx_x86_emit_t *e);
+
+/* ---- AVX2 lane manipulation / broadcast ---- */
+void vtx_x86_emit_vbroadcastsd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_vbroadcastss(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
+void vtx_x86_emit_vperm2f128(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2, uint8_t ctrl);
+void vtx_x86_emit_vinsertf128(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2, uint8_t imm8);
+void vtx_x86_emit_vextractf128(vtx_x86_emit_t *e, uint8_t dst, uint8_t src, uint8_t imm8);
 
 /* ---- Packed double SIMD ---- */
 void vtx_x86_emit_subpd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);

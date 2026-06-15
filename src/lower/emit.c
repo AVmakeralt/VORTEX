@@ -35,6 +35,11 @@ int vtx_x86_emit_init(vtx_x86_emit_t *emit, uint32_t initial_capacity)
     emit->reloc_arena = NULL;
     emit->label_offsets = NULL;
     emit->label_count = 0;
+    /* Initialize constant pool */
+    emit->const_pool.values = NULL;
+    emit->const_pool.ref_offsets = NULL;
+    emit->const_pool.count = 0;
+    emit->const_pool.capacity = 0;
     return 0;
 }
 
@@ -52,6 +57,11 @@ void vtx_x86_emit_destroy(vtx_x86_emit_t *emit)
     emit->reloc_arena = NULL;
     emit->label_offsets = NULL;
     emit->label_count = 0;
+    /* Free constant pool */
+    if (emit->const_pool.values) { free(emit->const_pool.values); emit->const_pool.values = NULL; }
+    if (emit->const_pool.ref_offsets) { free(emit->const_pool.ref_offsets); emit->const_pool.ref_offsets = NULL; }
+    emit->const_pool.count = 0;
+    emit->const_pool.capacity = 0;
 }
 
 int vtx_x86_emit_ensure(vtx_x86_emit_t *emit, uint32_t needed)
@@ -1146,6 +1156,514 @@ void vtx_x86_emit_xorps(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
 }
 
 /* ========================================================================== */
+/* VEX prefix encoder (AVX/AVX2)                                              */
+/* ========================================================================== */
+
+/**
+ * Emit a VEX 3-byte prefix.
+ *
+ * VEX encoding replaces the REX + legacy prefix + 0F escape with a compact
+ * 3-byte prefix: 0xC4 byte2 byte3, where:
+ *
+ * byte2: [~R:1][~X:1][~B:1][mmmmm:5]
+ *   R/X/B: inverted REX.R/X/B (1=0, 0=1)
+ *   mmmmm: 00001=0F, 00010=0F38, 00011=0F3A
+ *
+ * byte3: [W:1][~vvvv:4][L:1][pp:2]
+ *   W: REX.W (0 or 1)
+ *   vvvv: 1's complement of vvvv (second source register, 1111=unused)
+ *   L: 0=128-bit (xmm), 1=256-bit (ymm)
+ *   pp: 00=none, 01=66, 10=F3, 11=F2
+ *
+ * Followed by: opcode + ModR/M + SIB + disp + imm (same as legacy)
+ *
+ * @param e       Emitter
+ * @param r       REX.R bit (0 or 1, NOT inverted)
+ * @param x       REX.X bit (0 or 1, NOT inverted)
+ * @param b       REX.B bit (0 or 1, NOT inverted)
+ * @param mmmmm   Escape code (1=0F, 2=0F38, 3=0F3A)
+ * @param w       REX.W bit (0 or 1)
+ * @param vvvv    vvvv field (0-15, NOT inverted; 15=unused)
+ * @param l       Vector length (0=128-bit, 1=256-bit)
+ * @param pp      Mandatory prefix (0=none, 1=66, 2=F3, 3=F2)
+ */
+static void emit_vex3(vtx_x86_emit_t *e, int r, int x, int b,
+                       int mmmmm, int w, int vvvv, int l, int pp)
+{
+    uint8_t byte2 = (uint8_t)(((~r & 1) << 7) | ((~x & 1) << 6) |
+                              ((~b & 1) << 5) | (mmmmm & 0x1F));
+    uint8_t byte3 = (uint8_t)((w << 7) | ((~vvvv & 0xF) << 3) |
+                              ((l & 1) << 2) | (pp & 3));
+    emit_byte(e, 0xC4);
+    emit_byte(e, byte2);
+    emit_byte(e, byte3);
+}
+
+/**
+ * Emit a VEX 2-byte prefix (optimized form when mmmmm=0F, W=0, X=0, B=0).
+ *
+ * 0xC5 byte2, where:
+ * byte2: [~R:1][~vvvv:4][L:1][pp:2]
+ *
+ * Can only be used when:
+ *   - mmmmm = 00001 (0F escape)
+ *   - W = 0
+ *   - X = 0 and B = 0 (no extended registers in r/m or SIB)
+ *
+ * For simplicity and generality, the 3-byte form is preferred for all
+ * AVX2 256-bit instructions. The 2-byte form is used for VZEROUPPER/VZEROALL.
+ */
+static void emit_vex2(vtx_x86_emit_t *e, int r, int vvvv, int l, int pp)
+{
+    uint8_t byte2 = (uint8_t)(((~r & 1) << 7) | ((~vvvv & 0xF) << 3) |
+                              ((l & 1) << 2) | (pp & 3));
+    emit_byte(e, 0xC5);
+    emit_byte(e, byte2);
+}
+
+/**
+ * Helper: emit a VEX-encoded 256-bit SSE-type instruction with 2 operands
+ * (dst=src1, src=src2). Uses 3-byte VEX prefix.
+ * VEX.vvvv = 1111 (unused).
+ *
+ * Format: VEX.256.pp.0F opcode /r  (mod=11)
+ */
+static void emit_vex256_rr(vtx_x86_emit_t *e, uint8_t opcode, int mmmmm,
+                            int pp, uint8_t dst, uint8_t src)
+{
+    int r = reg_hi(dst);
+    int b = reg_hi(src);
+    int x = 0;
+    emit_vex3(e, r, x, b, mmmmm, 0, 15, 1, pp);
+    emit_byte(e, opcode);
+    emit_modrm(e, 3, dst & 7, src & 7);
+}
+
+/**
+ * Helper: emit a VEX-encoded 256-bit instruction with 3 operands
+ * (dst, src1, src2). Uses 3-byte VEX prefix.
+ * VEX.vvvv = src1 (non-destructive encoding).
+ *
+ * Format: VEX.256.pp.mmmmm opcode /r  (mod=11)
+ */
+static void emit_vex256_rrr(vtx_x86_emit_t *e, uint8_t opcode, int mmmmm,
+                             int pp, uint8_t dst, uint8_t src1, uint8_t src2)
+{
+    int r = reg_hi(dst);
+    int b = reg_hi(src2);
+    int x = 0;
+    emit_vex3(e, r, x, b, mmmmm, 0, src1, 1, pp);
+    emit_byte(e, opcode);
+    emit_modrm(e, 3, dst & 7, src2 & 7);
+}
+
+/* ========================================================================== */
+/* Timing / Profiling                                                         */
+/* ========================================================================== */
+
+void vtx_x86_emit_rdtsc(vtx_x86_emit_t *e)
+{
+    /* RDTSC: 0F 31 — reads TSC into EDX:EAX */
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0x31);
+}
+
+void vtx_x86_emit_rdtscp(vtx_x86_emit_t *e)
+{
+    /* RDTSCP: 0F 01 F9 — reads TSC into EDX:EAX, TSC_AUX into ECX */
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0x01);
+    emit_byte(e, 0xF9);
+}
+
+/* ========================================================================== */
+/* Atomics                                                                    */
+/* ========================================================================== */
+
+void vtx_x86_emit_cmpxchg(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    /* CMPXCHG r/m64, r64: REX.W 0F B1 /r
+     * Compare RAX with r/m64 (dst). If equal, ZF=1 and dst←src.
+     * If not equal, ZF=0 and RAX←dst. */
+    int r = reg_hi(src);
+    int b = reg_hi(dst);
+    emit_rex(e, 1, r, 0, b);
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0xB1);
+    emit_modrm(e, 3, src & 7, dst & 7);
+}
+
+void vtx_x86_emit_xadd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    /* XADD r/m64, r64: REX.W 0F C1 /r
+     * temp ← r/m64 (dst); dst ← temp + r64 (src); src ← temp */
+    int r = reg_hi(src);
+    int b = reg_hi(dst);
+    emit_rex(e, 1, r, 0, b);
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0xC1);
+    emit_modrm(e, 3, src & 7, dst & 7);
+}
+
+/* ========================================================================== */
+/* Memory fences                                                              */
+/* ========================================================================== */
+
+void vtx_x86_emit_lfence(vtx_x86_emit_t *e)
+{
+    /* LFENCE: 0F AE E8 — serializes load operations */
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0xAE);
+    emit_byte(e, 0xE8);
+}
+
+void vtx_x86_emit_mfence(vtx_x86_emit_t *e)
+{
+    /* MFENCE: 0F AE F0 — serializes all memory operations */
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0xAE);
+    emit_byte(e, 0xF0);
+}
+
+void vtx_x86_emit_sfence(vtx_x86_emit_t *e)
+{
+    /* SFENCE: 0F AE F8 — serializes store operations */
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0xAE);
+    emit_byte(e, 0xF8);
+}
+
+/* ========================================================================== */
+/* SSE4.1 rounding                                                            */
+/* ========================================================================== */
+
+void vtx_x86_emit_roundsd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src, uint8_t mode)
+{
+    /* ROUNDSD xmm, xmm, imm8: 66 0F 3A 0B /r ib
+     * mode: 0=nearest, 1=floor, 2=ceil, 3=trunc */
+    int r = reg_hi(src);
+    int b = reg_hi(dst);
+    if (r || b) emit_rex(e, 0, r, 0, b);
+    emit_byte(e, 0x66);
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0x3A);
+    emit_byte(e, 0x0B);
+    emit_modrm(e, 3, src & 7, dst & 7);
+    emit_byte(e, mode);
+}
+
+void vtx_x86_emit_roundss(vtx_x86_emit_t *e, uint8_t dst, uint8_t src, uint8_t mode)
+{
+    /* ROUNDSS xmm, xmm, imm8: 66 0F 3A 0A /r ib
+     * mode: 0=nearest, 1=floor, 2=ceil, 3=trunc */
+    int r = reg_hi(src);
+    int b = reg_hi(dst);
+    if (r || b) emit_rex(e, 0, r, 0, b);
+    emit_byte(e, 0x66);
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0x3A);
+    emit_byte(e, 0x0A);
+    emit_modrm(e, 3, src & 7, dst & 7);
+    emit_byte(e, mode);
+}
+
+/* ========================================================================== */
+/* Constant pool load (RIP-relative MOVSD from literal pool)                  */
+/* ========================================================================== */
+
+void vtx_x86_emit_movsd_rip(vtx_x86_emit_t *e, uint8_t dst_xmm, uint64_t double_bits)
+{
+    /* MOVSD xmm, [rip+disp32]: F2 0F 10 ModR/M(00, xmm, 101) + disp32
+     *
+     * This emits a placeholder disp32=0 and records the reference in the
+     * constant pool. After all code blocks are emitted, the constant pool
+     * is written and all disp32 references are patched.
+     *
+     * Encoding: F2 [REX] 0F 10 ModR/M(00, reg, 101) disp32
+     *   F2 = scalar double prefix
+     *   REX with R=reg_hi(dst), B=0 (r/m=5, no extension)
+     *   0F 10 = MOVSD xmm, m64
+     *   ModR/M: mod=00, reg=dst&7, r/m=5 (RIP-relative)
+     *   disp32 = placeholder (patched later)
+     *
+     * Total: 7 bytes (F2 + REX + 0F + 10 + ModR/M + 4 bytes disp32)
+     *        or 8 bytes if REX needed for XMM8-15 */
+
+    /* Ensure constant pool has capacity */
+    if (e->const_pool.count >= e->const_pool.capacity) {
+        uint32_t new_cap = e->const_pool.capacity ? e->const_pool.capacity * 2 : 16;
+        uint64_t *new_vals = (uint64_t *)realloc(e->const_pool.values, new_cap * sizeof(uint64_t));
+        uint32_t *new_refs = (uint32_t *)realloc(e->const_pool.ref_offsets, new_cap * sizeof(uint32_t));
+        if (!new_vals || !new_refs) return; /* OOM — best effort */
+        e->const_pool.values = new_vals;
+        e->const_pool.ref_offsets = new_refs;
+        e->const_pool.capacity = new_cap;
+    }
+
+    /* Add constant to the pool */
+    uint32_t idx = e->const_pool.count++;
+    e->const_pool.values[idx] = double_bits;
+
+    /* Emit F2 prefix */
+    emit_byte(e, 0xF2);
+
+    /* Emit REX if needed for XMM8-15 */
+    int r = reg_hi(dst_xmm);
+    if (r) emit_rex(e, 0, r, 0, 0);
+
+    /* Emit 0F 10 (MOVSD xmm, m64) */
+    emit_byte(e, 0x0F);
+    emit_byte(e, 0x10);
+
+    /* Emit ModR/M: mod=00, reg=dst_xmm&7, r/m=5 (RIP-relative) */
+    emit_modrm(e, 0, dst_xmm & 7, 5);
+
+    /* Record the offset of the disp32 for later patching */
+    e->const_pool.ref_offsets[idx] = vtx_x86_emit_position(e);
+
+    /* Emit placeholder disp32 (will be patched after pool emission) */
+    emit_dword(e, 0);
+}
+
+/* ========================================================================== */
+/* AVX2 VEX-encoded 256-bit packed double                                     */
+/* ========================================================================== */
+
+void vtx_x86_emit_vmovapd_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    /* VMOVAPD ymm, ymm: VEX.256.66.0F 28 /r */
+    emit_vex256_rr(e, 0x28, 1, 1, dst, src);
+}
+
+void vtx_x86_emit_vaddpd_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2)
+{
+    /* VADDPD ymm1, ymm2, ymm3: VEX.256.66.0F 58 /r */
+    emit_vex256_rrr(e, 0x58, 1, 1, dst, src1, src2);
+}
+
+void vtx_x86_emit_vsubpd_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2)
+{
+    /* VSUBPD ymm1, ymm2, ymm3: VEX.256.66.0F 5C /r */
+    emit_vex256_rrr(e, 0x5C, 1, 1, dst, src1, src2);
+}
+
+void vtx_x86_emit_vmulpd_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2)
+{
+    /* VMULPD ymm1, ymm2, ymm3: VEX.256.66.0F 59 /r */
+    emit_vex256_rrr(e, 0x59, 1, 1, dst, src1, src2);
+}
+
+void vtx_x86_emit_vdivpd_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2)
+{
+    /* VDIVPD ymm1, ymm2, ymm3: VEX.256.66.0F 5E /r */
+    emit_vex256_rrr(e, 0x5E, 1, 1, dst, src1, src2);
+}
+
+void vtx_x86_emit_vminpd_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2)
+{
+    /* VMINPD ymm1, ymm2, ymm3: VEX.256.66.0F 5D /r */
+    emit_vex256_rrr(e, 0x5D, 1, 1, dst, src1, src2);
+}
+
+void vtx_x86_emit_vmaxpd_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2)
+{
+    /* VMAXPD ymm1, ymm2, ymm3: VEX.256.66.0F 5F /r */
+    emit_vex256_rrr(e, 0x5F, 1, 1, dst, src1, src2);
+}
+
+void vtx_x86_emit_vxorpd_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2)
+{
+    /* VXORPD ymm1, ymm2, ymm3: VEX.256.66.0F 57 /r */
+    emit_vex256_rrr(e, 0x57, 1, 1, dst, src1, src2);
+}
+
+void vtx_x86_emit_vandpd_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2)
+{
+    /* VANDPD ymm1, ymm2, ymm3: VEX.256.66.0F 54 /r */
+    emit_vex256_rrr(e, 0x54, 1, 1, dst, src1, src2);
+}
+
+void vtx_x86_emit_vcmppd_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2, uint8_t pred)
+{
+    /* VCMPPD ymm1, ymm2, ymm3, imm8: VEX.256.66.0F C2 /r ib */
+    int r = reg_hi(dst);
+    int b = reg_hi(src2);
+    int x = 0;
+    emit_vex3(e, r, x, b, 1, 0, src1, 1, 1);
+    emit_byte(e, 0xC2);
+    emit_modrm(e, 3, dst & 7, src2 & 7);
+    emit_byte(e, pred);
+}
+
+/* ========================================================================== */
+/* AVX2 256-bit packed single-precision float                                 */
+/* ========================================================================== */
+
+void vtx_x86_emit_vmovaps_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    /* VMOVAPS ymm, ymm: VEX.256.0F 28 /r (pp=00, no mandatory prefix) */
+    emit_vex256_rr(e, 0x28, 1, 0, dst, src);
+}
+
+void vtx_x86_emit_vaddps_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2)
+{
+    /* VADDPS ymm1, ymm2, ymm3: VEX.256.0F 58 /r */
+    emit_vex256_rrr(e, 0x58, 1, 0, dst, src1, src2);
+}
+
+void vtx_x86_emit_vsubps_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2)
+{
+    /* VSUBPS ymm1, ymm2, ymm3: VEX.256.0F 5C /r */
+    emit_vex256_rrr(e, 0x5C, 1, 0, dst, src1, src2);
+}
+
+void vtx_x86_emit_vmulps_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2)
+{
+    /* VMULPS ymm1, ymm2, ymm3: VEX.256.0F 59 /r */
+    emit_vex256_rrr(e, 0x59, 1, 0, dst, src1, src2);
+}
+
+void vtx_x86_emit_vdivps_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2)
+{
+    /* VDIVPS ymm1, ymm2, ymm3: VEX.256.0F 5E /r */
+    emit_vex256_rrr(e, 0x5E, 1, 0, dst, src1, src2);
+}
+
+/* ========================================================================== */
+/* AVX2 256-bit packed integer                                                */
+/* ========================================================================== */
+
+void vtx_x86_emit_vmovdqa_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    /* VMOVDQA ymm, ymm: VEX.256.66.0F 6F /r */
+    emit_vex256_rr(e, 0x6F, 1, 1, dst, src);
+}
+
+void vtx_x86_emit_vpaddd_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2)
+{
+    /* VPADDD ymm1, ymm2, ymm3: VEX.256.66.0F FE /r */
+    emit_vex256_rrr(e, 0xFE, 1, 1, dst, src1, src2);
+}
+
+void vtx_x86_emit_vpsubd_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2)
+{
+    /* VPSUBD ymm1, ymm2, ymm3: VEX.256.66.0F FA /r */
+    emit_vex256_rrr(e, 0xFA, 1, 1, dst, src1, src2);
+}
+
+void vtx_x86_emit_vpmulld_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2)
+{
+    /* VPMULLD ymm1, ymm2, ymm3: VEX.256.66.0F38 40 /r */
+    emit_vex256_rrr(e, 0x40, 2, 1, dst, src1, src2);
+}
+
+void vtx_x86_emit_vpxor_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2)
+{
+    /* VPXOR ymm1, ymm2, ymm3: VEX.256.66.0F EF /r */
+    emit_vex256_rrr(e, 0xEF, 1, 1, dst, src1, src2);
+}
+
+void vtx_x86_emit_vpand_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2)
+{
+    /* VPAND ymm1, ymm2, ymm3: VEX.256.66.0F DB /r */
+    emit_vex256_rrr(e, 0xDB, 1, 1, dst, src1, src2);
+}
+
+void vtx_x86_emit_vpor_256(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2)
+{
+    /* VPOR ymm1, ymm2, ymm3: VEX.256.66.0F EB /r */
+    emit_vex256_rrr(e, 0xEB, 1, 1, dst, src1, src2);
+}
+
+/* ========================================================================== */
+/* AVX2 utility / transition                                                  */
+/* ========================================================================== */
+
+void vtx_x86_emit_vzeroupper(vtx_x86_emit_t *e)
+{
+    /* VZEROUPPER: VEX.128.0F 77 (L=0, pp=00, vvvv=1111)
+     * Zeroes the upper 128 bits of YMM0-YMM15.
+     * CRITICAL: must be called before any transition from AVX to SSE code
+     * to avoid devastating ~70 cycle AVX→SSE transition penalty. */
+    emit_vex2(e, 0, 15, 0, 0);
+    emit_byte(e, 0x77);
+}
+
+void vtx_x86_emit_vzeroall(vtx_x86_emit_t *e)
+{
+    /* VZEROALL: VEX.256.0F 77 (L=1, pp=00, vvvv=1111)
+     * Zeroes all bits of YMM0-YMM15. */
+    emit_vex2(e, 0, 15, 1, 0);
+    emit_byte(e, 0x77);
+}
+
+/* ========================================================================== */
+/* AVX2 lane manipulation / broadcast                                         */
+/* ========================================================================== */
+
+void vtx_x86_emit_vbroadcastsd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    /* VBROADCASTSD ymm1, xmm2: VEX.256.66.0F38 19 /r
+     * Broadcasts scalar double from xmm2[63:0] to all 4 double positions in ymm1. */
+    int r = reg_hi(dst);
+    int b = reg_hi(src);
+    emit_vex3(e, r, 0, b, 2, 0, 15, 1, 1);
+    emit_byte(e, 0x19);
+    emit_modrm(e, 3, dst & 7, src & 7);
+}
+
+void vtx_x86_emit_vbroadcastss(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
+{
+    /* VBROADCASTSS xmm1, xmm2: VEX.128.66.0F38 18 /r
+     * Broadcasts scalar float from xmm2[31:0] to all 4 float positions in xmm1. */
+    int r = reg_hi(dst);
+    int b = reg_hi(src);
+    emit_vex3(e, r, 0, b, 2, 0, 15, 0, 1);
+    emit_byte(e, 0x18);
+    emit_modrm(e, 3, dst & 7, src & 7);
+}
+
+void vtx_x86_emit_vperm2f128(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2, uint8_t ctrl)
+{
+    /* VPERM2F128 ymm1, ymm2, ymm3, imm8: VEX.256.66.0F3A 06 /r ib
+     * Permutes 128-bit lanes between ymm2 and ymm3 per imm8 control byte. */
+    int r = reg_hi(dst);
+    int b = reg_hi(src2);
+    emit_vex3(e, r, 0, b, 3, 0, src1, 1, 1);
+    emit_byte(e, 0x06);
+    emit_modrm(e, 3, dst & 7, src2 & 7);
+    emit_byte(e, ctrl);
+}
+
+void vtx_x86_emit_vinsertf128(vtx_x86_emit_t *e, uint8_t dst, uint8_t src1, uint8_t src2, uint8_t imm8)
+{
+    /* VINSERTF128 ymm1, ymm2, xmm3, imm8: VEX.256.66.0F3A 18 /r ib
+     * Inserts 128 bits from xmm3 into ymm2 at lane specified by imm8,
+     * result in ymm1. */
+    int r = reg_hi(dst);
+    int b = reg_hi(src2);
+    emit_vex3(e, r, 0, b, 3, 0, src1, 1, 1);
+    emit_byte(e, 0x18);
+    emit_modrm(e, 3, dst & 7, src2 & 7);
+    emit_byte(e, imm8);
+}
+
+void vtx_x86_emit_vextractf128(vtx_x86_emit_t *e, uint8_t dst, uint8_t src, uint8_t imm8)
+{
+    /* VEXTRACTF128 xmm1, ymm2, imm8: VEX.256.66.0F3A 19 /r ib
+     * Extracts 128 bits from ymm2 at lane specified by imm8, result in xmm1.
+     * Note: VEX.vvvv is unused (1111), dst in reg field, src in vvvv... wait.
+     * Actually, VEXTRACTF128 is a 2-source form: xmm1/m128, ymm2, imm8.
+     * VEX.vvvv = ymm2 (source), ModR/M.reg = xmm1 (destination). */
+    int r = reg_hi(dst);
+    int b = 0; /* no r/m register for reg-reg */
+    emit_vex3(e, r, 0, b, 3, 0, src, 1, 1);
+    emit_byte(e, 0x19);
+    emit_modrm(e, 3, dst & 7, 0);
+    emit_byte(e, imm8);
+}
+
+/* ========================================================================== */
 /* Safepoint poll emission                                                     */
 /* ========================================================================== */
 
@@ -1464,6 +1982,24 @@ static uint8_t inst_dst_preg(const vtx_inst_t *inst)
     case VTX_X86_LEA: case VTX_X86_INC: case VTX_X86_DEC:
     case VTX_X86_CMOV: case VTX_X86_SETCC: case VTX_X86_MOVZX:
     case VTX_X86_MOVSX: case VTX_X86_POP:
+    case VTX_X86_XADD: case VTX_X86_CMPXCHG:
+    case VTX_X86_ROL: case VTX_X86_ROR: case VTX_X86_BSWAP:
+    case VTX_X86_BSF: case VTX_X86_BSR: case VTX_X86_POPCNT:
+    case VTX_X86_RDTSC: case VTX_X86_RDTSCP:
+    case VTX_X86_ROUNDSD: case VTX_X86_ROUNDSS:
+    case VTX_X86_MOVSD_RIP:
+    /* AVX2 256-bit ops write to operand 0 */
+    case VTX_X86_VMOVAPD_256: case VTX_X86_VADDPD_256: case VTX_X86_VSUBPD_256:
+    case VTX_X86_VMULPD_256: case VTX_X86_VDIVPD_256:
+    case VTX_X86_VMINPD_256: case VTX_X86_VMAXPD_256:
+    case VTX_X86_VXORPD_256: case VTX_X86_VANDPD_256: case VTX_X86_VCMPPD_256:
+    case VTX_X86_VMOVAPS_256: case VTX_X86_VADDPS_256: case VTX_X86_VSUBPS_256:
+    case VTX_X86_VMULPS_256: case VTX_X86_VDIVPS_256:
+    case VTX_X86_VMOVDQA_256: case VTX_X86_VPADDD_256: case VTX_X86_VPSUBD_256:
+    case VTX_X86_VPMULLD_256: case VTX_X86_VPXOR_256:
+    case VTX_X86_VPAND_256: case VTX_X86_VPOR_256:
+    case VTX_X86_VBROADCASTSD: case VTX_X86_VBROADCASTSS:
+    case VTX_X86_VPERM2F128: case VTX_X86_VINSERTF128: case VTX_X86_VEXTRACTF128:
         return (uint8_t)inst->operands[0];
     default:
         return 0xFF;
@@ -1478,6 +2014,9 @@ static bool inst_reads_preg(const vtx_inst_t *inst, uint8_t preg)
 {
     /* RET implicitly reads RAX (return value register) */
     if (inst->opcode == VTX_X86_RET && preg == 0) /* RAX = register 0 */
+        return true;
+    /* CMPXCHG implicitly reads RAX (comparison operand) */
+    if (inst->opcode == VTX_X86_CMPXCHG && preg == 0) /* RAX = register 0 */
         return true;
     /* Check operand 1 (source) */
     if (inst->opnd_kinds[1] == VTX_OPND_PREG && (uint8_t)inst->operands[1] == preg)
@@ -3322,6 +3861,266 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
         }
         break;
 
+    /* ---- Timing / Profiling ---- */
+    case VTX_X86_RDTSC:
+        vtx_x86_emit_rdtsc(e);
+        break;
+
+    case VTX_X86_RDTSCP:
+        vtx_x86_emit_rdtscp(e);
+        break;
+
+    /* ---- Atomics ---- */
+    case VTX_X86_CMPXCHG:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF)
+            vtx_x86_emit_cmpxchg(e, r0, r1);
+        break;
+
+    case VTX_X86_XADD:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF)
+            vtx_x86_emit_xadd(e, r0, r1);
+        break;
+
+    /* ---- Memory fences ---- */
+    case VTX_X86_LFENCE:
+        vtx_x86_emit_lfence(e);
+        break;
+
+    case VTX_X86_MFENCE:
+        vtx_x86_emit_mfence(e);
+        break;
+
+    case VTX_X86_SFENCE:
+        vtx_x86_emit_sfence(e);
+        break;
+
+    /* ---- SSE4.1 rounding ---- */
+    case VTX_X86_ROUNDSD:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF)
+            vtx_x86_emit_roundsd(e, r0, r1, (uint8_t)inst->imm);
+        break;
+
+    case VTX_X86_ROUNDSS:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF)
+            vtx_x86_emit_roundss(e, r0, r1, (uint8_t)inst->imm);
+        break;
+
+    /* ---- Constant pool load (RIP-relative MOVSD) ---- */
+    case VTX_X86_MOVSD_RIP:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        if (r0 != 0xFF) {
+            vtx_x86_emit_movsd_rip(e, r0, (uint64_t)inst->imm);
+        }
+        break;
+
+    /* ---- AVX2 256-bit packed double ---- */
+    case VTX_X86_VMOVAPD_256:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_vmovapd_256(e, r0, r1);
+        break;
+
+    case VTX_X86_VADDPD_256:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        r2 = (inst->opnd_kinds[2] == VTX_OPND_PREG) ? (uint8_t)inst->operands[2] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF && r2 != 0xFF) vtx_x86_emit_vaddpd_256(e, r0, r1, r2);
+        break;
+
+    case VTX_X86_VSUBPD_256:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        r2 = (inst->opnd_kinds[2] == VTX_OPND_PREG) ? (uint8_t)inst->operands[2] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF && r2 != 0xFF) vtx_x86_emit_vsubpd_256(e, r0, r1, r2);
+        break;
+
+    case VTX_X86_VMULPD_256:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        r2 = (inst->opnd_kinds[2] == VTX_OPND_PREG) ? (uint8_t)inst->operands[2] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF && r2 != 0xFF) vtx_x86_emit_vmulpd_256(e, r0, r1, r2);
+        break;
+
+    case VTX_X86_VDIVPD_256:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        r2 = (inst->opnd_kinds[2] == VTX_OPND_PREG) ? (uint8_t)inst->operands[2] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF && r2 != 0xFF) vtx_x86_emit_vdivpd_256(e, r0, r1, r2);
+        break;
+
+    case VTX_X86_VMINPD_256:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        r2 = (inst->opnd_kinds[2] == VTX_OPND_PREG) ? (uint8_t)inst->operands[2] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF && r2 != 0xFF) vtx_x86_emit_vminpd_256(e, r0, r1, r2);
+        break;
+
+    case VTX_X86_VMAXPD_256:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        r2 = (inst->opnd_kinds[2] == VTX_OPND_PREG) ? (uint8_t)inst->operands[2] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF && r2 != 0xFF) vtx_x86_emit_vmaxpd_256(e, r0, r1, r2);
+        break;
+
+    case VTX_X86_VXORPD_256:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        r2 = (inst->opnd_kinds[2] == VTX_OPND_PREG) ? (uint8_t)inst->operands[2] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF && r2 != 0xFF) vtx_x86_emit_vxorpd_256(e, r0, r1, r2);
+        break;
+
+    case VTX_X86_VANDPD_256:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        r2 = (inst->opnd_kinds[2] == VTX_OPND_PREG) ? (uint8_t)inst->operands[2] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF && r2 != 0xFF) vtx_x86_emit_vandpd_256(e, r0, r1, r2);
+        break;
+
+    case VTX_X86_VCMPPD_256:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        r2 = (inst->opnd_kinds[2] == VTX_OPND_PREG) ? (uint8_t)inst->operands[2] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF && r2 != 0xFF)
+            vtx_x86_emit_vcmppd_256(e, r0, r1, r2, (uint8_t)inst->imm);
+        break;
+
+    /* ---- AVX2 256-bit packed single ---- */
+    case VTX_X86_VMOVAPS_256:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_vmovaps_256(e, r0, r1);
+        break;
+
+    case VTX_X86_VADDPS_256:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        r2 = (inst->opnd_kinds[2] == VTX_OPND_PREG) ? (uint8_t)inst->operands[2] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF && r2 != 0xFF) vtx_x86_emit_vaddps_256(e, r0, r1, r2);
+        break;
+
+    case VTX_X86_VSUBPS_256:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        r2 = (inst->opnd_kinds[2] == VTX_OPND_PREG) ? (uint8_t)inst->operands[2] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF && r2 != 0xFF) vtx_x86_emit_vsubps_256(e, r0, r1, r2);
+        break;
+
+    case VTX_X86_VMULPS_256:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        r2 = (inst->opnd_kinds[2] == VTX_OPND_PREG) ? (uint8_t)inst->operands[2] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF && r2 != 0xFF) vtx_x86_emit_vmulps_256(e, r0, r1, r2);
+        break;
+
+    case VTX_X86_VDIVPS_256:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        r2 = (inst->opnd_kinds[2] == VTX_OPND_PREG) ? (uint8_t)inst->operands[2] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF && r2 != 0xFF) vtx_x86_emit_vdivps_256(e, r0, r1, r2);
+        break;
+
+    /* ---- AVX2 256-bit packed integer ---- */
+    case VTX_X86_VMOVDQA_256:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_vmovdqa_256(e, r0, r1);
+        break;
+
+    case VTX_X86_VPADDD_256:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        r2 = (inst->opnd_kinds[2] == VTX_OPND_PREG) ? (uint8_t)inst->operands[2] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF && r2 != 0xFF) vtx_x86_emit_vpaddd_256(e, r0, r1, r2);
+        break;
+
+    case VTX_X86_VPSUBD_256:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        r2 = (inst->opnd_kinds[2] == VTX_OPND_PREG) ? (uint8_t)inst->operands[2] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF && r2 != 0xFF) vtx_x86_emit_vpsubd_256(e, r0, r1, r2);
+        break;
+
+    case VTX_X86_VPMULLD_256:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        r2 = (inst->opnd_kinds[2] == VTX_OPND_PREG) ? (uint8_t)inst->operands[2] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF && r2 != 0xFF) vtx_x86_emit_vpmulld_256(e, r0, r1, r2);
+        break;
+
+    case VTX_X86_VPXOR_256:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        r2 = (inst->opnd_kinds[2] == VTX_OPND_PREG) ? (uint8_t)inst->operands[2] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF && r2 != 0xFF) vtx_x86_emit_vpxor_256(e, r0, r1, r2);
+        break;
+
+    case VTX_X86_VPAND_256:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        r2 = (inst->opnd_kinds[2] == VTX_OPND_PREG) ? (uint8_t)inst->operands[2] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF && r2 != 0xFF) vtx_x86_emit_vpand_256(e, r0, r1, r2);
+        break;
+
+    case VTX_X86_VPOR_256:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        r2 = (inst->opnd_kinds[2] == VTX_OPND_PREG) ? (uint8_t)inst->operands[2] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF && r2 != 0xFF) vtx_x86_emit_vpor_256(e, r0, r1, r2);
+        break;
+
+    /* ---- AVX2 utility / transition ---- */
+    case VTX_X86_VZEROUPPER:
+        vtx_x86_emit_vzeroupper(e);
+        break;
+
+    case VTX_X86_VZEROALL:
+        vtx_x86_emit_vzeroall(e);
+        break;
+
+    /* ---- AVX2 lane manipulation / broadcast ---- */
+    case VTX_X86_VBROADCASTSD:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_vbroadcastsd(e, r0, r1);
+        break;
+
+    case VTX_X86_VBROADCASTSS:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) vtx_x86_emit_vbroadcastss(e, r0, r1);
+        break;
+
+    case VTX_X86_VPERM2F128:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        r2 = (inst->opnd_kinds[2] == VTX_OPND_PREG) ? (uint8_t)inst->operands[2] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF && r2 != 0xFF)
+            vtx_x86_emit_vperm2f128(e, r0, r1, r2, (uint8_t)inst->imm);
+        break;
+
+    case VTX_X86_VINSERTF128:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        r2 = (inst->opnd_kinds[2] == VTX_OPND_PREG) ? (uint8_t)inst->operands[2] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF && r2 != 0xFF)
+            vtx_x86_emit_vinsertf128(e, r0, r1, r2, (uint8_t)inst->imm);
+        break;
+
+    case VTX_X86_VEXTRACTF128:
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF)
+            vtx_x86_emit_vextractf128(e, r0, r1, (uint8_t)inst->imm);
+        break;
+
     default:
         /* Unknown opcode — emit nop as safe fallback */
         vtx_x86_emit_nop(e);
@@ -3636,6 +4435,43 @@ int vtx_x86_emit_function(vtx_x86_emit_t *emit, vtx_inst_stream_t *stream,
 
     /* Apply all rel32 relocations (skip already-resolved short jumps) */
     vtx_reloc_apply_all(emit->relocs, emit->buffer, emit->position);
+
+    /* ---- Emit constant pool (for float immediate materialization) ---- *
+     * After all code blocks and relocation resolution, emit the constant
+     * pool at the end of the function. Each 8-byte constant is aligned
+     * to 8 bytes and referenced via RIP-relative MOVSD loads whose
+     * disp32 was emitted as a placeholder during code emission.
+     * We patch the disp32 directly here — no relocation needed. */
+    if (emit->const_pool.count > 0) {
+        /* Align to 8 bytes (8-byte doubles don't strictly need 16-byte
+         * alignment, but 8-byte alignment is required for correct atomic
+         * loads on x86-64) */
+        uint32_t pos = vtx_x86_emit_position(emit);
+        while (pos & 7) {
+            vtx_x86_emit_nop(emit);
+            pos++;
+        }
+
+        /* Emit each constant and patch its reference */
+        for (uint32_t i = 0; i < emit->const_pool.count; i++) {
+            uint32_t pool_offset = vtx_x86_emit_position(emit);
+            uint32_t ref_offset = emit->const_pool.ref_offsets[i];
+
+            /* Emit the 8-byte constant */
+            emit_qword(emit, emit->const_pool.values[i]);
+
+            /* Patch the RIP-relative disp32 at the reference site.
+             * disp32 = target - (rip_after_disp) = pool_offset - (ref_offset + 4)
+             * where ref_offset is the position of the disp32 field in the
+             * MOVSD instruction, and pool_offset is where the constant
+             * was actually emitted. */
+            int32_t disp = (int32_t)pool_offset - (int32_t)(ref_offset + 4);
+            emit->buffer[ref_offset + 0] = (uint8_t)(disp & 0xFF);
+            emit->buffer[ref_offset + 1] = (uint8_t)((disp >> 8) & 0xFF);
+            emit->buffer[ref_offset + 2] = (uint8_t)((disp >> 16) & 0xFF);
+            emit->buffer[ref_offset + 3] = (uint8_t)((disp >> 24) & 0xFF);
+        }
+    }
 
     /* Epilogue is now emitted by the RET instruction handler in
      * emit_single_inst(), which calls vtx_x86_emit_epilogue() before

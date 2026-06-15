@@ -180,6 +180,65 @@ typedef enum {
     /* Unsigned division */
     VTX_X86_DIV,        /* div r/m64 — unsigned RDX:RAX / r/m64 */
 
+    /* ---- Timing / Profiling ---- */
+    VTX_X86_RDTSC,      /* 0F 31 — read time-stamp counter into EDX:EAX */
+    VTX_X86_RDTSCP,     /* 0F 01 F9 — read TSC + TSC_AUX into EDX:EAX, ECX */
+
+    /* ---- Atomics ---- */
+    VTX_X86_CMPXCHG,    /* 0F B1 /r — compare RAX with r/m64; if equal, r/m64←r64; else RAX←r/m64 */
+    VTX_X86_XADD,       /* 0F C1 /r — exchange and add: temp←r/m64; r/m64←temp+r64; r64←temp */
+
+    /* ---- Memory fences ---- */
+    VTX_X86_LFENCE,     /* 0F AE E8 — load fence */
+    VTX_X86_MFENCE,     /* 0F AE F0 — memory fence (full) */
+    VTX_X86_SFENCE,     /* 0F AE F8 — store fence */
+
+    /* ---- SSE4.1 rounding ---- */
+    VTX_X86_ROUNDSD,    /* 66 0F 3A 0B /r ib — round scalar double per imm8 */
+    VTX_X86_ROUNDSS,    /* 66 0F 3A 0A /r ib — round scalar float per imm8 */
+
+    /* ---- Constant pool load (RIP-relative MOVSD from literal pool) ---- */
+    VTX_X86_MOVSD_RIP,  /* MOVSD xmm, [rip+disp32] — load double from constant pool */
+
+    /* ---- AVX2 VEX-encoded 256-bit packed double ---- */
+    VTX_X86_VMOVAPD_256,   /* VEX.256.66.0F 28 /r — 256-bit aligned move */
+    VTX_X86_VADDPD_256,    /* VEX.256.66.0F 58 /r — packed double add (4 doubles) */
+    VTX_X86_VSUBPD_256,    /* VEX.256.66.0F 5C /r — packed double sub */
+    VTX_X86_VMULPD_256,    /* VEX.256.66.0F 59 /r — packed double mul */
+    VTX_X86_VDIVPD_256,    /* VEX.256.66.0F 5E /r — packed double div */
+    VTX_X86_VMINPD_256,    /* VEX.256.66.0F 5D /r — packed double min */
+    VTX_X86_VMAXPD_256,    /* VEX.256.66.0F 5F /r — packed double max */
+    VTX_X86_VXORPD_256,    /* VEX.256.66.0F 57 /r — packed double bitwise XOR */
+    VTX_X86_VANDPD_256,    /* VEX.256.66.0F 54 /r — packed double bitwise AND */
+    VTX_X86_VCMPPD_256,    /* VEX.256.66.0F C2 /r ib — packed double compare */
+
+    /* ---- AVX2 256-bit packed single-precision float ---- */
+    VTX_X86_VMOVAPS_256,   /* VEX.256.0F 28 /r — 256-bit aligned float move */
+    VTX_X86_VADDPS_256,    /* VEX.256.0F 58 /r — packed float add (8 floats) */
+    VTX_X86_VSUBPS_256,    /* VEX.256.0F 5C /r — packed float sub */
+    VTX_X86_VMULPS_256,    /* VEX.256.0F 59 /r — packed float mul */
+    VTX_X86_VDIVPS_256,    /* VEX.256.0F 5E /r — packed float div */
+
+    /* ---- AVX2 256-bit packed integer ---- */
+    VTX_X86_VMOVDQA_256,   /* VEX.256.66.0F 6F /r — 256-bit aligned integer move */
+    VTX_X86_VPADDD_256,    /* VEX.256.66.0F FE /r — packed 32-bit int add (8 ints) */
+    VTX_X86_VPSUBD_256,    /* VEX.256.66.0F FA /r — packed 32-bit int sub */
+    VTX_X86_VPMULLD_256,   /* VEX.256.66.0F38 40 /r — packed 32-bit int mul (SSE4.1/AVX) */
+    VTX_X86_VPXOR_256,     /* VEX.256.66.0F EF /r — packed integer XOR */
+    VTX_X86_VPAND_256,     /* VEX.256.66.0F DB /r — packed integer AND */
+    VTX_X86_VPOR_256,      /* VEX.256.66.0F EB /r — packed integer OR */
+
+    /* ---- AVX2 utility / transition ---- */
+    VTX_X86_VZEROUPPER,    /* VEX.128.0F 77 — zero upper 128 bits of YMM0-15 (critical for AVX↔SSE) */
+    VTX_X86_VZEROALL,      /* VEX.256.0F 77 — zero all bits of YMM0-15 */
+
+    /* ---- AVX2 lane manipulation / broadcast ---- */
+    VTX_X86_VBROADCASTSD,   /* VEX.256.66.0F38 19 /r — broadcast scalar double to 4 doubles */
+    VTX_X86_VBROADCASTSS,   /* VEX.128.66.0F38 18 /r — broadcast scalar float to 4 floats */
+    VTX_X86_VPERM2F128,    /* VEX.256.66.0F3A 06 /r ib — permute 128-bit lanes */
+    VTX_X86_VINSERTF128,   /* VEX.256.66.0F3A 18 /r ib — insert 128-bit lane */
+    VTX_X86_VEXTRACTF128,  /* VEX.256.66.0F3A 19 /r ib — extract 128-bit lane */
+
     VTX_X86_OPCODE_COUNT
 } vtx_x86_opcode_t;
 
