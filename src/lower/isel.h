@@ -179,6 +179,7 @@ typedef struct {
 #define VTX_INST_FLAG_IS_SAFEPOINT (1u << 21) /* safepoint poll (loop back-edge) */
 #define VTX_INST_FLAG_IMPLICIT_NULL (1u << 22) /* implicit null check — SIGSEGV catches null, no explicit TEST+JCC */
 #define VTX_INST_FLAG_VALUE_GUARD   (1u << 23) /* value speculation guard — constant fold via guard page */
+#define VTX_INST_FLAG_NO_TEST      (1u << 24) /* CMP must NOT be peephole-converted to TEST (NaN-boxed SMI operand) */
 
 typedef struct {
     vtx_x86_opcode_t opcode;

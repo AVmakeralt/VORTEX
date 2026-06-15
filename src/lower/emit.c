@@ -1065,8 +1065,13 @@ uint32_t vtx_peephole_optimize(vtx_inst_stream_t *stream,
                 continue;
             }
 
-            /* ---- Pattern 2: CMP reg, 0 → TEST reg, reg ---- */
+            /* ---- Pattern 2: CMP reg, 0 → TEST reg, reg ----
+             * DISABLED for NaN-boxed SMI operands (marked with NO_TEST flag).
+             * SMI(0) = 0x7FF8000000000000 ≠ 0, so TEST would give the wrong
+             * zero comparison result. The isel layer marks CMPs on untagged
+             * values where TEST is safe, and leaves NaN-boxed CMPs unmarked. */
             if (inst->opcode == VTX_X86_CMP &&
+                !(inst->flags & VTX_INST_FLAG_NO_TEST) &&
                 (inst->flags & VTX_INST_FLAG_HAS_IMM) &&
                 inst->imm == 0 &&
                 inst->opnd_kinds[0] == VTX_OPND_PREG) {
@@ -1080,8 +1085,10 @@ uint32_t vtx_peephole_optimize(vtx_inst_stream_t *stream,
                 continue;
             }
 
-            /* ---- Pattern 3: CMP reg1, reg2 where reg1==reg2 → TEST reg, reg ---- */
+            /* ---- Pattern 3: CMP reg1, reg2 where reg1==reg2 → TEST reg, reg ----
+             * Same NO_TEST guard as pattern 2. */
             if (inst->opcode == VTX_X86_CMP &&
+                !(inst->flags & VTX_INST_FLAG_NO_TEST) &&
                 !(inst->flags & VTX_INST_FLAG_HAS_IMM) &&
                 inst->opnd_kinds[0] == VTX_OPND_PREG &&
                 inst->opnd_kinds[1] == VTX_OPND_PREG &&

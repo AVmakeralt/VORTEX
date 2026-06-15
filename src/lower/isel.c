@@ -646,21 +646,86 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
          */
         int64_t rhs_const;
         if (try_get_const_int(graph, node->inputs[1], &rhs_const)) {
-            /* NOTE: INC/DEC optimizations disabled for SMI values.
-             * SMI(a+1) = HEADER | ((a+1)<<3) = SMI(a) + 8 (not +1).
-             * INC adds 1, not 8, so it produces the wrong result.
-             * Fall through to LEA or MOV+ADD with SMI adjustment instead. */
-            (void)rhs_const; /* suppress unused warning */
+            /* SMI-aware Add(x, Const) — INC/DEC/LEA shortcuts.
+             *
+             * SMI encoding: SMI(a) = HEADER | (a << 3)
+             * SMI(a + c) = HEADER | ((a+c) << 3) = SMI(a) + c*8
+             * But we also need: SMI(a) + SMI(c) = 2*HEADER + (a+c)<<3
+             *   = SMI(a) + c*8 + HEADER
+             * Wait — the RHS is also NaN-boxed SMI(c), so:
+             *   SMI(a) + SMI(c) = 2*HEADER + (a+c)<<3
+             * We want HEADER + (a+c)<<3 = SMI(a+c)
+             *   = SMI(a) + c*8 + HEADER - HEADER  (the two headers from the add)
+             *   = SMI(a) + c*8 - HEADER
+             *
+             * Wait, let me redo this carefully:
+             *   dst = SMI(a) + SMI(c)  [raw add of two NaN-boxed values]
+             *       = 2*HEADER + (a+c)<<3
+             *   want = HEADER + (a+c)<<3 = SMI(a+c)
+             *   So dst - HEADER = SMI(a+c)
+             *
+             * But that means we just add the two SMI values and subtract one HEADER.
+             *
+             * Strategy:
+             *   LEA dst, [lhs + c_shifted]   where c_shifted = c << 3 (SMI-shifted)
+             *   then SUB HEADER              to cancel the extra header
+             *
+             * But wait — if we use LEA with displacement c_shifted, that adds
+             * c_shifted to lhs (which is SMI(a)), giving:
+             *   SMI(a) + c*8 = HEADER + a*8 + c*8 = HEADER + (a+c)*8
+             * This is already SMI(a+c)! No header adjustment needed!
+             *
+             * Because LEA adds a RAW displacement (not another SMI value),
+             * we get exactly one header in the result.
+             */
+
+            int64_t c_shifted = rhs_const << 3; /* SMI shift: multiply by 8 */
+
+            /* Special case: Add(x, 1) when dst == lhs → ADD dst, 8
+             * INC adds 1, but SMI increment adds 8 (one SMI step).
+             * ADD dst, 8 is 4 bytes (REX.W + 83 /0 imm8) vs INC's 3,
+             * but it produces the correct SMI result. */
+            if (rhs_const == 1 && dst == lhs_vreg) {
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_ADD, dst, 8, node_id), arena);
+                break;
+            }
+
+            /* Special case: Add(x, -1) when dst == lhs → SUB dst, 8
+             * DEC subtracts 1, but SMI decrement subtracts 8. */
+            if (rhs_const == -1 && dst == lhs_vreg) {
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SUB, dst, 8, node_id), arena);
+                break;
+            }
+
+            /* General LEA: dst = lhs + c_shifted (no flag write)
+             * c_shifted fits in int32 when |c| <= 2^28 (shifted to 2^31).
+             * Since c_shifted = c*8 and c fits in int64, we need
+             * c_shifted in [-2^31, 2^31-1] for the LEA displacement. */
+            if (c_shifted >= INT32_MIN && c_shifted <= INT32_MAX) {
+                if (dst == lhs_vreg) {
+                    /* LEA can't do [reg + disp] into same reg — use ADD ri */
+                    vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_ADD, dst, (int32_t)c_shifted, node_id), arena);
+                } else {
+                    vtx_x86_memop_t mem = { lhs_vreg, VTX_VREG_INVALID, 0xFF, 0xFF, 1, (int32_t)c_shifted };
+                    vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_LEA, dst, &mem, node_id), arena);
+                }
+                break;
+            }
+
+            /* c_shifted doesn't fit in int32 — fall through to MOV+ADD */
         }
 
         /* P1 isel: LEA for Add(x, y) where dst ≠ lhs — saves a MOV.
          *
-         * Pattern: dst = lhs + rhs (dst != lhs)
+         * Pattern: dst = lhs + rhs (dst != lhs), both non-constant
          *   Old: mov dst, lhs; add dst, rhs
          *   New: lea dst, [lhs + rhs]     (1 instruction instead of 2)
          *
          * LEA can represent [base + index*scale] where scale=1,
          * giving base + index = lhs + rhs. This eliminates the MOV.
+         *
+         * SMI adjustment: LEA computes SMI(a)+SMI(b) = 2*HEADER+(a+b)<<3;
+         * need to subtract one header for correct SMI result.
          *
          * Constraint: dst must differ from both lhs and rhs to avoid
          * clobbering. If dst == lhs, the ADD form is fine (in-place).
@@ -668,8 +733,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         if (dst != lhs_vreg && dst != rhs_vreg) {
             vtx_x86_memop_t mem = { lhs_vreg, rhs_vreg, 0xFF, 0xFF, 1, 0 };
             vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_LEA, dst, &mem, node_id), arena);
-            /* SMI adjustment: LEA computes SMI(a)+SMI(b) = 2*HEADER+(a+b)<<3;
-             * need to subtract one header for correct SMI result.
+            /* SMI adjustment: subtract one HEADER.
              * The header (0x7FF8000000000000) doesn't fit in imm32, so we
              * load it into R10 (scratch vreg) and use SUB reg,reg. */
             vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, stream->smi_scratch_vreg,
@@ -711,22 +775,54 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
         /* P1 isel: LEA for Sub(x, Const) — subtract via LEA with negative disp.
          *
-         * Pattern: dst = lhs - constant
-         *   Old: mov dst, lhs; sub dst, imm
-         *   New: lea dst, [lhs + (-imm)]   (1 instruction, no flag write)
+         * SMI encoding: SMI(a) = HEADER | (a << 3)
+         * SMI(a - c) = HEADER | ((a-c) << 3) = SMI(a) - c*8
          *
-         * Only valid when -imm fits in int32 (i.e., imm in [-2^31+1, 2^31]).
-         * Note: LEA doesn't set flags, which is an advantage for subsequent
-         * flag-dependent code.
+         * LEA with displacement adds a RAW value, not another SMI:
+         *   LEA dst, [lhs + (-c_shifted)]  where c_shifted = c << 3
+         *   = SMI(a) + (-(c<<3)) = HEADER + a*8 - c*8 = HEADER + (a-c)*8
+         *   = SMI(a-c)   ← correct! No header adjustment needed.
          *
-         * NOTE: DEC/INC/LEA shortcuts disabled for SMI values.
-         * SMI values are NaN-boxed: SMI(x) = HEADER|(x<<3).
-         * Sub(x, 1): SMI(x) - SMI(1) = (x-1)<<3, need +HEADER.
-         *   DEC adds 1, not 8, and doesn't add the header. Wrong.
-         *   LEA [lhs - imm] computes lhs - imm, but lhs is SMI(x) and imm
-         *   is a raw constant, not SMI-tagged. These paths assume raw integers.
-         * Fall through to MOV+SUB + SMI header adjustment instead.
+         * Compare with the two-SMI subtract path:
+         *   SMI(a) - SMI(c) = HEADER|(a<<3) - HEADER|(c<<3) = (a-c)<<3
+         *   Need HEADER + (a-c)<<3 = SMI(a-c), so ADD HEADER.
+         *
+         * Special case: Sub(x, 1) when dst == lhs → SUB dst, 8
+         *   DEC subtracts 1, but SMI decrement subtracts 8.
+         * Special case: Sub(x, -1) when dst == lhs → ADD dst, 8
+         *   INC adds 1, but SMI increment adds 8.
          */
+        int64_t rhs_const;
+        if (try_get_const_int(graph, node->inputs[1], &rhs_const)) {
+            int64_t neg_c_shifted = -(rhs_const << 3); /* = -(c*8) = (-c)*8 for LEA disp */
+
+            /* Special case: Sub(x, 1) when dst == lhs → SUB dst, 8 */
+            if (rhs_const == 1 && dst == lhs_vreg) {
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SUB, dst, 8, node_id), arena);
+                break;
+            }
+
+            /* Special case: Sub(x, -1) when dst == lhs → ADD dst, 8 */
+            if (rhs_const == -1 && dst == lhs_vreg) {
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_ADD, dst, 8, node_id), arena);
+                break;
+            }
+
+            /* General LEA: dst = lhs + neg_c_shifted (no flag write)
+             * neg_c_shifted fits in int32 when |c| <= 2^28. */
+            if (neg_c_shifted >= INT32_MIN && neg_c_shifted <= INT32_MAX) {
+                if (dst == lhs_vreg) {
+                    /* LEA can't do [reg + disp] into same reg — use SUB ri */
+                    vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SUB, dst, (int32_t)(rhs_const << 3), node_id), arena);
+                } else {
+                    vtx_x86_memop_t mem = { lhs_vreg, VTX_VREG_INVALID, 0xFF, 0xFF, 1, (int32_t)neg_c_shifted };
+                    vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_LEA, dst, &mem, node_id), arena);
+                }
+                break;
+            }
+
+            /* neg_c_shifted doesn't fit in int32 — fall through to MOV+SUB */
+        }
 
         if (dst != lhs_vreg)
             vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_vreg, node_id), arena);
@@ -758,32 +854,225 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             break;
         }
 
-        /* Strength reduction: try to replace IMUL with cheaper ops */
+        /* Strength reduction for SMI multiplication.
+         *
+         * SMI values are NaN-boxed: SMI(a) = HEADER | (a << 3).
+         * The LEA/shift strength reduction shortcuts (x*3 → LEA, x*4 → SHL)
+         * operate on the NaN-boxed representation, which gives wrong results.
+         * For example: SMI(a)*3 = 3*HEADER | (a<<3)*3 ≠ SMI(a*3).
+         *
+         * To multiply SMI values correctly, we must:
+         *   1. Untag both operands (remove header, shift right by 3)
+         *   2. Multiply the raw integers
+         *   3. Re-tag the result (shift left by 3, OR header)
+         *
+         * However, for SMI(a) * SMI(b), there's a useful algebraic identity:
+         *   SMI(a) * SMI(b) = (HEADER|(a<<3)) * (HEADER|(b<<3))
+         * This doesn't simplify nicely. But IMUL on the NaN-boxed values
+         * gives a completely wrong result.
+         *
+         * Correct approach: untag lhs by subtracting HEADER and SAR by 3,
+         * then IMUL with untagged rhs, then re-tag.
+         *
+         * For the common case of Mul by a constant, we can use a simpler
+         * sequence: IMUL SMI(a), SMI(b) is wrong, but:
+         *   raw_result = (SMI(a) >> 3) * (SMI(b) - HEADER) >> 3
+         * is overly complex. Instead, just untag one operand:
+         *   SAR SMI(a), 3        ; gives a (raw integer) with sign extension
+         *   IMUL a, SMI(b)       ; a * SMI(b) = a * (HEADER|(b<<3))
+         * But this is also wrong because IMUL multiplies the full 64-bit values.
+         *
+         * The simplest correct approach for now: just use IMUL on the raw
+         * SMI-tagged operands and then fix up. But IMUL of two NaN-boxed
+         * values produces garbage. We MUST untag first.
+         *
+         * Strategy: Untag lhs (SAR 3 + mask), untag rhs or use constant,
+         * IMUL, re-tag (SHL 3 + OR HEADER).
+         *
+         * For Mul(x, small_const) we can optimize:
+         *   SMI(a) * c = (HEADER|(a<<3)) * c  ← WRONG, this multiplies header too
+         *   Instead: result = SMI(a*c) = HEADER | (a*c)<<3
+         *   Compute: (SMI(a) - HEADER) * c + HEADER
+         *          = (a<<3) * c + HEADER
+         *          = (a*c)<<3 + HEADER  (if c is power of 2, this is just SHL)
+         *          = SMI(a*c) ✓
+         *   So: SUB lhs, HEADER; then multiply by c; then ADD HEADER.
+         *   For power-of-2 c: SUB lhs, HEADER; SHL lhs, log2(c)+3; ADD HEADER.
+         *   Wait: (a<<3) * c = a*c*8 = (a*c)<<3 only if no overflow in a*c.
+         *   And SHL by (log2(c)+3) is the same as (a<<3) * c when c is power of 2.
+         *   But we need (a*c)<<3, and (a<<3)*c = (a*c)<<3 only when c is a power of 2.
+         *   For general c: IMUL is needed.
+         *
+         * Simplest correct implementation for integer SMI Mul:
+         *   1. Untag lhs: sub HEADER, sar 3 → gives raw a
+         *   2. If rhs is constant: imul raw_a, c
+         *      If rhs is variable: untag rhs too: sub HEADER, sar 3 → raw b, imul
+         *   3. Re-tag: shl 3, add HEADER
+         */
+
         int64_t rhs_const;
         if (try_get_const_int(graph, node->inputs[1], &rhs_const)) {
-            /* P1 isel: LEA for Mul(x, 3/5/9) — already handled by
-             * emit_mul_by_constant() which uses LEA for these cases.
-             * The existing code correctly emits:
-             *   x*3 → lea dst, [x + x*2]
-             *   x*5 → lea dst, [x + x*4]
-             *   x*9 → lea dst, [x + x*8]
-             * These are 1-instruction replacements for what would otherwise
-             * be a 2-instruction MOV+IMUL sequence. */
-            /* RHS is constant — try LEA/shift/add sequence */
-            if (emit_mul_by_constant(stream, block, dst, lhs_vreg, rhs_const, node_id, arena))
+            /* Mul(x, const): untag x, multiply by const, re-tag */
+
+            /* Special case: Mul(x, 0) → SMI(0) = HEADER */
+            if (rhs_const == 0) {
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, dst,
+                                    (int64_t)0x7FF8000000000000ULL, node_id), arena);
                 break;
-        }
-        int64_t lhs_const;
-        if (try_get_const_int(graph, node->inputs[0], &lhs_const)) {
-            /* LHS is constant — swap and try */
-            if (emit_mul_by_constant(stream, block, dst, rhs_vreg, lhs_const, node_id, arena))
+            }
+
+            /* Special case: Mul(x, 1) → just move (or nop if dst == lhs) */
+            if (rhs_const == 1) {
+                if (dst != lhs_vreg)
+                    vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_vreg, node_id), arena);
                 break;
+            }
+
+            /* Special case: Mul(x, -1) → neg then re-tag */
+            if (rhs_const == -1) {
+                /* Untag: sub HEADER, sar 3 → raw a; neg → -a; re-tag: shl 3, add HEADER */
+                if (dst != lhs_vreg)
+                    vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_vreg, node_id), arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, stream->smi_scratch_vreg,
+                                    (int64_t)0x7FF8000000000000ULL, node_id), arena);
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_SUB, dst, stream->smi_scratch_vreg, node_id), arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, dst, 3, node_id), arena);
+                vtx_isel_emit_inst(block, make_r_inst(VTX_X86_NEG, dst, node_id, 0), arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, dst, 3, node_id), arena);
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_ADD, dst, stream->smi_scratch_vreg, node_id), arena);
+                break;
+            }
+
+            /* Power of 2: Mul(x, 2^n) → untag, SHL by n, re-tag
+             * Untag: sub HEADER, sar 3 → raw a
+             * SHL raw_a, n → a * 2^n
+             * Re-tag: shl 3, add HEADER
+             * Combined shift: total shift = n + 3 (untag SAR 3 cancels one SHL 3,
+             *   but we need to shift the raw value left by n+3 total)
+             * Actually: raw_a = a; a * 2^n = raw_a << n; then re-tag: (raw_a << n) << 3 + HEADER
+             * So: sub HEADER, sar 3, shl (n+3), add HEADER.
+             * But sar 3 then shl (n+3) = shl n (since sar+shl with net shift n)
+             * Wait: sar 3 discards low 3 bits (the SMI tag bits, which are 0 for SMI).
+             * So sar 3 of SMI(a) gives a (if no overflow). Then shl (n+3) gives a * 2^(n+3).
+             * But we want (a * 2^n) << 3 + HEADER = a * 2^(n+3) + HEADER.
+             * So: sub HEADER, sar 3, shl (n+3), add HEADER = correct!
+             *
+             * Even simpler: since the low 3 bits of SMI(a) are always 0 (tag bits),
+             * sar 3 is the same as shr 3 for positive values. And the net effect of
+             * sar 3 then shl (n+3) is just: (a << n) << 3 = (a * 2^n) << 3.
+             * But we could skip the sar+shl and just do: SHL SMI(a), n (which gives
+             * (HEADER|(a<<3)) << n = HEADER<<n | (a<<(3+n)), wrong because header shifts too).
+             * No, we need to untag first. So the full sequence is needed.
+             *
+             * Optimization: since SMI low 3 bits are 0, we can use:
+             *   SUB dst, HEADER    ; remove header
+             *   SHL dst, (n + 3)   ; (a << 3) << (n+3-3) ... wait this is wrong
+             * Let me think again:
+             *   SMI(a) = HEADER | (a << 3)
+             *   SMI(a) - HEADER = a << 3  (just the data part)
+             *   (a << 3) << n = a << (3 + n) = (a * 2^n) << 3
+             *   ((a * 2^n) << 3) + HEADER = SMI(a * 2^n) ✓
+             * So: SUB HEADER, SHL n, ADD HEADER.
+             * No SAR needed! Because SMI(a) - HEADER = a << 3 (clean).
+             * This is simpler and faster.
+             */
+            int shift = is_power_of_2(rhs_const);
+            if (shift >= 0) {
+                if (dst != lhs_vreg)
+                    vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_vreg, node_id), arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, stream->smi_scratch_vreg,
+                                    (int64_t)0x7FF8000000000000ULL, node_id), arena);
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_SUB, dst, stream->smi_scratch_vreg, node_id), arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, dst, shift, node_id), arena);
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_ADD, dst, stream->smi_scratch_vreg, node_id), arena);
+                break;
+            }
+
+            /* General constant: untag lhs, IMUL by const, re-tag */
+            if (dst != lhs_vreg)
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_vreg, node_id), arena);
+            vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, stream->smi_scratch_vreg,
+                                (int64_t)0x7FF8000000000000ULL, node_id), arena);
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_SUB, dst, stream->smi_scratch_vreg, node_id), arena);
+            vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, dst, 3, node_id), arena);
+            if (rhs_const >= INT32_MIN && rhs_const <= INT32_MAX) {
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_IMUL, dst, (int32_t)rhs_const, node_id), arena);
+            } else {
+                /* Large constant: load into a vreg and use IMUL rr */
+                uint32_t const_vreg = vtx_isel_alloc_vreg(stream, arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, const_vreg, rhs_const, node_id), arena);
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_IMUL, dst, const_vreg, node_id), arena);
+            }
+            vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, dst, 3, node_id), arena);
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_ADD, dst, stream->smi_scratch_vreg, node_id), arena);
+            break;
         }
 
-        /* Fallback: use IMUL */
-        if (dst != lhs_vreg)
-            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_vreg, node_id), arena);
-        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_IMUL, dst, rhs_vreg, node_id), arena);
+        int64_t lhs_const;
+        if (try_get_const_int(graph, node->inputs[0], &lhs_const)) {
+            /* LHS is constant — swap and apply same logic via recursion */
+            /* Mul(c, x) = Mul(x, c) — rhs_const path handles it */
+            /* Swap: treat rhs as the variable operand */
+            /* We can reuse the same untag+imul+retag sequence */
+            if (lhs_const == 0) {
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, dst,
+                                    (int64_t)0x7FF8000000000000ULL, node_id), arena);
+                break;
+            }
+            if (lhs_const == 1) {
+                if (dst != rhs_vreg)
+                    vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, rhs_vreg, node_id), arena);
+                break;
+            }
+            /* For Mul(c, x) where c != 0, 1: untag x, multiply by c, re-tag */
+            if (dst != rhs_vreg)
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, rhs_vreg, node_id), arena);
+            vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, stream->smi_scratch_vreg,
+                                (int64_t)0x7FF8000000000000ULL, node_id), arena);
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_SUB, dst, stream->smi_scratch_vreg, node_id), arena);
+            vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, dst, 3, node_id), arena);
+            if (lhs_const >= INT32_MIN && lhs_const <= INT32_MAX) {
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_IMUL, dst, (int32_t)lhs_const, node_id), arena);
+            } else {
+                uint32_t const_vreg = vtx_isel_alloc_vreg(stream, arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, const_vreg, lhs_const, node_id), arena);
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_IMUL, dst, const_vreg, node_id), arena);
+            }
+            vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, dst, 3, node_id), arena);
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_ADD, dst, stream->smi_scratch_vreg, node_id), arena);
+            break;
+        }
+
+        /* Variable * Variable: untag both, IMUL, re-tag.
+         * SMI(a) * SMI(b) → need to compute a*b and re-tag as SMI(a*b).
+         * Untag lhs: sub HEADER, sar 3 → raw a
+         * Untag rhs: sub HEADER, sar 3 → raw b
+         * IMUL raw_a, raw_b → a*b
+         * Re-tag: shl 3, add HEADER → SMI(a*b) */
+        {
+            uint32_t lhs_untagged = vtx_isel_alloc_vreg(stream, arena);
+            uint32_t rhs_untagged = vtx_isel_alloc_vreg(stream, arena);
+
+            /* Untag lhs */
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, lhs_untagged, lhs_vreg, node_id), arena);
+            vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, stream->smi_scratch_vreg,
+                                (int64_t)0x7FF8000000000000ULL, node_id), arena);
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_SUB, lhs_untagged, stream->smi_scratch_vreg, node_id), arena);
+            vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, lhs_untagged, 3, node_id), arena);
+
+            /* Untag rhs */
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, rhs_untagged, rhs_vreg, node_id), arena);
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_SUB, rhs_untagged, stream->smi_scratch_vreg, node_id), arena);
+            vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, rhs_untagged, 3, node_id), arena);
+
+            /* Multiply */
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_IMUL, lhs_untagged, rhs_untagged, node_id), arena);
+
+            /* Re-tag: shl 3, add HEADER → map to dst */
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_untagged, node_id), arena);
+            vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, dst, 3, node_id), arena);
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_ADD, dst, stream->smi_scratch_vreg, node_id), arena);
+        }
         break;
     }
 
@@ -1074,7 +1363,11 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
          *   cmovg dst, rhs    ; if dst > rhs, dst = rhs */
         if (dst != lhs)
             vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs, node_id), arena);
-        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_CMP, dst, rhs, node_id), arena);
+        /* Mark CMP with NO_TEST — operands are NaN-boxed SMIs, peephole
+         * must not convert CMP→TEST (SMI(0) ≠ 0). */
+        vtx_inst_t min_cmp = make_rr_inst(VTX_X86_CMP, dst, rhs, node_id);
+        min_cmp.flags |= VTX_INST_FLAG_NO_TEST;
+        vtx_isel_emit_inst(block, min_cmp, arena);
 
         vtx_inst_t cmov;
         memset(&cmov, 0, sizeof(cmov));
@@ -1103,7 +1396,10 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
          *   cmovle dst, rhs   ; if dst <= rhs, dst = rhs */
         if (dst != lhs)
             vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs, node_id), arena);
-        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_CMP, dst, rhs, node_id), arena);
+        /* Mark CMP with NO_TEST — operands are NaN-boxed SMIs */
+        vtx_inst_t max_cmp = make_rr_inst(VTX_X86_CMP, dst, rhs, node_id);
+        max_cmp.flags |= VTX_INST_FLAG_NO_TEST;
+        vtx_isel_emit_inst(block, max_cmp, arena);
 
         vtx_inst_t cmov;
         memset(&cmov, 0, sizeof(cmov));
