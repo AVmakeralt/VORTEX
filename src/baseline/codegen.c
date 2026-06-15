@@ -745,6 +745,18 @@ static vtx_reg_t emit_stack_pop(vtx_compile_ctx_t *ctx)
     /* shift: RAX ← RCX, RCX ← RDX, RDX ← RBX */
     uint32_t new_depth = ctx->stack_depth;
 
+    /* CRITICAL: Shift registers FIRST (top-down order), THEN load spill
+     * into RBX. Loading the spill before the shift would clobber the old
+     * RBX value that needs to be moved into RDX by the shift.
+     * This was the T1 spill-path register clobber bug: the old RBX value
+     * was overwritten by the spill load before RDX could inherit it,
+     * causing incorrect values in the expression stack at runtime. */
+    if (new_depth >= 0) emit_mov_reg_reg64(&ctx->buf, VTX_REG_RAX, VTX_REG_RCX);
+    if (new_depth >= 1) emit_mov_reg_reg64(&ctx->buf, VTX_REG_RCX, VTX_REG_RDX);
+    if (new_depth >= 2) emit_mov_reg_reg64(&ctx->buf, VTX_REG_RDX, VTX_REG_RBX);
+
+    /* After the shift, RBX's old value has been moved to RDX (or is no
+     * longer needed if new_depth < 2). Now safe to load spill into RBX. */
     if (new_depth >= 3 && old_depth > VTX_EXPR_REG_COUNT) {
         /* Load a value from spill into RBX.
          * The deepest value that was in spill before the pop is at
@@ -753,10 +765,6 @@ static vtx_reg_t emit_stack_pop(vtx_compile_ctx_t *ctx)
         int32_t spill_off = vtx_frame_layout_spill_offset(&ctx->layout, spill_idx);
         emit_mov_reg_rbp_offset(&ctx->buf, VTX_REG_RBX, spill_off);
     }
-
-    if (new_depth >= 0) emit_mov_reg_reg64(&ctx->buf, VTX_REG_RAX, VTX_REG_RCX);
-    if (new_depth >= 1) emit_mov_reg_reg64(&ctx->buf, VTX_REG_RCX, VTX_REG_RDX);
-    if (new_depth >= 2) emit_mov_reg_reg64(&ctx->buf, VTX_REG_RDX, VTX_REG_RBX);
 
     return VTX_REG_RAX;
 }
@@ -1461,8 +1469,15 @@ static void emit_smi_overflow_guard(vtx_compile_ctx_t *ctx)
 
     /* mov r10, rax */
     emit_mov_reg_reg64(buf, VTX_REG_R10, VTX_REG_RAX);
-    /* shr r10, 48 */
-    vtx_code_buffer_emit_byte(buf, 0x48);
+    /* shr r10, 48
+     * CRITICAL: Must use emit_rex64() for R10 (register 10), which requires
+     * REX.B bit. Previously hardcoded 0x48 (REX.W only), which caused the
+     * SHR to target RDX (rm=2) instead of R10 (rm=2 + REX.B). This corrupted
+     * RDX — an expression stack register — and caused the overflow guard to
+     * always trigger deopt (since R10 was never shifted, cmp r10,0x7FF8 failed
+     * for all valid SMIs). The deopt stub then materialized the corrupted RDX
+     * value into the interpreter stack, producing incorrect results. */
+    emit_rex64(buf, (vtx_reg_t)5, VTX_REG_R10);  /* SHR /5, rm=R10 */
     vtx_code_buffer_emit_byte(buf, 0xC1);
     vtx_code_buffer_emit_byte(buf, modrm(3, 5, VTX_REG_R10));
     vtx_code_buffer_emit_byte(buf, 48);

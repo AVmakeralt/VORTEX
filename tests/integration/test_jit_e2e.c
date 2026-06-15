@@ -454,6 +454,119 @@ VTX_TEST(jit_sequential_calls)
 /* the allocated frame area.                                                   */
 /* ========================================================================== */
 
+/* Test: push 5 values, return TOS (no IADD) — isolates spill+return path */
+VTX_TEST(jit_spill_return_only)
+{
+    vtx_value_t consts[] = {
+        vtx_make_smi(10), vtx_make_smi(20), vtx_make_smi(30),
+        vtx_make_smi(40), vtx_make_smi(50)
+    };
+    uint8_t code[] = {
+        VT_OP_LOAD_CONST_INT, 0x00, 0x00,  /* push 10  depth=1 */
+        VT_OP_LOAD_CONST_INT, 0x00, 0x01,  /* push 20  depth=2 */
+        VT_OP_LOAD_CONST_INT, 0x00, 0x02,  /* push 30  depth=3 */
+        VT_OP_LOAD_CONST_INT, 0x00, 0x03,  /* push 40  depth=4 */
+        VT_OP_LOAD_CONST_INT, 0x00, 0x04,  /* push 50  depth=5 — spill */
+        VT_OP_RETURN_VALUE                  /* return 50 depth=0 */
+    };
+    vtx_value_t interp = run_interp_only(code, sizeof(code), consts, 5, 1, 5, 0, NULL);
+    vtx_value_t jit = run_jit(code, sizeof(code), consts, 5, 1, 5, 0, NULL);
+    printf("  spill_return: interp_raw=0x%016lX jit_raw=0x%016lX\n",
+           (uint64_t)interp, (uint64_t)jit);
+    printf("  spill_return: interp=%ld, jit_is_smi=%d\n",
+           vtx_is_smi(interp) ? vtx_smi_value(interp) : -999L,
+           vtx_is_smi(jit));
+    VTX_ASSERT_TRUE(vtx_is_smi(interp));
+    VTX_ASSERT_TRUE(vtx_is_smi(jit));
+    VTX_ASSERT_EQUAL(vtx_smi_value(jit), 50);
+}
+
+/* Test: push 5, one IADD, return — minimal spill+IADD test */
+VTX_TEST(jit_spill_one_add)
+{
+    vtx_value_t consts[] = {
+        vtx_make_smi(10), vtx_make_smi(20), vtx_make_smi(30),
+        vtx_make_smi(40), vtx_make_smi(50)
+    };
+    uint8_t code[] = {
+        VT_OP_LOAD_CONST_INT, 0x00, 0x00,  /* push 10  depth=1 */
+        VT_OP_LOAD_CONST_INT, 0x00, 0x01,  /* push 20  depth=2 */
+        VT_OP_LOAD_CONST_INT, 0x00, 0x02,  /* push 30  depth=3 */
+        VT_OP_LOAD_CONST_INT, 0x00, 0x03,  /* push 40  depth=4 */
+        VT_OP_LOAD_CONST_INT, 0x00, 0x04,  /* push 50  depth=5 — spill */
+        VT_OP_IADD,                         /* depth=4: 40+50=90 */
+        VT_OP_RETURN_VALUE                  /* return 90 */
+    };
+    vtx_value_t interp = run_interp_only(code, sizeof(code), consts, 5, 1, 5, 0, NULL);
+    vtx_value_t jit = run_jit(code, sizeof(code), consts, 5, 1, 5, 0, NULL);
+    printf("  spill_one_add: interp_raw=0x%016lX jit_raw=0x%016lX\n",
+           (uint64_t)interp, (uint64_t)jit);
+    printf("  spill_one_add: interp=%ld, jit_is_smi=%d\n",
+           vtx_is_smi(interp) ? vtx_smi_value(interp) : -999L,
+           vtx_is_smi(jit));
+    VTX_ASSERT_TRUE(vtx_is_smi(interp));
+    VTX_ASSERT_TRUE(vtx_is_smi(jit));
+    VTX_ASSERT_EQUAL(vtx_smi_value(jit), vtx_smi_value(interp));
+}
+
+/* Test: push 5, two IADDs — test depth 5→4→3 transition */
+VTX_TEST(jit_spill_two_adds)
+{
+    vtx_value_t consts[] = {
+        vtx_make_smi(10), vtx_make_smi(20), vtx_make_smi(30),
+        vtx_make_smi(40), vtx_make_smi(50)
+    };
+    uint8_t code[] = {
+        VT_OP_LOAD_CONST_INT, 0x00, 0x00,  /* push 10  depth=1 */
+        VT_OP_LOAD_CONST_INT, 0x00, 0x01,  /* push 20  depth=2 */
+        VT_OP_LOAD_CONST_INT, 0x00, 0x02,  /* push 30  depth=3 */
+        VT_OP_LOAD_CONST_INT, 0x00, 0x03,  /* push 40  depth=4 */
+        VT_OP_LOAD_CONST_INT, 0x00, 0x04,  /* push 50  depth=5 — spill */
+        VT_OP_IADD,                         /* depth=4: 40+50=90 */
+        VT_OP_IADD,                         /* depth=3: 30+90=120 */
+        VT_OP_RETURN_VALUE                  /* return 120 */
+    };
+    vtx_value_t interp = run_interp_only(code, sizeof(code), consts, 5, 1, 5, 0, NULL);
+    vtx_value_t jit = run_jit(code, sizeof(code), consts, 5, 1, 5, 0, NULL);
+    printf("  spill_two_adds: interp_raw=0x%016lX jit_raw=0x%016lX\n",
+           (uint64_t)interp, (uint64_t)jit);
+    printf("  spill_two_adds: interp=%ld, jit_is_smi=%d\n",
+           vtx_is_smi(interp) ? vtx_smi_value(interp) : -999L,
+           vtx_is_smi(jit));
+    VTX_ASSERT_TRUE(vtx_is_smi(interp));
+    VTX_ASSERT_TRUE(vtx_is_smi(jit));
+    VTX_ASSERT_EQUAL(vtx_smi_value(jit), vtx_smi_value(interp));
+}
+
+/* Test: push 4, one IADD — no spill, just depth 4→3 (the boundary) */
+VTX_TEST(jit_no_spill_depth4_add)
+{
+    vtx_value_t consts[] = {
+        vtx_make_smi(10), vtx_make_smi(20), vtx_make_smi(30),
+        vtx_make_smi(40)
+    };
+    uint8_t code[] = {
+        VT_OP_LOAD_CONST_INT, 0x00, 0x00,  /* push 10  depth=1 */
+        VT_OP_LOAD_CONST_INT, 0x00, 0x01,  /* push 20  depth=2 */
+        VT_OP_LOAD_CONST_INT, 0x00, 0x02,  /* push 30  depth=3 */
+        VT_OP_LOAD_CONST_INT, 0x00, 0x03,  /* push 40  depth=4 — all regs full */
+        VT_OP_IADD,                         /* depth=3: 30+40=70 */
+        VT_OP_IADD,                         /* depth=2: 20+70=90 */
+        VT_OP_IADD,                         /* depth=1: 10+90=100 */
+        VT_OP_RETURN_VALUE                  /* return 100 */
+    };
+    vtx_value_t interp = run_interp_only(code, sizeof(code), consts, 4, 1, 4, 0, NULL);
+    vtx_value_t jit = run_jit(code, sizeof(code), consts, 4, 1, 4, 0, NULL);
+    printf("  no_spill_depth4_add: interp_raw=0x%016lX jit_raw=0x%016lX\n",
+           (uint64_t)interp, (uint64_t)jit);
+    printf("  no_spill_depth4_add: interp=%ld, jit_is_smi=%d\n",
+           vtx_is_smi(interp) ? vtx_smi_value(interp) : -999L,
+           vtx_is_smi(jit));
+    VTX_ASSERT_TRUE(vtx_is_smi(interp));
+    VTX_ASSERT_TRUE(vtx_is_smi(jit));
+    VTX_ASSERT_EQUAL(vtx_smi_value(jit), vtx_smi_value(interp));
+}
+
 /* Test: 5 values on the stack (1 spill slot) — push 5 constants then add them */
 VTX_TEST(jit_spill_depth5)
 {
