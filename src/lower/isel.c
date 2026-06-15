@@ -646,22 +646,11 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
          */
         int64_t rhs_const;
         if (try_get_const_int(graph, node->inputs[1], &rhs_const)) {
-            if (rhs_const == 1 && dst == lhs_vreg) {
-                /* P1: INC for +1 when dst == lhs (in-place) */
-                vtx_isel_emit_inst(block, make_r_inst(VTX_X86_INC, dst, node_id, 0), arena);
-                break;
-            }
-            if (rhs_const == -1 && dst == lhs_vreg) {
-                /* P1: DEC for -1 when dst == lhs (in-place) */
-                vtx_isel_emit_inst(block, make_r_inst(VTX_X86_DEC, dst, node_id, 0), arena);
-                break;
-            }
-            if (rhs_const != 0 && rhs_const >= INT32_MIN && rhs_const <= INT32_MAX) {
-                vtx_x86_memop_t mem = { lhs_vreg, VTX_VREG_INVALID, 0xFF, 0xFF, 1, (int32_t)rhs_const };
-                vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_LEA, dst, &mem, node_id), arena);
-                break;
-            }
-            /* rhs_const == 0: just MOV (handled below by dst != lhs path) */
+            /* NOTE: INC/DEC optimizations disabled for SMI values.
+             * SMI(a+1) = HEADER | ((a+1)<<3) = SMI(a) + 8 (not +1).
+             * INC adds 1, not 8, so it produces the wrong result.
+             * Fall through to LEA or MOV+ADD with SMI adjustment instead. */
+            (void)rhs_const; /* suppress unused warning */
         }
 
         /* P1 isel: LEA for Add(x, y) where dst ≠ lhs — saves a MOV.
@@ -679,6 +668,16 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         if (dst != lhs_vreg && dst != rhs_vreg) {
             vtx_x86_memop_t mem = { lhs_vreg, rhs_vreg, 0xFF, 0xFF, 1, 0 };
             vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_LEA, dst, &mem, node_id), arena);
+            /* SMI adjustment: LEA computes SMI(a)+SMI(b) = 2*HEADER+(a+b)<<3;
+             * need to subtract one header for correct SMI result.
+             * The header (0x7FF8000000000000) doesn't fit in imm32, so we
+             * load it into a scratch register (R10=10) and use SUB reg,reg. */
+            {
+                uint32_t r10 = vtx_isel_alloc_vreg_fixed(stream, arena, 10);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, r10,
+                                    (int64_t)0x7FF8000000000000ULL, node_id), arena);
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_SUB, dst, r10, node_id), arena);
+            }
             break;
         }
 
@@ -686,6 +685,18 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         if (dst != lhs_vreg)
             vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_vreg, node_id), arena);
         vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_ADD, dst, rhs_vreg, node_id), arena);
+
+        /* SMI arithmetic adjustment:
+         * SMI(a) + SMI(b) = (HEADER|(a<<3)) + (HEADER|(b<<3))
+         *                  = 2*HEADER + (a+b)<<3
+         * We need HEADER + (a+b)<<3 = SMI(a+b), so subtract one header.
+         * The header doesn't fit in imm32, so use R10 as scratch. */
+        {
+            uint32_t r10 = vtx_isel_alloc_vreg_fixed(stream, arena, 10);
+            vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, r10,
+                                (int64_t)0x7FF8000000000000ULL, node_id), arena);
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_SUB, dst, r10, node_id), arena);
+        }
         break;
     }
 
@@ -739,6 +750,18 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         if (dst != lhs_vreg)
             vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_vreg, node_id), arena);
         vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_SUB, dst, rhs_vreg, node_id), arena);
+
+        /* SMI arithmetic adjustment:
+         * SMI(a) - SMI(b) = (HEADER|(a<<3)) - (HEADER|(b<<3))
+         *                  = (a-b)<<3  (headers cancel)
+         * We need HEADER + (a-b)<<3 = SMI(a-b), so add one header.
+         * The header doesn't fit in imm32, so use R10 as scratch. */
+        {
+            uint32_t r10 = vtx_isel_alloc_vreg_fixed(stream, arena, 10);
+            vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, r10,
+                                (int64_t)0x7FF8000000000000ULL, node_id), arena);
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_ADD, dst, r10, node_id), arena);
+        }
         break;
     }
 
