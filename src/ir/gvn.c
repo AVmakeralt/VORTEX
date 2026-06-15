@@ -24,20 +24,45 @@ uint32_t vtx_gvn_node_hash(const vtx_node_t *node, const vtx_node_table_t *table
     h *= 16777619u;
 
     /* Mix inputs (use value numbers if available, else raw IDs) */
-    for (uint32_t i = 0; i < node->input_count; i++) {
-        vtx_nodeid_t inp = node->inputs[i];
-        /* Use the value number of the input if it has been computed,
-         * otherwise use the raw node ID. This makes the hash sensitive
-         * to the actual values being computed. */
-        uint32_t val = inp;
-        if (inp != VTX_NODEID_INVALID && inp < table->count) {
-            uint32_t vn = table->nodes[inp].value_number;
-            if (vn != 0) {
-                val = vn;
-            }
+    /* For commutative binary operations (Add, Mul, And, Or, Xor),
+     * sort the two input values so that the hash is order-independent.
+     * This ensures Add(x,y) and Add(y,x) produce the same hash. */
+    if (node->input_count == 2 && (
+        node->opcode == VTX_OP_Add || node->opcode == VTX_OP_Mul ||
+        node->opcode == VTX_OP_And || node->opcode == VTX_OP_Or ||
+        node->opcode == VTX_OP_Xor)) {
+        uint32_t val0 = node->inputs[0];
+        uint32_t val1 = node->inputs[1];
+        if (val0 != VTX_NODEID_INVALID && val0 < table->count) {
+            uint32_t vn = table->nodes[val0].value_number;
+            if (vn != 0) val0 = vn;
         }
-        h ^= val;
+        if (val1 != VTX_NODEID_INVALID && val1 < table->count) {
+            uint32_t vn = table->nodes[val1].value_number;
+            if (vn != 0) val1 = vn;
+        }
+        /* Sort to ensure canonical order */
+        if (val0 > val1) { uint32_t tmp = val0; val0 = val1; val1 = tmp; }
+        h ^= val0;
         h *= 16777619u;
+        h ^= val1;
+        h *= 16777619u;
+    } else {
+        for (uint32_t i = 0; i < node->input_count; i++) {
+            vtx_nodeid_t inp = node->inputs[i];
+            /* Use the value number of the input if it has been computed,
+             * otherwise use the raw node ID. This makes the hash sensitive
+             * to the actual values being computed. */
+            uint32_t val = inp;
+            if (inp != VTX_NODEID_INVALID && inp < table->count) {
+                uint32_t vn = table->nodes[inp].value_number;
+                if (vn != 0) {
+                    val = vn;
+                }
+            }
+            h ^= val;
+            h *= 16777619u;
+        }
     }
 
     /* Mix condition code (for If, Cmp, Guard, etc.) */
@@ -142,7 +167,11 @@ bool vtx_gvn_nodes_congruent(const vtx_node_t *a, const vtx_node_t *b,
     /* Check inputs: all corresponding inputs must be congruent.
      * If both inputs have value numbers, compare those; otherwise
      * compare the raw node IDs (which is stricter but correct for
-     * the initial partition). */
+     * the initial partition).
+     *
+     * For commutative binary operations, if the ordered comparison
+     * fails, try the swapped comparison (Add(x,y) ≡ Add(y,x)). */
+    bool inputs_match = true;
     for (uint32_t i = 0; i < a->input_count; i++) {
         vtx_nodeid_t a_inp = a->inputs[i];
         vtx_nodeid_t b_inp = b->inputs[i];
@@ -160,7 +189,47 @@ bool vtx_gvn_nodes_congruent(const vtx_node_t *a, const vtx_node_t *b,
             if (bv != 0) b_vn = bv;
         }
 
-        if (a_vn != b_vn) return false;
+        if (a_vn != b_vn) {
+            inputs_match = false;
+            break;
+        }
+    }
+
+    if (!inputs_match) {
+        /* For commutative binary operations (Add, Mul, And, Or, Xor),
+         * try the swapped comparison: a[0]↔b[1], a[1]↔b[0]. */
+        if (a->input_count == 2 && (
+            a->opcode == VTX_OP_Add || a->opcode == VTX_OP_Mul ||
+            a->opcode == VTX_OP_And || a->opcode == VTX_OP_Or ||
+            a->opcode == VTX_OP_Xor)) {
+            vtx_nodeid_t a0 = a->inputs[0], a1 = a->inputs[1];
+            vtx_nodeid_t b0 = b->inputs[0], b1 = b->inputs[1];
+
+            vtx_nodeid_t a0_vn = a0, a1_vn = a1, b0_vn = b0, b1_vn = b1;
+
+            if (a0 != VTX_NODEID_INVALID && a0 < table->count) {
+                uint32_t av = table->nodes[a0].value_number;
+                if (av != 0) a0_vn = av;
+            }
+            if (a1 != VTX_NODEID_INVALID && a1 < table->count) {
+                uint32_t av = table->nodes[a1].value_number;
+                if (av != 0) a1_vn = av;
+            }
+            if (b0 != VTX_NODEID_INVALID && b0 < table->count) {
+                uint32_t bv = table->nodes[b0].value_number;
+                if (bv != 0) b0_vn = bv;
+            }
+            if (b1 != VTX_NODEID_INVALID && b1 < table->count) {
+                uint32_t bv = table->nodes[b1].value_number;
+                if (bv != 0) b1_vn = bv;
+            }
+
+            if (a0_vn == b1_vn && a1_vn == b0_vn) {
+                inputs_match = true;
+            }
+        }
+
+        if (!inputs_match) return false;
     }
 
     return true;

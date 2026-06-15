@@ -266,14 +266,19 @@ vtx_value_profile_t *vtx_value_profile_get_or_create(
         uint32_t new_cap = table->capacity * 2;
         vtx_value_profile_t *new_profiles = (vtx_value_profile_t *)realloc(
             table->profiles, new_cap * sizeof(vtx_value_profile_t));
+        if (new_profiles == NULL) return NULL;
+        table->profiles = new_profiles; /* Commit first realloc to avoid dangling pointer */
+
         uint32_t *new_pcs = (uint32_t *)realloc(
             table->bytecode_pcs, new_cap * sizeof(uint32_t));
-        if (new_profiles == NULL || new_pcs == NULL) {
-            free(new_profiles);
-            free(new_pcs);
+        if (new_pcs == NULL) {
+            /* First realloc committed, second failed.
+             * table->profiles is valid (just larger). table->bytecode_pcs
+             * is still valid (unchanged). The arrays are now inconsistent
+             * in size but we can handle that — the profiles array is just
+             * larger than needed. */
             return NULL;
         }
-        table->profiles = new_profiles;
         table->bytecode_pcs = new_pcs;
         table->capacity = new_cap;
     }

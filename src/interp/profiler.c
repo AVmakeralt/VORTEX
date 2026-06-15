@@ -77,6 +77,11 @@ static int profiler_ensure_capacity(vtx_profiler_t *profiler, uint32_t needed)
 
     profiler->data = new_data;
     profiler->capacity = new_capacity;
+
+    /* Invalidate LRU cache — realloc may have moved the data array,
+     * making cached pointers stale (use-after-free) */
+    memset(profiler->lru, 0, sizeof(profiler->lru));
+
     return 0;
 }
 

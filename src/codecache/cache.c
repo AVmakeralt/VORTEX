@@ -116,7 +116,7 @@ void *vtx_code_cache_alloc(vtx_code_cache_t *cache, uint32_t size)
 
     /* Try to allocate from the current segment */
     vtx_code_segment_t *seg = cache->current_segment;
-    if (seg && seg->writable && (seg->used + size <= seg->size)) {
+    if (seg && seg->writable && (size <= seg->size - seg->used)) {
         void *ptr = seg->memory + seg->used;
         seg->used += size;
         seg->method_count++;

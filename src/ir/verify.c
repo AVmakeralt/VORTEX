@@ -58,7 +58,12 @@ static bool verify_graph_impl(const vtx_graph_t *graph, bool check_no_dead, bool
         uint32_t     next_input;  /* next input index to process */
     } dfs_frame_t;
 
-    dfs_frame_t *dfs_stack = (dfs_frame_t *)malloc(node_count * sizeof(dfs_frame_t));
+    /* Allocate DFS stack with extra headroom: each node can push up to
+     * its input_count frames, so node_count * 4 covers typical fan-out.
+     * Without this, the stack can overflow when nodes have many inputs. */
+    uint32_t dfs_stack_cap = node_count * 4;
+    if (dfs_stack_cap < node_count) dfs_stack_cap = node_count; /* overflow guard */
+    dfs_frame_t *dfs_stack = (dfs_frame_t *)malloc(dfs_stack_cap * sizeof(dfs_frame_t));
     if (dfs_stack == NULL) {
         free(visit_state);
         return ok;
@@ -114,6 +119,18 @@ static bool verify_graph_impl(const vtx_graph_t *graph, bool check_no_dead, bool
                             inp, nid, inp);
                     ok = false;
                 } else if (visit_state[inp] == 0) {
+                    if (sp >= dfs_stack_cap) {
+                        /* DFS stack overflow — grow the stack */
+                        uint32_t new_cap = dfs_stack_cap * 2;
+                        if (new_cap <= dfs_stack_cap) break; /* overflow */
+                        dfs_frame_t *new_stack = (dfs_frame_t *)realloc(
+                            dfs_stack, new_cap * sizeof(dfs_frame_t));
+                        if (!new_stack) break; /* OOM — skip this input */
+                        dfs_stack = new_stack;
+                        dfs_stack_cap = new_cap;
+                        /* Re-acquire frame pointer after realloc */
+                        frame = &dfs_stack[sp - 1];
+                    }
                     dfs_stack[sp].node = inp;
                     dfs_stack[sp].next_input = 0;
                     sp++;

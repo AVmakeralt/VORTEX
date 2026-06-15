@@ -93,6 +93,45 @@ static void emit_test_reg_reg(vtx_code_buffer_t *buf, vtx_reg_t reg)
 }
 
 /* ========================================================================== */
+/* Helper: emit mov reg, imm64                                                */
+/* ========================================================================== */
+
+/**
+ * Emit: mov reg, imm64 (64-bit)
+ * Loads a 64-bit immediate into a register.
+ */
+static void emit_mov_reg_imm64(vtx_code_buffer_t *buf, vtx_reg_t reg, uint64_t imm)
+{
+    uint8_t rex = 0x48; /* REX.W */
+    if (reg >= VTX_REG_R8) rex |= 0x01; /* REX.B */
+    vtx_code_buffer_emit_byte(buf, rex);
+    vtx_code_buffer_emit_byte(buf, (uint8_t)(0xB8 | (reg & 7)));
+    vtx_code_buffer_emit_byte(buf, (uint8_t)(imm & 0xFF));
+    vtx_code_buffer_emit_byte(buf, (uint8_t)((imm >> 8) & 0xFF));
+    vtx_code_buffer_emit_byte(buf, (uint8_t)((imm >> 16) & 0xFF));
+    vtx_code_buffer_emit_byte(buf, (uint8_t)((imm >> 24) & 0xFF));
+    vtx_code_buffer_emit_byte(buf, (uint8_t)((imm >> 32) & 0xFF));
+    vtx_code_buffer_emit_byte(buf, (uint8_t)((imm >> 40) & 0xFF));
+    vtx_code_buffer_emit_byte(buf, (uint8_t)((imm >> 48) & 0xFF));
+    vtx_code_buffer_emit_byte(buf, (uint8_t)((imm >> 56) & 0xFF));
+}
+
+/* ========================================================================== */
+/* Helper: emit cmp reg, reg (64-bit)                                         */
+/* ========================================================================== */
+
+/**
+ * Emit: cmp reg_a, reg_b (64-bit)
+ * Compares two 64-bit registers.
+ */
+static void emit_cmp_reg_reg(vtx_code_buffer_t *buf, vtx_reg_t a, vtx_reg_t b)
+{
+    emit_rex_w(buf, b, a);
+    vtx_code_buffer_emit_byte(buf, 0x39); /* CMP r/m64, r64 */
+    vtx_code_buffer_emit_byte(buf, make_modrm(3, b, a));
+}
+
+/* ========================================================================== */
 /* Helper: emit conditional jump with 32-bit displacement                    */
 /* ========================================================================== */
 
@@ -252,10 +291,11 @@ void vtx_guard_emit_null_check(vtx_code_buffer_t *buf,
      * Default: test raw pointer.
      */
 
-    /* test obj_reg, obj_reg */
-    emit_test_reg_reg(buf, obj_reg);
+    /* Compare against VTX_VALUE_NULL — NaN-boxed null is never zero */
+    emit_mov_reg_imm64(buf, VTX_REG_R10, VTX_VALUE_NULL);
+    emit_cmp_reg_reg(buf, obj_reg, VTX_REG_R10);
 
-    /* jz deopt_stub (jump if zero = null) */
+    /* je deopt_stub (jump if equal to null) */
     uint32_t disp_pos = emit_jcc32(buf, CC_E);
     guard_info.branch_offset = (int32_t)disp_pos;
 

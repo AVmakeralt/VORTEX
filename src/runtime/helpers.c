@@ -297,11 +297,22 @@ void vtx_helpers_write_barrier(void *obj, uint32_t field_offset)
          * the value here — the JIT emits this barrier unconditionally
          * for reference stores. The GC will scan the object's fields
          * during collection to find actual young-gen pointers. */
-        if (gc->remembered_count < gc->remembered_capacity) {
-            gc->remembered_set[gc->remembered_count].obj = heap_obj;
-            gc->remembered_count++;
-            heap_obj->gc_remembered = 1;
+        if (gc->remembered_count >= gc->remembered_capacity) {
+            /* Grow the remembered set instead of silently dropping entries */
+            uint32_t new_cap = gc->remembered_capacity > 0 ? gc->remembered_capacity * 2 : 64;
+            if (new_cap <= gc->remembered_capacity) new_cap = gc->remembered_capacity + 16; /* overflow guard */
+            vtx_remembered_entry_t *new_set = (vtx_remembered_entry_t *)realloc(
+                gc->remembered_set, new_cap * sizeof(vtx_remembered_entry_t));
+            if (new_set == NULL) {
+                VTX_ASSERT(false, "remembered set overflow in JIT write barrier");
+                return;
+            }
+            gc->remembered_set = new_set;
+            gc->remembered_capacity = new_cap;
         }
+        gc->remembered_set[gc->remembered_count].obj = heap_obj;
+        gc->remembered_count++;
+        heap_obj->gc_remembered = 1;
     }
 }
 
@@ -389,6 +400,9 @@ vtx_value_t vtx_runtime_call_virtual_reg(void *interp,
      * stack overflow with large argument counts. alloca() on the
      * JIT-compiled code path has limited stack space and no error
      * handling for allocation failure. */
+    if (arg_count > UINT32_MAX - 1) {
+        return VTX_VALUE_UNDEFINED;
+    }
     uint32_t total_arg_count = arg_count + 1; /* +1 for receiver */
     vtx_value_t *full_args = (vtx_value_t *)malloc(total_arg_count * sizeof(vtx_value_t));
     if (full_args == NULL) {
@@ -445,6 +459,9 @@ vtx_value_t vtx_runtime_call_interface_reg(void *interp,
     /* Build the full args array: receiver + remaining args.
      * BUGFIX: Use heap allocation instead of alloca() to prevent
      * stack overflow with large argument counts. */
+    if (arg_count > UINT32_MAX - 1) {
+        return VTX_VALUE_UNDEFINED;
+    }
     uint32_t total_arg_count = arg_count + 1;
     vtx_value_t *full_args = (vtx_value_t *)malloc(total_arg_count * sizeof(vtx_value_t));
     if (full_args == NULL) {

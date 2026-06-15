@@ -69,11 +69,11 @@ static void check_markov_prediction(vtx_orchestrator_t *orch)
         task.priority = VTX_COMPILE_PRIORITY_LOW;
 
         if (vtx_threadpool_submit_task(orch->threadpool, &task) == 0) {
-            orch->total_proactive_compiles++;
+            __atomic_fetch_add(&orch->total_proactive_compiles, 1, __ATOMIC_RELAXED);
         }
     }
 
-    orch->total_phase_predictions++;
+    __atomic_fetch_add(&orch->total_phase_predictions, 1, __ATOMIC_RELAXED);
 }
 
 /* ========================================================================== */
@@ -120,7 +120,7 @@ static void check_phase_detection(vtx_orchestrator_t *orch)
                     orch->phase_react, method_id, phase_hash);
 
                 if (reactivated) {
-                    orch->total_phase_reactivations++;
+                    __atomic_fetch_add(&orch->total_phase_reactivations, 1, __ATOMIC_RELAXED);
                 }
             }
         }
@@ -162,7 +162,7 @@ static void check_recomp_drift(vtx_orchestrator_t *orch)
             task.priority = VTX_COMPILE_PRIORITY_HIGH; /* drift = urgent */
 
             if (vtx_threadpool_submit_task(orch->threadpool, &task) == 0) {
-                orch->total_recomp_triggers++;
+                __atomic_fetch_add(&orch->total_recomp_triggers, 1, __ATOMIC_RELAXED);
             }
         }
     }
@@ -211,7 +211,7 @@ static void check_fdi_feedback(vtx_orchestrator_t *orch)
         task.priority = VTX_COMPILE_PRIORITY_HIGH;
 
         if (vtx_threadpool_submit_task(orch->threadpool, &task) == 0) {
-            orch->total_fdi_recompiles++;
+            __atomic_fetch_add(&orch->total_fdi_recompiles, 1, __ATOMIC_RELAXED);
         }
     }
 }
@@ -265,7 +265,7 @@ static void *orchestrator_thread_fn(void *arg)
 
         /* ---- Perform wiring checks ---- */
 
-        orch->total_checks++;
+        __atomic_fetch_add(&orch->total_checks, 1, __ATOMIC_RELAXED);
 
         /* 1. Markov → proactive compilation */
         check_markov_prediction(orch);
@@ -437,7 +437,7 @@ void vtx_orchestrator_on_deopt(vtx_orchestrator_t *orch,
             task.tier = VTX_TIER_T2;
             task.priority = VTX_COMPILE_PRIORITY_HIGH;
             if (vtx_threadpool_submit_task(orch->threadpool, &task) == 0) {
-                orch->total_fdi_recompiles++;
+                __atomic_fetch_add(&orch->total_fdi_recompiles, 1, __ATOMIC_RELAXED);
             }
         }
     }

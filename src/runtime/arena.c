@@ -88,7 +88,7 @@ void *vtx_arena_alloc(vtx_arena_t *arena, size_t size)
     vtx_arena_page_t *page = arena->current_page;
 
     /* Try to allocate from the current page */
-    if (page != NULL && (page->used + aligned_size) <= page->size) {
+    if (page != NULL && aligned_size <= page->size - page->used) {
         void *ptr = (char *)page_data(page) + page->used;
         page->used += aligned_size;
         arena->total_allocated += aligned_size;

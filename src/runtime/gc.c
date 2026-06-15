@@ -561,7 +561,8 @@ void vtx_gc_root_push(vtx_gc_t *gc, vtx_value_t value)
 
     if (gc->root_count >= gc->root_capacity) {
         /* Grow the root stack */
-        uint32_t new_cap = gc->root_capacity * 2;
+        uint32_t new_cap = gc->root_capacity > 0 ? gc->root_capacity * 2 : 16;
+        if (new_cap <= gc->root_capacity) new_cap = gc->root_capacity + 16; /* overflow guard */
         vtx_root_entry_t *new_stack = (vtx_root_entry_t *)realloc(
             gc->root_stack, new_cap * sizeof(vtx_root_entry_t));
         if (new_stack == NULL) {
@@ -617,7 +618,8 @@ void vtx_gc_write_barrier(vtx_gc_t *gc, vtx_heap_object_t *obj,
 
     /* Grow remembered set if needed */
     if (gc->remembered_count >= gc->remembered_capacity) {
-        uint32_t new_cap = gc->remembered_capacity * 2;
+        uint32_t new_cap = gc->remembered_capacity > 0 ? gc->remembered_capacity * 2 : 16;
+        if (new_cap <= gc->remembered_capacity) new_cap = gc->remembered_capacity + 16; /* overflow guard */
         vtx_remembered_entry_t *new_set = (vtx_remembered_entry_t *)realloc(
             gc->remembered_set, new_cap * sizeof(vtx_remembered_entry_t));
         if (new_set == NULL) {
@@ -681,7 +683,8 @@ void vtx_gc_write_barrier_card(vtx_gc_t *gc, vtx_heap_object_t *obj,
     }
 
     if (gc->remembered_count >= gc->remembered_capacity) {
-        uint32_t new_cap = gc->remembered_capacity * 2;
+        uint32_t new_cap = gc->remembered_capacity > 0 ? gc->remembered_capacity * 2 : 16;
+        if (new_cap <= gc->remembered_capacity) new_cap = gc->remembered_capacity + 16; /* overflow guard */
         vtx_remembered_entry_t *new_set = (vtx_remembered_entry_t *)realloc(
             gc->remembered_set, new_cap * sizeof(vtx_remembered_entry_t));
         if (new_set == NULL) {
@@ -897,7 +900,7 @@ static void scan_dirty_cards(vtx_gc_t *gc)
 
     /* Iterate over all cards in the card table */
     for (size_t i = 0; i < gc->card_table_size; i++) {
-        if (gc->card_table[i] != VTX_CARD_DIRTY) {
+        if (gc->card_table[i] == VTX_CARD_CLEAN) {
             continue;
         }
 
@@ -906,7 +909,7 @@ static void scan_dirty_cards(vtx_gc_t *gc)
         uint8_t *card_end   = card_start + VTX_CARD_SIZE;
 
         /* Only scan within old gen (young-gen objects are traced directly) */
-        uint8_t *old_end = gc->old_gen.start + gc->old_gen.used;
+        uint8_t *old_end = gc->old_gen.start + gc->old_gen.size;
         if (card_start < gc->old_gen.start) {
             card_start = gc->old_gen.start;
         }
@@ -1024,7 +1027,15 @@ void vtx_gc_collect_young(vtx_gc_t *gc)
          *
          * The simplest approach: since pinned objects are rare, just copy
          * them to to-space and update all references. The forwarding pointer
-         * left in the old location will redirect any stale references. */
+         * left in the old location will redirect any stale references.
+         *
+         * BUG #6 KNOWN LIMITATION: Old-gen objects that hold references
+         * to pinned objects are NOT updated here. The forwarding pointer
+         * in the old location will redirect root-stack references on the
+         * next scan, but old-gen → pinned-young references that were
+         * recorded in the remembered set may now point to the old
+         * (forwarded) location. We add the new copy to the remembered
+         * set below so it will be rescanned on the next collection. */
         void *new_ptr = semi_space_alloc(&gc->young_to, pinned->size);
         if (new_ptr != NULL) {
             memcpy(new_ptr, pinned, pinned->size);
@@ -1033,6 +1044,18 @@ void vtx_gc_collect_young(vtx_gc_t *gc)
             /* Leave forwarding pointer in old location */
             *(uintptr_t *)pinned = (uintptr_t)new_obj;
             pinned->size = VTX_GC_FORWARDING_SENTINEL;
+
+            /* Bug #6 fix: Add the new copy to the remembered set so that
+             * old-gen objects referencing the pinned object will be
+             * rescanned on the next collection. Without this, stale
+             * old→young references to the old (forwarded) pinned location
+             * would not be updated, causing dangling pointers. */
+            if (!new_obj->gc_remembered &&
+                gc->remembered_count < gc->remembered_capacity) {
+                gc->remembered_set[gc->remembered_count].obj = new_obj;
+                gc->remembered_count++;
+                new_obj->gc_remembered = 1;
+            }
         }
     }
 
@@ -1063,6 +1086,16 @@ void vtx_gc_collect_young(vtx_gc_t *gc)
         uint8_t *end = gc->old_gen.start + gc->old_gen.used;
         while (ptr < end) {
             vtx_heap_object_t *obj = (vtx_heap_object_t *)ptr;
+            if (obj->gc_mark == 0xFF) {
+                /* Free block — skip it */
+                vtx_free_node_t *free_node = (vtx_free_node_t *)ptr;
+                size_t free_size = align_up_8(vtx_free_node_get_size(free_node));
+                if (free_size < sizeof(vtx_free_node_t)) {
+                    free_size = sizeof(vtx_free_node_t);
+                }
+                ptr += free_size;
+                continue;
+            }
             if (obj->size == 0 || obj->size == VTX_GC_FORWARDING_SENTINEL) {
                 ptr += sizeof(vtx_free_node_t);
                 continue;
@@ -1084,7 +1117,8 @@ void vtx_gc_collect_young(vtx_gc_t *gc)
                          * old→young references to be missed, leading to
                          * premature collection of live young-gen objects. */
                         if (gc->remembered_count >= gc->remembered_capacity) {
-                            uint32_t new_cap = gc->remembered_capacity * 2;
+                            uint32_t new_cap = gc->remembered_capacity > 0 ? gc->remembered_capacity * 2 : 16;
+                            if (new_cap <= gc->remembered_capacity) new_cap = gc->remembered_capacity + 16; /* overflow guard */
                             vtx_remembered_entry_t *new_set = (vtx_remembered_entry_t *)realloc(
                                 gc->remembered_set, new_cap * sizeof(vtx_remembered_entry_t));
                             if (new_set == NULL) {
@@ -1245,7 +1279,10 @@ void vtx_gc_collect_old(vtx_gc_t *gc)
         uint8_t *end = gc->young_from.current;
         while (ptr < end) {
             vtx_heap_object_t *obj = (vtx_heap_object_t *)ptr;
-            if (obj->size == 0) break;
+            if (obj->size == 0) {
+                ptr += align_up_8(VTX_HEAP_OBJECT_HEADER_SIZE);
+                continue;
+            }
             obj->gc_mark = 0;
             ptr += align_up_8(obj->size);
         }
@@ -1269,7 +1306,8 @@ void vtx_gc_pin(vtx_gc_t *gc, vtx_heap_object_t *obj)
 
     /* Add to pinned objects list */
     if (gc->pinned_count >= gc->pinned_capacity) {
-        uint32_t new_cap = gc->pinned_capacity * 2;
+        uint32_t new_cap = gc->pinned_capacity > 0 ? gc->pinned_capacity * 2 : 16;
+        if (new_cap <= gc->pinned_capacity) new_cap = gc->pinned_capacity + 16; /* overflow guard */
         vtx_heap_object_t **new_list = (vtx_heap_object_t **)realloc(
             gc->pinned_objects, new_cap * sizeof(vtx_heap_object_t *));
         if (new_list == NULL) {

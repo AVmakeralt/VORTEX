@@ -115,9 +115,16 @@ static uint32_t *compute_dominators(uint32_t block_count,
                      * the root of the dominator tree. */
                     uint32_t a = new_dom;
                     uint32_t b = dom[pred];
+                    unsigned iters = 0;
                     while (a != b) {
                         while (rpo[a] > rpo[b]) a = dom[a];
                         while (rpo[b] > rpo[a]) b = dom[b];
+                        if (++iters > block_count * 2) {
+                            /* Safety: prevent infinite loop for unreachable
+                             * blocks with same RPO number */
+                            a = start_block;
+                            break;
+                        }
                     }
                     new_dom = a;
                 }
@@ -885,6 +892,21 @@ int vtx_schedule_run(vtx_graph_t *graph, vtx_arena_t *arena, vtx_schedule_t *sch
         compute_loop_depth(schedule->count, start_block, schedule->blocks, dom);
     }
 
+    /* Compute dominator tree depths for correct LCA.
+     * loop_depth is NOT the same as dominator tree depth and using it
+     * to decide which block to walk up in the LCA computation can
+     * cause incorrect results (e.g., walking the wrong side of the
+     * dominator tree). dom_depth[i] = distance from the root of the
+     * dominator tree to block i. */
+    uint32_t *dom_depth = (uint32_t *)calloc(schedule->count, sizeof(uint32_t));
+    if (dom_depth) {
+        for (uint32_t i = 0; i < schedule->count; i++) {
+            if (dom[i] != (uint32_t)-1 && dom[i] != i) {
+                dom_depth[i] = dom_depth[dom[i]] + 1;
+            }
+        }
+    }
+
     /* Phase 5: Assign data and memory nodes to blocks.
      *
      * For each non-control, non-dead node, find the block where it should
@@ -935,11 +957,11 @@ int vtx_schedule_run(vtx_graph_t *graph, vtx_arena_t *arena, vtx_schedule_t *sch
                                 if (a == (uint32_t)-1 || b == (uint32_t)-1) break;
                                 if (a >= schedule->count || b >= schedule->count) break;
                                 /* Walk the one with deeper dominator chain upward.
-                                 * We use a simple approach: walk both up until they
-                                 * meet. The block with higher RPO depth walks first. */
-                                if (schedule->blocks[a].loop_depth > schedule->blocks[b].loop_depth) {
+                                 * Use dom_depth (dominator tree depth) instead of
+                                 * loop_depth, which is unrelated to dominator depth. */
+                                if (dom_depth && dom_depth[a] > dom_depth[b]) {
                                     a = dom[a];
-                                } else if (schedule->blocks[b].loop_depth > schedule->blocks[a].loop_depth) {
+                                } else if (dom_depth && dom_depth[b] > dom_depth[a]) {
                                     b = dom[b];
                                 } else {
                                     a = dom[a];
@@ -1027,11 +1049,11 @@ int vtx_schedule_run(vtx_graph_t *graph, vtx_arena_t *arena, vtx_schedule_t *sch
                             while (a != b) {
                                 if (a >= schedule->count || b >= schedule->count) break;
                                 /* Walk both upward until they converge.
-                                 * Use loop_depth as a proxy for dominator depth
-                                 * to avoid unnecessary upward walking. */
-                                if (schedule->blocks[a].loop_depth > schedule->blocks[b].loop_depth) {
+                                 * Use dom_depth (dominator tree depth) instead of
+                                 * loop_depth, which is unrelated to dominator depth. */
+                                if (dom_depth && dom_depth[a] > dom_depth[b]) {
                                     a = dom[a];
-                                } else if (schedule->blocks[b].loop_depth > schedule->blocks[a].loop_depth) {
+                                } else if (dom_depth && dom_depth[b] > dom_depth[a]) {
                                     b = dom[b];
                                 } else {
                                     a = dom[a];
@@ -1052,11 +1074,13 @@ int vtx_schedule_run(vtx_graph_t *graph, vtx_arena_t *arena, vtx_schedule_t *sch
         }
     }
 
-    /* Free dominator array now that Phase 5 is done */
+    /* Free dominator array and dom_depth now that Phase 5 is done */
     if (dom != NULL) {
         free(dom);
         dom = NULL;
     }
+    free(dom_depth);
+    dom_depth = NULL;
 
     /* Assign remaining unassigned nodes to block 0 */
     for (uint32_t i = 0; i < node_count; i++) {

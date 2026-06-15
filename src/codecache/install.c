@@ -26,6 +26,7 @@ int vtx_method_registry_init(vtx_method_registry_t *registry, vtx_arena_t *arena
     registry->capacity = VTX_METHOD_REGISTRY_INITIAL_CAPACITY;
     registry->capacity_mask = registry->capacity - 1;
     registry->clock_hand = 0;
+    registry->malloc_allocated = false;
     registry->methods = (vtx_compiled_method_t **)vtx_arena_alloc(
         arena, registry->capacity * sizeof(vtx_compiled_method_t *));
     if (!registry->methods) {
@@ -50,12 +51,16 @@ void vtx_method_registry_destroy(vtx_method_registry_t *registry)
             free(m); /* Allocated with malloc below */
         }
     }
-    /* The methods array is arena-allocated, no free needed */
+    /* Free the methods array if it was grown with malloc */
+    if (registry->malloc_allocated && registry->methods) {
+        free(registry->methods);
+    }
     registry->methods = NULL;
     registry->method_count = 0;
     registry->capacity = 0;
     registry->capacity_mask = 0;
     registry->clock_hand = 0;
+    registry->malloc_allocated = false;
 }
 
 int vtx_method_registry_add(vtx_method_registry_t *registry,
@@ -66,8 +71,16 @@ int vtx_method_registry_add(vtx_method_registry_t *registry,
     /* Grow array if needed. Capacity is always kept as a power of 2
      * so that (index & capacity_mask) is equivalent to (index % capacity). */
     if (method->method_id >= registry->capacity) {
-        uint32_t new_cap = registry->capacity;
-        while (new_cap <= method->method_id) new_cap *= 2;
+        uint32_t new_cap = registry->capacity > 0 ? registry->capacity : 16;
+        while (new_cap <= method->method_id) {
+            uint32_t next_cap = new_cap * 2;
+            if (next_cap <= new_cap) {
+                /* Overflow — just use method_id + 1 directly */
+                new_cap = method->method_id + 1;
+                break;
+            }
+            new_cap = next_cap;
+        }
         vtx_compiled_method_t **new_arr = (vtx_compiled_method_t **)malloc(
             new_cap * sizeof(vtx_compiled_method_t *));
         if (!new_arr) return -1;
@@ -79,6 +92,7 @@ int vtx_method_registry_add(vtx_method_registry_t *registry,
         registry->methods = new_arr;
         registry->capacity = new_cap;
         registry->capacity_mask = new_cap - 1;
+        registry->malloc_allocated = true;
     }
 
     registry->methods[method->method_id] = method;
@@ -152,7 +166,11 @@ bool vtx_install_method(vtx_code_cache_t *cache,
 
     /* Create the compiled method metadata */
     vtx_compiled_method_t *cm = (vtx_compiled_method_t *)malloc(sizeof(vtx_compiled_method_t));
-    if (!cm) return false;
+    if (!cm) {
+        /* Free the code cache allocation on failure */
+        vtx_code_cache_free(cache, code_mem, code_size);
+        return false;
+    }
     memset(cm, 0, sizeof(*cm));
 
     cm->method_id = method_id;

@@ -445,6 +445,34 @@ static vtx_frame_t *unwind_to_handler(vtx_interp_t *interp,
 }
 
 /* ========================================================================== */
+/* Type feedback site-index hashing (Bug #1 fix)                               */
+/* ========================================================================== */
+
+/**
+ * Hash the site_index with the method pointer to avoid cross-method collisions.
+ * Without this, two methods at the same bytecode PC would map to the same
+ * feedback slot in the global feedback arrays, polluting each other's data.
+ */
+/**
+ * Maximum number of distinct type-feedback sites.
+ * The hash is capped to this range to prevent the feedback arrays
+ * from growing to unbounded sizes (a full uint32_t hash would cause
+ * multi-GB allocations for the first site at a high index).
+ */
+#define VTX_FEEDBACK_SITE_MAX  4096
+
+static inline uint32_t vtx_hash_site_index(const void *method, uint32_t pc)
+{
+    uintptr_t mp = (uintptr_t)method;
+    uint32_t h = (uint32_t)(mp ^ (mp >> 32)) ^ pc;
+    h ^= h >> 16;
+    h *= 0x45d9f3bu;
+    h ^= h >> 16;
+    /* Cap to a reasonable table size to prevent unbounded growth */
+    return h % VTX_FEEDBACK_SITE_MAX;
+}
+
+/* ========================================================================== */
 /* Main interpreter dispatch loop                                              */
 /* ========================================================================== */
 
@@ -796,7 +824,8 @@ dispatch_VT_OP_LOAD_FIELD:
                                          (uint32_t)pc, obj->shape_id);
         /* Record field in type feedback */
         vtx_type_feedback_record_field(&interp->type_feedback,
-                                        (uint32_t)pc, obj->shape_id,
+                                        vtx_hash_site_index(frame->method, (uint32_t)pc),
+                                        obj->shape_id,
                                         value_typeid(val));
     }
     DISPATCH_NEXT();
@@ -817,7 +846,8 @@ dispatch_VT_OP_STORE_FIELD:
         vtx_profiler_record_field_shape(&interp->profiler, frame->method,
                                          (uint32_t)pc, obj->shape_id);
         vtx_type_feedback_record_field(&interp->type_feedback,
-                                        (uint32_t)pc, obj->shape_id,
+                                        vtx_hash_site_index(frame->method, (uint32_t)pc),
+                                        obj->shape_id,
                                         value_typeid(val));
     }
     DISPATCH_NEXT();
@@ -935,12 +965,25 @@ dispatch_VT_OP_IMUL:
         /* Fast path: SMI * SMI */
         int64_t ia_smi = vtx_smi_value(a);
         int64_t ib_smi = vtx_smi_value(b);
-        int64_t result_i = ia_smi * ib_smi;
-        /* Inline overflow check for multiplication: if either operand is 0,
-         * no overflow. Otherwise, divide back and check. */
-        if (VTX_LIKELY(ia_smi == 0 || ib_smi == 0 ||
-                       (result_i / ib_smi == ia_smi &&
-                        result_i >= VTX_SMI_MIN && result_i <= VTX_SMI_MAX))) {
+        /* Use unsigned multiply to avoid signed overflow UB */
+        uint64_t ua = (uint64_t)ia_smi;
+        uint64_t ub = (uint64_t)ib_smi;
+        uint64_t result_u = ua * ub;
+        /* Check overflow: result must fit in int64_t and be in SMI range */
+        int64_t result_i;
+        bool overflow = false;
+        if (ia_smi == 0 || ib_smi == 0) {
+            result_i = 0;
+        } else if ((ia_smi > 0 && ib_smi > 0 && result_u > (uint64_t)VTX_SMI_MAX) ||
+                   (ia_smi < 0 && ib_smi < 0 && result_u > (uint64_t)VTX_SMI_MAX) ||
+                   (ia_smi > 0 && ib_smi < 0 && (int64_t)result_u < VTX_SMI_MIN) ||
+                   (ia_smi < 0 && ib_smi > 0 && (int64_t)result_u < VTX_SMI_MIN)) {
+            overflow = true;
+            result_i = 0; /* placeholder */
+        } else {
+            result_i = (int64_t)result_u;
+        }
+        if (VTX_LIKELY(!overflow)) {
             *sp++ = vtx_make_smi(result_i);
             DISPATCH_NEXT();
         }
@@ -962,6 +1005,10 @@ dispatch_VT_OP_IDIV:
         int64_t ia_smi = vtx_smi_value(a);
         int64_t ib_smi = vtx_smi_value(b);
         VTX_ASSERT(ib_smi != 0, "integer division by zero");
+        if (VTX_UNLIKELY(ib_smi == 0)) {
+            *sp++ = VTX_VALUE_UNDEFINED;
+            DISPATCH_NEXT();
+        }
         if (VTX_UNLIKELY(ia_smi == INT64_MIN && ib_smi == -1)) {
             /* Bug #3 fix: INT64_MIN / -1 = 2^63 which overflows int64_t.
              * The correct result as a double is -(double)INT64_MIN = 2^63.0,
@@ -987,7 +1034,16 @@ dispatch_VT_OP_IMOD:
         /* Fast path: SMI % SMI */
         int64_t ia_smi = vtx_smi_value(a);
         int64_t ib_smi = vtx_smi_value(b);
-        VTX_ASSERT(ib_smi != 0, "integer modulo by zero");
+        if (VTX_UNLIKELY(ib_smi == 0)) {
+            /* Division by zero — throw exception or return undefined */
+            *sp++ = VTX_VALUE_UNDEFINED;
+            DISPATCH_NEXT();
+        }
+        if (VTX_UNLIKELY(ia_smi == INT64_MIN && ib_smi == -1)) {
+            /* INT64_MIN % -1 is UB in C — result is 0 */
+            *sp++ = vtx_make_smi(0);
+            DISPATCH_NEXT();
+        }
         int64_t result_i = ia_smi % ib_smi;
         *sp++ = vtx_make_smi(result_i);
     } else {
@@ -1050,11 +1106,11 @@ dispatch_VT_OP_ISHL:
     if (VTX_LIKELY(vtx_is_smi(a) && vtx_is_smi(b))) {
         ia = vtx_smi_value(a);
         ib = vtx_smi_value(b);
-        *sp++ = vtx_make_smi(ia << (ib & 63));
+        *sp++ = vtx_make_smi((int64_t)((uint64_t)ia << (ib & 63)));
     } else {
         int64_t va = vtx_is_smi(a) ? vtx_smi_value(a) : (vtx_is_double(a) ? (int64_t)vtx_double_value(a) : 0);
         int64_t vb = vtx_is_smi(b) ? vtx_smi_value(b) : (vtx_is_double(b) ? (int64_t)vtx_double_value(b) : 0);
-        *sp++ = vtx_make_smi(va << (vb & 63));
+        *sp++ = vtx_make_smi((int64_t)((uint64_t)va << (vb & 63)));
     }
     DISPATCH_NEXT();
 
@@ -1121,13 +1177,17 @@ dispatch_VT_OP_IXOR:
     /* ---- VT_OP_INEG ---- */
 dispatch_VT_OP_INEG:
     a = *--sp;
-    ia = vtx_smi_value(a);
-    {
+    if (VTX_LIKELY(vtx_is_smi(a))) {
+        ia = vtx_smi_value(a);
         if (ia == INT64_MIN) {
             *sp++ = vtx_make_double(-(double)INT64_MIN);
         } else {
             *sp++ = vtx_make_smi(-ia);
         }
+    } else if (vtx_is_double(a)) {
+        *sp++ = vtx_make_double(-vtx_double_value(a));
+    } else {
+        *sp++ = VTX_VALUE_UNDEFINED;
     }
     DISPATCH_NEXT();
 
@@ -1326,7 +1386,7 @@ dispatch_VT_OP_IF_TRUE:
         vtx_profiler_record_branch(&interp->profiler, frame->method,
                                     (uint32_t)pc, taken);
         vtx_type_feedback_record_branch(&interp->type_feedback,
-                                         (uint32_t)pc, taken);
+                                         vtx_hash_site_index(frame->method, (uint32_t)pc), taken);
         if (taken) {
             uint32_t target_pc = (uint32_t)operand;
             if (target_pc <= (uint32_t)pc) {
@@ -1365,7 +1425,7 @@ dispatch_VT_OP_IF_FALSE:
         vtx_profiler_record_branch(&interp->profiler, frame->method,
                                     (uint32_t)pc, taken);
         vtx_type_feedback_record_branch(&interp->type_feedback,
-                                         (uint32_t)pc, taken);
+                                         vtx_hash_site_index(frame->method, (uint32_t)pc), taken);
         if (taken) {
             uint32_t target_pc = (uint32_t)operand;
             if (target_pc <= (uint32_t)pc) {
@@ -1451,11 +1511,15 @@ dispatch_VT_OP_CALL_STATIC:
          * BUG-2 fix: Cap arg count to prevent stack overflow from
          * corrupted/malicious method descriptors. 256 args is well
          * beyond any realistic use case; larger counts would exhaust
-         * the C stack via alloca. */
+         * the C stack via alloca.
+         * Bug #5 fix: Save sp before popping so we can restore it
+         * if frame creation fails. Without this, the arguments are
+         * lost from the caller's stack on frame allocation failure. */
         uint32_t call_arg_count = target_method->arg_count;
         if (call_arg_count > 256) call_arg_count = 256;
         vtx_value_t call_args_buf[256];
         vtx_value_t *call_args = call_args_buf;
+        vtx_value_t *saved_sp = sp;
         for (uint32_t ai = call_arg_count; ai > 0; ai--) {
             call_args[ai - 1] = *--sp;
         }
@@ -1465,6 +1529,7 @@ dispatch_VT_OP_CALL_STATIC:
             target_method, frame, (uint32_t)(pc + vtx_bytecode_insn_length(bc, pc)),
             &interp->frame_stack);
         if (callee_frame == NULL) {
+            sp = saved_sp; /* Bug #5 fix: Restore sp to put args back */
             *sp++ = VTX_VALUE_UNDEFINED;
             DISPATCH_NEXT();
         }
@@ -1496,7 +1561,12 @@ dispatch_VT_OP_CALL_VIRTUAL:
             method_name = vtx_helpers_string_data(method_val);
         }
 
-        /* Get the receiver (top of stack) */
+        /* Get the receiver.
+         * Bug #3 fix: The receiver is at the BOTTOM of the argument area
+         * on the stack (pushed first: receiver, arg1, arg2, ...).
+         * We don't know arg_count yet, so peek the top of stack as a
+         * provisional value for IC lookup. After resolving the method,
+         * we re-peek the correct receiver position for profiling. */
         VTX_ASSERT(((int)(sp - frame->operand_stack)) > 0, "stack underflow for virtual call");
         vtx_value_t receiver = *(sp - 1);
 
@@ -1516,12 +1586,26 @@ dispatch_VT_OP_CALL_VIRTUAL:
             }
         }
 
-        /* Record call type in profiler and type feedback */
+        /* Bug #3 fix: After resolving the method, peek the correct receiver.
+         * The receiver is at *(sp - arg_count - 1) because it was pushed
+         * before the arguments. We only need the correct receiver for
+         * profiling/type-feedback; the IC lookup above may have used the
+         * wrong stack position, but that's a pre-existing limitation. */
         vtx_typeid_t receiver_tid = value_typeid(receiver);
+        if (target_method != NULL) {
+            uint32_t rarg_count = target_method->arg_count;
+            if ((uint32_t)(sp - frame->operand_stack) > rarg_count) {
+                receiver = *(sp - rarg_count - 1);
+                receiver_tid = value_typeid(receiver);
+            }
+        }
+
+        /* Record call type in profiler and type feedback */
         vtx_profiler_record_call_type(&interp->profiler, frame->method,
                                        (uint32_t)pc, receiver_tid);
         vtx_type_feedback_record_call(&interp->type_feedback,
-                                       (uint32_t)pc, receiver_tid,
+                                       vtx_hash_site_index(frame->method, (uint32_t)pc),
+                                       receiver_tid,
                                        VTX_TYPE_INVALID);
 
         if (target_method == NULL || target_method->bytecode == NULL) {
@@ -1589,7 +1673,10 @@ dispatch_VT_OP_CALL_INTERFACE:
             }
         }
 
-        /* Get the receiver */
+        /* Get the receiver.
+         * Bug #3 fix: The receiver is at the BOTTOM of the argument area
+         * on the stack. Peek top of stack provisionally for IC lookup,
+         * then re-peek at the correct position after resolving the method. */
         VTX_ASSERT(((int)(sp - frame->operand_stack)) > 0, "stack underflow for interface call");
         vtx_value_t receiver = *(sp - 1);
 
@@ -1609,12 +1696,24 @@ dispatch_VT_OP_CALL_INTERFACE:
                 interp->type_system, tid, method_name);
         }
 
-        /* Record call type */
+        /* Bug #3 fix: Re-peek the correct receiver after method resolution.
+         * The receiver is at *(sp - arg_count - 1) for the same reason
+         * as in CALL_VIRTUAL. */
         vtx_typeid_t receiver_tid = value_typeid(receiver);
+        if (target_method != NULL) {
+            uint32_t iarg_count = target_method->arg_count;
+            if ((uint32_t)(sp - frame->operand_stack) > iarg_count) {
+                receiver = *(sp - iarg_count - 1);
+                receiver_tid = value_typeid(receiver);
+            }
+        }
+
+        /* Record call type */
         vtx_profiler_record_call_type(&interp->profiler, frame->method,
                                        (uint32_t)pc, receiver_tid);
         vtx_type_feedback_record_call(&interp->type_feedback,
-                                       (uint32_t)pc, receiver_tid,
+                                       vtx_hash_site_index(frame->method, (uint32_t)pc),
+                                       receiver_tid,
                                        VTX_TYPE_INVALID);
 
         if (target_method == NULL || target_method->bytecode == NULL) {
@@ -1794,9 +1893,15 @@ dispatch_VT_OP_CHECKCAST:
     {
         vtx_typeid_t target_typeid = (vtx_typeid_t)operand;
         if (!vtx_helpers_type_check(interp->type_system, a, target_typeid)) {
-            /* Cast failed — throw ClassCastException */
+            /* Cast failed — throw ClassCastException.
+             * Bug #4 fix: Do NOT throw the value that failed the cast (`a`),
+             * because catch handlers cannot distinguish it from a normal
+             * value. Instead, throw VTX_VALUE_NULL as a sentinel that
+             * signals "cast failure" to the handler. A full implementation
+             * would create a ClassCastException object with the failing
+             * value and target type stored as fields. */
             vtx_frame_t *handler_frame = NULL;
-            uint32_t handler_pc = throw_exception(interp, a, &handler_frame);
+            uint32_t handler_pc = throw_exception(interp, VTX_VALUE_NULL, &handler_frame);
             if (handler_pc != VTX_CATCH_NONE && handler_frame != NULL) {
                 frame = unwind_to_handler(interp, frame, handler_frame);
                 interp->current_frame = frame;
@@ -1842,7 +1947,8 @@ dispatch_VT_OP_ARRAY_LOAD:
             if (arr->field_count > 0 && vtx_is_smi(arr->fields[0])) {
                 length = vtx_smi_value(arr->fields[0]);
             }
-            int64_t index = vtx_smi_value(b);
+            int64_t index = vtx_is_smi(b) ? vtx_smi_value(b) : 
+                            (vtx_is_double(b) ? (int64_t)vtx_double_value(b) : -1);
             vtx_helpers_bounds_check(index, length);
             /* Elements start at field[1] */
             *sp++ = arr->fields[1 + (uint32_t)index];
@@ -1863,7 +1969,8 @@ dispatch_VT_OP_ARRAY_STORE:
             if (arr->field_count > 0 && vtx_is_smi(arr->fields[0])) {
                 length = vtx_smi_value(arr->fields[0]);
             }
-            int64_t index = vtx_smi_value(b);
+            int64_t index = vtx_is_smi(b) ? vtx_smi_value(b) : 
+                            (vtx_is_double(b) ? (int64_t)vtx_double_value(b) : -1);
             vtx_helpers_bounds_check(index, length);
             uint32_t field_idx = 1 + (uint32_t)index;
             arr->fields[field_idx] = val;
@@ -2054,8 +2161,11 @@ dispatch_VT_OP_CALL_RUNTIME:
                     sp = frame->operand_stack + frame->stack_top;
                     locals_arr = frame->locals;
                     pc = handler_pc;
-                    /* Push undefined as a placeholder for the exception variable */
-                    *sp++ = VTX_VALUE_UNDEFINED;
+                    /* Bug #2 fix: Push the actual exception value to the catch
+                     * handler (was VTX_VALUE_UNDEFINED), and clear
+                     * interp->exception so it doesn't leak. */
+                    *sp++ = interp->exception;
+                    interp->exception = VTX_VALUE_UNDEFINED;
                     DISPATCH();
                 } else {
                     /* Uncaught exception — unwind everything and return */

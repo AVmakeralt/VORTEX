@@ -14,17 +14,25 @@
 /* Hash function                                                               */
 /* ========================================================================== */
 
-static uint32_t index_hash(uint32_t key)
+static uint32_t index_hash(uint64_t key)
 {
-    /* FNV-1a hash */
+    /* FNV-1a hash for 64-bit key */
     uint32_t h = 2166136261u;
-    h ^= key & 0xFF;
+    h ^= (uint32_t)(key & 0xFF);
     h *= 16777619u;
-    h ^= (key >> 8) & 0xFF;
+    h ^= (uint32_t)((key >> 8) & 0xFF);
     h *= 16777619u;
-    h ^= (key >> 16) & 0xFF;
+    h ^= (uint32_t)((key >> 16) & 0xFF);
     h *= 16777619u;
-    h ^= (key >> 24) & 0xFF;
+    h ^= (uint32_t)((key >> 24) & 0xFF);
+    h *= 16777619u;
+    h ^= (uint32_t)((key >> 32) & 0xFF);
+    h *= 16777619u;
+    h ^= (uint32_t)((key >> 40) & 0xFF);
+    h *= 16777619u;
+    h ^= (uint32_t)((key >> 48) & 0xFF);
+    h *= 16777619u;
+    h ^= (uint32_t)((key >> 56) & 0xFF);
     h *= 16777619u;
     return h % VTX_INVERTED_INDEX_CAPACITY;
 }
@@ -66,7 +74,7 @@ void vtx_inverted_index_destroy(vtx_inverted_index_t *index)
 /* Find or create an entry                                                     */
 /* ========================================================================== */
 
-static vtx_index_entry_t *find_entry(vtx_inverted_index_t *index, uint32_t key)
+static vtx_index_entry_t *find_entry(vtx_inverted_index_t *index, uint64_t key)
 {
     uint32_t bucket = index_hash(key);
     vtx_index_entry_t *entry = index->buckets[bucket];
@@ -77,7 +85,7 @@ static vtx_index_entry_t *find_entry(vtx_inverted_index_t *index, uint32_t key)
     return NULL;
 }
 
-static vtx_index_entry_t *create_entry(vtx_inverted_index_t *index, uint32_t key)
+static vtx_index_entry_t *create_entry(vtx_inverted_index_t *index, uint64_t key)
 {
     uint32_t bucket = index_hash(key);
 
@@ -129,7 +137,7 @@ static int add_to_dep_set(vtx_dep_set_t *set, uint32_t method_id)
 }
 
 int vtx_inverted_index_add(vtx_inverted_index_t *index,
-                            uint32_t typeid_, uint32_t method_id)
+                            uint64_t typeid_, uint32_t method_id)
 {
     if (!index) return -1;
 
@@ -148,8 +156,9 @@ int vtx_inverted_index_add_shape(vtx_inverted_index_t *index,
                                   uint32_t shapeid, uint32_t method_id)
 {
     /* Shape IDs use a different key space: offset by VTX_SHAPE_KEY_OFFSET
-     * to avoid collision with TypeIDs that have the high bit set. */
-    return vtx_inverted_index_add(index, shapeid + VTX_SHAPE_KEY_OFFSET, method_id);
+     * to avoid collision with TypeIDs. Use 64-bit arithmetic to prevent
+     * overflow when shapeid >= 0xC0000000u. */
+    return vtx_inverted_index_add(index, (uint64_t)shapeid + VTX_SHAPE_KEY_OFFSET, method_id);
 }
 
 /* ========================================================================== */
@@ -191,7 +200,7 @@ int vtx_inverted_index_remove_method(vtx_inverted_index_t *index,
 /* ========================================================================== */
 
 const vtx_dep_set_t *vtx_inverted_index_lookup(vtx_inverted_index_t *index,
-                                                 uint32_t typeid_)
+                                                 uint64_t typeid_)
 {
     if (!index) return NULL;
     vtx_index_entry_t *entry = find_entry(index, typeid_);
@@ -203,7 +212,7 @@ const vtx_dep_set_t *vtx_inverted_index_lookup(vtx_inverted_index_t *index,
 /* Invalidation                                                                */
 /* ========================================================================== */
 
-int vtx_invalidate_dependencies(uint32_t typeid_,
+int vtx_invalidate_dependencies(uint64_t typeid_,
                                  vtx_code_cache_t *cache,
                                  vtx_method_registry_t *registry,
                                  vtx_inverted_index_t *index)
@@ -279,8 +288,9 @@ int vtx_invalidate_shape(vtx_shapeid_t shapeid,
                           vtx_method_registry_t *registry,
                           vtx_inverted_index_t *index)
 {
-    /* Shape IDs are stored with VTX_SHAPE_KEY_OFFSET to avoid TypeID collision */
-    return vtx_invalidate_dependencies(shapeid + VTX_SHAPE_KEY_OFFSET,
+    /* Shape IDs are stored with VTX_SHAPE_KEY_OFFSET to avoid TypeID collision.
+     * Use 64-bit arithmetic to prevent overflow. */
+    return vtx_invalidate_dependencies((uint64_t)shapeid + VTX_SHAPE_KEY_OFFSET,
                                         cache, registry, index);
 }
 
@@ -466,41 +476,41 @@ int vtx_invalidate_guard_fine_grained(uint32_t typeid_,
 
         if (!dep->code_start || dep->guard_branch_offset == 0) continue;
 
-        /* Patch the guard's JCC to unconditionally jump to deopt stub.
+        /* Bug #7 fix: Actually patch the guard's JCC instruction in the
+         * compiled code to unconditionally jump (deopt).
          *
-         * On x86-64, a near JCC has format: 0F 8x [4-byte rel32]
-         * To make it unconditional, we replace the 2-byte opcode 0F 8x
-         * with a near JMP: E9 [4-byte rel32], adjusting the displacement.
+         * On x86-64, a near JCC has format: 0F 8x [4-byte rel32] (6 bytes)
+         * We patch it to: E9 [4-byte rel32] 90 (JMP + NOP, also 6 bytes)
          *
-         * Actually, simpler: we just replace the JCC's rel32 with a
-         * displacement that jumps to a generic deopt stub. This is the
-         * same mechanism used by vtx_deoptless_install() but in reverse:
-         * instead of patching to a continuation, we patch to a deopt stub.
+         * The JMP displacement needs +1 adjustment relative to the JCC
+         * displacement because JMP is 5 bytes (displacement relative to
+         * JMP end) while JCC is 6 bytes (displacement relative to JCC end).
+         * So: new_rel32 = old_rel32 + 1
          *
-         * For simplicity, we set the JCC's condition to always-true by
-         * patching the opcode from 0F 8x to 0F 84 (JZ, which we make
-         * always-taken by also ensuring the condition is met).
-         *
-         * The simplest correct approach: replace the 0F 8x prefix with
-         * a JMP (E9) + NOP. The JMP displacement needs adjustment because
-         * JMP is 5 bytes while JCC is 6 bytes.
-         *
-         * Since we don't have access to the deopt stub address here,
-         * we mark the code_start as NULL to indicate the guard is
-         * invalidated, and the runtime will check this before executing. */
+         * This makes the guard always jump to the deopt path, effectively
+         * invalidating it without requiring whole-method deoptimization. */
 
-        /* Mark this guard as invalidated by zeroing the code_start.
-         * The runtime checks code_start != NULL before following a
-         * guard's JCC. If code_start is NULL, it falls through to
-         * the deopt path.
-         *
-         * Note: In a full implementation, we would patch the JCC to
-         * jump to a deopt stub. Here we mark the dependency as
-         * invalidated for the runtime to handle. */
-        volatile uint8_t **code_ptr = (volatile uint8_t **)&deps[i].code_start;
-        /* We can't modify a const pointer's target. Instead, the runtime
-         * will check the guard_dep_index when a guard fails to see if
-         * the guard was invalidated. */
+        uint8_t *jcc_addr = dep->code_start + dep->guard_branch_offset;
+
+        /* Verify this looks like a near JCC (0F 8x) before patching */
+        if (jcc_addr[0] != 0x0F || (jcc_addr[1] & 0xF0) != 0x80) {
+            /* Not a near JCC — skip this guard to avoid corrupting code */
+            continue;
+        }
+
+        /* Read the existing 4-byte rel32 displacement (little-endian) */
+        int32_t old_rel32;
+        memcpy(&old_rel32, jcc_addr + 2, sizeof(int32_t));
+
+        /* Adjust displacement: JMP is 5 bytes, JCC is 6 bytes.
+         * The displacement is relative to the end of the instruction,
+         * so we add 1 to compensate for the shorter instruction. */
+        int32_t new_rel32 = old_rel32 + 1;
+
+        /* Write the patched instruction: E9 [rel32] 90 */
+        jcc_addr[0] = 0xE9;  /* near JMP rel32 */
+        memcpy(jcc_addr + 1, &new_rel32, sizeof(int32_t));
+        jcc_addr[5] = 0x90;  /* NOP padding */
 
         patched++;
     }

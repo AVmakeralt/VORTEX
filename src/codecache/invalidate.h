@@ -103,7 +103,7 @@ typedef struct {
 typedef struct vtx_index_entry vtx_index_entry_t;
 
 struct vtx_index_entry {
-    uint32_t            key;          /* TypeID or ShapeID */
+    uint64_t            key;          /* TypeID or ShapeID (uint64_t to avoid overflow) */
     vtx_dep_set_t       dep_set;     /* set of method IDs */
     vtx_index_entry_t  *next;        /* hash chain */
 };
@@ -136,7 +136,7 @@ void vtx_inverted_index_destroy(vtx_inverted_index_t *index);
  * Add a dependency: method `method_id` depends on `typeid`.
  */
 int vtx_inverted_index_add(vtx_inverted_index_t *index,
-                            uint32_t typeid_, uint32_t method_id);
+                            uint64_t typeid_, uint32_t method_id);
 
 /**
  * Add a shape dependency: method `method_id` depends on `shapeid`.
@@ -156,7 +156,7 @@ int vtx_inverted_index_remove_method(vtx_inverted_index_t *index,
  * Returns the dep set, or NULL if no methods depend on this type.
  */
 const vtx_dep_set_t *vtx_inverted_index_lookup(vtx_inverted_index_t *index,
-                                                 uint32_t typeid_);
+                                                 uint64_t typeid_);
 
 /* ========================================================================== */
 /* Invalidation                                                                */
@@ -175,7 +175,7 @@ const vtx_dep_set_t *vtx_inverted_index_lookup(vtx_inverted_index_t *index,
  * @param index      Inverted index
  * @return           Number of methods invalidated, or -1 on failure
  */
-int vtx_invalidate_dependencies(uint32_t typeid_,
+int vtx_invalidate_dependencies(uint64_t typeid_,
                                  vtx_code_cache_t *cache,
                                  vtx_method_registry_t *registry,
                                  vtx_inverted_index_t *index);

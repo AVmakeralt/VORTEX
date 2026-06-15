@@ -641,7 +641,9 @@ static void resolve_fixups(vtx_compile_ctx_t *ctx)
             vtx_code_buffer_patch_dword(&ctx->buf, fixup->patch_position,
                                          (uint32_t)disp);
         } else {
-            ctx->buf.bytes[fixup->patch_position] = (uint8_t)(disp & 0xFF);
+            /* JMP rel32: also has a 4-byte displacement */
+            vtx_code_buffer_patch_dword(&ctx->buf, fixup->patch_position,
+                                         (uint32_t)disp);
         }
     }
 }
@@ -901,7 +903,7 @@ static void emit_untag_heap_ptr(vtx_compile_ctx_t *ctx, vtx_reg_t val_reg, vtx_r
     emit_mov_reg_imm64(&ctx->buf, VTX_REG_R10, VTX_NAN_DATA_MASK);
 
     /* shr result_reg, 3 */
-    vtx_code_buffer_emit_byte(&ctx->buf, 0x48);
+    emit_rex64(&ctx->buf, (vtx_reg_t)5, result_reg);
     vtx_code_buffer_emit_byte(&ctx->buf, 0xC1);
     vtx_code_buffer_emit_byte(&ctx->buf, modrm(3, 5, result_reg));
     vtx_code_buffer_emit_byte(&ctx->buf, 3);
@@ -2634,8 +2636,8 @@ static void compile_instanceof(vtx_compile_ctx_t *ctx, uint16_t typeid_)
     vtx_code_buffer_emit_byte(buf, modrm(1, 0, VTX_REG_R11));
     vtx_code_buffer_emit_byte(buf, 0); /* offset 0 */
 
-    /* Compare R10 with typeid_ */
-    emit_cmp_reg_imm32(buf, VTX_REG_R10, (int32_t)typeid_);
+    /* Compare RAX (type_id) with typeid_ */
+    emit_cmp_reg_imm32(buf, VTX_REG_RAX, (int32_t)typeid_);
 
     /* sete al */
     vtx_code_buffer_emit_byte(buf, 0x31);
@@ -2716,7 +2718,7 @@ static void compile_array_load(vtx_compile_ctx_t *ctx)
     /* RAX = [R10 + idx_reg] */
     emit_rex64(buf, VTX_REG_RAX, VTX_REG_R10);
     vtx_code_buffer_emit_byte(buf, 0x8B);
-    vtx_code_buffer_emit_byte(buf, modrm(0, VTX_REG_RAX, VTX_REG_R10));
+    vtx_code_buffer_emit_byte(buf, modrm(0, VTX_REG_RAX, (vtx_reg_t)4)); /* rm=4 signals SIB */
     /* SIB byte: [R10 + idx_reg*1] */
     vtx_code_buffer_emit_byte(buf, sib(0, idx_reg, VTX_REG_R10));
 
@@ -2771,7 +2773,7 @@ static void compile_array_store(vtx_compile_ctx_t *ctx)
 
     emit_rex64(buf, VTX_REG_R12, VTX_REG_R10);
     vtx_code_buffer_emit_byte(buf, 0x89); /* MOV r/m64, r64 */
-    vtx_code_buffer_emit_byte(buf, modrm(0, VTX_REG_R12, VTX_REG_R10));
+    vtx_code_buffer_emit_byte(buf, modrm(0, VTX_REG_R12, (vtx_reg_t)4)); /* rm=4 signals SIB */
     vtx_code_buffer_emit_byte(buf, sib(0, idx_reg, VTX_REG_R10));
 }
 

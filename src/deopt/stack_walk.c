@@ -447,9 +447,16 @@ vtx_reconstructed_stack_t *vtx_stack_walk(
             /* Validate the frame pointer before reading */
             uintptr_t fp_addr = (uintptr_t)current_fp;
             if (fp_addr >= 0x1000 && fp_addr <= 0x7FFFFFFFFFFFull) {
-                /* Read method_id from the frame's method descriptor */
+                /* Read method_id from the frame's method descriptor.
+                 * Bug #8 fix: Use method_symbol_id as the method identifier.
+                 * This uniquely identifies the method by its interned name
+                 * symbol, which is sufficient for deopt/stack-walk purposes.
+                 * If method_symbol_id is invalid, fall back to vtable_index. */
                 if (interp_frame->method != NULL) {
-                    frame.method_id = 0; /* method_desc has no id field */
+                    frame.method_id = interp_frame->method->method_symbol_id;
+                    if (frame.method_id == VTX_SYMBOL_INVALID) {
+                        frame.method_id = interp_frame->method->vtable_index;
+                    }
                 }
 
                 /* Read the bytecode PC.

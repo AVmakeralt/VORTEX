@@ -268,22 +268,32 @@ const vtx_deopt_stub_t *vtx_deopt_stub_emit(vtx_deopt_context_t *ctx,
         emit_store_to_frame(buf, off_cx, VTX_REG_RCX);
         emit_store_to_frame(buf, off_ax, VTX_REG_RAX);
     } else if (depth == 3) {
-        int32_t off_bx = vtx_frame_layout_spill_offset(&ctx->frame_layout, spilled_count);
-        int32_t off_dx = vtx_frame_layout_spill_offset(&ctx->frame_layout, spilled_count + 1);
-        int32_t off_cx = vtx_frame_layout_spill_offset(&ctx->frame_layout, spilled_count + 2);
+        /* TOS-based register mapping for depth < 4:
+         *   RAX = TOS   = position 2
+         *   RCX = TOS-1 = position 1
+         *   RDX = TOS-2 = position 0
+         * RBX does not hold a stack value. */
+        int32_t off_dx = vtx_frame_layout_spill_offset(&ctx->frame_layout, spilled_count);
+        int32_t off_cx = vtx_frame_layout_spill_offset(&ctx->frame_layout, spilled_count + 1);
+        int32_t off_ax = vtx_frame_layout_spill_offset(&ctx->frame_layout, spilled_count + 2);
 
-        emit_store_to_frame(buf, off_bx, VTX_REG_RBX);
         emit_store_to_frame(buf, off_dx, VTX_REG_RDX);
         emit_store_to_frame(buf, off_cx, VTX_REG_RCX);
+        emit_store_to_frame(buf, off_ax, VTX_REG_RAX);
     } else if (depth == 2) {
-        int32_t off_bx = vtx_frame_layout_spill_offset(&ctx->frame_layout, spilled_count);
-        int32_t off_dx = vtx_frame_layout_spill_offset(&ctx->frame_layout, spilled_count + 1);
+        /* TOS-based register mapping for depth 2:
+         *   RAX = TOS   = position 1
+         *   RCX = TOS-1 = position 0 */
+        int32_t off_cx = vtx_frame_layout_spill_offset(&ctx->frame_layout, spilled_count);
+        int32_t off_ax = vtx_frame_layout_spill_offset(&ctx->frame_layout, spilled_count + 1);
 
-        emit_store_to_frame(buf, off_bx, VTX_REG_RBX);
-        emit_store_to_frame(buf, off_dx, VTX_REG_RDX);
+        emit_store_to_frame(buf, off_cx, VTX_REG_RCX);
+        emit_store_to_frame(buf, off_ax, VTX_REG_RAX);
     } else if (depth == 1) {
-        int32_t off_bx = vtx_frame_layout_spill_offset(&ctx->frame_layout, spilled_count);
-        emit_store_to_frame(buf, off_bx, VTX_REG_RBX);
+        /* TOS-based register mapping for depth 1:
+         *   RAX = TOS = position 0 */
+        int32_t off_ax = vtx_frame_layout_spill_offset(&ctx->frame_layout, spilled_count);
+        emit_store_to_frame(buf, off_ax, VTX_REG_RAX);
     }
 
     /* Step 2: Set up arguments for the runtime deopt function.

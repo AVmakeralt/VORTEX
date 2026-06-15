@@ -2,6 +2,8 @@
 #include "interp/type_feedback.h"
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 /* ========================================================================== */
 /* Continuation creation                                                      */
@@ -301,11 +303,29 @@ bool vtx_deoptless_install(vtx_deoptless_version_t *version)
         return true;
     }
 
+    /* D3 fix: Make the code page writable before patching.
+     * After vtx_code_cache_finalize(), the code page is PROT_EXEC|PROT_READ,
+     * so writing to it would cause SIGSEGV. We must mprotect it writable
+     * first, then restore exec+read after patching. */
+    long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0) page_size = 4096;
+    uintptr_t patch_start = (uintptr_t)disp_pos & ~((uintptr_t)page_size - 1);
+    uintptr_t patch_end = ((uintptr_t)(disp_pos + 4) + (uintptr_t)page_size - 1) &
+                          ~((uintptr_t)page_size - 1);
+    if (mprotect((void *)patch_start, patch_end - patch_start,
+                 PROT_EXEC | PROT_WRITE | PROT_READ) != 0) {
+        /* Cannot make page writable — cannot patch */
+        return false;
+    }
+
     /* Patch the 4 bytes with the new displacement.
      * We use a volatile pointer to prevent the compiler from
      * reordering or optimizing away the write. */
     volatile int32_t *patch_addr = (volatile int32_t *)disp_pos;
     *patch_addr = new_disp;
+
+    /* Restore the page to executable+readable after patching */
+    mprotect((void *)patch_start, patch_end - patch_start, PROT_EXEC | PROT_READ);
 
     /* Mark as patched so eviction knows to restore */
     version->is_patched = true;
@@ -473,8 +493,22 @@ void vtx_deoptless_evict_oldest(vtx_deoptless_table_t *table)
     if (oldest->is_patched && oldest->code_start != NULL &&
         oldest->guard_branch_offset != 0) {
         uint8_t *disp_pos = oldest->code_start + oldest->guard_branch_offset;
-        volatile int32_t *patch_addr = (volatile int32_t *)disp_pos;
-        *patch_addr = oldest->original_jcc_disp;
+
+        /* D3 fix: Make the code page writable before restoring the JCC.
+         * The code page may be PROT_EXEC|PROT_READ after finalization. */
+        long pg_size = sysconf(_SC_PAGESIZE);
+        if (pg_size <= 0) pg_size = 4096;
+        uintptr_t ev_start = (uintptr_t)disp_pos & ~((uintptr_t)pg_size - 1);
+        uintptr_t ev_end = ((uintptr_t)(disp_pos + 4) + (uintptr_t)pg_size - 1) &
+                           ~((uintptr_t)pg_size - 1);
+        if (mprotect((void *)ev_start, ev_end - ev_start,
+                     PROT_EXEC | PROT_WRITE | PROT_READ) == 0) {
+            volatile int32_t *patch_addr = (volatile int32_t *)disp_pos;
+            *patch_addr = oldest->original_jcc_disp;
+
+            /* Restore the page to executable+readable */
+            mprotect((void *)ev_start, ev_end - ev_start, PROT_EXEC | PROT_READ);
+        }
 
         /* Flush instruction cache after restoring */
         __asm__ __volatile__("" : : : "memory");

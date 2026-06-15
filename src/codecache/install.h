@@ -101,6 +101,7 @@ typedef struct vtx_method_registry {
     uint32_t                capacity;       /* allocated capacity (always power of 2) */
     uint32_t                capacity_mask;  /* capacity - 1, for fast modulo via bitwise AND */
     uint32_t                clock_hand;     /* current position of the clock hand */
+    bool                    malloc_allocated; /* true if methods array was grown with malloc */
 } vtx_method_registry_t;
 
 /**

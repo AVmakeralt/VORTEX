@@ -236,7 +236,7 @@ void vtx_threadpool_shutdown(vtx_threadpool_t *pool)
 
     /* Set shutdown flag and wake all workers */
     pthread_mutex_lock(&pool->pool_mutex);
-    pool->shutdown = true;
+    __atomic_store_n(&pool->shutdown, true, __ATOMIC_RELEASE);
     pthread_cond_broadcast(&pool->work_available);
     pthread_mutex_unlock(&pool->pool_mutex);
 
@@ -277,7 +277,7 @@ int vtx_threadpool_submit(vtx_threadpool_t *pool,
 {
     VTX_ASSERT(pool != NULL, "pool must not be NULL");
 
-    if (pool->shutdown) return -1;
+    if (__atomic_load_n(&pool->shutdown, __ATOMIC_ACQUIRE)) return -1;
 
     vtx_compile_task_t task;
     memset(&task, 0, sizeof(task));
@@ -297,7 +297,7 @@ int vtx_threadpool_submit_task(vtx_threadpool_t *pool,
 {
     VTX_ASSERT(pool != NULL, "pool must not be NULL");
 
-    if (pool->shutdown) return -1;
+    if (__atomic_load_n(&pool->shutdown, __ATOMIC_ACQUIRE)) return -1;
 
     /* Push to the priority queue */
     if (vtx_pq_push(&pool->task_queue, task) != 0) {
@@ -339,5 +339,5 @@ uint32_t vtx_threadpool_queue_depth(const vtx_threadpool_t *pool)
 bool vtx_threadpool_is_shutdown(const vtx_threadpool_t *pool)
 {
     VTX_ASSERT(pool != NULL, "pool must not be NULL");
-    return pool->shutdown;
+    return __atomic_load_n(&pool->shutdown, __ATOMIC_ACQUIRE);
 }
