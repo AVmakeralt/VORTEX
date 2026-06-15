@@ -864,128 +864,34 @@ static void emit_untag_smi(vtx_compile_ctx_t *ctx, vtx_reg_t val_reg)
 
     /* SMI decoding: raw = (val >> 3) & VTX_NAN_DATA_MASK, then sign-extend.
      *
-     * Step 1: sar val_reg, 3 — arithmetic shift right by VTX_NAN_DATA_SHIFT.
-     * Step 2: and val_reg, VTX_NAN_DATA_MASK — mask out the NaN-box header bits
-     *         that were shifted into the data area.
-     * Step 3: Sign-extend from 48 bits. If bit 47 is set, OR with
-     *         ~VTX_NAN_DATA_MASK to fill bits [63:48] with 1s.
+     * For positive SMI values, the result after SAR+AND is correct.
+     * For negative SMI values, the AND mask clears bits [63:48] which
+     * contained the sign extension. We need to restore it.
      *
-     * Without step 3, negative SMI values decode as large positive numbers,
-     * causing incorrect comparison results (e.g., -3 > 0 would be TRUE). */
+     * Approach: branchless sign extension using arithmetic shift.
+     * After AND with VTX_NAN_DATA_MASK (48-bit mask), bit 47 is the sign bit.
+     * We can sign-extend by:
+     *   1. sar val_reg, 3          -- shift out tag bits
+     *   2. shl val_reg, 16         -- shift sign bit to bit 63
+     *   3. sar val_reg, 16         -- arithmetic shift back, propagating sign
+     *
+     * This works because:
+     *   - For positive values: bit 47 = 0, so bits [63:48] become 0 after sar
+     *   - For negative values: bit 47 = 1, so bits [63:48] become all 1s after sar
+     */
+
+    /* Step 1: sar val_reg, 3 — arithmetic shift right by VTX_NAN_DATA_SHIFT */
     emit_sar_reg_imm8(buf, val_reg, VTX_NAN_DATA_SHIFT);
 
-    /* and val_reg, VTX_NAN_DATA_MASK (0x0000FFFFFFFFFFFF) */
+    /* Step 2: and val_reg, VTX_NAN_DATA_MASK — mask out NaN-box header bits */
     emit_mov_reg_imm64(buf, VTX_REG_R10, VTX_NAN_DATA_MASK);
     emit_and_reg_reg(buf, val_reg, VTX_REG_R10);
 
-    /* Sign-extend from 48 bits:
-     * test val_reg, (1 << 47)  ; check if bit 47 is set
-     * jz .no_sign_ext
-     * or val_reg, ~VTX_NAN_DATA_MASK  ; fill upper 16 bits with 1s
-     * .no_sign_ext: */
-    emit_mov_reg_imm64(buf, VTX_REG_R10, (1ULL << 47)); /* 0x0000800000000000 */
-    emit_test_reg_reg2(buf, val_reg, VTX_REG_R10);
-
-    /* jnz past the no-sign-extend block (skip the OR if bit 47 is clear) */
-    uint32_t jnz_pos = emit_jcc32(buf, CC_NE);
-
-    /* Bit 47 is clear — no sign extension needed. But we need to skip
-     * the sign-extension OR. Actually, we inverted the logic: we jump
-     * to sign-extend when bit 47 IS set. Let me redo:
-     * jz means bit 47 is clear → skip the OR (no sign extension).
-     * Fall through = bit 47 is set → do the OR. */
-    /* Actually, we want: if bit 47 set, do the OR. So:
-     * jz .skip means "if zero (bit 47 clear), skip the OR" */
-    /* Wait, we already emitted jnz. Let me patch it differently.
-     * The jnz jumps when bit 47 is SET. The target should be past the OR.
-     * Hmm, let me just emit the right branch. */
-
-    /* Re-emit: we want to OR when bit 47 is SET, so we should use jz (jump if zero = skip OR) */
-    /* But we already emitted jnz... Let me patch it. Actually, let me just rewrite: */
-
-    /* I'll emit the sign-extension code unconditionally, then use a jump to skip it. */
-    /* emit_mov_reg_imm64(buf, VTX_REG_R10, ~VTX_NAN_DATA_MASK); — but this is a huge immediate */
-    /* Instead: or val_reg, 0xFFFF000000000000 using a different approach */
-
-    /* Since we already have jnz emitted, let me just make it work:
-     * jnz means "bit 47 is set, need sign extension" — jump to sign ext code
-     * Fall through means "bit 47 is clear, no sign extension" — continue */
-
-    /* For now, just emit sign extension after the jnz. The jnz jumps here
-     * when bit 47 IS set. */
-
-    /* Actually, I made a mess. Let me start over with clean code. */
-
-    /* Undo the jnz by patching it to jump past the OR instruction group */
-    /* The jnz at jnz_pos jumps to the sign-extension code when ZF=0 (bit 47 set) */
-    /* After the OR, both paths merge */
-
-    /* Sign extension: OR val_reg, 0xFFFF000000000000 */
-    /* We can compute this as: mov r10, 0xFFFF; shl r10, 48; or val_reg, r10 */
-    emit_mov_reg_imm32(buf, VTX_REG_R10, 0xFFFF);
-    emit_shl_reg_imm8(buf, VTX_REG_R10, 48);
-    emit_or_reg_reg(buf, val_reg, VTX_REG_R10);
-
-    /* Now patch the jnz to jump HERE (past the OR) when bit 47 is CLEAR */
-    /* Wait, we need: if bit 47 is clear → skip OR. if bit 47 is set → do OR.
-     * The test sets ZF=0 when bit 47 is set. jnz (CC_NE) jumps when ZF=0.
-     * So jnz jumps to... the OR code. That's backwards!
-     * We want: jz (CC_E) to skip past the OR when bit 47 is clear.
-     * And: jnz (CC_NE) means bit 47 IS set, so we should fall through to OR.
-     * But I emitted jnz, which jumps AWAY when bit 47 is set.
-     * The fix: patch the jnz to be a jz instead, or change the code flow. */
-
-    /* Actually, the simplest fix: the jnz jumps when bit 47 is set (needs sign ext).
-     * The jnz target should be the sign extension code.
-     * After the sign extension code, jmp to the merge point.
-     * The fall-through (bit 47 clear) goes directly to the merge point.
-     * But that's not what I have — the OR code is AFTER the jnz. */
-
-    /* Let me just use a different approach: emit the OR, then skip it with jz */
-    /* Remove the jnz and redo */
-
-    /* The simplest correct approach for sign extension:
-     *   sar val_reg, 3
-     *   and val_reg, DATA_MASK
-     *   mov r10, 0x0000800000000000   ; bit 47
-     *   test val_reg, r10
-     *   jz .no_sign_ext              ; if bit 47 clear, skip
-     *   or val_reg, 0xFFFF0000000000000000  ; sign extend
-     * .no_sign_ext:
-     *
-     * I'll implement this cleanly by not using the jnz I emitted above
-     * and instead using a simpler approach. */
-
-    /* For now, just use a conditional OR approach:
-     * We use CMOV/SBB trick or just bite the bullet with branches.
-     * Simplest: use the test result to conditionally OR. */
-
-    /* Actually, a cleaner approach without branches:
-     *   sar val_reg, 3
-     *   mov r10, val_reg            ; save
-     *   shr r10, 47                 ; shift bit 47 to bit 0
-     *   dec r10                     ; if bit 47 was 0, r10 = -1 (all 1s); if 1, r10 = 0
-     *   wait, that's backwards.
-     *   neg r10                     ; if bit 47 was 0, r10 = 0; if 1, r10 = -1 (all 1s)
-     *   wait, need to think...
-     *
-     * Actually: shr r10, 47 gives 0 or 1. We want to create a mask:
-     *   if bit 47 = 1: mask = 0xFFFF000000000000
-     *   if bit 47 = 0: mask = 0
-     *
-     * Simple: r10 = (val_reg >> 47) & 1
-     *         r10 = r10 * 0xFFFF  (but multiply is expensive)
-     *         r10 = r10 << 48
-     *         val_reg |= r10
-     *
-     * Or even simpler:
-     *   cdqe after shifting sign bit to bit 31... but we're in 64-bit mode.
-     *
-     * OK, let me just use the branch approach properly. */
-    (void)jnz_pos; /* suppress warning — we'll handle it below */
-
-    /* REDO: Replace the jnz approach with a proper jz-based skip pattern.
-     * I'll emit the sign extension OR after the test, and use jz to skip it. */
+    /* Step 3: Sign-extend from 48 bits using shift trick:
+     *   shl val_reg, 16  — moves bit 47 to bit 63
+     *   sar val_reg, 16  — arithmetic shift back, propagating sign from bit 63 */
+    emit_shl_reg_imm8(buf, val_reg, 16);
+    emit_sar_reg_imm8(buf, val_reg, 16);
 }
 
 /**
