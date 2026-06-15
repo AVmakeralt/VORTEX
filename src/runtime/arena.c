@@ -4,6 +4,12 @@
 #include <string.h>
 #include <stdint.h>
 
+/* Guard page availability flag — defined here (in vortex_common) to break
+ * the circular dependency between vortex_lower (needs the flag) and
+ * vortex_compile (was defining it). Since vortex_common is a base library
+ * with no circular deps, all targets can link against it. */
+volatile int vtx_guard_page_available_flag = 0;
+
 /* Alignment for all arena allocations */
 #define VTX_ARENA_ALIGN 16
 

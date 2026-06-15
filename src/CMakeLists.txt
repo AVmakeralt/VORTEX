@@ -35,6 +35,7 @@ add_library(vortex_baseline STATIC
     baseline/frame_layout.c
     baseline/deopt_stubs.c
     baseline/instrument.c
+    runtime_stubs.c
 )
 target_include_directories(vortex_baseline PUBLIC ${VORTEX_INCLUDE_DIRS})
 target_link_libraries(vortex_baseline PUBLIC vortex_runtime vortex_deopt)
@@ -152,7 +153,7 @@ add_library(vortex_compile STATIC
     compile/request.c
 )
 target_include_directories(vortex_compile PUBLIC ${VORTEX_INCLUDE_DIRS})
-target_link_libraries(vortex_compile PUBLIC vortex_ir vortex_pea vortex_inliner vortex_lower vortex_deopt vortex_codecache vortex_guard vortex_profile $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota> Threads::Threads)
+target_link_libraries(vortex_compile PUBLIC vortex_ir vortex_pea vortex_inliner vortex_lower vortex_deopt vortex_codecache vortex_guard vortex_profile vortex_baseline $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota> Threads::Threads)
 
 find_package(Threads REQUIRED)
 
@@ -193,7 +194,6 @@ target_link_libraries(vortex_midtier PUBLIC vortex_ir vortex_interp vortex_lower
 # Main VORTEX executable
 add_executable(vortex
     main_new.c
-    runtime_stubs.c
 )
 target_include_directories(vortex PRIVATE ${VORTEX_INCLUDE_DIRS})
 target_link_libraries(vortex PRIVATE

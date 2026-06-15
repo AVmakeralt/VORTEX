@@ -33,9 +33,9 @@
 /** Global safepoint manager pointer for signal handler access */
 static vtx_safepoint_manager_t *vtx_global_safepoint_manager = NULL;
 
-/** Global flag for guard page availability (checked by isel without
- * creating a circular dependency between vortex_lower and vortex_compile) */
-volatile int vtx_guard_page_available_flag = 0;
+/** Global flag for guard page availability — now defined in vortex_common
+ * (arena.c) to break the circular dependency between vortex_lower and
+ * vortex_compile. This file only sets the flag, it does not define it. */
 
 vtx_safepoint_manager_t *vtx_get_safepoint_manager(void)
 {

@@ -78,6 +78,16 @@ typedef struct {
      * after compilation and proactively compiles methods that will
      * be hot in the next phase. */
     vtx_markov_t     *markov;
+
+    /* Code installation: when these are provided, the pipeline will
+     * automatically install the compiled code into the code cache
+     * and update the method's compiled_code pointer. Without these,
+     * the compiled code is just stored in the result and freed on
+     * destruction — it never becomes executable. */
+    struct vtx_code_cache       *code_cache;
+    struct vtx_method_registry  *method_registry;
+    const vtx_method_desc_t     *method;           /* the method being compiled */
+    vtx_arena_t                 *install_arena;    /* arena for installation allocations */
 } vtx_pipeline_config_t;
 
 /* Pipeline statistics */

@@ -26,6 +26,7 @@
  */
 
 #include "compile/pipeline.h"
+#include "codecache/install.h"
 
 #include <time.h>
 #include <string.h>
@@ -1253,6 +1254,39 @@ int vtx_pipeline_run(vtx_graph_t *graph,
     stats.total_pipeline_time_ns = elapsed_ns(pipeline_start);
     result->stats = stats;
     result->success = true;
+
+    /* ================================================================== */
+    /* Code Installation                                                  */
+    /*                                                                    */
+    /* CRITICAL FIX: Previously, the T2/T3 pipeline produced native code  */
+    /* but never installed it into the code cache. The code was simply     */
+    /* freed in vtx_compile_result_destroy(), making the optimizing JIT    */
+    /* completely non-functional. Now, if config provides code_cache,     */
+    /* method_registry, and method, we install the compiled code so it    */
+    /* becomes the active execution path for subsequent calls.            */
+    /* ================================================================== */
+    if (result->native_code != NULL && result->native_size > 0 &&
+        config->code_cache != NULL && config->method_registry != NULL &&
+        config->method != NULL) {
+        uint32_t method_id = config->method->vtable_index;
+        bool installed = vtx_install_method(
+            config->code_cache, config->method_registry,
+            config->method, method_id,
+            result->native_code, result->native_size,
+            NULL,   /* side_table — TODO: wire from lowering */
+            NULL,   /* reloc_table */
+            NULL, 0, NULL, 0,  /* dep_type_ids, dep_shape_ids */
+            config->install_arena ? config->install_arena : arena,
+            NULL, 0  /* poly_ics */
+        );
+        if (installed) {
+            /* Code is now installed in the cache and method->compiled_code
+             * is set. Transfer ownership: don't free native_code in
+             * vtx_compile_result_destroy(). */
+            result->native_code = NULL;
+            result->native_size = 0;
+        }
+    }
 
     /* ================================================================== */
     /* Phase 11: Markov Chain — Predictive Compilation (D10)               */

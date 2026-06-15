@@ -140,4 +140,16 @@ vtx_inline_cache_t *vtx_interp_get_ic(vtx_interp_t *interp,
 vtx_value_t vtx_interp_handle_uncaught(vtx_interp_t *interp,
                                         vtx_value_t exception);
 
+/**
+ * Set the compilation context on the interpreter.
+ * When set, the interpreter will request JIT compilation for hot
+ * methods via vtx_request_compilation(). This is the wiring that
+ * connects the interpreter's hot-code detection to the JIT pipeline.
+ *
+ * Must be called after vtx_interp_init() and before vtx_interp_run().
+ * The ctx pointer is stored but NOT owned by the interpreter.
+ */
+void vtx_interp_set_compile_ctx(vtx_interp_t *interp,
+                                 vtx_compile_context_t *ctx);
+
 #endif /* VORTEX_DISPATCH_H */

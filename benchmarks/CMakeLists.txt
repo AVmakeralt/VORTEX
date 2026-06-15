@@ -66,7 +66,6 @@ target_link_libraries(bench_jit_exec PRIVATE
 # bench_real_workload
 add_executable(bench_real_workload
     bench_real_workload.c
-    ${CMAKE_SOURCE_DIR}/src/runtime_stubs.c
 )
 target_link_libraries(bench_real_workload PRIVATE
     vortex_bench_framework

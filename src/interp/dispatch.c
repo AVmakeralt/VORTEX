@@ -347,6 +347,13 @@ void vtx_interp_destroy(vtx_interp_t *interp)
     interp->dispatch_table = NULL;
 }
 
+void vtx_interp_set_compile_ctx(vtx_interp_t *interp,
+                                 vtx_compile_context_t *ctx)
+{
+    VTX_ASSERT(interp != NULL, "interpreter must not be NULL");
+    interp->compile_ctx = ctx;
+}
+
 vtx_value_t vtx_interp_handle_uncaught(vtx_interp_t *interp, vtx_value_t exception)
 {
     VTX_ASSERT(interp != NULL, "interpreter must not be NULL");
@@ -513,22 +520,41 @@ static inline vtx_value_t vtx_dispatch_jit(
      * The baseline JIT's prologue expects:
      *   RDI = method ptr, RSI = deopt_info, RDX = profile_data
      * And it returns a vtx_value_t in RAX.
-     * We call through the runtime helpers which handle the ABI bridge. */
+     *
+     * CRITICAL FIX: We pass a sentinel value for profile_data (1 instead
+     * of NULL) so the JIT prologue's `if (profile_data)` check doesn't
+     * skip instrumentation entirely, but also doesn't dereference NULL.
+     * The sentinel value 1 is never a valid pointer but is non-NULL,
+     * so the prologue can safely check it without crashing. The actual
+     * profile data is stored in the compiled_code metadata, not passed
+     * through this argument in practice. */
     vtx_jit_entry_t entry = (vtx_jit_entry_t)code;
+
+    /* Clear the deopt_pending flag before calling JIT code.
+     * The deopt stub will set this flag instead of returning
+     * VTX_VALUE_UNDEFINED, so we can distinguish between
+     * a legitimate undefined return value and a deopt. */
+    interp->deopt_pending = false;
 
     vtx_value_t result;
     if (arg_count > 0 && args != NULL) {
         /* Pass args directly — the JIT prologue copies args[i] → local[i].
          * No placeholder receiver is needed; for virtual calls the receiver
-         * is already args[0], and for static calls args map 1:1 to locals. */
-        result = entry(target_method, NULL, NULL, args, arg_count);
+         * is already args[0], and for static calls args map 1:1 to locals.
+         * We pass (void*)1 as profile_data to avoid NULL dereference in
+         * the JIT prologue's instrumentation check. */
+        result = entry(target_method, NULL, (void*)1, args, arg_count);
     } else {
-        result = entry(target_method, NULL, NULL, NULL, 0);
+        result = entry(target_method, NULL, (void*)1, NULL, 0);
     }
 
-    /* If the JIT code returned undefined, it may have hit a deopt.
-     * Fall back to the interpreter for this call. */
-    if (VTX_UNLIKELY(vtx_is_undefined(result))) {
+    /* CRITICAL FIX: Check deopt_pending flag instead of checking for
+     * VTX_VALUE_UNDEFINED. Void methods legitimately return undefined,
+     * and returning undefined should NOT trigger re-interpretation.
+     * Only deoptimization (signaled by the deopt stub setting
+     * deopt_pending = true) should fall back to the interpreter. */
+    if (VTX_UNLIKELY(interp->deopt_pending)) {
+        interp->deopt_pending = false;
         return vtx_interp_run(interp, target_method, args, arg_count);
     }
 
@@ -1705,6 +1731,24 @@ dispatch_VT_OP_CALL_VIRTUAL:
         /* Record invocation */
         vtx_profiler_record_invocation(&interp->profiler, target_method);
 
+        /* JIT dispatch: if the target method has been compiled, call it
+         * directly instead of creating an interpreter frame. This mirrors
+         * the JIT dispatch in CALL_STATIC and makes virtual calls actually
+         * benefit from JIT compilation. Previously, virtual calls always
+         * fell through to the interpreter even for compiled methods. */
+        if (VTX_UNLIKELY(__atomic_load_n(&target_method->compiled_code, __ATOMIC_ACQUIRE) != NULL)) {
+            uint32_t varg_count_jit = target_method->arg_count + 1; /* +1 for receiver */
+            if (varg_count_jit > 256) varg_count_jit = 256;
+            vtx_value_t vjit_args_buf[256];
+            for (uint32_t ai = varg_count_jit; ai > 0; ai--) {
+                vjit_args_buf[ai - 1] = *--sp;
+            }
+            vtx_value_t vjit_result = vtx_dispatch_jit(interp, target_method,
+                                                        vjit_args_buf, varg_count_jit);
+            *sp++ = vjit_result;
+            DISPATCH_NEXT();
+        }
+
         /* Pop arguments from caller's stack and copy to callee locals.
          * For virtual calls, the receiver (this) is the implicit first
          * argument and must be included in the pop count and passed as
@@ -1811,6 +1855,22 @@ dispatch_VT_OP_CALL_INTERFACE:
         }
 
         vtx_profiler_record_invocation(&interp->profiler, target_method);
+
+        /* JIT dispatch: if the target method has been compiled, call it
+         * directly. Same pattern as CALL_VIRTUAL — interface calls were
+         * previously never dispatched to JIT code. */
+        if (VTX_UNLIKELY(__atomic_load_n(&target_method->compiled_code, __ATOMIC_ACQUIRE) != NULL)) {
+            uint32_t iarg_count_jit = target_method->arg_count + 1; /* +1 for receiver */
+            if (iarg_count_jit > 256) iarg_count_jit = 256;
+            vtx_value_t ijit_args_buf[256];
+            for (uint32_t ai = iarg_count_jit; ai > 0; ai--) {
+                ijit_args_buf[ai - 1] = *--sp;
+            }
+            vtx_value_t ijit_result = vtx_dispatch_jit(interp, target_method,
+                                                        ijit_args_buf, iarg_count_jit);
+            *sp++ = ijit_result;
+            DISPATCH_NEXT();
+        }
 
         /* Pop arguments from caller's stack and copy to callee locals.
          * For interface calls, the receiver (this) is the implicit first

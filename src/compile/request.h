@@ -115,4 +115,18 @@ bool vtx_is_compilation_requested(const vtx_compile_context_t *ctx,
 void vtx_clear_compilation_requested(vtx_compile_context_t *ctx,
                                        uint32_t method_id);
 
+/**
+ * Wire the compile context to its threadpool.
+ *
+ * This sets the threadpool's compile_callback to a function that
+ * looks up the method by ID, compiles it (T1 baseline or T2+ pipeline),
+ * and installs the result in the code cache.
+ *
+ * Must be called after setting ctx->threadpool, ctx->code_cache,
+ * ctx->method_registry, and ctx->method_lookup.
+ *
+ * Returns 0 on success, -1 if ctx or ctx->threadpool is NULL.
+ */
+int vtx_compile_context_wire_threadpool(vtx_compile_context_t *ctx);
+
 #endif /* VORTEX_COMPILE_REQUEST_H */

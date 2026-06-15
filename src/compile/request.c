@@ -12,6 +12,8 @@
 #include "compile/threadpool.h"
 #include "compile/pipeline.h"
 #include "codecache/install.h"
+#include "baseline/codegen.h"
+#include "ir/graph.h"
 #include "runtime/arena.h"
 
 #include <stdlib.h>
@@ -154,4 +156,132 @@ void vtx_request_compilation(vtx_compile_context_t *ctx,
             __atomic_store_n(&ctx->compilation_requested[method_id], false, __ATOMIC_RELAXED);
         }
     }
+}
+
+/* ========================================================================== */
+/* Compile callback — called by threadpool workers                               */
+/* ========================================================================== */
+
+/**
+ * This is the compile_callback that the threadpool calls when it
+ * picks up a compilation task. Previously, this callback was never
+ * set, so compilation tasks were silently discarded.
+ *
+ * The callback:
+ *   1. Looks up the method descriptor by method_id
+ *   2. Creates a per-compilation arena
+ *   3. Runs the baseline JIT (for T1) or the optimizing pipeline (T2+)
+ *   4. Installs the compiled code into the code cache
+ *   5. Clears the compilation_requested flag
+ */
+static void compile_callback(uint32_t method_id, vtx_compile_tier_t tier, void *context)
+{
+    vtx_compile_context_t *ctx = (vtx_compile_context_t *)context;
+    if (ctx == NULL) return;
+
+    /* Look up the method descriptor */
+    const vtx_method_desc_t *method = NULL;
+    if (ctx->method_lookup != NULL) {
+        method = ctx->method_lookup(method_id, ctx->method_lookup_context);
+    }
+    if (method == NULL || method->bytecode == NULL) {
+        /* Method not found or has no bytecode — skip */
+        vtx_clear_compilation_requested(ctx, method_id);
+        return;
+    }
+
+    /* Don't compile if already compiled */
+    if (__atomic_load_n(&method->compiled_code, __ATOMIC_ACQUIRE) != NULL) {
+        vtx_clear_compilation_requested(ctx, method_id);
+        return;
+    }
+
+    /* Create a per-compilation arena */
+    vtx_arena_t compile_arena;
+    if (vtx_arena_init(&compile_arena) != 0) {
+        vtx_clear_compilation_requested(ctx, method_id);
+        return;
+    }
+
+    if (tier == VTX_TIER_T1) {
+        /* T1: Baseline JIT compilation — fast, minimal optimization.
+         * vtx_baseline_compile already handles code installation when
+         * cache and registry are provided. */
+        vtx_compiled_code_t *compiled = vtx_baseline_compile(
+            method, NULL, &compile_arena,
+            ctx->code_cache, ctx->method_registry);
+
+        if (compiled != NULL) {
+            /* Success — the compiled code has been installed into the
+             * code cache and method->compiled_code is set atomically.
+             * Destroy the compiled_code wrapper (the actual code lives
+             * in the code cache now). */
+            vtx_compiled_code_destroy(compiled);
+        } else {
+            fprintf(stderr, "[compile] T1 compilation failed for method %u\n", method_id);
+        }
+    } else {
+        /* T2+: Optimizing pipeline compilation */
+        vtx_graph_t graph;
+        if (vtx_graph_init(&graph, method->arg_count) != 0) {
+            vtx_arena_destroy(&compile_arena);
+            vtx_clear_compilation_requested(ctx, method_id);
+            return;
+        }
+        if (vtx_graph_build(&graph, method->bytecode, method, &compile_arena) != 0) {
+            vtx_graph_destroy(&graph);
+            vtx_arena_destroy(&compile_arena);
+            vtx_clear_compilation_requested(ctx, method_id);
+            return;
+        }
+
+        vtx_pipeline_config_t config;
+        if (tier == VTX_TIER_T2) {
+            config = vtx_pipeline_config_t2();
+        } else {
+            config = vtx_pipeline_config_t3();
+        }
+
+        /* Set up code installation so the pipeline installs its output */
+        config.code_cache = ctx->code_cache;
+        config.method_registry = ctx->method_registry;
+        config.method = method;
+        config.install_arena = &compile_arena;
+
+        vtx_compile_result_t result;
+        memset(&result, 0, sizeof(result));
+
+        int rc = vtx_pipeline_run(&graph, &config, &compile_arena, &result);
+
+        if (rc == 0 && result.success) {
+            /* Pipeline succeeded — code is installed */
+        } else {
+            fprintf(stderr, "[compile] T%d compilation failed for method %u (rc=%d)\n",
+                    tier, method_id, rc);
+        }
+
+        vtx_compile_result_destroy(&result);
+        vtx_pipeline_config_destroy(&config);
+        vtx_graph_destroy(&graph);
+    }
+
+    vtx_arena_destroy(&compile_arena);
+    vtx_clear_compilation_requested(ctx, method_id);
+}
+
+/* ========================================================================== */
+/* Wire the compile context to the threadpool                                    */
+/* ========================================================================== */
+
+int vtx_compile_context_wire_threadpool(vtx_compile_context_t *ctx)
+{
+    if (ctx == NULL || ctx->threadpool == NULL) return -1;
+
+    /* Set the compile callback on the threadpool so that when workers
+     * pick up a compilation task (with method_id but no task_fn),
+     * they call our compile_callback instead of silently discarding
+     * the task. */
+    vtx_threadpool_set_compile_callback(ctx->threadpool,
+                                         compile_callback, ctx);
+    return 0;
 }
