@@ -186,6 +186,20 @@ uint16_t vtx_bytecode_read_operand(const vtx_bytecode_t *bc, size_t pc);
 int vtx_bytecode_stack_effect(vtx_opcode_t opcode);
 
 /**
+ * Compute the actual maximum operand stack depth by abstract interpretation.
+ *
+ * Walks the bytecode tracking stack depth at each PC, handling branches
+ * via a worklist algorithm. This produces an accurate max_stack that
+ * accounts for all control-flow paths, even when the bytecode's declared
+ * max_stack is too low (a common cause of spill-index-out-of-bounds bugs).
+ *
+ * @param bc          The bytecode module
+ * @param max_locals  Number of local variable slots (for context)
+ * @return            The computed maximum stack depth (at least 0)
+ */
+uint32_t vtx_bytecode_compute_max_stack(const vtx_bytecode_t *bc, uint32_t max_locals);
+
+/**
  * Disassemble one instruction at `pc` into the provided buffer.
  * Returns the PC of the next instruction (pc + instruction length).
  * Writes at most bufsize-1 characters plus a null terminator.

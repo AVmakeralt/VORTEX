@@ -725,6 +725,8 @@ static void emit_stack_push(vtx_compile_ctx_t *ctx)
 static vtx_reg_t emit_stack_pop(vtx_compile_ctx_t *ctx)
 {
     VTX_ASSERT(ctx->stack_depth > 0, "stack underflow during compilation");
+
+    uint32_t old_depth = ctx->stack_depth;
     ctx->stack_depth--;
 
     /* The value to pop is in RAX (TOS). We need to shift registers up:
@@ -743,9 +745,11 @@ static vtx_reg_t emit_stack_pop(vtx_compile_ctx_t *ctx)
     /* shift: RAX ← RCX, RCX ← RDX, RDX ← RBX */
     uint32_t new_depth = ctx->stack_depth;
 
-    if (new_depth >= 3) {
-        /* Load a value from spill into RBX */
-        uint32_t spill_idx = new_depth - VTX_EXPR_REG_COUNT;
+    if (new_depth >= 3 && old_depth > VTX_EXPR_REG_COUNT) {
+        /* Load a value from spill into RBX.
+         * The deepest value that was in spill before the pop is at
+         * spill index (old_depth - VTX_EXPR_REG_COUNT - 1). */
+        uint32_t spill_idx = old_depth - VTX_EXPR_REG_COUNT - 1;
         int32_t spill_off = vtx_frame_layout_spill_offset(&ctx->layout, spill_idx);
         emit_mov_reg_rbp_offset(&ctx->buf, VTX_REG_RBX, spill_off);
     }
@@ -766,6 +770,8 @@ static void emit_stack_pop2(vtx_compile_ctx_t *ctx, vtx_reg_t *first, vtx_reg_t 
 {
     VTX_ASSERT(ctx->stack_depth >= 2, "stack underflow: need 2 values");
 
+    uint32_t old_depth = ctx->stack_depth;
+
     /* TOS is in RAX, TOS-1 is in RCX.
      * We want: second = old TOS (RAX), first = old TOS-1 (RCX) */
     /* Save both to temporary registers first */
@@ -780,33 +786,43 @@ static void emit_stack_pop2(vtx_compile_ctx_t *ctx, vtx_reg_t *first, vtx_reg_t 
      * RAX = old TOS-2 (was RDX)
      * RCX = old TOS-3 (was RBX)
      * RDX = spill or empty
-     * RBX = spill or empty */
+     * RBX = spill or empty
+     *
+     * Spill index formula: after popping 2, we need to load values that
+     * were in spill before the pop. The Nth spill load (0-indexed) uses
+     * spill_idx = old_depth - VTX_EXPR_REG_COUNT - 1 - N.
+     * This is because before the pop, the deepest register (RBX) held the
+     * value that was at stack position (old_depth - 4) from the bottom,
+     * and spill slots held positions 0 through (old_depth - 5). */
+
     if (new_depth >= 2) {
         /* RAX ← RDX, RCX ← RBX, then load spills into RDX and RBX */
         emit_mov_reg_reg64(&ctx->buf, VTX_REG_RAX, VTX_REG_RDX);
         emit_mov_reg_reg64(&ctx->buf, VTX_REG_RCX, VTX_REG_RBX);
-        if (new_depth >= 3) {
-            /* Load into RDX from spill */
-            uint32_t spill_idx = new_depth - VTX_EXPR_REG_COUNT;
+        if (new_depth >= 3 && old_depth > VTX_EXPR_REG_COUNT) {
+            /* Load into RDX from spill: deepest value that was below RBX */
+            uint32_t spill_idx = old_depth - VTX_EXPR_REG_COUNT - 1;
             int32_t spill_off = vtx_frame_layout_spill_offset(&ctx->layout, spill_idx);
             emit_mov_reg_rbp_offset(&ctx->buf, VTX_REG_RDX, spill_off);
         }
-        if (new_depth >= 4) {
-            uint32_t spill_idx = new_depth - VTX_EXPR_REG_COUNT + 1;
+        if (new_depth >= 4 && old_depth > VTX_EXPR_REG_COUNT + 1) {
+            /* Load into RBX from spill: next deeper value */
+            uint32_t spill_idx = old_depth - VTX_EXPR_REG_COUNT - 2;
             int32_t spill_off = vtx_frame_layout_spill_offset(&ctx->layout, spill_idx);
             emit_mov_reg_rbp_offset(&ctx->buf, VTX_REG_RBX, spill_off);
         }
     } else if (new_depth == 1) {
-        /* RAX ← RDX, RCX ← RBX */
+        /* RAX ← RDX */
         emit_mov_reg_reg64(&ctx->buf, VTX_REG_RAX, VTX_REG_RDX);
-        if (new_depth >= 2) {
-            emit_mov_reg_reg64(&ctx->buf, VTX_REG_RCX, VTX_REG_RBX);
-        }
-        /* Load from spill if needed */
-        if (new_depth + 2 > VTX_EXPR_REG_COUNT) {
-            uint32_t spill_idx = new_depth - VTX_EXPR_REG_COUNT;
+        /* RCX ← RBX or load from spill */
+        if (old_depth > VTX_EXPR_REG_COUNT) {
+            /* Need to load from spill into RCX */
+            uint32_t spill_idx = old_depth - VTX_EXPR_REG_COUNT - 1;
             int32_t spill_off = vtx_frame_layout_spill_offset(&ctx->layout, spill_idx);
             emit_mov_reg_rbp_offset(&ctx->buf, VTX_REG_RCX, spill_off);
+        } else {
+            /* RCX ← RBX */
+            emit_mov_reg_reg64(&ctx->buf, VTX_REG_RCX, VTX_REG_RBX);
         }
     }
     /* For new_depth == 0, all registers are already "consumed" —
@@ -1390,10 +1406,14 @@ static uint32_t emit_smi_type_check(vtx_compile_ctx_t *ctx)
 static void emit_stack_binary_result(vtx_compile_ctx_t *ctx)
 {
     vtx_code_buffer_t *buf = &ctx->buf;
-    uint32_t old_depth = ctx->stack_depth + 2;  /* before pop2 */
-    ctx->stack_depth = old_depth - 1;  /* net: pop2 + push1 */
 
-    uint32_t new_depth = ctx->stack_depth;
+    /* In the fast path (e.g., IADD SMI), we operate directly on the
+     * register file without calling emit_stack_pop2/push.
+     * stack_depth still holds the PRE-operation depth (including both
+     * operands). We emit the register shift code only — the caller
+     * is responsible for updating stack_depth to (old - 1). */
+    uint32_t old_depth = ctx->stack_depth;
+    uint32_t new_depth = old_depth - 1;
 
     /* Shift registers up: RCX ← RDX, RDX ← RBX */
     if (new_depth >= 2) {
@@ -1405,16 +1425,13 @@ static void emit_stack_binary_result(vtx_compile_ctx_t *ctx)
 
     /* Load from spill if needed */
     if (new_depth >= 4) {
-        /* The value at the new TOS-3 position was at old position
-         * old_depth - 5 (0-indexed from bottom), which is in spill if
-         * old_depth > 4. Spill index = (old_depth - 4) - 1 = old_depth - 5 */
+        /* After pop2+push1, the deepest register (RBX) needs a value
+         * from spill. The value now at TOS-3 was previously at
+         * position (old_depth - 1) - 3 = old_depth - 4 from the top,
+         * or spill slot (old_depth - VTX_EXPR_REG_COUNT - 1) from the bottom. */
         uint32_t spill_idx = old_depth - VTX_EXPR_REG_COUNT - 1;
         int32_t spill_off = vtx_frame_layout_spill_offset(&ctx->layout, spill_idx);
         emit_mov_reg_rbp_offset(buf, VTX_REG_RBX, spill_off);
-    }
-
-    if (ctx->stack_depth > ctx->max_stack_depth) {
-        ctx->max_stack_depth = ctx->stack_depth;
     }
 }
 
@@ -1458,7 +1475,7 @@ static void emit_smi_overflow_guard(vtx_compile_ctx_t *ctx)
     memset(&guard, 0, sizeof(guard));
     guard.bytecode_pc = ctx->bc_pc;
     guard.deopt_continuation = ctx->bc_pc;
-    guard.stack_depth = ctx->stack_depth + 2;  /* before pop2 */
+    guard.stack_depth = ctx->stack_depth;  /* pre-operation depth (fast path, no pop yet) */
     vtx_guard_emit_overflow_check(buf, guard, &ctx->guards);
 }
 
@@ -1494,6 +1511,10 @@ static void compile_int_arith(vtx_compile_ctx_t *ctx, vtx_opcode_t op)
      * to the untag→compute→retag path below. */
     if (op == VT_OP_IADD) {
         /* RAX = TOS (rhs), RCX = TOS-1 (lhs) — already in the right registers */
+
+        /* Save pre-operation stack depth for both fast and slow paths.
+         * Both paths need to end at depth = pre_depth - 1. */
+        uint32_t pre_depth = ctx->stack_depth;
 
         /* SMI type check: (RAX | RCX) & 0x7 == 0 */
         uint32_t smi_check_jnz = emit_smi_type_check(ctx);
@@ -1531,6 +1552,11 @@ static void compile_int_arith(vtx_compile_ctx_t *ctx, vtx_opcode_t op)
         int32_t smi_disp = (int32_t)slow_path_start - (int32_t)(smi_check_jnz + 4);
         vtx_code_buffer_patch_dword(buf, smi_check_jnz, (uint32_t)smi_disp);
 
+        /* Restore stack_depth to pre-operation value for the slow path,
+         * since emit_stack_binary_result above did not modify it,
+         * but we need the slow path to start from the correct state. */
+        ctx->stack_depth = pre_depth;
+
         /* Slow path: untag both, compute, retag */
         vtx_reg_t lhs_reg, rhs_reg;
         emit_stack_pop2(ctx, &lhs_reg, &rhs_reg);
@@ -1566,6 +1592,15 @@ static void compile_int_arith(vtx_compile_ctx_t *ctx, vtx_opcode_t op)
         int32_t done_disp = (int32_t)done_pos - (int32_t)(jmp_done_pos + 4);
         vtx_code_buffer_patch_dword(buf, jmp_done_pos, (uint32_t)done_disp);
 
+        /* Both paths converge: stack_depth should be pre_depth - 1.
+         * Fast path: didn't modify stack_depth (emit_stack_binary_result is code-only).
+         * Slow path: pop2(-2) + push(+1) = net -1, so stack_depth = pre_depth - 1.
+         * For the fast path, we need to set it now. */
+        ctx->stack_depth = pre_depth - 1;
+        if (ctx->stack_depth > ctx->max_stack_depth) {
+            ctx->max_stack_depth = ctx->stack_depth;
+        }
+
         return;
     }
 
@@ -1573,6 +1608,9 @@ static void compile_int_arith(vtx_compile_ctx_t *ctx, vtx_opcode_t op)
     if (op == VT_OP_IMUL) {
         /* RAX = TOS (rhs), RCX = TOS-1 (lhs)
          * IMUL requires untag→mul→retag since SMI(a)*SMI(b) ≠ SMI(a*b) */
+
+        /* Save pre-operation stack depth. Both paths converge at depth - 1. */
+        uint32_t pre_depth = ctx->stack_depth;
 
         /* SMI type check for fast IMUL path */
         uint32_t smi_check_jnz = emit_smi_type_check(ctx);
@@ -1611,6 +1649,9 @@ static void compile_int_arith(vtx_compile_ctx_t *ctx, vtx_opcode_t op)
         int32_t smi_disp = (int32_t)slow_path_start - (int32_t)(smi_check_jnz + 4);
         vtx_code_buffer_patch_dword(buf, smi_check_jnz, (uint32_t)smi_disp);
 
+        /* Restore stack_depth for the slow path */
+        ctx->stack_depth = pre_depth;
+
         /* Slow path: pop2, untag, imul, retag, push */
         vtx_reg_t lhs_reg, rhs_reg;
         emit_stack_pop2(ctx, &lhs_reg, &rhs_reg);
@@ -1638,7 +1679,18 @@ static void compile_int_arith(vtx_compile_ctx_t *ctx, vtx_opcode_t op)
         vtx_code_buffer_patch_dword(buf, jo2_pos, (uint32_t)jo2_disp);
 
         /* On overflow, produce SMI(0) as a safe fallback.
-         * TODO: Proper double-boxing path for overflow results. */
+         * TODO: Proper double-boxing path for overflow results.
+         * Note: emit_stack_binary_result uses the current stack_depth
+         * to compute spill offsets. At this point, stack_depth may
+         * have been modified by the slow path (pop2+push = pre_depth - 1),
+         * but the overflow can come from EITHER the fast path (depth=pre_depth)
+         * or the slow path (depth=pre_depth-1). Since both paths have the
+         * same physical register state at their respective JO points,
+         * and the fast path's JO is BEFORE emit_stack_binary_result,
+         * we need to ensure stack_depth matches the fast path state.
+         * The overflow path is rarely taken; we set depth to pre_depth
+         * for correctness of spill offset computation. */
+        ctx->stack_depth = pre_depth;
         emit_mov_reg_imm64(buf, VTX_REG_RAX, VTX_NAN_BOX_HEADER); /* SMI(0) */
         emit_stack_binary_result(ctx);
 
@@ -1648,6 +1700,12 @@ static void compile_int_arith(vtx_compile_ctx_t *ctx, vtx_opcode_t op)
         vtx_code_buffer_patch_dword(buf, jmp_done_pos, (uint32_t)done_disp);
         int32_t done2_disp = (int32_t)done_pos - (int32_t)(jmp_done2_pos + 4);
         vtx_code_buffer_patch_dword(buf, jmp_done2_pos, (uint32_t)done2_disp);
+
+        /* All paths converge at depth = pre_depth - 1 */
+        ctx->stack_depth = pre_depth - 1;
+        if (ctx->stack_depth > ctx->max_stack_depth) {
+            ctx->max_stack_depth = ctx->stack_depth;
+        }
 
         return;
     }
@@ -1732,11 +1790,13 @@ static void compile_float_arith(vtx_compile_ctx_t *ctx, vtx_opcode_t op)
     /* Use local[max_locals] and local[max_locals+1] as temp if available,
      * or use fixed scratch area. For simplicity, store to [rbp-48-max_locals*8-8]
      * and [rbp-48-max_locals*8-16]. Actually, let's use the spill area. */
-    int32_t temp_off1 = vtx_frame_layout_spill_offset(&ctx->layout, 0);
-    int32_t temp_off2 = vtx_frame_layout_spill_offset(&ctx->layout, 1);
+    int32_t temp_off1, temp_off2;
 
-    /* If we have no spill slots, use local slots as temp */
-    if (ctx->layout.max_spills < 2) {
+    /* If we don't have enough spill slots, use local slots as temp */
+    if (ctx->layout.max_spills >= 2) {
+        temp_off1 = vtx_frame_layout_spill_offset(&ctx->layout, 0);
+        temp_off2 = vtx_frame_layout_spill_offset(&ctx->layout, 1);
+    } else {
         /* Use the last two locals as temp */
         temp_off1 = vtx_frame_layout_local_offset(&ctx->layout,
                      ctx->layout.max_locals > 0 ? ctx->layout.max_locals - 1 : 0);
@@ -1895,9 +1955,11 @@ static void compile_float_cmp(vtx_compile_ctx_t *ctx, vtx_opcode_t op)
     emit_stack_pop2(ctx, &lhs_reg, &rhs_reg);
 
     /* Store both to temp slots for XMM comparison */
-    int32_t temp_off1 = vtx_frame_layout_spill_offset(&ctx->layout, 0);
-    int32_t temp_off2 = vtx_frame_layout_spill_offset(&ctx->layout, 1);
-    if (ctx->layout.max_spills < 2) {
+    int32_t temp_off1, temp_off2;
+    if (ctx->layout.max_spills >= 2) {
+        temp_off1 = vtx_frame_layout_spill_offset(&ctx->layout, 0);
+        temp_off2 = vtx_frame_layout_spill_offset(&ctx->layout, 1);
+    } else {
         temp_off1 = vtx_frame_layout_local_offset(&ctx->layout,
                      ctx->layout.max_locals > 0 ? ctx->layout.max_locals - 1 : 0);
         temp_off2 = vtx_frame_layout_local_offset(&ctx->layout,
