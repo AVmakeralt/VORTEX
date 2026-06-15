@@ -1010,6 +1010,17 @@ static bool inst_reads_preg(const vtx_inst_t *inst, uint8_t preg)
             inst->opcode == VTX_X86_PUSH)
             return true;
     }
+    /* CRITICAL: Check memory operand registers (base_phys and index_phys).
+     * LEA, MOV r/m, and other instructions with memory operands read the
+     * base and index physical registers. Without this check, the peephole
+     * dead-store eliminator will kill MOVs that feed into LEA index registers,
+     * causing the LEA to use a stale/wrong register value. */
+    if (inst->flags & VTX_INST_FLAG_HAS_MEM) {
+        if (inst->mem.base_phys == preg)
+            return true;
+        if (inst->mem.index_phys == preg)
+            return true;
+    }
     return false;
 }
 

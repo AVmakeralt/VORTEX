@@ -671,13 +671,10 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             /* SMI adjustment: LEA computes SMI(a)+SMI(b) = 2*HEADER+(a+b)<<3;
              * need to subtract one header for correct SMI result.
              * The header (0x7FF8000000000000) doesn't fit in imm32, so we
-             * load it into a scratch register (R10=10) and use SUB reg,reg. */
-            {
-                uint32_t r10 = vtx_isel_alloc_vreg_fixed(stream, arena, 10);
-                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, r10,
-                                    (int64_t)0x7FF8000000000000ULL, node_id), arena);
-                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_SUB, dst, r10, node_id), arena);
-            }
+             * load it into R10 (scratch vreg) and use SUB reg,reg. */
+            vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, stream->smi_scratch_vreg,
+                                (int64_t)0x7FF8000000000000ULL, node_id), arena);
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_SUB, dst, stream->smi_scratch_vreg, node_id), arena);
             break;
         }
 
@@ -690,13 +687,10 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
          * SMI(a) + SMI(b) = (HEADER|(a<<3)) + (HEADER|(b<<3))
          *                  = 2*HEADER + (a+b)<<3
          * We need HEADER + (a+b)<<3 = SMI(a+b), so subtract one header.
-         * The header doesn't fit in imm32, so use R10 as scratch. */
-        {
-            uint32_t r10 = vtx_isel_alloc_vreg_fixed(stream, arena, 10);
-            vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, r10,
-                                (int64_t)0x7FF8000000000000ULL, node_id), arena);
-            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_SUB, dst, r10, node_id), arena);
-        }
+         * The header doesn't fit in imm32, so use R10 scratch vreg. */
+        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, stream->smi_scratch_vreg,
+                            (int64_t)0x7FF8000000000000ULL, node_id), arena);
+        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_SUB, dst, stream->smi_scratch_vreg, node_id), arena);
         break;
     }
 
@@ -725,27 +719,14 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
          * Note: LEA doesn't set flags, which is an advantage for subsequent
          * flag-dependent code.
          *
-         * Special case: Sub(x, 1) when dst == lhs → DEC
-         *   DEC dst is 3 bytes vs LEA 7 bytes */
-        int64_t rhs_const_sub;
-        if (try_get_const_int(graph, node->inputs[1], &rhs_const_sub)) {
-            /* P1: DEC for Sub(x, 1) when dst == lhs (in-place) */
-            if (rhs_const_sub == 1 && dst == lhs_vreg) {
-                vtx_isel_emit_inst(block, make_r_inst(VTX_X86_DEC, dst, node_id, 0), arena);
-                break;
-            }
-            /* P1: INC for Sub(x, -1) = Add(x, 1) when dst == lhs */
-            if (rhs_const_sub == -1 && dst == lhs_vreg) {
-                vtx_isel_emit_inst(block, make_r_inst(VTX_X86_INC, dst, node_id, 0), arena);
-                break;
-            }
-            int64_t neg_imm = -rhs_const_sub;
-            if (neg_imm != 0 && neg_imm >= INT32_MIN && neg_imm <= INT32_MAX) {
-                vtx_x86_memop_t mem = { lhs_vreg, VTX_VREG_INVALID, 0xFF, 0xFF, 1, (int32_t)neg_imm };
-                vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_LEA, dst, &mem, node_id), arena);
-                break;
-            }
-        }
+         * NOTE: DEC/INC/LEA shortcuts disabled for SMI values.
+         * SMI values are NaN-boxed: SMI(x) = HEADER|(x<<3).
+         * Sub(x, 1): SMI(x) - SMI(1) = (x-1)<<3, need +HEADER.
+         *   DEC adds 1, not 8, and doesn't add the header. Wrong.
+         *   LEA [lhs - imm] computes lhs - imm, but lhs is SMI(x) and imm
+         *   is a raw constant, not SMI-tagged. These paths assume raw integers.
+         * Fall through to MOV+SUB + SMI header adjustment instead.
+         */
 
         if (dst != lhs_vreg)
             vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_vreg, node_id), arena);
@@ -755,13 +736,10 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
          * SMI(a) - SMI(b) = (HEADER|(a<<3)) - (HEADER|(b<<3))
          *                  = (a-b)<<3  (headers cancel)
          * We need HEADER + (a-b)<<3 = SMI(a-b), so add one header.
-         * The header doesn't fit in imm32, so use R10 as scratch. */
-        {
-            uint32_t r10 = vtx_isel_alloc_vreg_fixed(stream, arena, 10);
-            vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, r10,
-                                (int64_t)0x7FF8000000000000ULL, node_id), arena);
-            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_ADD, dst, r10, node_id), arena);
-        }
+         * The header doesn't fit in imm32, so use R10 scratch vreg. */
+        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, stream->smi_scratch_vreg,
+                            (int64_t)0x7FF8000000000000ULL, node_id), arena);
+        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_ADD, dst, stream->smi_scratch_vreg, node_id), arena);
         break;
     }
 
@@ -1150,29 +1128,52 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (lhs == VTX_VREG_INVALID || rhs == VTX_VREG_INVALID) return -1;
 
-        /* Optimization: CMP against 0 → TEST reg, reg */
-        int64_t rhs_const;
-        if (try_get_const_int(graph, node->inputs[1], &rhs_const) && rhs_const == 0) {
-            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_TEST, lhs, lhs, node_id), arena);
-        } else {
-            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_CMP, lhs, rhs, node_id), arena);
-        }
+        /* SMI untagging for integer comparisons.
+         *
+         * NaN-boxed SMI values do NOT preserve signed ordering in 64-bit
+         * comparison. SMI(-3) = 0x7FFFFFFFFFFFFFE8 appears as a large
+         * positive 64-bit value, so CMP SMI(-3), SMI(0) gives the wrong
+         * result (-3 > 0 = true, which is incorrect).
+         *
+         * To compare correctly, we must untag both operands:
+         *   SHL r64, 13   ; move SMI sign bit (bit 50) to bit 63
+         *   SAR r64, 16   ; arithmetic shift right, sign-extend from bit 63
+         *
+         * After untagging, both values are sign-extended integers that can
+         * be compared with a normal signed CMP.
+         *
+         * We use temporary vregs for the untagged values to avoid modifying
+         * the original SMI values (which may be used by other nodes). */
+        uint32_t lhs_untagged = vtx_isel_alloc_vreg(stream, arena);
+        uint32_t rhs_untagged = vtx_isel_alloc_vreg(stream, arena);
 
-        /* P1 isel: SETCC into zeroed register — eliminates the AND 0xFF.
+        /* lhs_untagged = untag(lhs) */
+        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, lhs_untagged, lhs, node_id), arena);
+        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, lhs_untagged, 13, node_id), arena);
+        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, lhs_untagged, 16, node_id), arena);
+
+        /* rhs_untagged = untag(rhs) */
+        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, rhs_untagged, rhs, node_id), arena);
+        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, rhs_untagged, 13, node_id), arena);
+        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, rhs_untagged, 16, node_id), arena);
+
+        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_CMP, lhs_untagged, rhs_untagged, node_id), arena);
+
+        /* P1 isel: SETCC + MOVZX for boolean result.
          *
          * Pattern: dst = (lhs cmp rhs) ? 1 : 0
-         *   Old: setcc dst_lo; and dst, 0xFF    (2 instructions)
-         *   New: xor dst, dst; setcc dst_lo      (2 instructions, but xor is cheaper)
          *
-         * Why XOR+SETCC is better than SETCC+AND:
-         *   - XOR reg,reg is 1 uop (register renaming zeros the register)
-         *   - SETCC writes only the low byte, but XOR already zeroed the
-         *     upper bytes, so the result is correctly zero-extended
-         *   - AND 0xFF is 1 uop but requires an immediate operand
-         *   - More importantly: XOR+SETCC can be macro-fused on some CPUs
-         *   - The register renamer handles XOR zeroing for free (no execution)
+         * IMPORTANT: The XOR+SETCC pattern (xor dst,dst; setcc dst_lo) is WRONG
+         * because XOR clobbers the flags set by CMP. SETCC must read the flags
+         * IMMEDIATELY after CMP, before any instruction that modifies flags.
+         *
+         * Correct sequence:
+         *   CMP lhs, rhs       ; sets flags
+         *   SETCC dst_lo       ; reads flags, writes low byte
+         *   MOVZX dst, dst_lo  ; zero-extends byte to full register
+         *
+         * This produces the correct 0/1 boolean result without clobbering flags.
          */
-        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_XOR, dst, dst, node_id), arena);
         vtx_inst_t setcc;
         memset(&setcc, 0, sizeof(setcc));
         setcc.opcode = VTX_X86_SETCC;
@@ -1182,6 +1183,8 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         setcc.flags = VTX_INST_FLAG_HAS_COND;
         setcc.source_node = node_id;
         vtx_isel_emit_inst(block, setcc, arena);
+        /* MOVZX r64, r/m8 — zero-extend the SETCC result */
+        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOVZX, dst, dst, node_id), arena);
         break;
     }
 
@@ -2274,8 +2277,28 @@ static void resolve_branch_targets(vtx_inst_stream_t *stream,
             if (inst->opcode == VTX_X86_JMP && sched_blk->succ_count > 0) {
                 inst->operands[0] = sched_blk->succ_blocks[0];
             } else if (inst->opcode == VTX_X86_JCC) {
-                if (sched_blk->succ_count > 0)
+                /* For conditional branches, the JCC should jump to the
+                 * "taken" (true) successor, and fall through to the
+                 * "not taken" (false) successor.
+                 *
+                 * Convention: the fall-through block is the next block
+                 * in schedule order (b+1). So the JCC target should be
+                 * the successor that is NOT the next block.
+                 *
+                 * If both successors are different from b+1, or if there's
+                 * only one successor, we default to succ_blocks[0].
+                 */
+                if (sched_blk->succ_count >= 2) {
+                    uint32_t next_block = b + 1;
+                    /* Jump to the successor that is NOT the fall-through */
+                    if (sched_blk->succ_blocks[0] == next_block) {
+                        inst->operands[0] = sched_blk->succ_blocks[1];
+                    } else {
+                        inst->operands[0] = sched_blk->succ_blocks[0];
+                    }
+                } else if (sched_blk->succ_count > 0) {
                     inst->operands[0] = sched_blk->succ_blocks[0];
+                }
             }
         }
     }
@@ -2297,6 +2320,14 @@ vtx_inst_stream_t *vtx_isel_select(const vtx_schedule_t *schedule,
     if (!stream) return NULL;
     memset(stream, 0, sizeof(*stream));
     stream->schedule = schedule;
+
+    /* Allocate the SMI scratch vreg (fixed to R10). This vreg is reused by
+     * all SMI adjustment sequences (Add/Sub header fixups, etc.) so we don't
+     * create multiple vregs all fighting for R10 in the register allocator.
+     * R10 is reserved in VTX_REG_RESERVED_MASK so regalloc will never
+     * allocate it for normal vregs. */
+    stream->smi_scratch_vreg = vtx_isel_alloc_vreg_fixed(stream, arena, 10);
+    if (stream->smi_scratch_vreg == VTX_VREG_INVALID) return NULL;
 
     stream->block_count = schedule->count;
     stream->block_capacity = schedule->count;

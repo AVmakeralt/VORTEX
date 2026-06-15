@@ -907,10 +907,12 @@ int main(void)
             int prc = vtx_pipeline_run(&graph, &config, &arena, &result2);
 
             if (prc == 0 && result2.success && method.compiled_code != NULL) {
-                /* Execute the JIT-compiled code through the interpreter */
-                vtx_interp_t interp2; vtx_interp_init(&interp2, &ts, &gc);
-                vtx_value_t jit_result = vtx_interp_run(&interp2, &method, args, 2);
-                vtx_interp_destroy(&interp2);
+                /* Execute the JIT-compiled code directly */
+                typedef vtx_value_t (*vtx_jit_entry_t)(
+                    const vtx_method_desc_t *, void *, void *,
+                    vtx_value_t *, uint32_t);
+                vtx_jit_entry_t entry = (vtx_jit_entry_t)method.compiled_code;
+                vtx_value_t jit_result = entry(&method, NULL, (void*)1, args, 2);
 
                 printf("  t2_add: interp_raw=0x%016llX, jit_raw=0x%016llX\n",
                        (unsigned long long)interp_result,
@@ -1005,13 +1007,15 @@ int main(void)
             int prc = vtx_pipeline_run(&graph, &config, &arena, &result2);
 
             if (prc == 0 && result2.success && method.compiled_code != NULL) {
-                /* Execute JIT code with positive arg */
-                vtx_interp_t interp2; vtx_interp_init(&interp2, &ts, &gc);
-                vtx_value_t jit_result_pos = vtx_interp_run(&interp2, &method, &arg_pos, 1);
+                /* Execute JIT code directly with positive arg */
+                typedef vtx_value_t (*vtx_jit_entry_t)(
+                    const vtx_method_desc_t *, void *, void *,
+                    vtx_value_t *, uint32_t);
+                vtx_jit_entry_t entry = (vtx_jit_entry_t)method.compiled_code;
+                vtx_value_t jit_result_pos = entry(&method, NULL, (void*)1, &arg_pos, 1);
 
-                /* Execute JIT code with negative arg */
-                vtx_value_t jit_result_neg = vtx_interp_run(&interp2, &method, &arg_neg, 1);
-                vtx_interp_destroy(&interp2);
+                /* Execute JIT code directly with negative arg */
+                vtx_value_t jit_result_neg = entry(&method, NULL, (void*)1, &arg_neg, 1);
 
                 bool match_pos = (interp_result_pos == jit_result_pos);
                 bool match_neg = (interp_result_neg == jit_result_neg);

@@ -67,7 +67,7 @@ static const uint8_t vtx_callee_saved_regs[VTX_CALLEE_SAVED_COUNT] = {
 };
 
 /* Bitmask for reserved registers */
-#define VTX_REG_RESERVED_MASK ((1u << 4) | (1u << 5))  /* RSP=4, RBP=5 */
+#define VTX_REG_RESERVED_MASK ((1u << 4) | (1u << 5) | (1u << 10))  /* RSP=4, RBP=5, R10=10 (SMI scratch) */
 
 /* Bitmask for caller-saved registers */
 #define VTX_CALLER_SAVED_MASK \

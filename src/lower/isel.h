@@ -227,6 +227,11 @@ typedef struct {
     uint8_t          *vreg_fixed_reg;        /* vreg → vtx_reg_t if VTX_VREG_FLAG_FIXED */
     uint32_t          vreg_fixed_reg_count;  /* size of vreg_fixed_reg array */
 
+    /* SMI scratch vreg: fixed to R10, used for NaN-box header constant.
+     * Allocated once during isel init, reused for all SMI adjustments.
+     * R10 is reserved in VTX_REG_RESERVED_MASK so regalloc won't touch it. */
+    uint32_t          smi_scratch_vreg;       /* vreg id fixed to R10 */
+
     /* Reference to the graph for node lookups */
     const vtx_schedule_t *schedule;
 } vtx_inst_stream_t;
