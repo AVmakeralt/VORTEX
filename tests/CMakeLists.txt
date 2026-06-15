@@ -128,6 +128,35 @@ target_link_libraries(test_p2_features PRIVATE
 )
 add_test(NAME test_p2_features COMMAND test_p2_features)
 
+# test_smi_arith — SMI arithmetic correctness (encoding, interpreter, T2 JIT)
+add_executable(test_smi_arith
+    unit/test_smi_arith.c
+)
+target_link_libraries(test_smi_arith PRIVATE
+    vortex_test_framework
+    -Wl,--start-group
+    vortex_baseline
+    vortex_codecache
+    vortex_compile
+    vortex_interp
+    vortex_runtime
+    vortex_ir
+    vortex_guard
+    vortex_deopt
+    vortex_profile
+    vortex_lower
+    vortex_inliner
+    vortex_pea
+    vortex_sota
+    vortex_midtier
+    vortex_trace
+    vortex_region
+    -Wl,--end-group
+    m
+    pthread
+)
+add_test(NAME test_smi_arith COMMAND test_smi_arith)
+
 # ---- Integration tests ----
 
 # test_interp_basics

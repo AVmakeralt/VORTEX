@@ -353,6 +353,11 @@ typedef struct {
      * R10 is reserved in VTX_REG_RESERVED_MASK so regalloc won't touch it. */
     uint32_t          smi_scratch_vreg;       /* vreg id fixed to R10 */
 
+    /* SMI mask vreg: fixed to R11, used for VTX_NAN_DATA_MASK constant.
+     * Needed for correct SMI retag: (val & DATA_MASK) << 3 | HEADER.
+     * R11 is reserved in VTX_REG_RESERVED_MASK so regalloc won't touch it. */
+    uint32_t          smi_mask_vreg;          /* vreg id fixed to R11 */
+
     /* Reference to the graph for node lookups */
     const vtx_schedule_t *schedule;
 } vtx_inst_stream_t;
