@@ -237,6 +237,42 @@ static vtx_lattice_val_t evaluate_node(vtx_node_opcode_t opcode,
         return vtx_lattice_bottom();
     }
 
+    case VTX_OP_Min: {
+        if (input_count < 2) return vtx_lattice_bottom();
+        if (inputs[0].tag == VTX_LATTICE_CONSTANT && inputs[1].tag == VTX_LATTICE_CONSTANT) {
+            if (inputs[0].value.kind == VTX_TYPE_Int && inputs[1].value.kind == VTX_TYPE_Int) {
+                int64_t a = inputs[0].value.as.int_val;
+                int64_t b = inputs[1].value.as.int_val;
+                return vtx_lattice_const_int(a < b ? a : b);
+            }
+            if (inputs[0].value.kind == VTX_TYPE_Float && inputs[1].value.kind == VTX_TYPE_Float) {
+                return vtx_lattice_const_float(fmin(inputs[0].value.as.float_val, inputs[1].value.as.float_val));
+            }
+        }
+        if (inputs[0].tag == VTX_LATTICE_TOP || inputs[1].tag == VTX_LATTICE_TOP) {
+            return vtx_lattice_top();
+        }
+        return vtx_lattice_bottom();
+    }
+
+    case VTX_OP_Max: {
+        if (input_count < 2) return vtx_lattice_bottom();
+        if (inputs[0].tag == VTX_LATTICE_CONSTANT && inputs[1].tag == VTX_LATTICE_CONSTANT) {
+            if (inputs[0].value.kind == VTX_TYPE_Int && inputs[1].value.kind == VTX_TYPE_Int) {
+                int64_t a = inputs[0].value.as.int_val;
+                int64_t b = inputs[1].value.as.int_val;
+                return vtx_lattice_const_int(a > b ? a : b);
+            }
+            if (inputs[0].value.kind == VTX_TYPE_Float && inputs[1].value.kind == VTX_TYPE_Float) {
+                return vtx_lattice_const_float(fmax(inputs[0].value.as.float_val, inputs[1].value.as.float_val));
+            }
+        }
+        if (inputs[0].tag == VTX_LATTICE_TOP || inputs[1].tag == VTX_LATTICE_TOP) {
+            return vtx_lattice_top();
+        }
+        return vtx_lattice_bottom();
+    }
+
     case VTX_OP_Shl: {
         if (input_count < 2) return vtx_lattice_bottom();
         if (inputs[0].tag == VTX_LATTICE_CONSTANT && inputs[1].tag == VTX_LATTICE_CONSTANT) {
@@ -514,9 +550,23 @@ uint32_t vtx_constant_prop_run(vtx_graph_t *graph)
     if (graph->start_node < node_count) {
         lattice[graph->start_node] = vtx_lattice_bottom();
         worklist_push(&wl, graph->start_node);
+        /* Push Start's users since its lattice value changed from TOP to BOTTOM.
+         * Without this, downstream nodes never get evaluated because when Start
+         * is popped from the worklist, its value doesn't change (already BOTTOM),
+         * so the change-detection logic doesn't push its users. */
+        vtx_node_t *start = &nt->nodes[graph->start_node];
+        for (uint32_t u = 0; u < start->use_count; u++) {
+            vtx_use_entry_t *use = &start->uses[u];
+            if (use->user_id < node_count && !nt->nodes[use->user_id].dead) {
+                worklist_push(&wl, use->user_id);
+            }
+        }
     }
 
-    /* Also seed all Constant nodes — they are always known */
+    /* Also seed all Constant nodes — they are always known.
+     * Also seed Parameter nodes as BOTTOM — they are always reachable
+     * (method inputs) but their values are unknown (not constant).
+     * Push their users for the same reason as Start above. */
     for (uint32_t i = 0; i < node_count; i++) {
         vtx_node_t *node = &nt->nodes[i];
         if (node->dead) continue;
@@ -526,6 +576,24 @@ uint32_t vtx_constant_prop_run(vtx_graph_t *graph)
             v.value = node->constval;
             lattice[i] = v;
             worklist_push(&wl, i);
+            /* Push Constant's users */
+            for (uint32_t u = 0; u < node->use_count; u++) {
+                vtx_use_entry_t *use = &node->uses[u];
+                if (use->user_id < node_count && !nt->nodes[use->user_id].dead) {
+                    worklist_push(&wl, use->user_id);
+                }
+            }
+        }
+        if (node->opcode == VTX_OP_Parameter) {
+            lattice[i] = vtx_lattice_bottom();
+            worklist_push(&wl, i);
+            /* Push Parameter's users */
+            for (uint32_t u = 0; u < node->use_count; u++) {
+                vtx_use_entry_t *use = &node->uses[u];
+                if (use->user_id < node_count && !nt->nodes[use->user_id].dead) {
+                    worklist_push(&wl, use->user_id);
+                }
+            }
         }
     }
 
@@ -562,15 +630,15 @@ uint32_t vtx_constant_prop_run(vtx_graph_t *graph)
             (new_val.tag == VTX_LATTICE_CONSTANT && !vtx_constval_equal(new_val.value, old_val.value))) {
             lattice[nid] = new_val;
 
-            /* Add all users of this node to the worklist */
-            for (uint32_t u = 0; u < node_count; u++) {
-                vtx_node_t *user = &nt->nodes[u];
-                if (user->dead) continue;
-                for (uint32_t j = 0; j < user->input_count; j++) {
-                    if (user->inputs[j] == nid) {
-                        worklist_push(&wl, u);
-                        break;
-                    }
+            /* Bug #14 fix: Add users to the worklist using the
+             * O(K) use-def list instead of the O(N^2) scan of
+             * all nodes' inputs. This dramatically improves compile
+             * time for large graphs. */
+            vtx_node_t *changed_node = &nt->nodes[nid];
+            for (uint32_t u = 0; u < changed_node->use_count; u++) {
+                vtx_use_entry_t *use = &changed_node->uses[u];
+                if (use->user_id < node_count && !nt->nodes[use->user_id].dead) {
+                    worklist_push(&wl, use->user_id);
                 }
             }
         }
@@ -644,30 +712,27 @@ uint32_t vtx_constant_prop_run(vtx_graph_t *graph)
             default:             cn->type = VTX_TYPE_Void; break;
             }
 
-            /* Redirect all uses of this node to the new constant */
-            for (uint32_t u = 0; u < nt->count; u++) {
-                vtx_node_t *user = &nt->nodes[u];
-                if (user->dead) continue;
-                for (uint32_t j = 0; j < user->input_count; j++) {
-                    if (user->inputs[j] == (vtx_nodeid_t)i) {
-                        vtx_node_replace_input(nt, u, j, const_node);
-                    }
-                }
-            }
+            /* Redirect all uses of this node to the new constant.
+             * Bug #6 fix (complete): Use O(K) replace_all_uses instead
+             * of the O(N^2) scan. vtx_node_replace_all_uses properly
+             * maintains use-def lists, output counts, and inputs for
+             * all users. After this call, this node's output_count
+             * is 0 and all its former users point to the constant. */
+            vtx_node_replace_all_uses(nt, (vtx_nodeid_t)i, const_node);
 
-            /* IR-7 fix: Disconnect inputs before marking dead.
-             * Without this, the input nodes' output_count remains
-             * inflated, which can prevent them from being cleaned
-             * up by later DCE passes. */
+            /* Disconnect this node's inputs from their producers and
+             * remove use-def entries, since this node is now dead. */
             for (uint32_t j = 0; j < node->input_count; j++) {
                 if (node->inputs[j] != VTX_NODEID_INVALID && node->inputs[j] < nt->count) {
                     vtx_node_t *producer = &nt->nodes[node->inputs[j]];
+                    vtx_node_remove_use_entry(producer, (vtx_nodeid_t)i, j);
                     if (producer->output_count > 0) {
                         producer->output_count--;
                     }
                 }
             }
             node->input_count = 0;
+            node->use_count = 0; /* Clear dead node's use list */
             node->dead = true;
             node->output_count = 0;
             simplified++;
@@ -679,16 +744,23 @@ uint32_t vtx_constant_prop_run(vtx_graph_t *graph)
             if (vtx_nf_has(node->flags, VTX_NF_DATA) &&
                 !vtx_nf_has(node->flags, VTX_NF_SIDE_EFFECT) &&
                 !vtx_nf_has(node->flags, VTX_NF_CONTROL)) {
-                /* IR-7 fix: disconnect inputs on dead nodes */
+                /* Bug #4 fix: disconnect inputs on dead nodes AND
+                 * remove use-def entries from producers. Without
+                 * vtx_node_remove_use_entry, the producers' use-def
+                 * lists retain stale entries pointing to the dead node,
+                 * which corrupts later passes that traverse use-def
+                 * lists (GVN, LICM, bounds check). */
                 for (uint32_t j = 0; j < node->input_count; j++) {
                     if (node->inputs[j] != VTX_NODEID_INVALID && node->inputs[j] < nt->count) {
                         vtx_node_t *producer = &nt->nodes[node->inputs[j]];
+                        vtx_node_remove_use_entry(producer, (vtx_nodeid_t)i, j);
                         if (producer->output_count > 0) {
                             producer->output_count--;
                         }
                     }
                 }
                 node->input_count = 0;
+                node->use_count = 0; /* Clear dead node's use list */
                 node->dead = true;
                 simplified++;
             }
@@ -729,15 +801,25 @@ uint32_t vtx_constant_prop_run(vtx_graph_t *graph)
 
         if (has_non_top && all_same_or_top && unique_val != VTX_NODEID_INVALID) {
             /* Replace Phi with its single value */
-            for (uint32_t u = 0; u < nt->count; u++) {
-                vtx_node_t *user = &nt->nodes[u];
-                if (user->dead) continue;
-                for (uint32_t j = 0; j < user->input_count; j++) {
-                    if (user->inputs[j] == (vtx_nodeid_t)i) {
-                        vtx_node_replace_input(nt, u, j, unique_val);
+            /* Bug #5 fix: Use O(K) replace_all_uses instead of O(N^2)
+             * scan. Also properly disconnect the Phi's inputs from
+             * their producers, removing use-def entries and decrementing
+             * output_count, to prevent stale use-def list entries that
+             * corrupt later passes. */
+            vtx_node_replace_all_uses(nt, (vtx_nodeid_t)i, unique_val);
+
+            /* Disconnect the Phi's inputs from their producers */
+            for (uint32_t j = 0; j < node->input_count; j++) {
+                if (node->inputs[j] != VTX_NODEID_INVALID && node->inputs[j] < nt->count) {
+                    vtx_node_t *producer = &nt->nodes[node->inputs[j]];
+                    vtx_node_remove_use_entry(producer, (vtx_nodeid_t)i, j);
+                    if (producer->output_count > 0) {
+                        producer->output_count--;
                     }
                 }
             }
+            node->input_count = 0;
+            node->use_count = 0; /* Clear dead node's use list */
             node->dead = true;
             node->output_count = 0;
             simplified++;

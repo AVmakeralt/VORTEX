@@ -212,6 +212,15 @@ vtx_range_t vtx_bounds_compute_range(const vtx_node_t *node,
         }
 
         vtx_range_t a = ranges[a_id];
+
+        /* Bug #3 fix: Check for INT64_MIN / -1 which is undefined behavior
+         * in C (traps on x86). If the dividend range includes INT64_MIN
+         * and the divisor range includes -1, we must return unknown. */
+        if (a.min <= INT64_MIN && a.max >= INT64_MIN &&
+            b.min <= -1 && b.max >= -1) {
+            return VTX_RANGE_UNKNOWN;
+        }
+
         /* Compute cross-product of a range divided by b range */
         int64_t candidates[4];
         candidates[0] = a.min / b.min;
@@ -554,10 +563,43 @@ bool vtx_bounds_is_nonneg_check(const vtx_node_t *node,
         return false;
 
     case VTX_COND_ULT:
-        /* Unsigned less-than implies both operands are non-negative.
-         * i <u len implies i >= 0 (since unsigned values are >= 0). */
-        if (index) *index = left;
-        return true;
+        /* Bug #7 fix: Unsigned less-than does NOT universally prove
+         * non-negativity in the signed sense. While unsigned values
+         * are always >= 0 in the unsigned interpretation, a signed
+         * value i with i ULT large_number does NOT prove i >= 0
+         * (since negative i has a large unsigned bit pattern).
+         *
+         * ULT only proves non-negativity when the right operand is
+         * known to be a small positive value (e.g., an array length).
+         * Check if the right operand is a positive constant, or if
+         * it's a LoadField (array.length pattern) or NewArray. */
+        {
+            bool right_is_positive = false;
+            /* Check if right is a positive constant */
+            if (right != VTX_NODEID_INVALID && right < table->count) {
+                const vtx_node_t *right_node = &table->nodes[right];
+                if (right_node->opcode == VTX_OP_Constant &&
+                    right_node->constval.kind == VTX_TYPE_Int &&
+                    right_node->constval.as.int_val > 0) {
+                    right_is_positive = true;
+                }
+                /* Also allow if right operand is an array length field
+                 * (LoadField with field_offset matching length) or a
+                 * NewArray result. These are always non-negative. */
+                else if (right_node->opcode == VTX_OP_LoadField ||
+                         right_node->opcode == VTX_OP_NewArray) {
+                    right_is_positive = true;
+                }
+            }
+            if (right_is_positive) {
+                /* i ULT positive_value implies i is in [0, positive_value)
+                 * which is non-negative */
+                if (index) *index = left;
+                return true;
+            }
+            /* For other cases, ULT doesn't prove signed non-negativity */
+            return false;
+        }
 
     default:
         return false;
@@ -819,16 +861,26 @@ static bool is_bounds_check_proven(const vtx_range_t *idx_range,
 {
     if (idx_range == NULL || len_range == NULL) return false;
 
-    /* i < len is proven if idx.max < len.min */
+    /* i < len is proven if idx.max < len.min.
+     * This subsumes the case where idx ∈ [0, max] and len is a constant. */
     if (idx_range->max < len_range->min) return true;
 
-    /* Also check if idx is provably within [0, len-1] */
-    if (idx_range->min >= 0 &&
-        idx_range->max >= 0 &&
-        len_range->is_const &&
-        idx_range->max < len_range->min) {
-        return true;
-    }
+    /* Bug #11 fix: The previous second condition was dead code because
+     * idx_range->max < len_range->min (checked above) is strictly weaker
+     * than idx_range->max < len_range->min (same check again). Replace
+     * with a useful check: if the index is non-negative and the length
+     * range is narrow enough, check if idx.max < len.max. This is sound
+     * because if idx.max < len.max and idx.min >= 0, then for any
+     * concrete values idx ∈ [idx.min, idx.max] and len ∈ [len.min, len.max],
+     * we have idx < len.max, but we also need idx < len. Since len could
+     * be as small as len.min, we still need idx.max < len.min for the
+     * fully general case. However, if we know idx.max < len.max AND
+     * len.min == len.max (constant length), this is equivalent to the
+     * first check. For a non-constant length with a tight range,
+     * we can check: idx.min >= 0 && idx.max < len.max - only safe if
+     * len range is [len.min, len.max] and we prove idx < len.min.
+     * So there's no useful relaxation. The first check is already optimal.
+     */
 
     return false;
 }

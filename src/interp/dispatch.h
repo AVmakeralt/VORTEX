@@ -13,6 +13,7 @@
 #include "interp/profiler.h"
 #include "interp/lookup.h"
 #include "interp/type_feedback.h"
+#include "compile/request.h"
 
 /**
  * VORTEX Interpreter Dispatch Loop (Tier 0)
@@ -63,6 +64,13 @@ typedef struct {
     /* Type system and GC references */
     vtx_type_system_t  *type_system;
     vtx_gc_t           *gc;
+
+    /* Compilation context: when non-NULL, the interpreter can
+     * request JIT compilation for hot methods via
+     * vtx_request_compilation(). This is the wiring that
+     * connects the interpreter's hot-code detection to the
+     * JIT compilation thread pool. */
+    vtx_compile_context_t *compile_ctx;
 
     /* Dispatch table for computed goto (indexed by opcode) */
     void              **dispatch_table;

@@ -303,23 +303,9 @@ static int gvn_table_grow(vtx_gvn_table_t *t, vtx_node_table_t *nt __attribute__
 /* Redirect all uses of old_node to new_node                                   */
 /* ========================================================================== */
 
-static void redirect_all_uses(vtx_node_table_t *table, vtx_nodeid_t old_id, vtx_nodeid_t new_id)
-{
-    VTX_ASSERT(old_id != VTX_NODEID_INVALID, "old_id must be valid");
-    VTX_ASSERT(new_id != VTX_NODEID_INVALID, "new_id must be valid");
-    VTX_ASSERT(old_id != new_id, "cannot redirect to self");
-
-    for (uint32_t i = 0; i < table->count; i++) {
-        vtx_node_t *user = &table->nodes[i];
-        if (user->dead) continue;
-
-        for (uint32_t j = 0; j < user->input_count; j++) {
-            if (user->inputs[j] == old_id) {
-                vtx_node_replace_input(table, i, j, new_id);
-            }
-        }
-    }
-}
+/* redirect_all_uses is now replaced by vtx_node_replace_all_uses which is
+ * O(K) in the number of users rather than O(N) scanning all nodes.
+ * vtx_node_replace_all_uses also properly maintains use-def lists. */
 
 /* ========================================================================== */
 /* Main GVN pass                                                               */
@@ -406,23 +392,31 @@ uint32_t vtx_gvn_run(vtx_graph_t *graph)
                 /* Found a congruent node! Eliminate this one. */
                 VTX_ASSERT(existing != i, "should not match self");
 
-                /* Redirect all uses of this node to the existing one */
-                redirect_all_uses(nt, i, existing);
+                /* Redirect all uses of this node to the existing one.
+                 * vtx_node_replace_all_uses is O(K) in the number of users
+                 * and properly maintains use-def lists. After this call,
+                 * the dead node's output_count will be 0 and all its
+                 * former users now point to the existing representative. */
+                vtx_node_replace_all_uses(nt, (vtx_nodeid_t)i, existing);
 
                 /* Mark this node as dead */
                 node->dead = true;
-                node->output_count = 0;
+                /* output_count is already 0 after replace_all_uses */
 
-                /* Clear inputs (break the edges) */
+                /* Clear inputs (break the edges) and update use-def lists.
+                 * Since this node is dead, remove its use entries from
+                 * each producer's use-def list. */
                 for (uint32_t j = 0; j < node->input_count; j++) {
                     if (node->inputs[j] != VTX_NODEID_INVALID && node->inputs[j] < nt->count) {
                         vtx_node_t *producer = &nt->nodes[node->inputs[j]];
+                        vtx_node_remove_use_entry(producer, (vtx_nodeid_t)i, j);
                         if (producer->output_count > 0) {
                             producer->output_count--;
                         }
                     }
                 }
                 node->input_count = 0;
+                node->use_count = 0; /* Clear dead node's use list */
 
                 eliminated++;
                 changed = true;

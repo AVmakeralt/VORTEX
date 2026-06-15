@@ -770,7 +770,26 @@ static void find_derived_ivs(vtx_graph_t *graph, vtx_iv_result_t *result,
 
             /* Compute the derived IV's iteration range from the base IV.
              * If base ∈ [lo, hi), then derived ∈ [scale*lo+offset, scale*hi+offset)
-             * taking care of sign flips when scale < 0. */
+             * taking care of sign flips when scale < 0.
+             *
+             * Bug #9 fix: When scale < 0, the range must account for
+             * the exclusive upper bound. If base ∈ [lo, hi), the last
+             * value the base takes is hi-1 (since hi is exclusive).
+             * For scale < 0: new_lo = scale * base_hi + offset (correct
+             * since base_hi is the exclusive bound, so scale*base_hi
+             * is the smallest scaled value). But the new exclusive upper
+             * bound should be scale*(base_hi-1) + offset + 1 for the
+             * case where the stride is exactly scale, because the derived
+             * IV takes values {scale*lo+offset, scale*(lo+1)+offset, ...,
+             * scale*(hi-1)+offset}. When scale < 0, this set's max is
+             * scale*lo+offset (since lo < hi, scale < 0, so scale*lo is
+             * largest). The exclusive hi is scale*(hi-1)+offset (the
+             * minimum value) or we can use the next value past the max
+             * which is scale*lo + offset + scale = scale*(lo+1) + offset.
+             * For simplicity, we use a conservative approximation:
+             * [scale*hi + offset, scale*lo + offset + 1) when scale < 0.
+             * This is safe (never eliminates a valid bounds check) and
+             * only slightly over-conservative by 1. */
             if (base_iv->iteration_range.lo_known && base_iv->iteration_range.hi_known) {
                 int64_t base_lo = base_iv->iteration_range.lo;
                 int64_t base_hi = base_iv->iteration_range.hi;
@@ -781,9 +800,16 @@ static void find_derived_ivs(vtx_graph_t *graph, vtx_iv_result_t *result,
                     desc.iteration_range.lo_known = true;
                     desc.iteration_range.hi_known = true;
                 } else if (scale < 0) {
-                    /* When scale < 0, the range flips */
+                    /* When scale < 0, the range flips.
+                     * The derived values are: {scale*lo+offset, scale*(lo+1)+offset, ..., scale*(hi-1)+offset}
+                     * Since scale < 0 and lo < hi, the maximum is scale*lo+offset
+                     * and the minimum is scale*(hi-1)+offset.
+                     * We represent this as [min, max+1) = [scale*(hi-1)+offset, scale*lo+offset+1)
+                     * But to be safe against overflow, use: lo = scale*hi+offset, hi = scale*lo+offset+1
+                     * (scale*hi is ≤ scale*(hi-1) since scale < 0, so this is a wider lower bound,
+                     *  which is conservative and safe). */
                     desc.iteration_range.lo = iv_sat_add(iv_sat_mul(scale, base_hi), offset);
-                    desc.iteration_range.hi = iv_sat_add(iv_sat_mul(scale, base_lo), offset);
+                    desc.iteration_range.hi = iv_sat_add(iv_sat_mul(scale, base_lo), iv_sat_add(offset, 1));
                     desc.iteration_range.lo_known = true;
                     desc.iteration_range.hi_known = true;
                 }
@@ -949,7 +975,8 @@ vtx_iv_range_t vtx_iv_value_range(const vtx_iv_result_t *result,
             has_const = get_int_constant(table, left_id, &c);
         }
 
-        if (base_iv != NULL && base_iv->iteration_range.lo_known &&
+        if (base_iv != NULL && has_const &&
+            base_iv->iteration_range.lo_known &&
             base_iv->iteration_range.hi_known) {
             vtx_iv_range_t r;
             r.lo = iv_sat_add(base_iv->iteration_range.lo, c);
@@ -959,6 +986,11 @@ vtx_iv_range_t vtx_iv_value_range(const vtx_iv_result_t *result,
             r.is_constant = (r.lo == r.hi);
             return r;
         }
+        /* Bug #2 fix: Add(IV, non-const) has unknown range.
+         * If the non-IV operand is not a compile-time constant,
+         * the resulting range is unknown. Returning the IV's
+         * raw range shifted by 0 (the uninitialized c) is wrong
+         * and can cause invalid bounds check elimination. */
     }
 
     /* Pattern: Sub(IV_Phi, constant) */
@@ -998,8 +1030,19 @@ vtx_iv_range_t vtx_iv_value_range(const vtx_iv_result_t *result,
             get_int_constant(table, left_id, &c);
         }
 
-        if (base_iv != NULL && c != 0 &&
+        if (base_iv != NULL &&
             base_iv->iteration_range.lo_known && base_iv->iteration_range.hi_known) {
+            /* Bug #19 fix: Handle Mul(IV, 0) correctly.
+             * When c == 0, the result is always 0 regardless of IV range. */
+            if (c == 0) {
+                vtx_iv_range_t r;
+                r.lo = 0;
+                r.hi = 0;
+                r.lo_known = true;
+                r.hi_known = true;
+                r.is_constant = true;
+                return r;
+            }
             vtx_iv_range_t r;
             if (c > 0) {
                 r.lo = iv_sat_add(iv_sat_mul(c, base_iv->iteration_range.lo), 0);
@@ -1084,62 +1127,89 @@ bool vtx_iv_can_eliminate_bounds(const vtx_iv_result_t *result,
             index_matches_iv = true;
         }
 
-        /* Also check derived IVs and affine combinations */
+        /* Also check derived IVs and affine combinations.
+         * Bug #1 fix: For affine index expressions like Add(IV, 5),
+         * we must use vtx_iv_value_range to compute the actual index
+         * range, NOT just check the base IV's range. The base IV
+         * range for Add(IV, 5) where IV ∈ [0, N) would be [0, N),
+         * but the actual index range is [5, N+5) which may exceed
+         * the array length. */
+        vtx_iv_range_t idx_range = {0, 0, false, false, false};
+        bool idx_range_valid = false;
+
         if (!index_matches_iv) {
             /* Try to match the index_node against an affine expression
-             * of this IV by checking the use chain */
+             * of this IV by checking the use chain, and compute the
+             * actual range using vtx_iv_value_range. */
             const vtx_node_t *idx_node = &table->nodes[index_node];
             if (!idx_node->dead) {
                 /* Check Add/Sub/Mul patterns that involve this IV */
-                if (idx_node->opcode == VTX_OP_Add && idx_node->input_count >= 2) {
-                    if (idx_node->inputs[0] == iv->phi_node ||
-                        idx_node->inputs[1] == iv->phi_node) {
-                        index_matches_iv = true;
-                    }
-                } else if (idx_node->opcode == VTX_OP_Sub && idx_node->input_count >= 2) {
-                    if (idx_node->inputs[0] == iv->phi_node) {
-                        index_matches_iv = true;
-                    }
-                } else if (idx_node->opcode == VTX_OP_Mul && idx_node->input_count >= 2) {
-                    if (idx_node->inputs[0] == iv->phi_node ||
-                        idx_node->inputs[1] == iv->phi_node) {
-                        index_matches_iv = true;
-                    }
+                if ((idx_node->opcode == VTX_OP_Add && idx_node->input_count >= 2 &&
+                     (idx_node->inputs[0] == iv->phi_node ||
+                      idx_node->inputs[1] == iv->phi_node)) ||
+                    (idx_node->opcode == VTX_OP_Sub && idx_node->input_count >= 2 &&
+                     idx_node->inputs[0] == iv->phi_node) ||
+                    (idx_node->opcode == VTX_OP_Mul && idx_node->input_count >= 2 &&
+                     (idx_node->inputs[0] == iv->phi_node ||
+                      idx_node->inputs[1] == iv->phi_node))) {
+                    index_matches_iv = true;
+                    /* Compute the actual range of the affine expression */
+                    idx_range = vtx_iv_value_range(result, table, index_node);
+                    idx_range_valid = (idx_range.lo_known && idx_range.hi_known);
                 }
             }
+        }
+
+        if (index_matches_iv && !idx_range_valid) {
+            /* For a basic IV (no affine transform), use its range directly */
+            idx_range = iv->iteration_range;
+            idx_range_valid = (idx_range.lo_known && idx_range.hi_known);
         }
 
         if (!index_matches_iv) continue;
 
         /* The index is (an affine function of) this IV.
-         * If idx_range.lo >= 0, the nonneg check is proven.
-         * If idx_range.hi <= length, the upper bound check is proven.
-         * But we need to verify that idx_range.hi corresponds to the same
-         * length_node value.
-         *
-         * For the case where length_node is a Proj node (array.length),
-         * we need to check if the IV's range hi bound was computed
-         * from the same value. We do this by checking if the IV's
-         * iteration range hi_known is true and the IV's hi value is
-         * derived from a comparison with length_node.
-         *
-         * Simple heuristic: if the IV's range is [init, hi) and
-         * hi is not a constant, but the index at the loop exit
-         * is bounded by length_node, we can eliminate. This works
-         * because the loop condition guarantees i < length.
-         *
-         * For a fully sound analysis we would need to track which
-         * node the upper bound came from. For now, we do a simpler
-         * check: */
-        if (iv->iteration_range.lo_known && iv->iteration_range.lo >= 0 &&
-            iv->iteration_range.hi_known) {
-            /* The IV has a known range. We need to verify that
-             * idx_range.hi <= length. Since we can't evaluate length
-             * as a constant, we check if the IV was bounded by this
-             * exact length node.
-             *
-             * Heuristic: walk the Cmp that defined the IV's range
-             * and check if one operand is the length_node. */
+         * Use the computed idx_range (which accounts for affine
+         * transforms) rather than the base IV range directly.
+         * This is the Bug #1 fix: previously we used the base
+         * IV's range for affine index expressions, which was
+         * incorrect (e.g., Add(IV, 5) has range shifted by 5). */
+        if (idx_range_valid && idx_range.lo >= 0) {
+            /* The index has a known range starting at non-negative.
+             * We need to verify that the upper bound doesn't exceed
+             * the length. Since we can't always evaluate length as a
+             * constant, we check if the IV or index expression is
+             * compared against the length_node in the loop condition. */
+
+            /* First, check if the index_node itself is compared to
+             * length_node (handles affine expressions like Add(IV, 5)
+             * compared directly to length). */
+            if (index_node != iv->phi_node) {
+                const vtx_node_t *idx_n = &table->nodes[index_node];
+                for (uint32_t u = 0; u < idx_n->use_count; u++) {
+                    vtx_use_entry_t *use = &idx_n->uses[u];
+                    vtx_nodeid_t cmp_id = use->user_id;
+                    if (cmp_id >= table->count) continue;
+
+                    const vtx_node_t *cmp = &table->nodes[cmp_id];
+                    if (cmp->opcode != VTX_OP_Cmp || cmp->input_count < 2) continue;
+
+                    vtx_nodeid_t left_id  = cmp->inputs[0];
+                    vtx_nodeid_t right_id = cmp->inputs[1];
+
+                    if ((left_id == index_node && right_id == length_node) ||
+                        (right_id == index_node && left_id == length_node)) {
+                        /* The affine index is compared against the same
+                         * length_node. Loop condition guarantees index < length.
+                         * Since idx_range.lo >= 0, the bounds check is redundant. */
+                        return true;
+                    }
+                }
+            }
+
+            /* Also check the base IV's Phi compared to length_node.
+             * This handles the common case: for (i = 0; i < arr.length; i++)
+             * where the IV is directly compared to the length. */
             const vtx_node_t *phi = &table->nodes[iv->phi_node];
             for (uint32_t u = 0; u < phi->use_count; u++) {
                 vtx_use_entry_t *use = &phi->uses[u];
@@ -1152,9 +1222,13 @@ bool vtx_iv_can_eliminate_bounds(const vtx_iv_result_t *result,
                 vtx_nodeid_t left_id  = cmp->inputs[0];
                 vtx_nodeid_t right_id = cmp->inputs[1];
 
-                /* Check if the other operand of the Cmp is the length_node */
-                if ((left_id == iv->phi_node && right_id == length_node) ||
-                    (right_id == iv->phi_node && left_id == length_node)) {
+                /* Check if the other operand of the Cmp is the length_node.
+                 * Only safe for basic IVs (index_node == iv->phi_node).
+                 * For affine indices, this comparison doesn't bound the
+                 * affine expression, so we skip it. */
+                if (index_node == iv->phi_node &&
+                    ((left_id == iv->phi_node && right_id == length_node) ||
+                     (right_id == iv->phi_node && left_id == length_node))) {
                     /* The IV is compared against the same length_node in the loop
                      * condition. The loop condition guarantees i < length.
                      * Since idx_range.lo >= 0 and the loop guarantees i < length,

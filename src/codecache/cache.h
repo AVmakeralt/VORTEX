@@ -36,6 +36,17 @@ struct vtx_code_segment {
     uint32_t             method_count; /* number of methods in this segment */
     bool                 writable;     /* true if PROT_WRITE is set */
     vtx_code_segment_t  *next;         /* linked list of segments */
+
+    /* Free list: tracks freed regions within this segment so they can
+     * be reused for new allocations. Without this, freed memory within
+     * a non-empty segment is permanently wasted (leaked).
+     * Each free entry records (offset, size) within the segment. */
+    struct {
+        uint32_t offset;
+        uint32_t size;
+    }                   *free_list;
+    uint32_t             free_count;
+    uint32_t             free_capacity;
 };
 
 /* ========================================================================== */

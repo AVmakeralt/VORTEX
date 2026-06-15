@@ -9,7 +9,7 @@
 /* Verification implementation (only compiled when VORTEX_ENABLE_VERIFY)        */
 /* ========================================================================== */
 
-static bool verify_graph_impl(const vtx_graph_t *graph, bool check_no_dead)
+static bool verify_graph_impl(const vtx_graph_t *graph, bool check_no_dead, bool check_memory_chains)
 {
     if (graph == NULL) return true;
 
@@ -184,8 +184,14 @@ static bool verify_graph_impl(const vtx_graph_t *graph, bool check_no_dead)
         }
 
         if (!found_mem_input && node->opcode != VTX_OP_Province) {
-            /* Soft check — memory nodes created from Start may not have
-             * explicit memory inputs during early construction. */
+            if (check_memory_chains) {
+                fprintf(stderr, "VERIFY FAIL: memory node N%u (%s) has no memory chain input\n",
+                        i, vtx_node_opcode_name(node->opcode));
+                ok = false;
+            }
+            /* When check_memory_chains is false, memory nodes created from
+             * Start may not yet have explicit memory inputs during early
+             * construction, so this is allowed. */
         }
     }
 
@@ -287,12 +293,12 @@ static bool verify_graph_impl(const vtx_graph_t *graph, bool check_no_dead)
 
 bool vtx_verify_graph(const vtx_graph_t *graph)
 {
-    return verify_graph_impl(graph, false);
+    return verify_graph_impl(graph, false, false);
 }
 
 bool vtx_verify_graph_post_dce(const vtx_graph_t *graph)
 {
-    return verify_graph_impl(graph, true);
+    return verify_graph_impl(graph, true, true);
 }
 
 #else /* !VORTEX_ENABLE_VERIFY */

@@ -53,6 +53,20 @@ typedef struct {
 /* Thread pool                                                                 */
 /* ========================================================================== */
 
+/**
+ * Compilation callback: invoked by worker threads when a task has
+ * method_id set but task_fn is NULL. The callback looks up the method,
+ * runs the pipeline, and installs the compiled code.
+ *
+ * @param method_id  Method to compile
+ * @param tier       Compilation tier
+ * @param context    User-provided context (e.g. compile context)
+ * @return           0 on success, -1 on failure
+ */
+typedef int (*vtx_compile_callback_t)(uint32_t method_id,
+                                       vtx_compile_tier_t tier,
+                                       void *context);
+
 typedef struct {
     vtx_worker_t         *workers;        /* array of worker threads */
     uint32_t              num_workers;    /* number of worker threads */
@@ -62,6 +76,14 @@ typedef struct {
 
     pthread_mutex_t       pool_mutex;     /* protects shutdown flag and condition */
     pthread_cond_t        work_available; /* signaled when a task is pushed */
+
+    /* Compilation callback: when a task has method_id but no task_fn,
+     * the worker invokes this callback to perform the actual compilation.
+     * This is the key fix that makes the JIT pipeline functional —
+     * previously, tasks submitted with method_id only had task_fn=NULL
+     * and were silently discarded by workers. */
+    vtx_compile_callback_t compile_callback;
+    void                  *compile_callback_context;
 
     /* Statistics */
     uint64_t              total_tasks_completed;
@@ -82,6 +104,24 @@ typedef struct {
  * @return            0 on success, -1 on failure
  */
 int vtx_threadpool_init(vtx_threadpool_t *pool, uint32_t num_threads);
+
+/**
+ * Set the compilation callback for the thread pool.
+ *
+ * When a worker receives a task with method_id set but task_fn == NULL,
+ * it calls this callback to perform the compilation. This is the fix
+ * for the critical bug where orchestrator-submitted tasks (which have
+ * method_id but no task_fn) were silently discarded.
+ *
+ * Must be called BEFORE starting any compilation tasks.
+ *
+ * @param pool     Thread pool
+ * @param callback Compilation callback function
+ * @param context  Context pointer passed to the callback
+ */
+void vtx_threadpool_set_compile_callback(vtx_threadpool_t *pool,
+                                          vtx_compile_callback_t callback,
+                                          void *context);
 
 /**
  * Shutdown the thread pool. Signals all workers to stop, waits for

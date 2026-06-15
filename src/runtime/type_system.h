@@ -27,7 +27,8 @@ typedef uint32_t vtx_shapeid_t;
 
 #define VTX_TYPE_INVALID 0
 #define VTX_TYPE_OBJECT  1
-/* First user-defined type starts at 2 */
+#define VTX_TYPE_SMI     2   /* Small Integer (tagged pointer integer type) */
+/* First user-defined type starts at 3 */
 
 #define VTX_SHAPE_INVALID 0
 #define VTX_SHAPE_OBJECT  1

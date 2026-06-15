@@ -66,6 +66,18 @@ target_link_libraries(test_bugfixes PRIVATE
 )
 add_test(NAME test_bugfixes COMMAND test_bugfixes)
 
+# test_ir_bugfixes — IR-specific edge case tests for bug audit
+add_executable(test_ir_bugfixes
+    unit/test_ir_bugfixes.c
+)
+target_link_libraries(test_ir_bugfixes PRIVATE
+    vortex_test_framework
+    vortex_ir
+    vortex_runtime
+    m
+)
+add_test(NAME test_ir_bugfixes COMMAND test_ir_bugfixes)
+
 # test_zero_cost_deopt — zero-cost deopt feature verification
 add_executable(test_zero_cost_deopt
     unit/test_zero_cost_deopt.c
@@ -127,9 +139,11 @@ add_executable(test_interp_basics
 )
 target_link_libraries(test_interp_basics PRIVATE
     vortex_test_framework
+    vortex_compile
     vortex_interp
     vortex_runtime
     m
+    pthread
 )
 add_test(NAME test_interp_basics COMMAND test_interp_basics)
 

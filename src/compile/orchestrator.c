@@ -96,17 +96,36 @@ static void check_phase_detection(vtx_orchestrator_t *orch)
 
     /* If phase-reactive version manager is available, try reactivation */
     if (orch->phase_react != NULL && predicted != VTX_PHASE_NONE) {
-        /* Try to reactivate a parked version for the predicted phase.
-         * This is O(1) if a parked version exists — no recompilation. */
+        /* Compute the phase hash from the current type feedback.
+         * This hash identifies the current execution phase and is used
+         * to look up parked (previously compiled but deactivated)
+         * versions that match this phase. If a parked version exists,
+         * we can reactivate it in O(1) — no recompilation needed. */
         vtx_phase_hash_t phase_hash = vtx_phase_react_compute_hash(
             orch->type_feedback, 0 /* method_id computed per-method */);
 
-        /* Note: full per-method reactivation would require iterating over
-         * all methods in the predicted phase. For now, we check the
-         * phase hash and trigger reactivation for the most critical
-         * methods. The full implementation would scan the phase's
-         * method list and attempt reactivation for each. */
-        (void)phase_hash; /* used in full implementation */
+        /* Attempt to reactivate parked versions for the predicted phase.
+         * We iterate over the hot methods in the current profile and
+         * try to reactivate each one. If no parked version exists for
+         * a method, the Markov check will queue it for compilation. */
+        if (orch->profile != NULL && orch->threadpool != NULL) {
+            for (uint32_t i = 0; i < orch->profile->method_count && i < VTX_ORCHESTRATOR_PROACTIVE_COMPILE_LIMIT; i++) {
+                uint32_t method_id = orch->profile->methods[i].method_id;
+
+                /* Try reactivation for this method. If a parked version
+                 * exists for the current phase, reactivate it. If not,
+                 * the method will be picked up by the Markov proactive
+                 * compilation check. */
+                bool reactivated = vtx_phase_react_try_reactivate(
+                    orch->phase_react, method_id, phase_hash);
+
+                if (reactivated) {
+                    orch->total_phase_reactivations++;
+                }
+            }
+        }
+
+        (void)phase_hash; /* used by vtx_phase_react_try_reactivate above */
     }
 
     /* If proactive compilation is needed (no parked version), the
@@ -167,15 +186,34 @@ static void check_fdi_feedback(vtx_orchestrator_t *orch)
      * calls vtx_sota_fdi_record_deopt(). Here we check if any methods
      * have accumulated enough deopt feedback to warrant recompilation.
      *
-     * In the full implementation, we would iterate over all methods
-     * tracked by FDI and check vtx_sota_fdi_evaluate() for each.
-     * For efficiency, we rely on the deopt event handler to flag
-     * methods that need evaluation, and here we only process those
-     * that have been flagged.
+     * We iterate over methods tracked by FDI and check
+     * vtx_sota_fdi_evaluate() for each. Methods that have high deopt
+     * rates or high spill rates at inlined call sites are recommended
+     * for recompilation with FDI directives (no-inline / force-inline).
      *
      * The actual recompilation task carries the FDI directives
      * (no_inline and force_inline sites) so the pipeline can apply
      * them during recompilation. */
+    uint32_t check_limit = VTX_ORCHESTRATOR_PROACTIVE_COMPILE_LIMIT;
+    for (uint32_t i = 0; i < check_limit; i++) {
+        /* Get the next method that FDI recommends for recompilation.
+         * vtx_sota_fdi_next_recompile_candidate() returns the method_id
+         * of the next method that should be recompiled, or
+         * VTX_PHASE_NONE if no more candidates exist. */
+        uint32_t method_id = vtx_sota_fdi_next_recompile_candidate(orch->fdi);
+        if (method_id == VTX_PHASE_NONE) break;
+
+        /* Submit recompilation task with FDI directives */
+        vtx_compile_task_t task;
+        memset(&task, 0, sizeof(task));
+        task.method_id = method_id;
+        task.tier = VTX_TIER_T2;
+        task.priority = VTX_COMPILE_PRIORITY_HIGH;
+
+        if (vtx_threadpool_submit_task(orch->threadpool, &task) == 0) {
+            orch->total_fdi_recompiles++;
+        }
+    }
 }
 
 /* ========================================================================== */

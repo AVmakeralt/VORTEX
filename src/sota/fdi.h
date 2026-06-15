@@ -7,6 +7,7 @@
 #include "vortex_config.h"
 #include "inliner/feedback.h"
 #include "profile/data.h"
+#include "profile/phase.h"
 #include "compile/version.h"
 #include "runtime/arena.h"
 
@@ -269,5 +270,25 @@ void vtx_sota_fdi_update_version_score(vtx_sota_fdi_t *fdi,
                                          uint32_t method_id,
                                          uint32_t version_id,
                                          double score);
+
+/* ========================================================================== */
+/* Recompilation candidate iteration                                            */
+/* ========================================================================== */
+
+/**
+ * Get the next method that FDI recommends for recompilation.
+ *
+ * Iterates over all tracked methods and returns the method_id of
+ * the next method that vtx_sota_fdi_evaluate() recommends for
+ * recompilation. Returns VTX_PHASE_NONE if no more candidates exist.
+ *
+ * Each call advances an internal cursor so that repeated calls
+ * enumerate all candidates without duplication.
+ *
+ * @param fdi       FDI state
+ * @return          Method ID of the next recompilation candidate,
+ *                  or VTX_PHASE_NONE if no more candidates
+ */
+uint32_t vtx_sota_fdi_next_recompile_candidate(vtx_sota_fdi_t *fdi);
 
 #endif /* VORTEX_SOTA_FDI_H */

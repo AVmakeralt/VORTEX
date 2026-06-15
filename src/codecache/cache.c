@@ -43,6 +43,9 @@ static vtx_code_segment_t *segment_alloc(uint32_t size)
     seg->method_count = 0;
     seg->writable = true;
     seg->next = NULL;
+    seg->free_list = NULL;
+    seg->free_count = 0;
+    seg->free_capacity = 0;
     return seg;
 }
 
@@ -54,6 +57,9 @@ static void segment_free(vtx_code_segment_t *seg)
     if (!seg) return;
     if (seg->memory) {
         munmap(seg->memory, seg->size);
+    }
+    if (seg->free_list) {
+        free(seg->free_list);
     }
     free(seg);
 }
@@ -241,7 +247,31 @@ int vtx_code_cache_free(vtx_code_cache_t *cache, void *code_ptr, uint32_t code_s
                 cache->segment_count--;
                 segment_free(seg);
             } else {
-                /* Mark the space as freed (but don't compact) */
+                /* Add the freed region to the segment's free list
+                 * so it can be reused for future allocations.
+                 * Previously, freed memory within a non-empty segment
+                 * was permanently wasted (leaked) because only
+                 * total_size was decremented without making the space
+                 * available for reuse. */
+                uint32_t freed_offset = (uint32_t)((uint8_t *)code_ptr - seg->memory);
+
+                /* Grow free list if needed */
+                if (seg->free_count >= seg->free_capacity) {
+                    uint32_t new_cap = seg->free_capacity == 0 ? 8 : seg->free_capacity * 2;
+                    void *new_list = realloc(seg->free_list,
+                        new_cap * sizeof(seg->free_list[0]));
+                    if (new_list) {
+                        seg->free_list = new_list;
+                        seg->free_capacity = new_cap;
+                    }
+                }
+
+                if (seg->free_count < seg->free_capacity) {
+                    seg->free_list[seg->free_count].offset = freed_offset;
+                    seg->free_list[seg->free_count].size = code_size;
+                    seg->free_count++;
+                }
+
                 cache->total_size -= code_size;
             }
             return 0;

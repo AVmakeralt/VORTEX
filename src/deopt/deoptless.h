@@ -85,14 +85,13 @@ struct vtx_deoptless_version {
 /* Deoptless version table                                                    */
 /* ========================================================================== */
 
-/* Max Aggro Level 1: 64 continuation versions per method.
- * Safe because deoptless continuations are cheap — each is just a patched
- * guard branch, no interpreter involvement. More versions means more
- * specialization: each guard failure creates a tailored version that
- * removes only that speculation, keeping all other optimized paths intact.
- * With 64 slots, even methods with many type-specialized paths can be
- * fully specialized before falling back to full deopt. */
-#define VTX_DEOPTLESS_MAX_VERSIONS 64
+/* Deoptless continuation versions per method.
+ * 8 base versions before eviction; type specialization extends this
+ * via VTX_SPEC_VERSION_MAX (64). The base limit of 8 is the designed
+ * value — more versions means more memory and longer search chains,
+ * while 8 covers the vast majority of real-world guard patterns.
+ * Eviction is LRU when this limit is exceeded. */
+#define VTX_DEOPTLESS_MAX_VERSIONS 8
 
 /**
  * Per-method version table: tracks all continuation versions for a method.

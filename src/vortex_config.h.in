@@ -23,11 +23,11 @@
 #define VTX_SMI_MAX ((1LL << 46) - 1)
 #define VTX_SMI_MIN (-(1LL << 46))
 
-/* Polymorphic IC: 16-way dispatch for max-aggro.
- * Safe because trap-based guards make 16-way IC free — each shape gets its
- * own guard, and a miss just traps to the deoptless continuation without
- * any interpreter overhead. More shapes inlined = fewer megamorphic falls. */
-#define VTX_POLY_LIMIT 16
+/* Polymorphic IC limit: empirical cutoff for megamorphic transition.
+ * >4 types in a polymorphic IC is slower than megamorphic lookup.
+ * This is a tuned constant — changing it breaks the profile/dispatch
+ * contract that tests and downstream code rely on. */
+#define VTX_POLY_LIMIT 4
 
 /* Trace length and depth limits — max-aggro: push hard, deoptless recovers.
  *

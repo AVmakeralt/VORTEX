@@ -20,6 +20,8 @@
  *      Phi(Region) has one data input per Region predecessor, plus the
  *      Region itself as a control input.
  *   4. Valid memory chains: memory nodes form a properly threaded chain.
+ *      Only enforced by vtx_verify_graph_post_dce(); early construction
+ *      (vtx_verify_graph) allows memory nodes without chain inputs.
  *   5. No dead nodes remain after DCE (if verify_post_dce flag is set).
  *   6. Output counts are consistent: for each node, its output_count
  *      equals the number of times it appears as an input of other live nodes.
@@ -39,7 +41,8 @@ bool vtx_verify_graph(const vtx_graph_t *graph);
 
 /**
  * Verify the graph after DCE — additionally checks that no dead nodes
- * exist (since DCE should have removed them all).
+ * exist (since DCE should have removed them all) and that memory chains
+ * are properly wired (each memory node has a memory chain input).
  */
 bool vtx_verify_graph_post_dce(const vtx_graph_t *graph);
 

@@ -1685,18 +1685,25 @@ static void compile_bitwise(vtx_compile_ctx_t *ctx, vtx_opcode_t op)
 
         switch (op) {
         case VT_OP_ISHL:
-            /* Shift amount in rhs (RCX on x86-64 uses CL) */
-            emit_mov_reg_reg64(buf, VTX_REG_RCX, rhs_reg);
+            /* BUG-1 fix: RCX holds the new TOS-1 after pop2. We need CL
+             * for the shift instruction, so save RCX, use it for the
+             * shift count, then restore it to avoid corrupting the
+             * expression stack during the subsequent push. */
+            emit_mov_reg_reg64(buf, VTX_REG_R11, VTX_REG_RCX); /* save TOS-1 */
+            emit_mov_reg_reg64(buf, VTX_REG_RCX, rhs_reg);     /* shift count → CL */
             /* shl lhs, cl */
             emit_rex64(buf, (vtx_reg_t)4, lhs_reg);
             vtx_code_buffer_emit_byte(buf, 0xD3);
             vtx_code_buffer_emit_byte(buf, modrm(3, 4, lhs_reg));
+            emit_mov_reg_reg64(buf, VTX_REG_RCX, VTX_REG_R11); /* restore TOS-1 */
             break;
         case VT_OP_ISHR:
-            emit_mov_reg_reg64(buf, VTX_REG_RCX, rhs_reg);
+            emit_mov_reg_reg64(buf, VTX_REG_R11, VTX_REG_RCX); /* save TOS-1 */
+            emit_mov_reg_reg64(buf, VTX_REG_RCX, rhs_reg);     /* shift count → CL */
             emit_rex64(buf, (vtx_reg_t)7, lhs_reg);
             vtx_code_buffer_emit_byte(buf, 0xD3);
             vtx_code_buffer_emit_byte(buf, modrm(3, 7, lhs_reg));
+            emit_mov_reg_reg64(buf, VTX_REG_RCX, VTX_REG_R11); /* restore TOS-1 */
             break;
         case VT_OP_IAND:
             emit_and_reg_reg(buf, lhs_reg, rhs_reg);

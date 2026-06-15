@@ -1286,27 +1286,31 @@ dispatch_VT_OP_GOTO:
              * actually compiled (for tier-up to the next tier). */
             if (VTX_UNLIKELY(vtx_profiler_tier_up_check(&interp->profiler,
                                                           frame->method))) {
-                /* Threshold reached — signal compilation request.
-                 * In a full implementation with a compilation thread pool,
-                 * this would enqueue the method for background compilation.
-                 * For now, we mark the method as compilation-requested
-                 * and the next tier decision will pick it up. */
-                /* TODO: vtx_request_compilation(interp, frame->method); */
+                /* Threshold reached — request JIT compilation.
+                 * This is the key wiring that connects the interpreter's
+                 * hot-code detection to the JIT compilation thread pool.
+                 * Previously this was a TODO comment; now it actually
+                 * submits the method for background compilation. */
+                if (interp->compile_ctx != NULL) {
+                    vtx_request_compilation(interp->compile_ctx, frame->method);
+                }
             }
 
-            /* Bug #11 fix: At backward branches, check for deopt pending.
-             * The deopt_pending flag is set by the safepoint mechanism when
-             * an invalidation affects the current method. If set, we must
-             * process the deoptimization request before continuing execution. */
+            /* Bug #11 fix / BUG-3 fix: At backward branches, check for
+             * deopt pending. The deopt_pending flag is set by the
+             * safepoint mechanism when an invalidation affects the
+             * current method. When this fires, we must:
+             * 1. Request recompilation so an optimized version is
+             *    regenerated for the updated type profile.
+             * 2. Clear the flag.
+             * Previously this was a no-op — the flag was cleared but
+             * no action was taken, making the entire deopt pipeline
+             * decorative. Now we actually trigger recompilation. */
             if (VTX_UNLIKELY(interp->deopt_pending)) {
-                /* Process deoptimization request — clear the flag and
-                 * handle the deopt. In the T0 interpreter, deopt_pending
-                 * means we should switch to baseline compiled code or
-                 * recompile at a higher tier. Since the interpreter is
-                 * always correct, we clear the flag and continue; the
-                 * next dispatch cycle will use the updated code if
-                 * recompilation has completed. */
                 interp->deopt_pending = false;
+                if (interp->compile_ctx != NULL && frame->method != NULL) {
+                    vtx_request_compilation(interp->compile_ctx, frame->method);
+                }
             }
         }
         pc = target_pc;
@@ -1332,12 +1336,17 @@ dispatch_VT_OP_IF_TRUE:
                 /* D7: Decrement-then-test tier-up counter at loop back-edge */
                 if (VTX_UNLIKELY(vtx_profiler_tier_up_check(&interp->profiler,
                                                               frame->method))) {
-                    /* TODO: vtx_request_compilation(interp, frame->method); */
+                        if (interp->compile_ctx != NULL) {
+                            vtx_request_compilation(interp->compile_ctx, frame->method);
+                        }
                 }
 
-                /* Bug #11 fix: Check for deopt pending at backward branches */
+                /* BUG-3 fix: Check for deopt pending at backward branches */
                 if (VTX_UNLIKELY(interp->deopt_pending)) {
                     interp->deopt_pending = false;
+                    if (interp->compile_ctx != NULL && frame->method != NULL) {
+                        vtx_request_compilation(interp->compile_ctx, frame->method);
+                    }
                 }
             }
             pc = target_pc;
@@ -1366,12 +1375,17 @@ dispatch_VT_OP_IF_FALSE:
                 /* D7: Decrement-then-test tier-up counter at loop back-edge */
                 if (VTX_UNLIKELY(vtx_profiler_tier_up_check(&interp->profiler,
                                                               frame->method))) {
-                    /* TODO: vtx_request_compilation(interp, frame->method); */
+                        if (interp->compile_ctx != NULL) {
+                            vtx_request_compilation(interp->compile_ctx, frame->method);
+                        }
                 }
 
-                /* Bug #11 fix: Check for deopt pending at backward branches */
+                /* BUG-3 fix: Check for deopt pending at backward branches */
                 if (VTX_UNLIKELY(interp->deopt_pending)) {
                     interp->deopt_pending = false;
+                    if (interp->compile_ctx != NULL && frame->method != NULL) {
+                        vtx_request_compilation(interp->compile_ctx, frame->method);
+                    }
                 }
             }
             pc = target_pc;
@@ -1434,10 +1448,14 @@ dispatch_VT_OP_CALL_STATIC:
                                        (uint32_t)pc, receiver_tid);
 
         /* Pop arguments from caller's stack and copy to callee locals.
-         * Fixed: No longer silently truncates at 16 args — uses alloca
-         * for dynamic stack allocation to support any arg count. */
+         * BUG-2 fix: Cap arg count to prevent stack overflow from
+         * corrupted/malicious method descriptors. 256 args is well
+         * beyond any realistic use case; larger counts would exhaust
+         * the C stack via alloca. */
         uint32_t call_arg_count = target_method->arg_count;
-        vtx_value_t *call_args = (vtx_value_t *)alloca(call_arg_count * sizeof(vtx_value_t));
+        if (call_arg_count > 256) call_arg_count = 256;
+        vtx_value_t call_args_buf[256];
+        vtx_value_t *call_args = call_args_buf;
         for (uint32_t ai = call_arg_count; ai > 0; ai--) {
             call_args[ai - 1] = *--sp;
         }
@@ -1520,7 +1538,9 @@ dispatch_VT_OP_CALL_VIRTUAL:
          * local[0] in the callee. arg_count returns only the
          * explicit parameters, so we add 1 for the receiver. */
         uint32_t varg_count = target_method->arg_count + 1; /* +1 for receiver */
-        vtx_value_t *vcall_args = (vtx_value_t *)alloca(varg_count * sizeof(vtx_value_t));
+        if (varg_count > 256) varg_count = 256;
+        vtx_value_t vcall_args_buf[256];
+        vtx_value_t *vcall_args = vcall_args_buf;
         for (uint32_t ai = varg_count; ai > 0; ai--) {
             vcall_args[ai - 1] = *--sp;
         }
@@ -1610,7 +1630,9 @@ dispatch_VT_OP_CALL_INTERFACE:
          * local[0] in the callee. arg_count returns only the
          * explicit parameters, so we add 1 for the receiver. */
         uint32_t iarg_count = target_method->arg_count + 1; /* +1 for receiver */
-        vtx_value_t *icall_args = (vtx_value_t *)alloca(iarg_count * sizeof(vtx_value_t));
+        if (iarg_count > 256) iarg_count = 256;
+        vtx_value_t icall_args_buf[256];
+        vtx_value_t *icall_args = icall_args_buf;
         for (uint32_t ai = iarg_count; ai > 0; ai--) {
             icall_args[ai - 1] = *--sp;
         }
@@ -1732,6 +1754,13 @@ dispatch_VT_OP_NEWARRAY:
          * We create an array object with field[0] = length (SMI)
          * and fields[1..N] = array elements (initialized to undefined). */
         uint32_t length = (uint32_t)array_size;
+        /* BUG-7 fix: Guard against integer overflow in total_fields.
+         * If length == UINT32_MAX, 1 + length wraps to 0, causing
+         * a zero-sized allocation and subsequent out-of-bounds writes. */
+        if (length > UINT32_MAX - 2) {
+            *sp++ = VTX_VALUE_NULL;
+            DISPATCH_NEXT();
+        }
         uint32_t total_fields = 1 + length; /* field[0]=length, field[1..N]=elements */
 
         vtx_typeid_t elem_type = (vtx_typeid_t)operand;

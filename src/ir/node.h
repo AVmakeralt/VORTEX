@@ -516,6 +516,22 @@ int vtx_node_for_each_user(vtx_node_table_t *table, vtx_nodeid_t node_id,
                             vtx_user_callback_t fn, void *context);
 
 /**
+ * Remove a use entry (user_id, input_index) from the producer's use-def list.
+ * This is the public wrapper around the internal node_remove_use helper.
+ * Used by passes like DCE that need to maintain use-def list consistency
+ * when disconnecting edges without going through the full add/remove input API.
+ */
+void vtx_node_remove_use_entry(vtx_node_t *producer, vtx_nodeid_t user_id, uint32_t input_index);
+
+/**
+ * Add a use entry (user_id, input_index) to the producer's use-def list.
+ * This is the public wrapper around the internal node_add_use helper.
+ * Used by passes that need to maintain use-def list consistency when
+ * adding edges without going through the full add input API.
+ */
+void vtx_node_add_use_entry(vtx_node_t *producer, vtx_nodeid_t user_id, uint32_t input_index);
+
+/**
  * Convenience macro: iterate over all use entries of a node.
  * Usage:
  *   vtx_node_t *n = vtx_node_get(table, id);

@@ -545,3 +545,36 @@ void vtx_sota_fdi_update_version_score(vtx_sota_fdi_t *fdi,
         rec->best_version_id = version_id;
     }
 }
+
+/* ========================================================================== */
+/* Recompilation candidate iteration                                            */
+/* ========================================================================== */
+
+uint32_t vtx_sota_fdi_next_recompile_candidate(vtx_sota_fdi_t *fdi)
+{
+    if (fdi == NULL) return VTX_PHASE_NONE;
+
+    /* Iterate over all tracked method records and return the next one
+     * that vtx_sota_fdi_evaluate() recommends for recompilation.
+     * We use a simple linear scan with a cursor stored in the first
+     * record's spare field (or just scan from the beginning each time
+     * since the record count is typically small). */
+    for (uint32_t i = 0; i < fdi->record_count; i++) {
+        vtx_fdi_method_record_t *rec = &fdi->records[i];
+        if (rec->has_unprofitable_inlines || rec->has_missed_inlines) {
+            /* Check if this method actually evaluates to needing recompilation */
+            if (vtx_sota_fdi_evaluate(fdi, rec->method_id)) {
+                /* Mark as processed so we don't return it again in this round.
+                 * Clear the flags so subsequent calls skip this method until
+                 * new feedback is recorded. */
+                rec->has_unprofitable_inlines = false;
+                rec->has_missed_inlines = false;
+                rec->unprofitable_site_count = 0;
+                rec->missed_site_count = 0;
+                return rec->method_id;
+            }
+        }
+    }
+
+    return VTX_PHASE_NONE;
+}

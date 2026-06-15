@@ -34,9 +34,15 @@ bool vtx_helpers_type_check(const vtx_type_system_t *ts,
 bool vtx_helpers_null_check(vtx_value_t value)
 {
     if (vtx_is_null(value)) {
-        /* Trap: null pointer dereference */
-        VTX_ASSERT(false, "null pointer dereference");
-        abort();
+        /* BUGFIX: Return false instead of calling abort().
+         * In a JIT compiler, a null pointer dereference should trigger
+         * deoptimization (falling back to the interpreter) rather than
+         * crashing the entire process. The caller (typically a guard
+         * check in JIT-compiled code) checks the return value and
+         * initiates deoptimization if it returns false.
+         * Previously, this called abort() which made null pointer
+         * errors fatal rather than recoverable. */
+        return false;
     }
     return true;
 }
@@ -378,9 +384,16 @@ vtx_value_t vtx_runtime_call_virtual_reg(void *interp,
     }
 
     /* Build the full args array: receiver + remaining args.
-     * The receiver is always the first argument (local[0]) in the callee. */
+     * The receiver is always the first argument (local[0]) in the callee.
+     * BUGFIX: Use heap allocation instead of alloca() to prevent
+     * stack overflow with large argument counts. alloca() on the
+     * JIT-compiled code path has limited stack space and no error
+     * handling for allocation failure. */
     uint32_t total_arg_count = arg_count + 1; /* +1 for receiver */
-    vtx_value_t *full_args = (vtx_value_t *)alloca(total_arg_count * sizeof(vtx_value_t));
+    vtx_value_t *full_args = (vtx_value_t *)malloc(total_arg_count * sizeof(vtx_value_t));
+    if (full_args == NULL) {
+        return VTX_VALUE_UNDEFINED;
+    }
     full_args[0] = receiver;
     if (arg_count > 0 && args != NULL) {
         memcpy(full_args + 1, args, arg_count * sizeof(vtx_value_t));
@@ -389,7 +402,9 @@ vtx_value_t vtx_runtime_call_virtual_reg(void *interp,
     /* Record invocation */
     vtx_profiler_record_invocation(&interp_ptr->profiler, target_method);
 
-    return vtx_interp_run(interp_ptr, target_method, full_args, total_arg_count);
+    vtx_value_t result = vtx_interp_run(interp_ptr, target_method, full_args, total_arg_count);
+    free(full_args);
+    return result;
 }
 
 /**
@@ -427,9 +442,14 @@ vtx_value_t vtx_runtime_call_interface_reg(void *interp,
         return VTX_VALUE_UNDEFINED;
     }
 
-    /* Build the full args array: receiver + remaining args */
+    /* Build the full args array: receiver + remaining args.
+     * BUGFIX: Use heap allocation instead of alloca() to prevent
+     * stack overflow with large argument counts. */
     uint32_t total_arg_count = arg_count + 1;
-    vtx_value_t *full_args = (vtx_value_t *)alloca(total_arg_count * sizeof(vtx_value_t));
+    vtx_value_t *full_args = (vtx_value_t *)malloc(total_arg_count * sizeof(vtx_value_t));
+    if (full_args == NULL) {
+        return VTX_VALUE_UNDEFINED;
+    }
     full_args[0] = receiver;
     if (arg_count > 0 && args != NULL) {
         memcpy(full_args + 1, args, arg_count * sizeof(vtx_value_t));
@@ -438,5 +458,7 @@ vtx_value_t vtx_runtime_call_interface_reg(void *interp,
     /* Record invocation */
     vtx_profiler_record_invocation(&interp_ptr->profiler, target_method);
 
-    return vtx_interp_run(interp_ptr, target_method, full_args, total_arg_count);
+    vtx_value_t result = vtx_interp_run(interp_ptr, target_method, full_args, total_arg_count);
+    free(full_args);
+    return result;
 }

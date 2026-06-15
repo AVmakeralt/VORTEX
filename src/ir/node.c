@@ -374,6 +374,20 @@ static int node_remove_use(vtx_node_t *producer, vtx_nodeid_t user_id, uint32_t 
 }
 
 /* ========================================================================== */
+/* Public use-def list maintenance wrappers                                    */
+/* ========================================================================== */
+
+void vtx_node_remove_use_entry(vtx_node_t *producer, vtx_nodeid_t user_id, uint32_t input_index)
+{
+    node_remove_use(producer, user_id, input_index);
+}
+
+void vtx_node_add_use_entry(vtx_node_t *producer, vtx_nodeid_t user_id, uint32_t input_index)
+{
+    node_add_use(producer, user_id, input_index);
+}
+
+/* ========================================================================== */
 /* Node table operations                                                       */
 /* ========================================================================== */
 
@@ -746,8 +760,17 @@ void vtx_node_table_clear_dead(vtx_node_table_t *table)
         node->input_count = write_idx;
     }
 
-    /* Now clear all dead flags */
+    /* Now clear all dead flags.
+     * Bug #15 fix: Also clear use_count on previously-dead nodes.
+     * If clear_dead is called without a preceding DCE pass that sets
+     * use_count=0, the dead nodes could have stale use-def list
+     * entries. After clearing the dead flag, these nodes become
+     * "live" again (zombies) with potentially stale use entries,
+     * which corrupts later passes. Clearing use_count prevents this. */
     for (uint32_t i = 0; i < table->count; i++) {
+        if (table->nodes[i].dead) {
+            table->nodes[i].use_count = 0;
+        }
         table->nodes[i].dead = false;
     }
 }

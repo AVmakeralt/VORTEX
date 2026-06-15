@@ -185,10 +185,12 @@ static uint32_t midtier_specialize_types(
                      * integer type, and other arithmetic nodes that are
                      * already specialized. */
                     if (input_node->opcode == VTX_OP_Constant) {
-                        /* Constants tagged as SMI are integers */
-                        if (!vtx_is_smi(input_node->constval.kind == VTX_TYPE_Int ?
-                            vtx_make_smi((int32_t)input_node->constval.as.int_val) :
-                            VTX_VALUE_UNDEFINED)) {
+                        /* Constants are integer if their kind is Int.
+                         * BUGFIX: The previous check was tautological —
+                         * vtx_make_smi always produces an SMI, so checking
+                         * vtx_is_smi on its result was always true.
+                         * Now we directly check the constant's type kind. */
+                        if (input_node->constval.kind != VTX_TYPE_Int) {
                             both_inputs_int = false;
                             break;
                         }
@@ -197,8 +199,7 @@ static uint32_t midtier_specialize_types(
 
                 if (both_inputs_int && node->input_count >= 2) {
                     /* Specialize: mark node as integer-typed */
-                    node->type_id = 2; /* First user type ID; in practice
-                                         this would be VTX_TYPE_INT or similar */
+                    node->type_id = VTX_TYPE_SMI; /* SMI = Small Integer type */
                     sites_specialized++;
 
                     /* Insert a guard that both inputs are integers.

@@ -66,6 +66,11 @@ uint32_t vtx_dce_run(vtx_graph_t *graph)
                     vtx_nodeid_t inp = node->inputs[j];
                     if (inp != VTX_NODEID_INVALID && inp < nt->count) {
                         vtx_node_t *producer = &nt->nodes[inp];
+                        /* Remove this node's use entry from the producer's
+                         * use-def list BEFORE decrementing output_count.
+                         * Without this, the producer's use-def list retains
+                         * stale entries referencing the dead node. */
+                        vtx_node_remove_use_entry(producer, node->id, j);
                         if (producer->output_count > 0) {
                             producer->output_count--;
                         }
@@ -75,6 +80,10 @@ uint32_t vtx_dce_run(vtx_graph_t *graph)
                 /* Mark as dead */
                 node->dead = true;
                 node->input_count = 0;
+                /* Clear this node's own use list — no live node should
+                 * reference a dead node, and stale use entries corrupt
+                 * later passes that traverse use-def lists. */
+                node->use_count = 0;
 
                 total_removed++;
                 changed = true;
@@ -93,6 +102,9 @@ uint32_t vtx_dce_run(vtx_graph_t *graph)
                 vtx_nodeid_t inp = node->inputs[j];
                 if (inp != VTX_NODEID_INVALID && inp < nt->count) {
                     vtx_node_t *producer = &nt->nodes[inp];
+                    /* Remove use entry from producer's use-def list to
+                     * prevent stale references to this dead node. */
+                    vtx_node_remove_use_entry(producer, node->id, j);
                     if (producer->output_count > 0) {
                         producer->output_count--;
                     }
@@ -100,6 +112,8 @@ uint32_t vtx_dce_run(vtx_graph_t *graph)
             }
             node->input_count = 0;
         }
+        /* Clear this dead node's own use list as well. */
+        node->use_count = 0;
     }
 
     return total_removed;

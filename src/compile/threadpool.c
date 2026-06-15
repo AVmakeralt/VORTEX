@@ -75,6 +75,14 @@ static void *worker_thread_func(void *arg)
 
         if (task.task_fn) {
             task.task_fn(task.arg);
+        } else if (task.method_id != 0 && pool->compile_callback != NULL) {
+            /* Method compilation task (no task_fn, but has method_id).
+             * This is the path used by the orchestrator and
+             * vtx_request_compilation(). Previously, these tasks
+             * were silently discarded because task_fn was NULL.
+             * Now we invoke the compile callback to run the pipeline. */
+            pool->compile_callback(task.method_id, task.tier,
+                                   pool->compile_callback_context);
         }
 
         clock_gettime(CLOCK_MONOTONIC, &end);
@@ -247,6 +255,15 @@ void vtx_threadpool_shutdown(vtx_threadpool_t *pool)
     vtx_pq_destroy(&pool->task_queue);
 
     pool->num_workers = 0;
+}
+
+void vtx_threadpool_set_compile_callback(vtx_threadpool_t *pool,
+                                          vtx_compile_callback_t callback,
+                                          void *context)
+{
+    if (pool == NULL) return;
+    pool->compile_callback = callback;
+    pool->compile_callback_context = context;
 }
 
 /* ========================================================================== */

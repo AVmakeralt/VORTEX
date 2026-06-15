@@ -856,7 +856,9 @@ int vtx_schedule_run(vtx_graph_t *graph, vtx_arena_t *arena, vtx_schedule_t *sch
         }
     }
 
-    /* DEBUG: Print CFG edges */
+    /* BUG-16 fix: Guard debug CFG printing with VORTEX_ENABLE_VERIFY
+     * so it doesn't spam stderr in production builds. */
+#ifdef VORTEX_ENABLE_VERIFY
     fprintf(stderr, "[schedule] CFG edges after Phase 3:\n");
     for (uint32_t dbi = 0; dbi < schedule->count; dbi++) {
         vtx_schedule_block_t *dbl = &schedule->blocks[dbi];
@@ -872,6 +874,7 @@ int vtx_schedule_run(vtx_graph_t *graph, vtx_arena_t *arena, vtx_schedule_t *sch
         }
         fprintf(stderr, "]\n");
     }
+#endif
 
     /* Phase 4: Compute dominators and loop depth.
      * Keep the dominator array alive through Phase 5 so we can use it
@@ -1093,8 +1096,21 @@ int vtx_schedule_run(vtx_graph_t *graph, vtx_arena_t *arena, vtx_schedule_t *sch
             }
 
             if (all_inputs_outside && schedule->blocks[bi].pred_count > 0) {
-                /* Hoist to the first predecessor (preheader for a loop header) */
+                /* BUG-13 fix: Find the preheader, not just pred_blocks[0].
+                 * The first predecessor might be the back-edge (latch),
+                 * not the preheader. The preheader is the predecessor
+                 * whose loop_depth is strictly less than this block's.
+                 * If all predecessors are at the same depth (e.g. a
+                 * non-loop merge), fall back to pred_blocks[0]. */
                 uint32_t preheader = schedule->blocks[bi].pred_blocks[0];
+                uint32_t my_depth = schedule->blocks[bi].loop_depth;
+                for (uint32_t pi = 0; pi < schedule->blocks[bi].pred_count; pi++) {
+                    uint32_t pred_idx = schedule->blocks[bi].pred_blocks[pi];
+                    if (schedule->blocks[pred_idx].loop_depth < my_depth) {
+                        preheader = pred_idx;
+                        break;
+                    }
+                }
                 schedule->node_block[i] = preheader;
             }
         }

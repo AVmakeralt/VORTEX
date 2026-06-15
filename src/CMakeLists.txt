@@ -26,7 +26,7 @@ add_library(vortex_interp STATIC
     interp/type_feedback.c
 )
 target_include_directories(vortex_interp PUBLIC ${VORTEX_INCLUDE_DIRS})
-target_link_libraries(vortex_interp PUBLIC vortex_runtime)
+target_link_libraries(vortex_interp PUBLIC vortex_runtime vortex_compile)
 
 # Baseline JIT T1
 add_library(vortex_baseline STATIC
@@ -149,6 +149,7 @@ add_library(vortex_compile STATIC
     compile/phase_react.c
     compile/spec_versioning.c
     compile/orchestrator.c
+    compile/request.c
 )
 target_include_directories(vortex_compile PUBLIC ${VORTEX_INCLUDE_DIRS})
 target_link_libraries(vortex_compile PUBLIC vortex_ir vortex_pea vortex_inliner vortex_lower vortex_deopt vortex_codecache vortex_guard vortex_profile $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota> Threads::Threads)
