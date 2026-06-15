@@ -546,7 +546,15 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         inst.operands[0] = dst;
         inst.opnd_kinds[1] = VTX_OPND_IMM;
         if (node->constval.kind == VTX_TYPE_Int) {
-            inst.imm = node->constval.as.int_val;
+            /* SMI-tag the integer constant for the NaN-boxed value system.
+             * The IR stores raw integer values (e.g., 42), but the runtime
+             * expects NaN-boxed SMIs (e.g., 0x7FF8000000000150).
+             * SMI tag: VTX_NAN_BOX_HEADER | (val << 3) | VTX_TAG_SMI */
+            int64_t raw = node->constval.as.int_val;
+            uint64_t smi_val = 0x7FF8000000000000ULL
+                             | (((uint64_t)raw & 0x0000FFFFFFFFFFFFULL) << 3)
+                             | 0ULL; /* VTX_TAG_SMI = 0 */
+            inst.imm = (int64_t)smi_val;
         } else if (node->constval.kind == VTX_TYPE_Ptr) {
             inst.imm = (int64_t)(uintptr_t)node->constval.as.ptr_val;
         } else if (node->constval.kind == VTX_TYPE_Float) {
