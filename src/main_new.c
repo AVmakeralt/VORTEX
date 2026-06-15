@@ -2810,6 +2810,34 @@ int main(int argc, char *argv[])
         vtx_interp_t interp;
         vtx_interp_init(&interp, &ts, &gc);
 
+        /* Wire the JIT compilation pipeline so the interpreter
+         * automatically triggers T1 compilation for hot methods.
+         * Without this, the interpreter runs forever in T0 mode
+         * and the JIT is dead code. The wiring chain is:
+         *   interpreter → tier_up_check → vtx_request_compilation
+         *     → threadpool → compile_callback → vtx_baseline_compile
+         *       → code cache → method->compiled_code
+         *         → vtx_dispatch_jit on next call */
+        vtx_code_cache_t cache;
+        vtx_code_cache_init(&cache, VORTEX_CACHE_MAX_SIZE);
+
+        vtx_method_registry_t registry;
+        vtx_method_registry_init(&registry, &arena);
+
+        vtx_compile_context_t compile_ctx;
+        vtx_compile_context_init(&compile_ctx);
+        compile_ctx.code_cache = &cache;
+        compile_ctx.method_registry = &registry;
+
+        /* Create and wire threadpool for background compilation */
+        vtx_threadpool_t pool;
+        if (vtx_threadpool_init(&pool, 1) == 0) {  /* 1 compile thread */
+            compile_ctx.threadpool = &pool;
+            vtx_compile_context_wire_threadpool(&compile_ctx);
+        }
+
+        vtx_interp_set_compile_ctx(&interp, &compile_ctx);
+
         vtx_value_t result = vtx_interp_run(&interp, &method, NULL, 0);
 
         printf("Program exited");
@@ -2819,6 +2847,14 @@ int main(int argc, char *argv[])
         printf("\n");
 
         vtx_interp_destroy(&interp);
+
+        /* Shut down JIT compilation pipeline */
+        vtx_interp_set_compile_ctx(&interp, NULL);
+        vtx_threadpool_shutdown(&pool);
+        vtx_compile_context_destroy(&compile_ctx);
+        vtx_method_registry_destroy(&registry);
+        vtx_code_cache_destroy(&cache);
+
         vtx_gc_destroy(&gc);
         vtx_type_system_destroy(&ts);
         vtx_arena_destroy(&arena);

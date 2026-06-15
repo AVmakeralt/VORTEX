@@ -25,6 +25,7 @@
 #include "lower/regalloc.h"
 #include "lower/emit.h"
 #include "lower/guard_emit.h"
+#include "deopt/side_table.h"
 #include "runtime/arena.h"
 #include "interp/type_feedback.h"
 #include "vortex_config.h"
@@ -122,6 +123,7 @@ typedef struct {
     vtx_pipeline_stats_t stats;
     uint8_t        *native_code;   /* emitted x86-64 machine code */
     uint32_t         native_size;  /* size of emitted code */
+    vtx_side_table_t *side_table;  /* deoptimization side table (native PC -> FrameState) */
 } vtx_compile_result_t;
 
 /* Get default config for each tier */

@@ -174,6 +174,10 @@ target_link_libraries(test_jit_e2e PRIVATE
     vortex_lower
     vortex_inliner
     vortex_pea
+    vortex_sota
+    vortex_midtier
+    vortex_trace
+    vortex_region
     -Wl,--end-group
     m
     pthread

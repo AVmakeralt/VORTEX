@@ -729,7 +729,49 @@ static int run_lowering_pipeline(vtx_graph_t *graph,
     /* Step 4: Peephole optimization on the allocated instructions */
     vtx_peephole_optimize(inst_stream, ra_result);
 
-    /* Step 5: Code emission */
+    /* Step 5: Build guard descriptor array from the graph.
+     * Scan for Guard/DeoptGuard nodes and create descriptors so we can
+     * emit deopt stubs and build the side table during code emission. */
+    vtx_guard_desc_array_t guard_arr;
+    if (vtx_guard_desc_array_init(&guard_arr, arena) != 0) {
+        fprintf(stderr, "[pipeline] guard array init failed\n");
+        *time_ns = elapsed_ns(start);
+        return -1;
+    }
+
+    vtx_node_table_t *ntable = &graph->node_table;
+    for (uint32_t i = 0; i < ntable->count; i++) {
+        vtx_node_t *node = &ntable->nodes[i];
+        if (node->dead) continue;
+        if (node->opcode != VTX_OP_Guard && node->opcode != VTX_OP_DeoptGuard) continue;
+
+        vtx_guard_desc_t gd;
+        memset(&gd, 0, sizeof(gd));
+        gd.guard_node = i;  /* node index in the table */
+        gd.cond = node->cond;
+        gd.bytecode_pc = node->bytecode_pc;
+        gd.type_id = node->type_id;
+        /* frame_state_index: use the node's frame_state if available,
+         * otherwise use the node index as a unique identifier */
+        gd.frame_state_index = (node->frame_state != VTX_NODEID_INVALID)
+                                ? node->frame_state
+                                : i;
+
+        vtx_guard_desc_array_add(&guard_arr, gd, arena);
+    }
+
+    /* Step 6: Build side table for deoptimization.
+     * The side table maps native PC offsets → FrameState, enabling
+     * the deopt runtime to reconstruct interpreter state when a
+     * guard fails or a safepoint is hit. */
+    vtx_side_table_t *side_table = vtx_side_table_build(arena);
+    if (!side_table) {
+        fprintf(stderr, "[pipeline] side table build failed\n");
+        *time_ns = elapsed_ns(start);
+        return -1;
+    }
+
+    /* Step 7: Code emission */
     vtx_x86_emit_t emitter;
     if (vtx_x86_emit_init(&emitter, VTX_EMIT_INITIAL_CAPACITY) != 0) {
         fprintf(stderr, "[pipeline] emitter init failed\n");
@@ -755,10 +797,46 @@ static int run_lowering_pipeline(vtx_graph_t *graph,
         return -1;
     }
 
-    /* Epilogue is now emitted by each RET instruction in the function body.
-     * We no longer emit a separate epilogue at the end because the RET
-     * handler in emit_single_inst() calls vtx_x86_emit_epilogue() which
-     * restores callee-saved registers and emits the ret instruction. */
+    /* Step 8: Lower guards — record guard positions in the side table.
+     * This scans the instruction stream for guard JCCs (marked with
+     * VTX_INST_FLAG_IS_GUARD) and records their native PC offsets,
+     * live register maps, and FrameState indices in the side table. */
+    if (guard_arr.count > 0) {
+        int lowered = vtx_guard_emit_lower(&guard_arr, inst_stream,
+                                            &emitter, side_table, arena,
+                                            ra_result);
+        if (lowered < 0) {
+            fprintf(stderr, "[pipeline] guard lowering failed\n");
+            vtx_x86_emit_destroy(&emitter);
+            *time_ns = elapsed_ns(start);
+            return -1;
+        }
+
+        /* Step 9: Emit deopt stubs after the main code.
+         * Each guard gets a deopt stub that saves state and transfers
+         * to the deopt runtime when the guard fails. */
+        uint8_t *code_start = (uint8_t *)vtx_x86_emit_code(&emitter);
+        int stubs = vtx_guard_emit_deopt_stubs(&guard_arr, &emitter,
+                                                 side_table, code_start, arena);
+        if (stubs < 0) {
+            fprintf(stderr, "[pipeline] deopt stub emission failed\n");
+            vtx_x86_emit_destroy(&emitter);
+            *time_ns = elapsed_ns(start);
+            return -1;
+        }
+
+        /* Step 10: Patch guard JCC instructions to point to deopt stubs.
+         * After deopt stubs are emitted, we patch the 32-bit displacement
+         * in each guard's JCC instruction to jump to its deopt stub. */
+        int patched = vtx_guard_emit_patch(&guard_arr, &emitter,
+                                            code_start, arena);
+        if (patched < 0) {
+            fprintf(stderr, "[pipeline] guard patching failed\n");
+            vtx_x86_emit_destroy(&emitter);
+            *time_ns = elapsed_ns(start);
+            return -1;
+        }
+    }
 
     /* Copy the emitted code into the result.
      * We use malloc here (not arena) because the native code must outlive
@@ -786,6 +864,7 @@ static int run_lowering_pipeline(vtx_graph_t *graph,
 
     result->native_code = native_code;
     result->native_size = code_size;
+    result->side_table = side_table;
 
     *time_ns = elapsed_ns(start);
     return 0;
@@ -1273,7 +1352,7 @@ int vtx_pipeline_run(vtx_graph_t *graph,
             config->code_cache, config->method_registry,
             config->method, method_id,
             result->native_code, result->native_size,
-            NULL,   /* side_table — TODO: wire from lowering */
+            result->side_table,  /* side_table from lowering pipeline */
             NULL,   /* reloc_table */
             NULL, 0, NULL, 0,  /* dep_type_ids, dep_shape_ids */
             config->install_arena ? config->install_arena : arena,
@@ -1285,6 +1364,7 @@ int vtx_pipeline_run(vtx_graph_t *graph,
              * vtx_compile_result_destroy(). */
             result->native_code = NULL;
             result->native_size = 0;
+            result->side_table = NULL;  /* ownership transferred to code cache */
         }
     }
 

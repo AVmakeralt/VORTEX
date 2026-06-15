@@ -1119,11 +1119,9 @@ int main(void)
     /* Compile with T1 baseline JIT */
     printf("--- T1 Baseline JIT Compilation ---\n\n");
 
-    printf("  NOTE: T1 baseline JIT hits spill-index bug (P0 — frame_layout.h:169).\n");
-    printf("  This is a known P0 bug. Benchmarking Emitter JIT instead.\n");
-    printf("  After P0 fixes land, T1 will be benchmarked here too.\n\n");
+    printf("  T1 spill-index P0 bug has been fixed. Benchmarking T1.\n\n");
 
-#if 0  /* T1 baseline JIT disabled: spill-index P0 bug */
+#if 1  /* T1 baseline JIT re-enabled: spill-index P0 bug fixed */
     uint64_t t0_compile = now_ns();
     vtx_compiled_code_t *sum_compiled = vtx_baseline_compile(&sum_method, NULL, &arena, &cache, &registry);
     uint64_t t1_compile = now_ns();

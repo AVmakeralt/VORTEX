@@ -801,6 +801,36 @@ int vtx_x86_emit_safepoint_poll_guard_page(vtx_x86_emit_t *e)
 void vtx_x86_emit_prologue(vtx_x86_emit_t *e, uint32_t frame_size,
                             uint32_t callee_saved_mask)
 {
+    /* JIT calling convention prologue — matches T1 baseline layout:
+     *
+     *   Entry: RDI = method pointer (1st arg, System V ABI)
+     *          RSI = deopt_info pointer (2nd arg)
+     *          RDX = profile_data pointer (3rd arg)
+     *
+     *   push rdi              ; method_ptr   -> [RBP+24]
+     *   push rsi              ; deopt_info   -> [RBP+16]
+     *   push rdx              ; profile_data -> [RBP+8]
+     *   push rbp              ; caller RBP   -> [RBP+0]
+     *   mov rbp, rsp
+     *   push callee-saved regs (RBX, R12-R15 as needed)
+     *   sub rsp, frame_size   ; locals + spills
+     *
+     * This layout ensures that the deopt handler can find the method
+     * pointer at [RBP+24] and deopt_info at [RBP+16] — the same
+     * offsets used by T1 baseline JIT (see frame_layout.h).
+     * Without these saved values, T2/T3 deopt would crash because
+     * the deopt stubs cannot reconstruct interpreter state.
+     */
+
+    /* push method pointer (RDI) */
+    vtx_x86_emit_push_r(e, 7);  /* RDI = 7 */
+
+    /* push deopt_info (RSI) */
+    vtx_x86_emit_push_r(e, 6);  /* RSI = 6 */
+
+    /* push profile_data (RDX) */
+    vtx_x86_emit_push_r(e, 2);  /* RDX = 2 */
+
     /* push rbp */
     vtx_x86_emit_push_r(e, 5); /* RBP = 5 */
 
@@ -816,9 +846,32 @@ void vtx_x86_emit_prologue(vtx_x86_emit_t *e, uint32_t frame_size,
         }
     }
 
-    /* sub rsp, frame_size */
+    /* sub rsp, frame_size — adjusted for stack alignment.
+     * At function entry (after CALL), RSP ≡ 8 (mod 16).
+     * After 4 pushes (rdi, rsi, rdx, rbp): RSP ≡ 8 - 32 ≡ 8 (mod 16).
+     * After N callee-saved pushes: RSP ≡ 8 - 8N (mod 16).
+     * After sub rsp, frame_size: need RSP ≡ 0 (mod 16).
+     * So frame_size ≡ 8 - 8N (mod 16), i.e.:
+     *   N even: frame_size ≡ 8 (mod 16)
+     *   N odd:  frame_size ≡ 0 (mod 16)
+     * We pad frame_size up to satisfy this constraint. */
     if (frame_size > 0) {
-        vtx_x86_emit_sub_ri(e, 4, (int32_t)frame_size); /* RSP = 4 */
+        static const uint8_t cs_regs[] = { 3, 12, 13, 14, 15 };
+        int cs_count = 0;
+        for (int i = 0; i < 5; i++) {
+            if (callee_saved_mask & (1u << cs_regs[i])) cs_count++;
+        }
+        uint32_t aligned_size = frame_size;
+        /* Round up to next multiple of 8, then add 8 if cs_count is even */
+        aligned_size = (aligned_size + 7u) & ~(uint32_t)7u;
+        if (aligned_size == 0) aligned_size = 8;
+        /* Check if current alignment matches requirement */
+        bool need_mod8 = (cs_count % 2 == 0); /* need ≡ 8 (mod 16) */
+        bool is_mod8 = (aligned_size % 16 == 8);
+        if (need_mod8 != is_mod8) {
+            aligned_size += 8; /* toggle between ≡ 0 and ≡ 8 (mod 16) */
+        }
+        vtx_x86_emit_sub_ri(e, 4, (int32_t)aligned_size); /* RSP = 4 */
     }
 }
 
@@ -837,6 +890,12 @@ void vtx_x86_emit_epilogue(vtx_x86_emit_t *e, uint32_t callee_saved_mask)
 
     /* pop rbp */
     vtx_x86_emit_pop_r(e, 5);
+
+    /* Skip the 3 JIT header values pushed in prologue:
+     *   profile_data (RDX), deopt_info (RSI), method_ptr (RDI)
+     * These were pushed before RBP so they sit above the saved RBP.
+     * T1 uses "add rsp, 24" to skip them — we do the same. */
+    vtx_x86_emit_add_ri(e, 4, 24);  /* RSP += 24 */
 
     /* ret */
     vtx_x86_emit_ret(e);
