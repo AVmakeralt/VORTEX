@@ -228,6 +228,19 @@ target_link_libraries(fuzz_graph_build PRIVATE
 add_test(NAME fuzz_graph_build COMMAND fuzz_graph_build)
 set_tests_properties(fuzz_graph_build PROPERTIES TIMEOUT 60)
 
+# test_assembler_prog: program-mode assembler (labels + pseudo-instructions)
+add_executable(test_assembler_prog
+    unit/test_assembler_prog.c
+)
+target_link_libraries(test_assembler_prog PRIVATE
+    vortex_test_framework
+    vortex_ir
+    vortex_runtime
+    vortex_assembler
+    m
+)
+add_test(NAME test_assembler_prog COMMAND test_assembler_prog)
+
 # ---- Stress tests (1000 tests) ----
 
 # test_stress_runtime: Arena, Object, Type System, Bytecode, GC (200 tests)
