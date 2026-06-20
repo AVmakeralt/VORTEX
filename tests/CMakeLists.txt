@@ -213,6 +213,21 @@ target_link_libraries(test_jit_e2e PRIVATE
 )
 add_test(NAME test_jit_e2e COMMAND test_jit_e2e)
 
+# ---- Fuzz tests ----
+
+# fuzz_graph_build: 500+ random valid bytecode programs through vtx_graph_build()
+add_executable(fuzz_graph_build
+    fuzz/fuzz_graph_build.c
+)
+target_link_libraries(fuzz_graph_build PRIVATE
+    vortex_test_framework
+    vortex_ir
+    vortex_runtime
+    m
+)
+add_test(NAME fuzz_graph_build COMMAND fuzz_graph_build)
+set_tests_properties(fuzz_graph_build PROPERTIES TIMEOUT 60)
+
 # ---- Stress tests (1000 tests) ----
 
 # test_stress_runtime: Arena, Object, Type System, Bytecode, GC (200 tests)

@@ -40,6 +40,7 @@ typedef struct {
     bool    is_loop_header;     /* true if this block is a loop header */
     bool    is_loop_end;        /* true if this block ends with a backward branch */
     bool    is_catch_handler;   /* true if this block starts at a catch handler */
+    bool    is_unreachable;     /* true if no forward predecessor reaches this block */
 
     /* SoN nodes created for this block */
     vtx_nodeid_t region_node;       /* Region/LoopBegin node ID for this block */

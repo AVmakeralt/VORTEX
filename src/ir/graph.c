@@ -482,6 +482,7 @@ static uint32_t identify_blocks(vtx_arena_t *arena,
             blocks[bi].is_loop_header = false;
             blocks[bi].is_loop_end = false;
             blocks[bi].is_catch_handler = false;
+            blocks[bi].is_unreachable = false;
             blocks[bi].exit_stack = NULL;
             blocks[bi].exit_sp = 0;
             bi++;
@@ -687,6 +688,44 @@ static int create_block_entry(vtx_graph_t *graph, vtx_block_info_t *blocks,
 
     /* Create Region or LoopBegin */
     vtx_node_opcode_t region_op = block->is_loop_header ? VTX_OP_LoopBegin : VTX_OP_Region;
+
+    /* Count forward predecessors FIRST so we can detect unreachable blocks. */
+    uint32_t forward_pred_count = 0;
+    for (uint32_t p = 0; p < block->pred_count; p++) {
+        uint32_t pred_idx = block->pred_indices[p];
+        /* Skip back-edge predecessors for loop headers */
+        if (block->is_loop_header && blocks[pred_idx].is_loop_end) {
+            continue;
+        }
+        forward_pred_count++;
+    }
+
+    /* Unreachable block: no forward predecessors and not the entry block.
+     *
+     * BUGFIX (audit #1, fuzz-discovered): The original code created a
+     * Region node for every block regardless of reachability, then left
+     * unreachable Regions with 0 inputs — failing verifier check #8
+     * ("All Region nodes have at least one input"). The correct behavior
+     * is to mark the block as unreachable, NOT create a Region, and skip
+     * its Phase 3 instruction walk. Subsequent Phi-creation logic in
+     * successor blocks must treat unreachable blocks as producing no
+     * values (handled in the merge logic by checking exit_sp). */
+    if (forward_pred_count == 0) {
+        block->region_node  = VTX_NODEID_INVALID;
+        block->control_node = VTX_NODEID_INVALID;
+        block->memory_node  = VTX_NODEID_INVALID;
+        block->is_unreachable = true;
+
+        /* Allocate locals (all undefined) so later phases can read blocks[i].locals[j]
+         * without crashing, even though this block is never executed. */
+        block->locals = (vtx_nodeid_t *)vtx_arena_alloc(arena, max_locals * sizeof(vtx_nodeid_t));
+        if (block->locals == NULL) return -1;
+        for (uint16_t i = 0; i < max_locals; i++) {
+            block->locals[i] = VTX_NODEID_INVALID;
+        }
+        return 0;
+    }
+
     vtx_nodeid_t region = vtx_node_create(nt, region_op);
     if (region == VTX_NODEID_INVALID) return -1;
     block->region_node = region;
@@ -706,18 +745,20 @@ static int create_block_entry(vtx_graph_t *graph, vtx_block_info_t *blocks,
      * mismatch between the number of Region inputs and Phi inputs. This
      * inconsistency crashed later Phases that expect Phis to have one
      * data input per Region input. */
-    uint32_t forward_pred_count = 0;  /* number of forward (non-back-edge) predecessors */
     for (uint32_t p = 0; p < block->pred_count; p++) {
         uint32_t pred_idx = block->pred_indices[p];
         /* Skip back-edge predecessors for loop headers */
         if (block->is_loop_header && blocks[pred_idx].is_loop_end) {
             continue;
         }
+        /* Skip unreachable predecessors — they have no control output. */
+        if (blocks[pred_idx].is_unreachable) {
+            continue;
+        }
         vtx_nodeid_t pred_ctrl = blocks[pred_idx].control_node;
         if (pred_ctrl != VTX_NODEID_INVALID) {
             vtx_node_add_input(nt, region, pred_ctrl);
         }
-        forward_pred_count++;
     }
 
     block->control_node = region;
@@ -741,6 +782,9 @@ static int create_block_entry(vtx_graph_t *graph, vtx_block_info_t *blocks,
             if (block->is_loop_header && blocks[pred_idx].is_loop_end) {
                 continue; /* back-edge input added in Phase 4 */
             }
+            if (blocks[pred_idx].is_unreachable) {
+                continue; /* unreachable predecessor: no memory contribution */
+            }
             vtx_nodeid_t pred_mem = blocks[pred_idx].memory_node;
             if (pred_mem == VTX_NODEID_INVALID) {
                 pred_mem = graph->entry_memory;
@@ -755,6 +799,9 @@ static int create_block_entry(vtx_graph_t *graph, vtx_block_info_t *blocks,
         for (uint32_t p = 0; p < block->pred_count; p++) {
             uint32_t pred_idx = block->pred_indices[p];
             if (block->is_loop_header && blocks[pred_idx].is_loop_end) {
+                continue;
+            }
+            if (blocks[pred_idx].is_unreachable) {
                 continue;
             }
             block->memory_node = blocks[pred_idx].memory_node;
@@ -778,6 +825,9 @@ static int create_block_entry(vtx_graph_t *graph, vtx_block_info_t *blocks,
             if (block->is_loop_header && blocks[pred_idx].is_loop_end) {
                 continue;
             }
+            if (blocks[pred_idx].is_unreachable) {
+                continue;
+            }
             for (uint16_t i = 0; i < max_locals; i++) {
                 block->locals[i] = blocks[pred_idx].locals[i];
             }
@@ -793,6 +843,9 @@ static int create_block_entry(vtx_graph_t *graph, vtx_block_info_t *blocks,
             for (uint32_t p = 0; p < block->pred_count; p++) {
                 uint32_t pred_idx = block->pred_indices[p];
                 if (block->is_loop_header && blocks[pred_idx].is_loop_end) {
+                    continue;
+                }
+                if (blocks[pred_idx].is_unreachable) {
                     continue;
                 }
                 vtx_nodeid_t val = blocks[pred_idx].locals[li];
@@ -817,6 +870,9 @@ static int create_block_entry(vtx_graph_t *graph, vtx_block_info_t *blocks,
                 for (uint32_t p = 0; p < block->pred_count; p++) {
                     uint32_t pred_idx = block->pred_indices[p];
                     if (block->is_loop_header && blocks[pred_idx].is_loop_end) {
+                        continue;
+                    }
+                    if (blocks[pred_idx].is_unreachable) {
                         continue;
                     }
                     vtx_nodeid_t val = blocks[pred_idx].locals[li];
@@ -1363,6 +1419,14 @@ int vtx_graph_build(vtx_graph_t *graph,
 
     for (uint32_t bi = 0; bi < nblocks; bi++) {
         vtx_block_info_t *block = &blocks[bi];
+
+        /* Skip unreachable blocks — they have no Region, no control, no
+         * instructions to process. Leaving them out of Phase 3 means
+         * they don't contribute to the operand stack or memory chain. */
+        if (block->is_unreachable) {
+            continue;
+        }
+
         int32_t sp = 0; /* stack pointer (index into op_stack) */
 
         /* If this is a catch handler, the exception is on the stack */
@@ -1388,6 +1452,10 @@ int vtx_graph_build(vtx_graph_t *graph,
                 if (block->is_loop_header && blocks[pred_idx].is_loop_end) {
                     continue;
                 }
+                /* Skip unreachable predecessors — they have no exit stack. */
+                if (blocks[pred_idx].is_unreachable) {
+                    continue;
+                }
                 /* Skip predecessors that haven't been processed yet
                  * (exit_sp == 0 and not the entry block) */
                 if (blocks[pred_idx].exit_sp == 0 && pred_idx > 0) {
@@ -1404,6 +1472,7 @@ int vtx_graph_build(vtx_graph_t *graph,
                 for (uint32_t p = 0; p < block->pred_count; p++) {
                     uint32_t pred_idx = block->pred_indices[p];
                     if (block->is_loop_header && blocks[pred_idx].is_loop_end) continue;
+                    if (blocks[pred_idx].is_unreachable) continue;
                     if (blocks[pred_idx].exit_sp == 0 && pred_idx > 0) continue;
                     for (int32_t si = 0; si < blocks[pred_idx].exit_sp; si++) {
                         op_stack[si] = blocks[pred_idx].exit_stack[si];
@@ -1420,6 +1489,7 @@ int vtx_graph_build(vtx_graph_t *graph,
                     for (uint32_t p = 0; p < block->pred_count; p++) {
                         uint32_t pred_idx = block->pred_indices[p];
                         if (block->is_loop_header && blocks[pred_idx].is_loop_end) continue;
+                        if (blocks[pred_idx].is_unreachable) continue;
                         if (blocks[pred_idx].exit_sp == 0 && pred_idx > 0) continue;
                         vtx_nodeid_t val = blocks[pred_idx].exit_stack[si];
                         if (first_val == VTX_NODEID_INVALID) {
@@ -1440,6 +1510,7 @@ int vtx_graph_build(vtx_graph_t *graph,
                         for (uint32_t p = 0; p < block->pred_count; p++) {
                             uint32_t pred_idx = block->pred_indices[p];
                             if (block->is_loop_header && blocks[pred_idx].is_loop_end) continue;
+                            if (blocks[pred_idx].is_unreachable) continue;
                             if (blocks[pred_idx].exit_sp == 0 && pred_idx > 0) continue;
                             vtx_nodeid_t val = blocks[pred_idx].exit_stack[si];
                             vtx_node_add_input(&graph->node_table, phi, val);
@@ -2495,6 +2566,25 @@ int vtx_graph_build(vtx_graph_t *graph,
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /* Phase 6: Create the End node and connect all Return nodes to it.
+     *
+     * BUGFIX (audit #1, fuzz-discovered): The End node was never created,
+     * so graph_has_start_and_end() and any downstream pass that walks
+     * from End (e.g. backward DCE) would fail. The End node is the
+     * single sink of the control-flow graph; every Return (and every
+     * Throw that doesn't have a handler) must feed into it. */
+    {
+        vtx_nodeid_t end = vtx_node_create(&graph->node_table, VTX_OP_End);
+        if (end == VTX_NODEID_INVALID) return -1;
+        for (uint32_t i = 0; i < graph->node_table.count; i++) {
+            const vtx_node_t *n = &graph->node_table.nodes[i];
+            if (n->dead) continue;
+            if (n->opcode == VTX_OP_Return) {
+                vtx_node_add_input(&graph->node_table, end, n->id);
             }
         }
     }
