@@ -13,9 +13,10 @@ add_library(vortex_runtime STATIC
     runtime/gc.c
     runtime/helpers.c
     runtime/bytecode.c
+    runtime/safepoint_manager.c
 )
 target_include_directories(vortex_runtime PUBLIC ${VORTEX_INCLUDE_DIRS})
-target_link_libraries(vortex_runtime PUBLIC vortex_common)
+target_link_libraries(vortex_runtime PUBLIC vortex_common Threads::Threads)
 
 # Interpreter T0
 add_library(vortex_interp STATIC

@@ -306,6 +306,32 @@ target_link_libraries(test_versioned_cache PRIVATE
 )
 add_test(NAME test_versioned_cache COMMAND test_versioned_cache)
 
+# test_regalloc_upgrade: loop-boundary splitting, rematerialization
+add_executable(test_regalloc_upgrade
+    unit/test_regalloc_upgrade.c
+)
+target_link_libraries(test_regalloc_upgrade PRIVATE
+    vortex_test_framework
+    vortex_lower
+    vortex_ir
+    vortex_runtime
+    m
+)
+add_test(NAME test_regalloc_upgrade COMMAND test_regalloc_upgrade)
+
+# test_safepoint_manager: thread-safe GC safepoint coordination
+add_executable(test_safepoint_manager
+    unit/test_safepoint_manager.c
+)
+target_link_libraries(test_safepoint_manager PRIVATE
+    vortex_test_framework
+    vortex_runtime
+    m
+    pthread
+)
+add_test(NAME test_safepoint_manager COMMAND test_safepoint_manager)
+set_tests_properties(test_safepoint_manager PROPERTIES TIMEOUT 30)
+
 # ---- Stress tests (1000 tests) ----
 
 # test_stress_runtime: Arena, Object, Type System, Bytecode, GC (200 tests)

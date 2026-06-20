@@ -2656,20 +2656,8 @@ static void resolve_branch_targets(vtx_inst_stream_t *stream,
             if (inst->opcode == VTX_X86_JMP && sched_blk->succ_count > 0) {
                 inst->operands[0] = sched_blk->succ_blocks[0];
             } else if (inst->opcode == VTX_X86_JCC) {
-                /* For conditional branches, the JCC should jump to the
-                 * "taken" (true) successor, and fall through to the
-                 * "not taken" (false) successor.
-                 *
-                 * Convention: the fall-through block is the next block
-                 * in schedule order (b+1). So the JCC target should be
-                 * the successor that is NOT the next block.
-                 *
-                 * If both successors are different from b+1, or if there's
-                 * only one successor, we default to succ_blocks[0].
-                 */
                 if (sched_blk->succ_count >= 2) {
                     uint32_t next_block = b + 1;
-                    /* Jump to the successor that is NOT the fall-through */
                     if (sched_blk->succ_blocks[0] == next_block) {
                         inst->operands[0] = sched_blk->succ_blocks[1];
                     } else {

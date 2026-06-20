@@ -279,4 +279,71 @@ uint32_t vtx_regalloc_live_regs_at_position(
     vtx_nodeid_t *out_nodeids,
     uint32_t max_entries);
 
+/* ========================================================================== */
+/* Loop-boundary splitting (audit #5)                                          */
+/* ========================================================================== */
+
+/**
+ * Split live intervals at loop boundaries.
+ *
+ * Audit priority #5: "Split live ranges at loop boundaries."
+ *
+ * When a live interval spans a loop boundary (enters or exits a loop),
+ * splitting it at the boundary allows the loop body to use a different
+ * register than the loop preheader/postheader. This reduces register
+ * pressure inside the loop, which is where it matters most.
+ *
+ * This function scans all live intervals and splits any that cross a
+ * loop boundary. The loop boundaries are determined from the schedule's
+ * loop header information.
+ *
+ * @param result   Register allocation result (intervals will be modified)
+ * @param stream   Instruction stream (for loop boundary positions)
+ * @param arena    Arena for new interval allocations
+ * @return         Number of intervals split
+ */
+uint32_t vtx_regalloc_split_at_loop_boundaries(
+    vtx_regalloc_result_t *result,
+    const vtx_inst_stream_t *stream,
+    vtx_arena_t *arena);
+
+/* ========================================================================== */
+/* Rematerialization (audit #5)                                                */
+/* ========================================================================== */
+
+/**
+ * Check if a vreg is a candidate for rematerialization.
+ *
+ * Audit priority #5: "Rematerialization of constants instead of spilling."
+ *
+ * Instead of spilling a value to memory and reloading it, we can
+ * sometimes just recompute it. This is cheaper for:
+ *   - Constants: `mov reg, imm` is 1 instruction, vs. spill+reload = 2+
+ *   - Simple arithmetic: `lea reg, [base+disp]` is 1 instruction
+ *
+ * This function checks if the vreg's defining instruction is a simple
+ * constant load or LEA that can be rematerialized.
+ *
+ * @param stream   Instruction stream
+ * @param vreg     Virtual register to check
+ * @return         true if the vreg can be rematerialized
+ */
+bool vtx_regalloc_can_rematerialize(
+    const vtx_inst_stream_t *stream,
+    uint32_t vreg);
+
+/**
+ * Get the rematerialization cost for a vreg.
+ *
+ * Returns the number of instructions needed to rematerialize the value.
+ * Lower is better. Returns UINT32_MAX if rematerialization is not possible.
+ *
+ * @param stream   Instruction stream
+ * @param vreg     Virtual register to check
+ * @return         Instruction count, or UINT32_MAX
+ */
+uint32_t vtx_regalloc_rematerialize_cost(
+    const vtx_inst_stream_t *stream,
+    uint32_t vreg);
+
 #endif /* VORTEX_LOWER_REGALLOC_H */

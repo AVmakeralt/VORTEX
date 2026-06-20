@@ -1098,3 +1098,165 @@ vtx_nodeid_t vtx_regalloc_node_at_position(
 
     return VTX_NODEID_INVALID;
 }
+
+/* ========================================================================== */
+/* Loop-boundary splitting (audit #5)                                          */
+/* ========================================================================== */
+
+uint32_t vtx_regalloc_split_at_loop_boundaries(
+    vtx_regalloc_result_t *result,
+    const vtx_inst_stream_t *stream,
+    vtx_arena_t *arena)
+{
+    if (result == NULL || stream == NULL || arena == NULL) return 0;
+
+    /* Identify loop boundary instruction positions.
+     * A loop boundary is the first instruction of a loop header block
+     * (where the loop begins) and the last instruction of a loop latch
+     * (where the loop ends/back-edges).
+     *
+     * We use the schedule's loop_depth information to find these positions.
+     * If the schedule is not available, we can't split at loop boundaries. */
+    if (stream->schedule == NULL) return 0;
+
+    const vtx_schedule_t *sched = stream->schedule;
+    uint32_t split_count = 0;
+
+    /* For each live interval, check if it crosses a loop boundary.
+     * If so, split it at the boundary position. */
+    for (uint32_t i = 0; i < result->interval_count; i++) {
+        vtx_live_interval_t *interval = &result->intervals[i];
+        if (interval->is_spilled) continue;
+        if (interval->split_parent != NULL) continue;  /* already a child */
+
+        /* Check each schedule block for loop headers.
+         * A loop header block has loop_depth > 0 and is marked is_loop_header.
+         * The first instruction position of a loop header block is a
+         * loop boundary. */
+        for (uint32_t b = 0; b < sched->count; b++) {
+            const vtx_schedule_block_t *blk = &sched->blocks[b];
+            if (!blk->is_loop_header) continue;
+
+            /* Find the instruction position range for this block.
+             * We approximate: each block's instructions are in the stream's
+             * blocks[b] range. The first instruction position is the
+             * start of that block's instruction range. */
+            if (b >= stream->block_count) continue;
+            const vtx_inst_block_t *inst_blk = &stream->blocks[b];
+            if (inst_blk->inst_count == 0) continue;
+
+            /* The loop boundary position is the first instruction of the
+             * loop header block. We use the block's global instruction
+             * offset (computed by summing previous blocks' inst counts). */
+            uint32_t loop_boundary_pos = 0;
+            for (uint32_t pb = 0; pb < b; pb++) {
+                loop_boundary_pos += stream->blocks[pb].inst_count;
+            }
+
+            /* Check if this interval spans the loop boundary.
+             * interval->start < loop_boundary_pos <= interval->end
+             * means the interval is live across the loop entry. */
+            if (interval->start < loop_boundary_pos &&
+                interval->end >= loop_boundary_pos &&
+                loop_boundary_pos > interval->start) {
+
+                /* Split the interval at the loop boundary. */
+                vtx_live_interval_t *child = vtx_regalloc_split_interval(
+                    interval, loop_boundary_pos, arena);
+                if (child != NULL) {
+                    split_count++;
+                    /* The child interval will be allocated separately,
+                     * potentially getting a different register inside the
+                     * loop. This reduces register pressure in the loop body. */
+                }
+            }
+        }
+    }
+
+    return split_count;
+}
+
+/* ========================================================================== */
+/* Rematerialization (audit #5)                                                */
+/* ========================================================================== */
+
+bool vtx_regalloc_can_rematerialize(
+    const vtx_inst_stream_t *stream,
+    uint32_t vreg)
+{
+    if (stream == NULL) return false;
+
+    /* Scan all instructions to find the one that defines this vreg.
+     * A vreg is rematerializable if its defining instruction is:
+     *   - MOV reg, imm64  (constant load — 1 instruction to recompute)
+     *   - MOV reg, imm32  (small constant — 1 instruction)
+     *   - LEA reg, [base + disp]  (address computation — 1 instruction)
+     *   - XOR reg, reg  (zero — 1 instruction, cheaper than reload)
+     *
+     * These are all single-instruction definitions that are cheaper to
+     * recompute than to spill+reload (which costs 2+ instructions plus
+     * a memory access). */
+    for (uint32_t b = 0; b < stream->block_count; b++) {
+        const vtx_inst_block_t *blk = &stream->blocks[b];
+        for (uint32_t i = 0; i < blk->inst_count; i++) {
+            const vtx_inst_t *inst = &blk->insts[i];
+            if (inst->opnd_kinds[0] != VTX_OPND_VREG) continue;
+            if (inst->operands[0] != vreg) continue;
+
+            /* This instruction defines the vreg. Check if it's rematerializable. */
+            switch (inst->opcode) {
+                case VTX_X86_MOV:
+                    /* MOV reg, imm — constant load. Rematerializable if
+                     * the immediate fits in the instruction. */
+                    if (inst->flags & VTX_INST_FLAG_HAS_IMM) {
+                        return true;
+                    }
+                    /* MOV reg, reg — register copy. NOT rematerializable
+                     * (we'd need the source reg's value). */
+                    break;
+
+                case VTX_X86_LEA:
+                    /* LEA reg, [base + disp] — address computation.
+                     * Rematerializable if base is a register we can access. */
+                    return true;
+
+                case VTX_X86_XOR:
+                    /* XOR reg, reg — zero. Cheapest rematerialization. */
+                    if (inst->opnd_kinds[1] == VTX_OPND_VREG &&
+                        inst->operands[1] == vreg) {
+                        return true;  /* XOR reg, reg = 0 */
+                    }
+                    break;
+
+                default:
+                    break;
+            }
+            /* Found the defining instruction but it's not rematerializable. */
+            return false;
+        }
+    }
+    return false;
+}
+
+uint32_t vtx_regalloc_rematerialize_cost(
+    const vtx_inst_stream_t *stream,
+    uint32_t vreg)
+{
+    if (!vtx_regalloc_can_rematerialize(stream, vreg)) {
+        return UINT32_MAX;
+    }
+
+    /* All rematerializable instructions are single instructions:
+     *   MOV reg, imm  = 1 instruction
+     *   LEA reg, [mem] = 1 instruction
+     *   XOR reg, reg  = 1 instruction
+     *
+     * Compare with spill+reload:
+     *   MOV [stack], reg  = 1 instruction + memory write
+     *   MOV reg, [stack]  = 1 instruction + memory read
+     *   Total = 2 instructions + 2 memory accesses
+     *
+     * So rematerialization cost = 1, spill cost = 2 + memory.
+     * Rematerialization is always cheaper for these cases. */
+    return 1;
+}
