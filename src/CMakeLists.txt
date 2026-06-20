@@ -95,6 +95,7 @@ add_library(vortex_deopt STATIC
     deopt/deoptless.c
     deopt/side_table.c
     deopt/stack_walk.c
+    deopt/rate_limit.c
 )
 target_include_directories(vortex_deopt PUBLIC ${VORTEX_INCLUDE_DIRS})
 target_link_libraries(vortex_deopt PUBLIC vortex_runtime vortex_ir)

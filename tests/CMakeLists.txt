@@ -272,6 +272,17 @@ target_link_libraries(test_tier_equivalence PRIVATE
 add_test(NAME test_tier_equivalence COMMAND test_tier_equivalence)
 set_tests_properties(test_tier_equivalence PROPERTIES TIMEOUT 120)
 
+# test_deopt_rate_limit: per-site, batcher, and global budget primitives
+add_executable(test_deopt_rate_limit
+    unit/test_deopt_rate_limit.c
+)
+target_link_libraries(test_deopt_rate_limit PRIVATE
+    vortex_test_framework
+    vortex_deopt
+    m
+)
+add_test(NAME test_deopt_rate_limit COMMAND test_deopt_rate_limit)
+
 # ---- Stress tests (1000 tests) ----
 
 # test_stress_runtime: Arena, Object, Type System, Bytecode, GC (200 tests)
