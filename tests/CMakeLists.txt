@@ -294,6 +294,18 @@ target_link_libraries(test_deopt_coordinator PRIVATE
 )
 add_test(NAME test_deopt_coordinator COMMAND test_deopt_coordinator)
 
+# test_versioned_cache: N+1 versioning, patching, reclamation
+add_executable(test_versioned_cache
+    unit/test_versioned_cache.c
+)
+target_link_libraries(test_versioned_cache PRIVATE
+    vortex_test_framework
+    vortex_codecache
+    m
+    pthread
+)
+add_test(NAME test_versioned_cache COMMAND test_versioned_cache)
+
 # ---- Stress tests (1000 tests) ----
 
 # test_stress_runtime: Arena, Object, Type System, Bytecode, GC (200 tests)

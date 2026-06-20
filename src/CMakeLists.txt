@@ -138,6 +138,7 @@ add_library(vortex_codecache STATIC
     codecache/install.c
     codecache/evict.c
     codecache/invalidate.c
+    codecache/versioned.c
 )
 target_include_directories(vortex_codecache PUBLIC ${VORTEX_INCLUDE_DIRS})
 target_link_libraries(vortex_codecache PUBLIC vortex_runtime vortex_lower)
