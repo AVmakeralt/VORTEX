@@ -241,6 +241,37 @@ target_link_libraries(test_assembler_prog PRIVATE
 )
 add_test(NAME test_assembler_prog COMMAND test_assembler_prog)
 
+# test_tier_equivalence: 30+ programs, T0 interpreter == T2 JIT result
+add_executable(test_tier_equivalence
+    integration/test_tier_equivalence.c
+)
+target_link_libraries(test_tier_equivalence PRIVATE
+    vortex_test_framework
+    -Wl,--start-group
+    vortex_baseline
+    vortex_codecache
+    vortex_compile
+    vortex_interp
+    vortex_runtime
+    vortex_ir
+    vortex_guard
+    vortex_deopt
+    vortex_profile
+    vortex_lower
+    vortex_inliner
+    vortex_pea
+    vortex_sota
+    vortex_midtier
+    vortex_trace
+    vortex_region
+    vortex_assembler
+    -Wl,--end-group
+    m
+    pthread
+)
+add_test(NAME test_tier_equivalence COMMAND test_tier_equivalence)
+set_tests_properties(test_tier_equivalence PROPERTIES TIMEOUT 120)
+
 # ---- Stress tests (1000 tests) ----
 
 # test_stress_runtime: Arena, Object, Type System, Bytecode, GC (200 tests)
