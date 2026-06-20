@@ -283,6 +283,17 @@ target_link_libraries(test_deopt_rate_limit PRIVATE
 )
 add_test(NAME test_deopt_rate_limit COMMAND test_deopt_rate_limit)
 
+# test_deopt_coordinator: integration of rate_limit into deopt decision path
+add_executable(test_deopt_coordinator
+    unit/test_deopt_coordinator.c
+)
+target_link_libraries(test_deopt_coordinator PRIVATE
+    vortex_test_framework
+    vortex_deopt
+    m
+)
+add_test(NAME test_deopt_coordinator COMMAND test_deopt_coordinator)
+
 # ---- Stress tests (1000 tests) ----
 
 # test_stress_runtime: Arena, Object, Type System, Bytecode, GC (200 tests)
