@@ -347,6 +347,23 @@ static uint32_t coalesce_copies(vtx_inst_stream_t *stream,
             if (di->is_fixed && si->is_fixed && di->fixed_reg != si->fixed_reg)
                 continue;
 
+            /* BUGFIX (audit #3, tier-equivalence): Don't coalesce if EITHER
+             * vreg is fixed to a physical register. A fixed vreg (e.g. RAX
+             * for Return's result) MUST keep its physical register. Coalescing
+             * it with a non-fixed vreg causes the fixed vreg to lose its
+             * register assignment (it gets coalesce_src set and is skipped
+             * in the linear scan). The emitter then can't find a phys reg
+             * for the fixed vreg, silently skipping the MOV instruction.
+             *
+             * This was the root cause of Constants being missing from native
+             * code: the Return's `MOV RAX, const_vreg` was coalesced, causing
+             * the RAX vreg to be skipped. The emitter saw RAX vreg as
+             * unassigned (0xFF) with no spill slot, and silently dropped the
+             * MOV. The Constant's value was never loaded, and the Return
+             * returned whatever was in RAX (garbage or the raw arg). */
+            if (di->is_fixed || si->is_fixed)
+                continue;
+
             /* Check for interval overlap — safe to coalesce if no overlap */
             bool overlaps = !(di->end < si->start || si->end < di->start);
             if (overlaps) continue;

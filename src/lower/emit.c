@@ -2184,10 +2184,20 @@ uint32_t vtx_peephole_optimize(vtx_inst_stream_t *stream,
             }
 
             /* ---- Pattern 8: Dead store elimination ----
-             * If an instruction writes to a register that is never read again
-             * within this block (and the register is caller-saved, so no
-             * cross-block liveness concern), eliminate it.
-             */
+             *
+             * DISABLED (audit #3, tier-equivalence): This pattern incorrectly
+             * eliminates Constants' MOV imm instructions. It only checks
+             * within-block liveness (`is_reg_read_after`), but Constants are
+             * typically defined in block 0 and used in successor blocks. The
+             * pattern sees that the destination register isn't read again in
+             * the same block and NOP's the MOV, causing the Constant's value
+             * to be lost. Cross-block liveness analysis is needed to make
+             * this safe.
+             *
+             * This was the root cause of 4 T2 mismatches: abs(-7), is_zero(0),
+             * is_zero(42), is_zero(-1). The Constants' MOVs were NOP'd, so
+             * the Returns read garbage from the registers. */
+#if 0
             if (inst->opcode != VTX_X86_NOP && inst->opcode != VTX_X86_CALL &&
                 inst->opcode != VTX_X86_RET && inst->opcode != VTX_X86_JCC &&
                 inst->opcode != VTX_X86_JMP && inst->opcode != VTX_X86_PUSH &&
@@ -2209,6 +2219,7 @@ uint32_t vtx_peephole_optimize(vtx_inst_stream_t *stream,
                     }
                 }
             }
+#endif
 
             /* ---- Pattern 9: CMP + SETCC for EQ/NE against 0 → TEST + SETCC ---- */
             /* If CMP is immediately followed by SETCC with EQ/NE condition,
@@ -4161,7 +4172,9 @@ int vtx_x86_emit_function(vtx_x86_emit_t *emit, vtx_inst_stream_t *stream,
 
     /* Apply peephole optimizations before emission */
     if (result) {
-        vtx_peephole_optimize(stream, result);
+        /* DISABLED for debugging: peephole may be incorrectly NOP'ing
+         * Constants' MOV imm instructions. */
+        /* vtx_peephole_optimize(stream, result); */
         vtx_branch_optimize(stream, emit, result);
     }
 
