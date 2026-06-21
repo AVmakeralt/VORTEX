@@ -2290,7 +2290,29 @@ int vtx_branch_optimize(vtx_inst_stream_t *stream, vtx_x86_emit_t *emit,
 {
     if (!stream) return 0;
 
-    /* ---- Phase 1: Invert JCC + JMP to eliminate jumps over jumps ---- */
+    /* ---- Phase 1: Invert JCC + JMP to eliminate jumps over jumps ----
+     *
+     * Pattern: JCC target1 followed by JMP target2
+     * Where target1 is the next block (b+1).
+     *
+     * Before:
+     *   JCC cond → target1 (= next block b+1)
+     *   JMP target2
+     *
+     * After (inverted):
+     *   JCC !cond → target2
+     *   ; fall through to target1 (next block b+1)
+     *   (JMP removed)
+     *
+     * This is correct because:
+     *   - Originally: if cond → jump to target1 (next block); else → JMP target2
+     *   - After: if !cond → jump to target2; else → fall through to target1 (next block)
+     *   - Both paths reach the same blocks with the same conditions.
+     *
+     * Only apply when target1 == b+1 (the JCC target is the next block).
+     * If target1 is NOT the next block, inverting would require a JMP to
+     * target1 anyway, so there's no benefit.
+     */
     for (uint32_t b = 0; b < stream->block_count; b++) {
         vtx_inst_block_t *blk = &stream->blocks[b];
 
@@ -2298,21 +2320,32 @@ int vtx_branch_optimize(vtx_inst_stream_t *stream, vtx_x86_emit_t *emit,
             vtx_inst_t *inst = &blk->insts[i];
             vtx_inst_t *next = &blk->insts[i + 1];
 
-            /* Pattern: JCC target1 followed by JMP target2
-             * Invert to: JCC(inverted) target2 followed by... (target1 becomes fall-through)
-             * This eliminates one jump when target1 is the next block.
-             *
-             * BUGFIX (audit #3): DISABLED — the inversion was producing wrong
-             * branch directions. The JCC cond was set by the If node (NE for
-             * if_true, EQ for if_false). Inverting it without also updating
-             * the branch resolver's target assignment caused branches to go
-             * in the wrong direction. The branch resolver already picks the
-             * correct target; inverting the cond after that breaks correctness.
-             *
-             * A proper fix would re-run the branch resolver after inversion,
-             * or compute the inverted target correctly. For now, disable
-             * this optimization to preserve correctness. */
-            (void)inst; (void)next;
+            if (inst->opcode == VTX_X86_JCC && next->opcode == VTX_X86_JMP &&
+                (inst->flags & VTX_INST_FLAG_HAS_COND) &&
+                inst->opnd_kinds[0] == VTX_OPND_LABEL &&
+                next->opnd_kinds[0] == VTX_OPND_LABEL) {
+
+                /* Only invert if the JCC targets the next block (b+1).
+                 * In that case, the JCC can fall through to b+1 instead,
+                 * and the inverted JCC takes the JMP's target. */
+                uint32_t jcc_target = inst->operands[0];
+                uint32_t next_block = b + 1;
+
+                if (jcc_target == next_block) {
+                    /* Invert the condition */
+                    vtx_cond_t inverted_cond = vtx_cond_negate(inst->cond);
+                    inst->cond = inverted_cond;
+
+                    /* Take the JMP's target */
+                    inst->operands[0] = next->operands[0];
+
+                    /* Remove the JMP (convert to NOP) */
+                    next->opcode = VTX_X86_NOP;
+                    next->flags = 0;
+                    memset(next->opnd_kinds, 0, sizeof(next->opnd_kinds));
+                    memset(next->operands, 0, sizeof(next->operands));
+                }
+            }
         }
     }
 

@@ -631,6 +631,19 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
                     active[j]->is_spilled = true;
                     active[j]->spill_slot = next_spill_slot++;
                     active[j]->phys_reg = 0xFF;
+
+                    /* BUGFIX (audit #3, tier-equivalence): Update the result
+                     * mapping so the emitter knows this vreg is spilled.
+                     * Without this, result->vreg_to_phys[evicted] still has
+                     * the old register, and the apply function replaces the
+                     * VREG operand with the old PREG. The emitter then reads
+                     * from the wrong register (the one now used by the fixed
+                     * vreg), producing garbage. */
+                    if (active[j]->vreg < result->vreg_to_phys_count) {
+                        result->vreg_to_phys[active[j]->vreg] = 0xFF;
+                        result->vreg_to_spill[active[j]->vreg] = active[j]->spill_slot;
+                    }
+
                     /* Remove from active */
                     for (uint32_t k = j; k < active_count - 1; k++) {
                         active[k] = active[k + 1];

@@ -1221,11 +1221,63 @@ int vtx_schedule_run(vtx_graph_t *graph, vtx_arena_t *arena, vtx_schedule_t *sch
         }
     }
 
+    /* Phase 8.5: Move control flow terminators to the end of each block.
+     *
+     * BUGFIX (audit #3, tier-equivalence): Without this, Constants and other
+     * data nodes placed in a block AFTER a control flow node (If, Goto, Return)
+     * would be emitted after the JCC/RET instruction. When the JCC jumps or
+     * the RET returns, those data nodes are never executed, leaving their
+     * vregs uninitialized. This caused the 8 T2 mismatches in branch-heavy
+     * programs: the Constants in successor blocks were placed in block 0
+     * after the If, so when the JCC jumped, the Constants' MOV instructions
+     * were skipped, and the Return read garbage.
+     *
+     * The fix: after the dependency sort, move all control flow terminators
+     * to the end of their block's node list. This ensures all data nodes
+     * (Constants, Parameters, arithmetic) are emitted before any branch. */
+    for (uint32_t bi = 0; bi < schedule->count; bi++) {
+        vtx_schedule_block_t *blk = &schedule->blocks[bi];
+        if (blk->node_count <= 1) continue;
+
+        /* Collect non-terminator nodes and terminator nodes separately */
+        vtx_nodeid_t *non_term = (vtx_nodeid_t *)malloc(blk->node_count * sizeof(vtx_nodeid_t));
+        vtx_nodeid_t *term = (vtx_nodeid_t *)malloc(blk->node_count * sizeof(vtx_nodeid_t));
+        if (!non_term || !term) { free(non_term); free(term); continue; }
+        uint32_t non_term_count = 0;
+        uint32_t term_count = 0;
+
+        for (uint32_t i = 0; i < blk->node_count; i++) {
+            vtx_nodeid_t nid = blk->nodes[i];
+            if (nid >= node_count) { non_term[non_term_count++] = nid; continue; }
+            vtx_node_t *node = &nt->nodes[nid];
+            /* Control flow terminators: If, Goto, Return, Unwind, LoopEnd.
+             * These must come last in the block. */
+            if (node->opcode == VTX_OP_If ||
+                node->opcode == VTX_OP_Goto ||
+                node->opcode == VTX_OP_Return ||
+                node->opcode == VTX_OP_Unwind ||
+                node->opcode == VTX_OP_LoopEnd) {
+                term[term_count++] = nid;
+            } else {
+                non_term[non_term_count++] = nid;
+            }
+        }
+
+        /* Rebuild: non-terminators first, then terminators */
+        uint32_t idx = 0;
+        for (uint32_t i = 0; i < non_term_count; i++) {
+            blk->nodes[idx++] = non_term[i];
+        }
+        for (uint32_t i = 0; i < term_count; i++) {
+            blk->nodes[idx++] = term[i];
+        }
+
+        free(non_term);
+        free(term);
+    }
+
     return 0;
 }
-
-/* ========================================================================== */
-/* Schedule destruction                                                        */
 /* ========================================================================== */
 
 void vtx_schedule_destroy(vtx_schedule_t *schedule)
