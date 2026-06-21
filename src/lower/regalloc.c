@@ -521,6 +521,7 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
             if (intervals[v].start <= intervals[v].end &&
                 intervals[v].coalesce_src == VTX_VREG_INVALID) {
                 valid_count++;
+            } else {
             }
         }
     }
