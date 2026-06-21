@@ -1832,47 +1832,25 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
                 break;
             }
         }
-        /* BUGFIX (audit #3): The condition for If is typically an SMI
-         * (from a Cmp result or a loaded local). The interpreter's
-         * is_truthy() checks vtx_smi_value(v) != 0, NOT the raw bits.
+        /* Test truthiness by comparing the raw SMI value against SMI(0).
          *
-         * The old code did TEST cond_vreg, 1 — which only checks bit 0.
-         * For SMI(5) = 0x7FF8000000000028, bit 0 is 0 (the low 3 bits
-         * are always 0 in an SMI due to the 3-bit tag). So TEST 1 always
-         * gives 0 for SMIs, meaning if_true ALWAYS falls through and
-         * if_false ALWAYS branches. That's why is_zero(), sign(), and
-         * classify() all returned wrong values.
+         * The interpreter's is_truthy() returns false for SMI(0) and true
+         * for all other SMIs. SMI(0) = 0x7FF8000000000000.
          *
-         * Correct: compare the raw 64-bit value against SMI(0) =
-         * 0x7FF8000000000000. If equal, the SMI value is 0 (falsy).
-         * Otherwise, it's truthy.
-         *
-         * For non-SMI conditions (booleans, etc.), this still works:
-         * VTX_VALUE_FALSE = 0x7FF8000000000018 (bool tag), which is != SMI(0),
-         * so it's truthy. Hmm, that's wrong for false.
-         *
-         * Actually, the safest approach: untag the SMI and TEST the raw
-         * integer. This matches the interpreter's is_truthy() for SMIs.
-         * For booleans, the Cmp node already produces 0/1, so we need
-         * to handle that case too. For now, we assume the condition is
-         * always an SMI (which is the common case in our test programs).
-         *
-         * The proper fix is to test the untagged value:
-         *   MOV tmp, cond
-         *   SHL tmp, 13   ; move SMI sign bit to bit 63
-         *   SAR tmp, 16   ; sign-extend to raw int64
-         *   TEST tmp, tmp ; zero if SMI(0), non-zero otherwise
+         * For if_true (cond=NE): JNE jumps when cond != SMI(0) (truthy)
+         * For if_false (cond=EQ): JE jumps when cond == SMI(0) (falsy)
          */
         if (cond_vreg != VTX_VREG_INVALID) {
-            uint32_t cond_untagged = vtx_isel_alloc_vreg(stream, arena);
-            emit_smi_untag(stream, block, cond_untagged, cond_vreg, node_id, arena);
-            vtx_inst_t test = make_rr_inst(VTX_X86_TEST, cond_untagged, cond_untagged, node_id);
-            test.flags |= VTX_INST_FLAG_FUSED; /* P1: mark for fusion */
-            vtx_isel_emit_inst(block, test, arena);
+            uint32_t smi_zero_vreg = vtx_isel_alloc_vreg(stream, arena);
+            vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, smi_zero_vreg,
+                               (int64_t)0x7FF8000000000000ULL, node_id), arena);
+            vtx_inst_t cmp = make_rr_inst(VTX_X86_CMP, cond_vreg, smi_zero_vreg, node_id);
+            cmp.flags |= VTX_INST_FLAG_FUSED;
+            vtx_isel_emit_inst(block, cmp, arena);
         }
         vtx_cond_t jcc_cond = (node->cond != VTX_COND_NEVER) ? node->cond : VTX_COND_NE;
         vtx_inst_t jcc = make_branch_inst(VTX_X86_JCC, 0, jcc_cond, node_id);
-        jcc.flags |= VTX_INST_FLAG_FUSED; /* P1: mark for fusion */
+        jcc.flags |= VTX_INST_FLAG_FUSED;
         vtx_isel_emit_inst(block, jcc, arena);
         break;
     }

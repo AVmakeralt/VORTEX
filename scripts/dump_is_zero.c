@@ -13,6 +13,7 @@
 #include "ir/graph.h"
 #include "ir/node.h"
 #include "ir/verify.h"
+#include "ir/schedule.h"
 #include "assembler.h"
 
 int main(void) {
@@ -56,6 +57,22 @@ int main(void) {
     if (brc == 0) {
         vtx_graph_print(&graph);
         printf("\nverify: %d\n", vtx_verify_graph(&graph));
+
+        /* Schedule and dump */
+        vtx_schedule_t schedule;
+        memset(&schedule, 0, sizeof(schedule));
+        int src = vtx_schedule_run(&graph, &arena, &schedule);
+        printf("\nschedule_run rc=%d, blocks=%u\n", src, schedule.count);
+        if (src == 0) {
+            for (uint32_t b = 0; b < schedule.count; b++) {
+                vtx_schedule_block_t *blk = &schedule.blocks[b];
+                printf("Block %u: region=N%u, succ_count=%u, pred_count=%u, is_loop_header=%d\n",
+                       b, blk->region_node, blk->succ_count, blk->pred_count, blk->is_loop_header);
+                for (uint32_t s = 0; s < blk->succ_count; s++) {
+                    printf("  succ[%u] = block %u\n", s, blk->succ_blocks[s]);
+                }
+            }
+        }
     }
     vtx_arena_destroy(&arena);
 

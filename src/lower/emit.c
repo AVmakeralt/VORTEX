@@ -2300,28 +2300,19 @@ int vtx_branch_optimize(vtx_inst_stream_t *stream, vtx_x86_emit_t *emit,
 
             /* Pattern: JCC target1 followed by JMP target2
              * Invert to: JCC(inverted) target2 followed by... (target1 becomes fall-through)
-             * This eliminates one jump when target1 is the next block. */
-            if (inst->opcode == VTX_X86_JCC && next->opcode == VTX_X86_JMP &&
-                (inst->flags & VTX_INST_FLAG_HAS_COND) &&
-                inst->opnd_kinds[0] == VTX_OPND_LABEL &&
-                next->opnd_kinds[0] == VTX_OPND_LABEL) {
-
-                /* Invert the condition and swap targets */
-                uint8_t old_x86_cond = vtx_cond_to_x86(inst->cond);
-                uint8_t new_x86_cond = invert_x86_cond(old_x86_cond);
-
-                /* Convert the inverted x86 cond back to vtx_cond */
-                /* We just update the condition code directly */
-                vtx_cond_t inverted_cond = vtx_cond_negate(inst->cond);
-                inst->cond = inverted_cond;
-                inst->operands[0] = next->operands[0]; /* Take the JMP's target */
-
-                /* Remove the JMP (convert to NOP) */
-                next->opcode = VTX_X86_NOP;
-                next->flags = 0;
-                memset(next->opnd_kinds, 0, sizeof(next->opnd_kinds));
-                memset(next->operands, 0, sizeof(next->operands));
-            }
+             * This eliminates one jump when target1 is the next block.
+             *
+             * BUGFIX (audit #3): DISABLED — the inversion was producing wrong
+             * branch directions. The JCC cond was set by the If node (NE for
+             * if_true, EQ for if_false). Inverting it without also updating
+             * the branch resolver's target assignment caused branches to go
+             * in the wrong direction. The branch resolver already picks the
+             * correct target; inverting the cond after that breaks correctness.
+             *
+             * A proper fix would re-run the branch resolver after inversion,
+             * or compute the inverted target correctly. For now, disable
+             * this optimization to preserve correctness. */
+            (void)inst; (void)next;
         }
     }
 
