@@ -684,7 +684,7 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
             }
 
             /* Update result mapping */
-            result->vreg_to_phys[current->vreg] = fixed;
+            result->vreg_to_phys[current->vreg] = fixed; result->vreg_to_spill[current->vreg] = VTX_NO_SPILL;
             continue;
         }
 
@@ -729,7 +729,7 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
             *free_regs &= ~reg_bit;
 
             /* Update result mapping */
-            result->vreg_to_phys[current->vreg] = reg;
+            result->vreg_to_phys[current->vreg] = reg; result->vreg_to_spill[current->vreg] = VTX_NO_SPILL;
 
             /* Add to active */
             if (active_count < active_capacity) {
@@ -804,7 +804,7 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
                         uint8_t reg = spill->phys_reg;
                         current->phys_reg = reg;
                         *free_regs &= ~reg_bit;
-                        result->vreg_to_phys[current->vreg] = reg;
+                        result->vreg_to_phys[current->vreg] = reg; result->vreg_to_spill[current->vreg] = VTX_NO_SPILL;
 
                         /* Replace in active list */
                         active[spill_idx] = current;
@@ -815,7 +815,7 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
                         spill->spill_slot = next_spill_slot++;
                         result->vreg_to_phys[spill->vreg] = 0xFF;
                         result->vreg_to_spill[spill->vreg] = spill->spill_slot;
-                        result->vreg_to_phys[current->vreg] = current->phys_reg;
+                        result->vreg_to_phys[current->vreg] = current->phys_reg; result->vreg_to_spill[current->vreg] = VTX_NO_SPILL;
                         active[spill_idx] = current;
                     }
                 } else {
@@ -826,7 +826,7 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
                     spill->spill_slot = next_spill_slot++;
                     result->vreg_to_phys[spill->vreg] = 0xFF;
                     result->vreg_to_spill[spill->vreg] = spill->spill_slot;
-                    result->vreg_to_phys[current->vreg] = current->phys_reg;
+                    result->vreg_to_phys[current->vreg] = current->phys_reg; result->vreg_to_spill[current->vreg] = VTX_NO_SPILL;
                     active[spill_idx] = current;
                 }
             } else {

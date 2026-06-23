@@ -1038,6 +1038,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             /* General constant: untag lhs, IMUL by const, retag */
             {
                 uint32_t untagged = vtx_isel_alloc_vreg(stream, arena);
+                uint32_t dst = ensure_node_vreg(stream, node_id, arena);
                 emit_smi_untag(stream, block, untagged, lhs_vreg, node_id, arena);
                 if (rhs_const >= INT32_MIN && rhs_const <= INT32_MAX) {
                     vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_IMUL, untagged, (int32_t)rhs_const, node_id), arena);
@@ -1046,13 +1047,11 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
                     vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, const_vreg, rhs_const, node_id), arena);
                     vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_IMUL, untagged, const_vreg, node_id), arena);
                 }
-                /* BUGFIX: retag the untagged value in-place, then map dst to
-                 * the same vreg. If we do MOV dst, untagged; retag(dst), the
-                 * regalloc may assign dst and untagged to the same phys reg,
-                 * making the MOV a no-op. The retag then shifts the IMUL
-                 * result, producing wrong values (e.g. 14*7=98 becomes 98<<3=784). */
-                emit_smi_retag(stream, block, untagged, node_id, arena);
-                vtx_isel_map_node_vreg(stream, node_id, untagged, arena);
+                /* Copy IMUL result to dst, then retag dst. Using separate
+                 * vregs ensures the regalloc assigns different registers,
+                 * preventing the retag from clobbering the IMUL result. */
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, untagged, node_id), arena);
+                emit_smi_retag(stream, block, dst, node_id, arena);
             }
             break;
         }
@@ -1125,16 +1124,24 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         {
             uint32_t lhs_untagged = vtx_isel_alloc_vreg(stream, arena);
             uint32_t rhs_untagged = vtx_isel_alloc_vreg(stream, arena);
-            uint32_t dst = ensure_node_vreg(stream, node_id, arena);
 
             /* Untag both operands */
             emit_smi_untag(stream, block, lhs_untagged, lhs_vreg, node_id, arena);
             emit_smi_untag(stream, block, rhs_untagged, rhs_vreg, node_id, arena);
 
-            /* CQO + IDIV: RDX:RAX = sign-extend(RAX), then IDIV rhs */
+            /* CQO + IDIV: RDX:RAX = sign-extend(RAX), then IDIV rhs.
+             *
+             * BUGFIX: CQO clobbers RDX. If rhs_untagged is in RDX, it gets
+             * destroyed. We must move rhs to a safe register (not RAX/RDX)
+             * before CQO. We use a fresh vreg that the regalloc will assign
+             * to a safe register. */
             uint32_t rax_vreg = vtx_isel_alloc_vreg_fixed(stream, arena, 0);
             uint32_t rdx_vreg = vtx_isel_alloc_vreg_fixed(stream, arena, 2);
             if (rax_vreg == VTX_VREG_INVALID || rdx_vreg == VTX_VREG_INVALID) return -1;
+
+            /* Move rhs to a safe register before CQO clobbers RDX */
+            uint32_t rhs_safe = vtx_isel_alloc_vreg(stream, arena);
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, rhs_safe, rhs_untagged, node_id), arena);
 
             vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, rax_vreg, lhs_untagged, node_id), arena);
             vtx_inst_t cqo;
@@ -1147,14 +1154,16 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             memset(&idiv_inst, 0, sizeof(idiv_inst));
             idiv_inst.opcode = VTX_X86_IDIV;
             idiv_inst.opnd_kinds[0] = VTX_OPND_VREG;
-            idiv_inst.operands[0] = rhs_untagged;
+            idiv_inst.operands[0] = rhs_safe;
             idiv_inst.source_node = node_id;
             idiv_inst.flags = VTX_INST_FLAG_CLOBBER_RAX | VTX_INST_FLAG_CLOBBER_RDX;
             vtx_isel_emit_inst(block, idiv_inst, arena);
 
-            /* RAX has the raw quotient. Retag it. */
-            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, rax_vreg, node_id), arena);
-            emit_smi_retag(stream, block, dst, node_id, arena);
+            /* RAX has the raw quotient. Copy to fresh vreg, retag, map dst. */
+            uint32_t div_dst = vtx_isel_alloc_vreg(stream, arena);
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, div_dst, rax_vreg, node_id), arena);
+            emit_smi_retag(stream, block, div_dst, node_id, arena);
+            vtx_isel_map_node_vreg(stream, node_id, div_dst, arena);
             (void)rdx_vreg;
         }
         break;
@@ -1170,16 +1179,20 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         {
             uint32_t lhs_untagged = vtx_isel_alloc_vreg(stream, arena);
             uint32_t rhs_untagged = vtx_isel_alloc_vreg(stream, arena);
-            uint32_t dst = ensure_node_vreg(stream, node_id, arena);
 
             /* Untag both operands */
             emit_smi_untag(stream, block, lhs_untagged, lhs_vreg, node_id, arena);
             emit_smi_untag(stream, block, rhs_untagged, rhs_vreg, node_id, arena);
 
-            /* CQO + IDIV: remainder in RDX */
+            /* CQO + IDIV: remainder in RDX.
+             * BUGFIX: same as Div — move rhs to safe register before CQO. */
             uint32_t rax_vreg = vtx_isel_alloc_vreg_fixed(stream, arena, 0);
             uint32_t rdx_vreg = vtx_isel_alloc_vreg_fixed(stream, arena, 2);
             if (rax_vreg == VTX_VREG_INVALID || rdx_vreg == VTX_VREG_INVALID) return -1;
+
+            /* Move rhs to a safe register before CQO clobbers RDX */
+            uint32_t rhs_safe = vtx_isel_alloc_vreg(stream, arena);
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, rhs_safe, rhs_untagged, node_id), arena);
 
             vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, rax_vreg, lhs_untagged, node_id), arena);
             vtx_inst_t cqo;
@@ -1192,14 +1205,14 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             memset(&idiv_inst, 0, sizeof(idiv_inst));
             idiv_inst.opcode = VTX_X86_IDIV;
             idiv_inst.opnd_kinds[0] = VTX_OPND_VREG;
-            idiv_inst.operands[0] = rhs_untagged;
+            idiv_inst.operands[0] = rhs_safe;
             idiv_inst.source_node = node_id;
             idiv_inst.flags = VTX_INST_FLAG_CLOBBER_RAX | VTX_INST_FLAG_CLOBBER_RDX;
             vtx_isel_emit_inst(block, idiv_inst, arena);
 
-            /* RDX has the raw remainder. Retag it. */
-            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, rdx_vreg, node_id), arena);
-            emit_smi_retag(stream, block, dst, node_id, arena);
+            /* RDX has the raw remainder. Retag in-place and map dst. */
+            emit_smi_retag(stream, block, rdx_vreg, node_id, arena);
+            vtx_isel_map_node_vreg(stream, node_id, rdx_vreg, arena);
             (void)rax_vreg;
         }
         break;
@@ -2700,11 +2713,14 @@ vtx_inst_stream_t *vtx_isel_select(const vtx_schedule_t *schedule,
         inst_blk->block_id = b;
 
         for (uint32_t n = 0; n < sched_blk->node_count; n++) {
+            fprintf(stderr, " %u", sched_blk->nodes[n]);
+        }
+        fprintf(stderr, "\n");
+    
+        for (uint32_t n = 0; n < sched_blk->node_count; n++) {
             vtx_nodeid_t node_id = sched_blk->nodes[n];
             if (select_node(stream, inst_blk, graph, node_id, arena) != 0) {
                 const vtx_node_t *dbg_node = vtx_node_get_const(&graph->node_table, node_id);
-                fprintf(stderr, "[isel] FAILED: block %u, node %u, opcode %s, inputs:",
-                        b, node_id, dbg_node ? vtx_node_opcode_name(dbg_node->opcode) : "NULL");
                 if (dbg_node) {
                     for (uint32_t di = 0; di < dbg_node->input_count; di++) {
                         vtx_nodeid_t dinp = dbg_node->inputs[di];
