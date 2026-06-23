@@ -1046,8 +1046,13 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
                     vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, const_vreg, rhs_const, node_id), arena);
                     vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_IMUL, untagged, const_vreg, node_id), arena);
                 }
-                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, untagged, node_id), arena);
-                emit_smi_retag(stream, block, dst, node_id, arena);
+                /* BUGFIX: retag the untagged value in-place, then map dst to
+                 * the same vreg. If we do MOV dst, untagged; retag(dst), the
+                 * regalloc may assign dst and untagged to the same phys reg,
+                 * making the MOV a no-op. The retag then shifts the IMUL
+                 * result, producing wrong values (e.g. 14*7=98 becomes 98<<3=784). */
+                emit_smi_retag(stream, block, untagged, node_id, arena);
+                vtx_isel_map_node_vreg(stream, node_id, untagged, arena);
             }
             break;
         }

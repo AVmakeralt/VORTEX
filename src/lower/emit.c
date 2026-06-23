@@ -304,6 +304,24 @@ void vtx_x86_emit_imul_rr(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
     vtx_x86_emit_rr(e, 0xAF, 0x0F, dst, src);
 }
 
+/* IMUL r64, imm32: REX.W 69 /r id (7 bytes) or REX.W 6B /r ib (4 bytes for imm8) */
+void vtx_x86_emit_imul_ri(vtx_x86_emit_t *e, uint8_t dst, int32_t imm)
+{
+    int b = reg_hi(dst);
+    emit_rex(e, 1, 0, 0, b);
+    if (imm >= -128 && imm <= 127) {
+        /* IMUL r64, imm8: REX.W 6B /r ib */
+        emit_byte(e, 0x6B);
+        emit_modrm(e, 3, dst & 7, 0);
+        emit_byte(e, (uint8_t)(imm & 0xFF));
+    } else {
+        /* IMUL r64, imm32: REX.W 69 /r id */
+        emit_byte(e, 0x69);
+        emit_modrm(e, 3, dst & 7, 0);
+        emit_dword(e, (uint32_t)imm);
+    }
+}
+
 /* IDIV r/m64: REX.W F7 /7 */
 void vtx_x86_emit_idiv_r(vtx_x86_emit_t *e, uint8_t src)
 {
@@ -2279,7 +2297,12 @@ static uint32_t estimate_inst_size(const vtx_inst_t *inst)
             return 7; /* REX.W 81 /x + imm32 */
         }
         return 3; /* REX.W op + ModR/M */
-    case VTX_X86_IMUL:   return 4;  /* REX.W 0F AF + ModR/M */
+    case VTX_X86_IMUL:
+        if (inst->flags & VTX_INST_FLAG_HAS_IMM) {
+            if (inst->imm >= -128 && inst->imm <= 127) return 4; /* REX.W 6B /r ib */
+            return 7; /* REX.W 69 /r id */
+        }
+        return 4;  /* REX.W 0F AF + ModR/M */
     case VTX_X86_IDIV:   return 3;  /* REX.W F7 /7 */
     case VTX_X86_SHL: case VTX_X86_SHR: case VTX_X86_SAR:
         if (inst->flags & VTX_INST_FLAG_HAS_IMM) return 4; /* REX.W C1 /x + imm8 */
@@ -2641,31 +2664,46 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
 
     case VTX_X86_IMUL:
         r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
-        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
-        if (r0 == 0xFF && r1 != 0xFF) {
-            uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
-            if (slot0 != VTX_NO_SPILL) {
-                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
-                vtx_x86_emit_imul_rr(e, VTX_SPILL_TMP_REG, r1);
-                emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+        if (inst->flags & VTX_INST_FLAG_HAS_IMM) {
+            /* IMUL r64, imm32 — multiply register by immediate */
+            if (r0 == 0xFF) {
+                /* Destination is spilled */
+                uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+                if (slot0 != VTX_NO_SPILL) {
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                    vtx_x86_emit_imul_ri(e, VTX_SPILL_TMP_REG, (int32_t)inst->imm);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                }
+            } else {
+                vtx_x86_emit_imul_ri(e, r0, (int32_t)inst->imm);
             }
-        } else if (r0 != 0xFF && r1 == 0xFF) {
-            uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
-            if (slot1 != VTX_NO_SPILL) {
-                emit_spill_load(e, slot1, VTX_SPILL_TMP_REG);
-                vtx_x86_emit_imul_rr(e, r0, VTX_SPILL_TMP_REG);
+        } else {
+            r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+            if (r0 == 0xFF && r1 != 0xFF) {
+                uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+                if (slot0 != VTX_NO_SPILL) {
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                    vtx_x86_emit_imul_rr(e, VTX_SPILL_TMP_REG, r1);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                }
+            } else if (r0 != 0xFF && r1 == 0xFF) {
+                uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+                if (slot1 != VTX_NO_SPILL) {
+                    emit_spill_load(e, slot1, VTX_SPILL_TMP_REG);
+                    vtx_x86_emit_imul_rr(e, r0, VTX_SPILL_TMP_REG);
+                }
+            } else if (r0 == 0xFF && r1 == 0xFF) {
+                uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+                uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+                if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_load(e, slot1, 13);
+                    vtx_x86_emit_imul_rr(e, VTX_SPILL_TMP_REG, 13);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                }
+            } else if (r0 != 0xFF && r1 != 0xFF) {
+                vtx_x86_emit_imul_rr(e, r0, r1);
             }
-        } else if (r0 == 0xFF && r1 == 0xFF) {
-            uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
-            uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
-            if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
-                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
-                emit_spill_load(e, slot1, 13);
-                vtx_x86_emit_imul_rr(e, VTX_SPILL_TMP_REG, 13);
-                emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
-            }
-        } else if (r0 != 0xFF && r1 != 0xFF) {
-            vtx_x86_emit_imul_rr(e, r0, r1);
         }
         break;
 

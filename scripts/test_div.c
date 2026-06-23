@@ -1,4 +1,4 @@
-/* Test: does T2 correctly return a constant? */
+/* Test: does T2 correctly handle division? */
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
@@ -52,44 +52,45 @@ static vtx_value_t run_jit(const char *prog, vtx_value_t arg) {
 }
 
 int main(void) {
-    /* Test 1: return constant 42 */
-    const char *ret_42 =
-        ".method ret42 (I)I\n.arg_count 1\nload_const_int 42\nreturn_value\n";
-    vtx_value_t r1 = run_jit(ret_42, vtx_make_smi(0));
-    printf("ret42 = 0x%016llX (expected 0x%016llX) %s\n",
-           (unsigned long long)r1, (unsigned long long)vtx_make_smi(42),
-           r1 == vtx_make_smi(42) ? "PASS" : "FAIL");
+    /* Test 1: arg / 7 */
+    const char *div7 =
+        ".method div7 (I)I\n.arg_count 1\n"
+        "load_local 0\nload_const_int 7\nidiv\nreturn_value\n";
+    vtx_value_t r1 = run_jit(div7, vtx_make_smi(100));
+    printf("div7(100) = 0x%016llX (expected 0x%016llX = SMI(%lld)) %s\n",
+           (unsigned long long)r1, (unsigned long long)vtx_make_smi(14), 14LL,
+           r1 == vtx_make_smi(14) ? "PASS" : "FAIL");
 
-    /* Test 2: return constant 0 */
-    const char *ret_0 =
-        ".method ret0 (I)I\n.arg_count 1\nload_const_int 0\nreturn_value\n";
-    vtx_value_t r2 = run_jit(ret_0, vtx_make_smi(0));
-    printf("ret0  = 0x%016llX (expected 0x%016llX) %s\n",
-           (unsigned long long)r2, (unsigned long long)vtx_make_smi(0),
-           r2 == vtx_make_smi(0) ? "PASS" : "FAIL");
+    vtx_value_t r1b = run_jit(div7, vtx_make_smi(7));
+    printf("div7(7)   = 0x%016llX (expected 0x%016llX = SMI(%lld)) %s\n",
+           (unsigned long long)r1b, (unsigned long long)vtx_make_smi(1), 1LL,
+           r1b == vtx_make_smi(1) ? "PASS" : "FAIL");
 
-    /* Test 3: return constant 1 */
-    const char *ret_1 =
-        ".method ret1 (I)I\n.arg_count 1\nload_const_int 1\nreturn_value\n";
-    vtx_value_t r3 = run_jit(ret_1, vtx_make_smi(0));
-    printf("ret1  = 0x%016llX (expected 0x%016llX) %s\n",
-           (unsigned long long)r3, (unsigned long long)vtx_make_smi(1),
-           r3 == vtx_make_smi(1) ? "PASS" : "FAIL");
+    /* Test 2: arg % 7 */
+    const char *mod7 =
+        ".method mod7 (I)I\n.arg_count 1\n"
+        "load_local 0\nload_const_int 7\nimod\nreturn_value\n";
+    vtx_value_t r2 = run_jit(mod7, vtx_make_smi(100));
+    printf("mod7(100) = 0x%016llX (expected 0x%016llX = SMI(%lld)) %s\n",
+           (unsigned long long)r2, (unsigned long long)vtx_make_smi(2), 2LL,
+           r2 == vtx_make_smi(2) ? "PASS" : "FAIL");
 
-    /* Test 4: if_true returning constants */
-    const char *if_test =
-        ".method iftest (I)I\n.arg_count 1\n"
-        "load_local 0\nif_true truthy\n"
-        "load_const_int 0\nreturn_value\n"
-        "truthy:\nload_const_int 1\nreturn_value\n";
-    vtx_value_t r4a = run_jit(if_test, vtx_make_smi(5));
-    printf("iftest(5)  = 0x%016llX (expected 0x%016llX) %s\n",
-           (unsigned long long)r4a, (unsigned long long)vtx_make_smi(1),
-           r4a == vtx_make_smi(1) ? "PASS" : "FAIL");
-    vtx_value_t r4b = run_jit(if_test, vtx_make_smi(0));
-    printf("iftest(0)  = 0x%016llX (expected 0x%016llX) %s\n",
-           (unsigned long long)r4b, (unsigned long long)vtx_make_smi(0),
-           r4b == vtx_make_smi(0) ? "PASS" : "FAIL");
+    vtx_value_t r2b = run_jit(mod7, vtx_make_smi(7));
+    printf("mod7(7)   = 0x%016llX (expected 0x%016llX = SMI(%lld)) %s\n",
+           (unsigned long long)r2b, (unsigned long long)vtx_make_smi(0), 0LL,
+           r2b == vtx_make_smi(0) ? "PASS" : "FAIL");
+
+    /* Test 3: (arg / 7) * 7 */
+    const char *mul_div =
+        ".method muldiv (I)I\n.arg_count 1\n.max_locals 1\n.max_stack 4\n"
+        "load_local 0\nload_const_int 7\nidiv\n"
+        "load_const_int 7\nimul\n"
+        "store_local 0\n"
+        "load_local 0\nreturn_value\n";
+    vtx_value_t r3 = run_jit(mul_div, vtx_make_smi(100));
+    printf("muldiv(100) = 0x%016llX (expected 0x%016llX = SMI(%lld)) %s\n",
+           (unsigned long long)r3, (unsigned long long)vtx_make_smi(98), 98LL,
+           r3 == vtx_make_smi(98) ? "PASS" : "FAIL");
 
     return 0;
 }
