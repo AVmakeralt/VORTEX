@@ -114,7 +114,16 @@ static bool verify_graph_impl(const vtx_graph_t *graph, bool check_no_dead, bool
                     vtx_nf_has(inp_node->flags, VTX_NF_CONTROL)) continue;
 
                 if (visit_state[inp] == 1) {
-                    /* Back edge -> cycle among data nodes */
+                    /* Back edge -> cycle among data nodes.
+                     *
+                     * BUGFIX (audit #3, loop hang): Phi nodes in loop headers
+                     * legitimately have back-edges in the data graph. The cycle
+                     * Phi → Sub → Phi is broken by the LoopBegin control
+                     * dependency. When we detect a back-edge TO a Phi node,
+                     * skip the cycle report. */
+                    if (inp_node->opcode == VTX_OP_Phi) {
+                        continue;
+                    }
                     fprintf(stderr, "VERIFY FAIL: data cycle detected: N%u -> N%u -> ... -> N%u\n",
                             inp, nid, inp);
                     ok = false;

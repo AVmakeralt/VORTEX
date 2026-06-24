@@ -772,38 +772,28 @@ int vtx_schedule_run(vtx_graph_t *graph, vtx_arena_t *arena, vtx_schedule_t *sch
             }
             if (le_block == (uint32_t)-1) continue;
 
-            /* Find the LoopBegin that this LoopEnd goes back to.
-             * Scan all blocks for LoopBegin headers, then check if
-             * any Phi in that block has a back-edge input in le_block. */
-            for (uint32_t j = 0; j < schedule->count; j++) {
-                if (!schedule->blocks[j].is_loop_header) continue;
-                if (j == le_block) continue; /* self-edge handled elsewhere */
-
-                vtx_nodeid_t lb_node = schedule->blocks[j].region_node;
-                /* Check Phi nodes in this LoopBegin's block for
-                 * back-edge inputs from le_block */
-                for (uint32_t p = 0; p < node_count; p++) {
-                    vtx_node_t *phi = &nt->nodes[p];
-                    if (phi->dead || phi->opcode != VTX_OP_Phi) continue;
-                    if (schedule->node_block[p] != j) continue;
-
-                    /* Check if any Phi input is in le_block */
-                    for (uint32_t pi = 0; pi < phi->input_count; pi++) {
-                        vtx_nodeid_t phi_inp = phi->inputs[pi];
-                        if (phi_inp != VTX_NODEID_INVALID && phi_inp < node_count) {
-                            if (schedule->node_block[phi_inp] == le_block) {
-                                /* Found a back-edge from le_block to loop header j */
-                                vtx_schedule_block_t *fb = &schedule->blocks[le_block];
-                                vtx_schedule_block_t *tb = &schedule->blocks[j];
-                                if (schedule_block_add_succ(fb, j) != 0) return -1;
-                                if (schedule_block_add_pred(tb, le_block) != 0) return -1;
-                                goto next_loopend; /* Found the back-edge, move on */
-                            }
+            /* BUGFIX (audit #3, loop hang): Find the LoopBegin that this
+             * LoopEnd connects to by checking which LoopBegin has this
+             * LoopEnd as an input. This is simpler and more reliable than
+             * searching Phi data inputs (which haven't been assigned to
+             * blocks yet at this point in the scheduler). */
+            for (uint32_t j = 0; j < node_count; j++) {
+                vtx_node_t *lb = &nt->nodes[j];
+                if (lb->dead || lb->opcode != VTX_OP_LoopBegin) continue;
+                for (uint32_t k = 0; k < lb->input_count; k++) {
+                    if (lb->inputs[k] == i) {
+                        uint32_t lb_block = schedule->node_block[j];
+                        if (lb_block != (uint32_t)-1 && lb_block != le_block) {
+                            vtx_schedule_block_t *fb = &schedule->blocks[le_block];
+                            vtx_schedule_block_t *tb = &schedule->blocks[lb_block];
+                            if (schedule_block_add_succ(fb, lb_block) != 0) return -1;
+                            if (schedule_block_add_pred(tb, le_block) != 0) return -1;
                         }
+                        goto next_loopend2;
                     }
                 }
             }
-            next_loopend:;
+            next_loopend2:;
         }
 
         /* Handle ExceptProj nodes: they represent exception edges.

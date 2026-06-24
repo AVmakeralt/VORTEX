@@ -1863,7 +1863,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, smi_zero_vreg,
                                (int64_t)0x7FF8000000000000ULL, node_id), arena);
             vtx_inst_t cmp = make_rr_inst(VTX_X86_CMP, cond_vreg, smi_zero_vreg, node_id);
-            cmp.flags |= VTX_INST_FLAG_FUSED;
+            cmp.flags |= VTX_INST_FLAG_FUSED | VTX_INST_FLAG_NO_TEST;
             vtx_isel_emit_inst(block, cmp, arena);
         }
         vtx_cond_t jcc_cond = (node->cond != VTX_COND_NEVER) ? node->cond : VTX_COND_NE;
@@ -2422,16 +2422,52 @@ static int resolve_phis(vtx_inst_stream_t *stream, const vtx_schedule_t *schedul
                 if (phi_vreg == VTX_VREG_INVALID) continue;
 
                 /* The p-th input of the Phi corresponds to the p-th predecessor.
-                 * Skip the Region input (last input) if it's at index p. */
-                if (p >= node->input_count) continue;
-                uint32_t input_vreg = vtx_isel_node_vreg(stream, node->inputs[p]);
-                if (input_vreg == VTX_VREG_INVALID || input_vreg == phi_vreg) continue;
+                 * For non-loop Phis, inputs are [data_0, data_1, ..., Region]
+                 * and p-th data input = inputs[p] (Region is at end).
+                 *
+                 * BUGFIX (audit #3, loop hang): For loop header Phis, the
+                 * control input (LoopBegin) is INTERLEAVED with data inputs:
+                 *   [forward_data, LoopBegin, back_edge_data]
+                 * So inputs[p] doesn't give the p-th data input. We must
+                 * skip control inputs for loop header blocks only. */
+                if (sched_blk->is_loop_header) {
+                    /* Loop header: skip control inputs (Region, LoopBegin, Proj) */
+                    uint32_t data_idx = 0;
+                    for (uint32_t pi = 0; pi < node->input_count; pi++) {
+                        vtx_nodeid_t inp_id = node->inputs[pi];
+                        if (inp_id == VTX_NODEID_INVALID || inp_id >= graph->node_table.count) continue;
+                        const vtx_node_t *inp_node = vtx_node_get_const(&graph->node_table, inp_id);
+                        if (inp_node && (inp_node->opcode == VTX_OP_Region ||
+                                         inp_node->opcode == VTX_OP_LoopBegin ||
+                                         inp_node->opcode == VTX_OP_Proj)) {
+                            continue;
+                        }
+                        if (data_idx == p) {
+                            uint32_t input_vreg = vtx_isel_node_vreg(stream, inp_id);
+                            if (input_vreg != VTX_VREG_INVALID && input_vreg != phi_vreg) {
+                                if (copy_count < MAX_PHI_COPIES) {
+                                    copy_dst[copy_count] = phi_vreg;
+                                    copy_src[copy_count] = input_vreg;
+                                    copy_node[copy_count] = nid;
+                                    copy_count++;
+                                }
+                            }
+                            break;
+                        }
+                        data_idx++;
+                    }
+                } else {
+                    /* Non-loop: old approach — p-th input = p-th predecessor */
+                    if (p >= node->input_count) continue;
+                    uint32_t input_vreg = vtx_isel_node_vreg(stream, node->inputs[p]);
+                    if (input_vreg == VTX_VREG_INVALID || input_vreg == phi_vreg) continue;
 
-                if (copy_count < MAX_PHI_COPIES) {
-                    copy_dst[copy_count] = phi_vreg;
-                    copy_src[copy_count] = input_vreg;
-                    copy_node[copy_count] = nid;
-                    copy_count++;
+                    if (copy_count < MAX_PHI_COPIES) {
+                        copy_dst[copy_count] = phi_vreg;
+                        copy_src[copy_count] = input_vreg;
+                        copy_node[copy_count] = nid;
+                        copy_count++;
+                    }
                 }
             }
 
@@ -2455,10 +2491,21 @@ static int resolve_phis(vtx_inst_stream_t *stream, const vtx_schedule_t *schedul
              * temp to the last destination.
              */
 
-            /* Find insertion point: before the first trailing branch */
+            /* Find insertion point: before the first branch instruction.
+             *
+             * BUGFIX (audit #3, loop hang): The old code scanned from the end
+             * looking for the first non-branch instruction, then inserted
+             * after it. But if ALL instructions are branches (e.g., a loop
+             * latch block with just JMP + LoopEnd), the insertion point was
+             * set to inst_count (after everything), meaning Phi copies were
+             * placed AFTER the JMP — they never executed.
+             *
+             * Fix: scan from the START, find the first branch instruction,
+             * and insert before it. This ensures Phi copies execute before
+             * any branch. */
             uint32_t insert_pos = pred_blk->inst_count;
-            for (uint32_t j = pred_blk->inst_count; j > 0; j--) {
-                if (!(pred_blk->insts[j-1].flags & VTX_INST_FLAG_IS_BRANCH)) {
+            for (uint32_t j = 0; j < pred_blk->inst_count; j++) {
+                if (pred_blk->insts[j].flags & VTX_INST_FLAG_IS_BRANCH) {
                     insert_pos = j;
                     break;
                 }

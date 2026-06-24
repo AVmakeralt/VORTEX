@@ -2592,19 +2592,29 @@ int vtx_graph_build(vtx_graph_t *graph,
                     vtx_nodeid_t succ0_proj = (term_op == VT_OP_IF_FALSE) ? proj_false : proj_true;
                     vtx_nodeid_t succ1_proj = (term_op == VT_OP_IF_FALSE) ? proj_true  : proj_false;
 
+                    /* BUGFIX (audit #3, loop hang): The successor Region's input
+                     * was set during Phase 2 to the predecessor's region_node
+                     * (LoopBegin/Region/Start). By Phase 5, control_node is the If.
+                     * Try control_node first, then fall back to region_node. */
+                    vtx_nodeid_t pred_region = block->region_node;
+                    if (pred_region == VTX_NODEID_INVALID) {
+                        pred_region = graph->start_node;
+                    }
+
                     uint32_t target_idx = block->succ_indices[0];
                     vtx_nodeid_t target_region = blocks[target_idx].region_node;
                     if (target_region != VTX_NODEID_INVALID) {
-                        /* Find the input in the Region that corresponds to this
-                         * predecessor and replace it with the projection */
                         vtx_node_t *region_n = vtx_node_get(&graph->node_table, target_region);
                         if (region_n != NULL) {
-                            for (uint32_t i = 0; i < region_n->input_count; i++) {
-                                vtx_nodeid_t inp = region_n->inputs[i];
-                                const vtx_node_t *inp_n = vtx_node_get_const(&graph->node_table, inp);
-                                if (inp_n != NULL && inp == block->control_node) {
-                                    vtx_node_replace_input(&graph->node_table, target_region, i, succ0_proj);
-                                    break;
+                            bool replaced = false;
+                            for (uint32_t try_val = 0; try_val < 2 && !replaced; try_val++) {
+                                vtx_nodeid_t search_for = (try_val == 0) ? block->control_node : pred_region;
+                                for (uint32_t i = 0; i < region_n->input_count; i++) {
+                                    if (region_n->inputs[i] == search_for) {
+                                        vtx_node_replace_input(&graph->node_table, target_region, i, succ0_proj);
+                                        replaced = true;
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -2615,12 +2625,15 @@ int vtx_graph_build(vtx_graph_t *graph,
                     if (fall_region != VTX_NODEID_INVALID) {
                         vtx_node_t *region_n = vtx_node_get(&graph->node_table, fall_region);
                         if (region_n != NULL) {
-                            for (uint32_t i = 0; i < region_n->input_count; i++) {
-                                vtx_nodeid_t inp = region_n->inputs[i];
-                                const vtx_node_t *inp_n = vtx_node_get_const(&graph->node_table, inp);
-                                if (inp_n != NULL && inp == block->control_node) {
-                                    vtx_node_replace_input(&graph->node_table, fall_region, i, succ1_proj);
-                                    break;
+                            bool replaced = false;
+                            for (uint32_t try_val = 0; try_val < 2 && !replaced; try_val++) {
+                                vtx_nodeid_t search_for = (try_val == 0) ? block->control_node : pred_region;
+                                for (uint32_t i = 0; i < region_n->input_count; i++) {
+                                    if (region_n->inputs[i] == search_for) {
+                                        vtx_node_replace_input(&graph->node_table, fall_region, i, succ1_proj);
+                                        replaced = true;
+                                        break;
+                                    }
                                 }
                             }
                         }
