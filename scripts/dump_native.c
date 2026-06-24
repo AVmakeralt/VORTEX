@@ -49,7 +49,7 @@ int main(void) {
          * since the code cache memory is executable and readable. */
         uint8_t *code = (uint8_t *)method.compiled_code;
         printf("\nNative code at %p:\n", code);
-        for (uint32_t i = 0; i < 80; i++) {
+        for (uint32_t i = 0; i < 300; i++) {
             printf("%02X ", code[i]);
             if ((i + 1) % 16 == 0) printf("\n");
         }
