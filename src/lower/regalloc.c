@@ -183,6 +183,62 @@ static vtx_live_interval_t *compute_live_intervals(vtx_inst_stream_t *stream,
         }
     }
 
+    /* BUGFIX (audit #3, loop crash): Extend live intervals for vregs that
+     * are used in loop bodies. MUST run AFTER the walk above computes
+     * the initial intervals. In a loop, a vreg defined before the loop
+     * (e.g., a constant) is live across ALL iterations. Without extending
+     * its interval to cover the entire loop, the regalloc may assign the
+     * same register to both the constant and a loop-variant temp, causing
+     * the temp to clobber the constant on subsequent iterations. */
+    if (stream->schedule) {
+        const vtx_schedule_t *sched = stream->schedule;
+        for (uint32_t b = 0; b < sched->count; b++) {
+            if (!sched->blocks[b].is_loop_header) continue;
+
+            uint32_t loop_start = UINT32_MAX;
+            uint32_t loop_end = 0;
+
+            if (b < stream->block_count && stream->blocks[b].inst_count > 0) {
+                uint32_t pos = stream->blocks[b].insts[0].native_offset;
+                if (pos < loop_start) loop_start = pos;
+                pos = stream->blocks[b].insts[stream->blocks[b].inst_count-1].native_offset;
+                if (pos > loop_end) loop_end = pos;
+            }
+
+            for (uint32_t sb = 0; sb < sched->count; sb++) {
+                bool in_loop = (sb == b);
+                for (uint32_t s = 0; s < sched->blocks[sb].succ_count; s++) {
+                    if (sched->blocks[sb].succ_blocks[s] == b) {
+                        in_loop = true;
+                        break;
+                    }
+                }
+                if (!in_loop) continue;
+
+                if (sb < stream->block_count && stream->blocks[sb].inst_count > 0) {
+                    uint32_t pos = stream->blocks[sb].insts[0].native_offset;
+                    if (pos < loop_start) loop_start = pos;
+                    pos = stream->blocks[sb].insts[stream->blocks[sb].inst_count-1].native_offset;
+                    if (pos > loop_end) loop_end = pos;
+                }
+            }
+
+            if (loop_start <= loop_end) {
+                for (uint32_t v = 0; v < vreg_count; v++) {
+                    if (intervals[v].start <= loop_end &&
+                        intervals[v].end >= loop_start) {
+                        if (loop_start < intervals[v].start) {
+                            intervals[v].start = loop_start;
+                        }
+                        if (loop_end > intervals[v].end) {
+                            intervals[v].end = loop_end;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /* Estimate loop depth for each block based on back-edges.
      * A block that is the target of a back-edge (JCC/JMP to an earlier block)
      * is a loop header with depth >= 1. Nested loops increase depth. */
