@@ -667,21 +667,46 @@ static int create_block_entry(vtx_graph_t *graph, vtx_block_info_t *blocks,
         block->control_node = loop_begin;
         block->memory_node = graph->entry_memory;
 
-        /* Allocate locals for entry block: map locals to Parameter nodes */
+        /* Allocate locals for entry block.
+         *
+         * BUGFIX (audit #3, loop hang): For entry-as-loop-header, we must
+         * create Phi nodes for ALL locals, merging the initial value
+         * (Parameter/Constant) with the back-edge value (which will be
+         * connected in Phase 4). Without this, 'load_local' in the loop
+         * body pushes the initial Parameter, not the Phi — so the loop
+         * variable never changes, causing an infinite loop.
+         *
+         * We create the Phi now with [initial_value, placeholder, LoopBegin].
+         * Phase 4 will fill in the back-edge value. */
         block->locals = (vtx_nodeid_t *)vtx_arena_alloc(arena, max_locals * sizeof(vtx_nodeid_t));
         if (block->locals == NULL) return -1;
         for (uint16_t i = 0; i < max_locals; i++) {
+            vtx_nodeid_t initial_val;
             if (i < graph->parameter_count) {
-                block->locals[i] = graph->parameters[i];
+                initial_val = graph->parameters[i];
             } else {
-                /* Undefined local */
                 vtx_nodeid_t undef = vtx_node_create(nt, VTX_OP_Constant);
                 if (undef == VTX_NODEID_INVALID) return -1;
                 vtx_node_t *n = vtx_node_get(nt, undef);
                 n->constval = vtx_constval_void();
                 n->type = VTX_TYPE_Void;
-                block->locals[i] = undef;
+                initial_val = undef;
             }
+
+            /* Create a Phi node merging initial_val with back-edge (placeholder).
+             * The back-edge input (second data input) will be set in Phase 4
+             * when we process the loop latch. For now, use VTX_NODEID_INVALID
+             * as a placeholder — Phase 4 will replace it. */
+            vtx_nodeid_t phi = vtx_node_create(nt, VTX_OP_Phi);
+            if (phi == VTX_NODEID_INVALID) return -1;
+            vtx_node_t *phi_n = vtx_node_get(nt, phi);
+            phi_n->flags = VTX_NF_DATA | VTX_NF_PINNED;
+            phi_n->type = VTX_TYPE_Bottom;
+            /* Inputs: [initial_value, LoopBegin] — back-edge input added in Phase 4 */
+            vtx_node_add_input(nt, phi, initial_val);
+            vtx_node_add_input(nt, phi, loop_begin);
+
+            block->locals[i] = phi;
         }
         return 0;
     }
@@ -818,7 +843,42 @@ static int create_block_entry(vtx_graph_t *graph, vtx_block_info_t *blocks,
     block->locals = (vtx_nodeid_t *)vtx_arena_alloc(arena, max_locals * sizeof(vtx_nodeid_t));
     if (block->locals == NULL) return -1;
 
-    if (forward_pred_count == 1) {
+    if (block->is_loop_header) {
+        /* BUGFIX (audit #3, loop hang): For loop headers, ALWAYS create Phi
+         * nodes for locals, even with forward_pred_count == 1. The loop
+         * header's locals merge the initial value (from the forward
+         * predecessor) with the back-edge value (from the loop latch,
+         * connected in Phase 4). Without Phi nodes, 'load_local' in the
+         * loop body pushes the initial value, and the loop variable never
+         * changes — causing infinite loops.
+         *
+         * The Phi's inputs are: [initial_value, LoopBegin].
+         * Phase 4 will add the back-edge value as a third input. */
+        for (uint16_t li = 0; li < max_locals; li++) {
+            /* Get the initial value from the forward predecessor */
+            vtx_nodeid_t initial_val = VTX_NODEID_INVALID;
+            for (uint32_t p = 0; p < block->pred_count; p++) {
+                uint32_t pred_idx = block->pred_indices[p];
+                if (blocks[pred_idx].is_loop_end) continue;
+                if (blocks[pred_idx].is_unreachable) continue;
+                initial_val = blocks[pred_idx].locals[li];
+                break;
+            }
+            if (initial_val == VTX_NODEID_INVALID) {
+                initial_val = graph->entry_memory; /* fallback */
+            }
+
+            /* Create a Phi node: [initial_value, LoopBegin] */
+            vtx_nodeid_t phi = vtx_node_create(nt, VTX_OP_Phi);
+            if (phi == VTX_NODEID_INVALID) return -1;
+            vtx_node_t *phi_n = vtx_node_get(nt, phi);
+            phi_n->flags = VTX_NF_DATA | VTX_NF_PINNED;
+            phi_n->type = VTX_TYPE_Bottom;
+            vtx_node_add_input(nt, phi, initial_val);
+            vtx_node_add_input(nt, phi, region);
+            block->locals[li] = phi;
+        }
+    } else if (forward_pred_count == 1) {
         /* Single forward predecessor: inherit locals directly */
         for (uint32_t p = 0; p < block->pred_count; p++) {
             uint32_t pred_idx = block->pred_indices[p];
