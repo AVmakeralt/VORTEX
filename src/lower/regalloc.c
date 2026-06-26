@@ -649,9 +649,13 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
         result->vreg_to_spill[v] = VTX_NO_SPILL;
     }
 
-    /* Active list: intervals currently assigned to physical registers */
+    /* Active list: intervals currently assigned to physical registers.
+     *
+     * BUGFIX (regalloc audit B): Use valid_count (actual number of intervals
+     * the linear scan will process) instead of interval_count (which is
+     * vreg_count, not the number of valid intervals). */
     uint32_t active_count = 0;
-    uint32_t active_capacity = interval_count > 0 ? interval_count : 1;
+    uint32_t active_capacity = valid_count > 0 ? valid_count : 1;
     vtx_live_interval_t **active = (vtx_live_interval_t **)vtx_arena_alloc(
         arena, active_capacity * sizeof(vtx_live_interval_t *));
     if (!active && active_capacity > 0) return NULL;
@@ -804,8 +808,21 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
                 }
             }
 
-            /* Use __builtin_ctz for O(1) register number extraction from bitmask,
-             * instead of O(N) loop counting bits. */
+            /* Use __builtin_ctz for O(1) register number extraction from bitmask.
+             *
+             * Safety: __builtin_ctz(0) is UB. reg_bit is always non-zero here
+             * (computed via lowest-set-bit isolation from a non-zero free_regs),
+             * but we guard defensively to prevent UB if control flow changes. */
+            if (reg_bit == 0) {
+                /* Should not happen — spill this interval */
+                current->is_spilled = true;
+                current->spill_slot = next_spill_slot++;
+                if (current->vreg < result->vreg_to_phys_count) {
+                    result->vreg_to_phys[current->vreg] = 0xFF;
+                    result->vreg_to_spill[current->vreg] = current->spill_slot;
+                }
+                continue;
+            }
             uint8_t reg = (uint8_t)__builtin_ctz(reg_bit);
 
             current->phys_reg = reg;
