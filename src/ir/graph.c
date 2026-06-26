@@ -2457,10 +2457,136 @@ int vtx_graph_build(vtx_graph_t *graph,
      * void Constant). But Phase 3 updates the predecessor's locals to
      * the EXIT state (e.g., SMI(0) after `store_local 1`). The Phi's
      * Input 0 was never updated, so it still referenced the old undef.
-     * This caused the loop body to use the wrong initial value.
      *
-     * Fix: After Phase 3, update each loop header Phi's Input 0 to
-     * reference the forward predecessor's EXIT local. */
+     * BUGFIX 3 (if-then-else crash): Non-loop Region Phis have the SAME
+     * bug — they were created in Phase 2 with inputs from the predecessors'
+     * INITIAL locals, but Phase 3 updates the predecessors' locals to
+     * their EXIT state. The Phi inputs must be updated to reference the
+     * EXIT locals. Additionally, if the predecessors' exit locals now
+     * DIFFER but no Phi was created (because Phase 2 saw them as same),
+     * we must create a new Phi.
+     *
+     * Fix: Before the loop header fix, scan all non-loop Region blocks.
+     * For each local, check if predecessors' exit locals differ. If they
+     * do and the local is already a Phi, update its inputs. If they differ
+     * but no Phi exists, create one. */
+    for (uint32_t bi = 0; bi < nblocks; bi++) {
+        vtx_block_info_t *block = &blocks[bi];
+        if (block->is_loop_header) continue;  /* loop headers handled below */
+        if (block->region_node == VTX_NODEID_INVALID) continue;
+        if (block->locals == NULL) continue;
+
+        vtx_node_t *region_n = vtx_node_get(&graph->node_table, block->region_node);
+        if (region_n == NULL || region_n->opcode != VTX_OP_Region) continue;
+
+        for (uint16_t li = 0; li < max_locals; li++) {
+            vtx_nodeid_t local_node = block->locals[li];
+            if (local_node == VTX_NODEID_INVALID) continue;
+
+            /* Check if predecessors' exit locals differ */
+            vtx_nodeid_t first_val = VTX_NODEID_INVALID;
+            bool differ = false;
+            uint32_t pred_count = 0;
+            for (uint32_t p = 0; p < block->pred_count; p++) {
+                uint32_t pred_idx = block->pred_indices[p];
+                if (blocks[pred_idx].is_unreachable) continue;
+                if (blocks[pred_idx].locals == NULL) continue;
+                vtx_nodeid_t val = blocks[pred_idx].locals[li];
+                if (val == VTX_NODEID_INVALID) continue;
+                pred_count++;
+                if (first_val == VTX_NODEID_INVALID) {
+                    first_val = val;
+                } else if (val != first_val) {
+                    differ = true;
+                }
+            }
+
+            if (!differ || pred_count < 2) continue;
+
+            vtx_node_t *local_n = vtx_node_get(&graph->node_table, local_node);
+            if (local_n != NULL && local_n->opcode == VTX_OP_Phi) {
+                /* Already a Phi — update its inputs with exit locals */
+                uint32_t data_idx = 0;
+                for (uint32_t p = 0; p < block->pred_count; p++) {
+                    uint32_t pred_idx = block->pred_indices[p];
+                    if (blocks[pred_idx].is_unreachable) continue;
+                    if (blocks[pred_idx].locals == NULL) continue;
+                    vtx_nodeid_t exit_val = blocks[pred_idx].locals[li];
+                    if (exit_val == VTX_NODEID_INVALID) continue;
+                    /* Update data input if not the Region control input */
+                    if (data_idx < local_n->input_count &&
+                        local_n->inputs[data_idx] != block->region_node) {
+                        if (local_n->inputs[data_idx] != exit_val) {
+                            vtx_node_replace_input(&graph->node_table, local_node, data_idx, exit_val);
+                        }
+                        data_idx++;
+                    }
+                }
+            } else {
+                /* Not a Phi but predecessors differ — create a new Phi */
+                vtx_nodeid_t phi = vtx_node_create(&graph->node_table, VTX_OP_Phi);
+                if (phi == VTX_NODEID_INVALID) continue;
+                vtx_node_t *phi_n = vtx_node_get(&graph->node_table, phi);
+                phi_n->flags = VTX_NF_DATA | VTX_NF_PINNED;
+                phi_n->type = VTX_TYPE_Bottom;
+                /* Add one input per predecessor (exit locals) */
+                for (uint32_t p = 0; p < block->pred_count; p++) {
+                    uint32_t pred_idx = block->pred_indices[p];
+                    if (blocks[pred_idx].is_unreachable) continue;
+                    if (blocks[pred_idx].locals == NULL) continue;
+                    vtx_nodeid_t val = blocks[pred_idx].locals[li];
+                    if (val == VTX_NODEID_INVALID) val = local_node;
+                    vtx_node_add_input(&graph->node_table, phi, val);
+                }
+                /* Add Region as control input */
+                vtx_node_add_input(&graph->node_table, phi, block->region_node);
+                block->locals[li] = phi;
+
+                /* CRITICAL: Replace all references to the old local value
+                 * (local_node) with the new Phi in nodes that are control-
+                 * dependent on this block's Region. Without this, the
+                 * Return/load_local nodes still reference the old value
+                 * (e.g., the void Constant N3) instead of the new Phi (N12),
+                 * producing wrong results.
+                 *
+                 * We scan all nodes in the graph and replace any input that
+                 * matches local_node with phi, but ONLY for nodes that have
+                 * the Region (or a projection of it) as a control input.
+                 * This ensures we only replace uses within this block's
+                 * control region, not uses in other blocks. */
+                {
+                    vtx_node_table_t *nt = &graph->node_table;
+                    for (uint32_t ni = 0; ni < nt->count; ni++) {
+                        vtx_node_t *n = &nt->nodes[ni];
+                        if (n->dead) continue;
+                        if (ni == phi) continue;
+                        /* Check if this node is control-dependent on this block's Region */
+                        bool in_region = false;
+                        for (uint32_t inp = 0; inp < n->input_count; inp++) {
+                            if (n->inputs[inp] == block->region_node) {
+                                in_region = true;
+                                break;
+                            }
+                        }
+                        if (!in_region) continue;
+                        /* Replace references to local_node with phi */
+                        for (uint32_t inp = 0; inp < n->input_count; inp++) {
+                            if (n->inputs[inp] == local_node) {
+                                vtx_node_replace_input(nt, ni, inp, phi);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /* Now handle loop headers: update Phi Input 0 and connect back-edges.
+     *
+     * The loop header's Phi was created in Phase 2 with Input 0 = the
+     * predecessor's INITIAL local. Phase 3 updates the predecessor's
+     * locals to the EXIT state. The Phi's Input 0 must be updated to
+     * reference the EXIT local. */
     for (uint32_t bi = 0; bi < nblocks; bi++) {
         vtx_block_info_t *block = &blocks[bi];
         if (block->is_loop_header && block->region_node != VTX_NODEID_INVALID) {
