@@ -89,7 +89,7 @@ int main(void) {
     printf("pipeline rc=%d success=%d code=%p\n", prc, result.success, method.compiled_code);
 
     if (method.compiled_code) {
-        printf("Executing collatz(6)...\n"); fflush(stdout); uint8_t *code = (uint8_t*)method.compiled_code; printf("Native code:"); for(int i=0;i<200;i++){printf(" %02X",code[i]);} printf("\n"); fflush(stdout);
+        printf("Executing collatz(6)...\n"); fflush(stdout); uint8_t *code = (uint8_t*)method.compiled_code; printf("Native code:"); for(int i=0;i<500;i++){printf(" %02X",code[i]);} printf("\n"); fflush(stdout);
         fflush(stdout);
         typedef vtx_value_t (*entry_t)(const vtx_method_desc_t*,void*,void*,vtx_value_t*,uint32_t);
         entry_t e = (entry_t)method.compiled_code;
