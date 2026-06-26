@@ -1153,14 +1153,21 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             uint32_t rdx_vreg = vtx_isel_alloc_vreg_fixed(stream, arena, 2);
             if (rax_vreg == VTX_VREG_INVALID || rdx_vreg == VTX_VREG_INVALID) return -1;
 
-            /* Move rhs to a safe register before CQO clobbers RDX */
-            uint32_t rhs_safe = vtx_isel_alloc_vreg(stream, arena);
+            /* Move rhs to a safe register before CQO clobbers RDX.
+             * BUGFIX: rhs_safe must NOT be RAX or RDX because:
+             *   - MOV rax_vreg, lhs clobbers RAX
+             *   - CQO clobbers RDX
+             * Use a fixed vreg on R8 (caller-saved, not RAX/RDX) to ensure
+             * the regalloc doesn't assign rhs_safe to RAX or RDX. */
+            uint32_t rhs_safe = vtx_isel_alloc_vreg_fixed(stream, arena, 8); /* R8 */
             vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, rhs_safe, rhs_untagged, node_id), arena);
 
             vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, rax_vreg, lhs_untagged, node_id), arena);
             vtx_inst_t cqo;
             memset(&cqo, 0, sizeof(cqo));
             cqo.opcode = VTX_X86_CQO;
+            cqo.opnd_kinds[0] = VTX_OPND_VREG;
+            cqo.operands[0] = rdx_vreg;
             cqo.source_node = node_id;
             cqo.flags = VTX_INST_FLAG_CLOBBER_RAX | VTX_INST_FLAG_CLOBBER_RDX;
             vtx_isel_emit_inst(block, cqo, arena);
@@ -1169,6 +1176,14 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             idiv_inst.opcode = VTX_X86_IDIV;
             idiv_inst.opnd_kinds[0] = VTX_OPND_VREG;
             idiv_inst.operands[0] = rhs_safe;
+            /* Add rax_vreg and rdx_vreg as dummy operands so the regalloc
+             * sees them as used here, extending their intervals to cover
+             * CQO/IDIV. Without this, RDX isn't reserved and CQO clobbers
+             * other vregs assigned to RDX. The emitter ignores operands 1+ */
+            idiv_inst.opnd_kinds[1] = VTX_OPND_VREG;
+            idiv_inst.operands[1] = rax_vreg;
+            idiv_inst.opnd_kinds[2] = VTX_OPND_VREG;
+            idiv_inst.operands[2] = rdx_vreg;
             idiv_inst.source_node = node_id;
             idiv_inst.flags = VTX_INST_FLAG_CLOBBER_RAX | VTX_INST_FLAG_CLOBBER_RDX;
             vtx_isel_emit_inst(block, idiv_inst, arena);
@@ -1204,14 +1219,17 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             uint32_t rdx_vreg = vtx_isel_alloc_vreg_fixed(stream, arena, 2);
             if (rax_vreg == VTX_VREG_INVALID || rdx_vreg == VTX_VREG_INVALID) return -1;
 
-            /* Move rhs to a safe register before CQO clobbers RDX */
-            uint32_t rhs_safe = vtx_isel_alloc_vreg(stream, arena);
+            /* Move rhs to a safe register before CQO clobbers RDX.
+             * BUGFIX: same as Div — use fixed R8 to avoid RAX/RDX. */
+            uint32_t rhs_safe = vtx_isel_alloc_vreg_fixed(stream, arena, 8); /* R8 */
             vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, rhs_safe, rhs_untagged, node_id), arena);
 
             vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, rax_vreg, lhs_untagged, node_id), arena);
             vtx_inst_t cqo;
             memset(&cqo, 0, sizeof(cqo));
             cqo.opcode = VTX_X86_CQO;
+            cqo.opnd_kinds[0] = VTX_OPND_VREG;
+            cqo.operands[0] = rdx_vreg;
             cqo.source_node = node_id;
             cqo.flags = VTX_INST_FLAG_CLOBBER_RAX | VTX_INST_FLAG_CLOBBER_RDX;
             vtx_isel_emit_inst(block, cqo, arena);
@@ -1220,6 +1238,11 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             idiv_inst.opcode = VTX_X86_IDIV;
             idiv_inst.opnd_kinds[0] = VTX_OPND_VREG;
             idiv_inst.operands[0] = rhs_safe;
+            /* Add rax_vreg and rdx_vreg as dummy operands (same as Div) */
+            idiv_inst.opnd_kinds[1] = VTX_OPND_VREG;
+            idiv_inst.operands[1] = rax_vreg;
+            idiv_inst.opnd_kinds[2] = VTX_OPND_VREG;
+            idiv_inst.operands[2] = rdx_vreg;
             idiv_inst.source_node = node_id;
             idiv_inst.flags = VTX_INST_FLAG_CLOBBER_RAX | VTX_INST_FLAG_CLOBBER_RDX;
             vtx_isel_emit_inst(block, idiv_inst, arena);

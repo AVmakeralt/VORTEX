@@ -1,5 +1,5 @@
 /*
- * Crash diagnostic: trace a simple loop (popcount(7)) to find where it crashes.
+ * Crash diagnostic: trace a simple loop (div_loop(8)) to find where it crashes.
  * Uses SIGSEGV handler to catch the crash and dump register state.
  */
 #define _GNU_SOURCE
@@ -78,14 +78,10 @@ int main(void) {
 
     vtx_assembler_t a; vtx_asm_init(&a);
     const char *prog =
-        ".method popcount (I)I\n.arg_count 1\n.max_locals 3\n.max_stack 4\n"
-        "load_const_int 0\nstore_local 1\n"
-        "loop:\nload_local 0\nif_false done\n"
-        "load_local 0\nload_const_int 2\nimod\n"
-        "load_const_int 1\nicmp_eq\nif_false skip\n"
-        "load_local 1\nload_const_int 1\niadd\nstore_local 1\n"
-        "skip:\nload_local 0\nload_const_int 2\nidiv\nstore_local 0\n"
-        "goto loop\ndone:\nload_local 1\nreturn_value\n";
+        ".method f (I)I\n.arg_count 1\n.max_locals 1\n.max_stack 4\n"
+        "loop:\nload_local 0\nload_const_int 2\nidiv\nstore_local 0\n"
+        "load_local 0\nif_false done\n"
+        "goto loop\ndone:\nload_local 0\nreturn_value\n";
     vtx_asm_program(&a, prog);
 
     vtx_arena_t arena; vtx_arena_init(&arena);
@@ -215,7 +211,6 @@ int main(void) {
 
     /* Now compile via pipeline and execute */
     vtx_pipeline_config_t config = vtx_pipeline_config_t2();
-    config.run_sccp = false;  /* Test if SCCP is the culprit */
     vtx_code_cache_t cache; vtx_code_cache_init(&cache, 1<<20);
     vtx_method_registry_t reg; vtx_method_registry_init(&reg, &arena);
     config.code_cache=&cache; config.method_registry=&reg; config.method=&method;
@@ -232,11 +227,11 @@ int main(void) {
         }
         printf("\n\n");
 
-        printf("Executing popcount(7)...\n");
+        printf("Executing div_loop(8)...\n");
         fflush(stdout);
         typedef vtx_value_t (*entry_t)(const vtx_method_desc_t*,void*,void*,vtx_value_t*,uint32_t);
         entry_t e = (entry_t)method.compiled_code;
-        vtx_value_t av = vtx_make_smi(7);
+        vtx_value_t av = vtx_make_smi(8);
 
         /* Set a 3-second alarm to catch infinite loops */
         alarm(3);
@@ -245,7 +240,7 @@ int main(void) {
         fflush(stdout);
         printf("Function returned! raw=0x%llX\n", (unsigned long long)r);
         fflush(stdout);
-        printf("popcount(7) = %lld (expected 3)\n", (long long)vtx_smi_value(r));
+        printf("div_loop(8) = %lld (expected 0)\n", (long long)vtx_smi_value(r));
         fflush(stdout);
     }
 

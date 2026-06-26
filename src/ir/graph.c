@@ -2576,9 +2576,6 @@ int vtx_graph_build(vtx_graph_t *graph,
 
             if (!differ || pred_count < 2) continue;
 
-            fprintf(stderr, "[graph] Block %u local %u: predecessors differ (pred_count=%u), creating Phi\n",
-                    bi, li, pred_count);
-
             vtx_node_t *local_n = vtx_node_get(&graph->node_table, local_node);
             if (local_n != NULL && local_n->opcode == VTX_OP_Phi) {
                 /* Already a Phi — update its inputs with exit locals */
@@ -2738,42 +2735,57 @@ int vtx_graph_build(vtx_graph_t *graph,
                          * For Phi nodes, we add the latch's value as an input.
                          * For direct values, we need to create a Phi if the
                          * latch's value differs. */
-                        if (block->locals != NULL) {
-                            for (uint16_t li = 0; li < max_locals; li++) {
-                                vtx_nodeid_t local_node = block->locals[li];
-                                if (local_node == VTX_NODEID_INVALID) continue;
+                        /* BUGFIX: Phase 3's store_local updates block->locals[li]
+                         * to the stored value, overwriting the Phi. So we can't
+                         * rely on block->locals to find the Phi. Instead, scan
+                         * the graph for Phi nodes that reference this LoopBegin
+                         * and add the back-edge value to them.
+                         *
+                         * Phis are created in create_block_entry in order of
+                         * local index (li = 0, 1, 2, ...). So the Nth Phi
+                         * referencing the LoopBegin corresponds to local N.
+                         * We add the latch's exit local[N] as the back-edge input. */
+                        {
+                            vtx_node_table_t *nt = &graph->node_table;
+                            uint32_t phi_index = 0; /* which local index this Phi is */
+                            for (uint32_t ni = 0; ni < nt->count; ni++) {
+                                vtx_node_t *phi_n = &nt->nodes[ni];
+                                if (phi_n->dead) continue;
+                                if (phi_n->opcode != VTX_OP_Phi) continue;
 
-                                vtx_node_t *local_n = vtx_node_get(&graph->node_table, local_node);
-                                if (local_n != NULL && local_n->opcode == VTX_OP_Phi) {
-                                    /* Add the latch's local value as a Phi input */
-                                    vtx_nodeid_t latch_val = VTX_NODEID_INVALID;
-                                    if (blocks[pred_idx].locals != NULL) {
-                                        latch_val = blocks[pred_idx].locals[li];
+                                /* Check if this Phi references our LoopBegin */
+                                bool belongs_to_this_loop = false;
+                                for (uint32_t inp = 0; inp < phi_n->input_count; inp++) {
+                                    if (phi_n->inputs[inp] == block->region_node) {
+                                        belongs_to_this_loop = true;
+                                        break;
                                     }
-                                    vtx_node_add_input(&graph->node_table, local_node, latch_val);
-                                } else {
-                                    /* The local is a direct value from forward
-                                     * predecessors. If the latch's value differs,
-                                     * we need to create a new Phi that merges
-                                     * the forward value with the latch value. */
-                                    vtx_nodeid_t latch_val = VTX_NODEID_INVALID;
-                                    if (blocks[pred_idx].locals != NULL) {
-                                        latch_val = blocks[pred_idx].locals[li];
+                                }
+                                if (!belongs_to_this_loop) continue;
+
+                                /* This Phi belongs to our loop header.
+                                 * Use phi_index as the local index. */
+                                uint16_t li = (uint16_t)phi_index;
+                                phi_index++;
+
+                                if (li >= max_locals) continue; /* safety */
+
+                                /* Get the latch's exit local for this index */
+                                vtx_nodeid_t latch_val = VTX_NODEID_INVALID;
+                                if (blocks[pred_idx].locals != NULL) {
+                                    latch_val = blocks[pred_idx].locals[li];
+                                }
+
+                                /* Only add if not already present (avoid duplicates) */
+                                bool already_has = false;
+                                for (uint32_t inp = 0; inp < phi_n->input_count; inp++) {
+                                    if (phi_n->inputs[inp] == latch_val) {
+                                        already_has = true;
+                                        break;
                                     }
-                                    if (latch_val != local_node && latch_val != VTX_NODEID_INVALID) {
-                                        /* Create a new Phi merging forward + back-edge */
-                                        vtx_nodeid_t phi = vtx_node_create(&graph->node_table, VTX_OP_Phi);
-                                        if (phi == VTX_NODEID_INVALID) return -1;
-                                        vtx_node_t *phi_n = vtx_node_get(&graph->node_table, phi);
-                                        /* Input 0: forward predecessor value */
-                                        vtx_node_add_input(&graph->node_table, phi, local_node);
-                                        /* Input 1: back-edge (latch) value */
-                                        vtx_node_add_input(&graph->node_table, phi, latch_val);
-                                        /* Phi depends on Region for control */
-                                        vtx_node_add_input(&graph->node_table, phi, block->region_node);
-                                        phi_n->type = VTX_TYPE_Bottom;
-                                        block->locals[li] = phi;
-                                    }
+                                }
+                                if (!already_has && latch_val != VTX_NODEID_INVALID) {
+                                    vtx_node_add_input(nt, (vtx_nodeid_t)ni, latch_val);
                                 }
                             }
                         }
