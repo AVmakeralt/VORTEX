@@ -267,21 +267,36 @@ static vtx_live_interval_t *compute_live_intervals(vtx_inst_stream_t *stream,
             }
         }
 
-        /* Assign loop depth to intervals based on their start block */
+        /* Assign loop depth to intervals based on the MAXIMUM loop depth
+         * across ALL blocks the interval spans.
+         *
+         * BUGFIX (audit #3, loop crash): The old code only checked the START
+         * block's loop depth. A constant defined in block 0 (loop_depth=0)
+         * but used in a loop body (loop_depth=1) would get loop_depth=0,
+         * making the regalloc think it's cheap to spill and assigning it a
+         * caller-saved register that gets clobbered by loop body temps.
+         *
+         * Fix: scan ALL blocks the interval spans and take the maximum
+         * loop_depth. This ensures constants used in loops get the same
+         * priority as loop-carried values. */
         for (uint32_t v = 0; v < vreg_count; v++) {
             if (intervals[v].start > intervals[v].end) continue;
-            /* Find which block this interval starts in */
-            uint32_t pos = intervals[v].start;
+            uint32_t max_depth = 0;
+            uint32_t vreg_start = intervals[v].start;
+            uint32_t vreg_end = intervals[v].end;
             for (uint32_t b = 0; b < stream->block_count; b++) {
                 vtx_inst_block_t *blk = &stream->blocks[b];
                 if (blk->inst_count == 0) continue;
                 uint32_t blk_start = blk->insts[0].native_offset;
                 uint32_t blk_end = blk->insts[blk->inst_count - 1].native_offset;
-                if (pos >= blk_start && pos <= blk_end) {
-                    intervals[v].loop_depth = block_loop_depth[b];
-                    break;
+                /* Check if this block overlaps with the vreg's interval */
+                if (vreg_start <= blk_end && vreg_end >= blk_start) {
+                    if (block_loop_depth[b] > max_depth) {
+                        max_depth = block_loop_depth[b];
+                    }
                 }
             }
+            intervals[v].loop_depth = max_depth;
         }
     }
 
@@ -753,17 +768,29 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
                 reg_bit = *free_regs & (~(*free_regs) + 1u);
             } else {
                 /* GPR: prefer caller-saved registers for short-lived values,
-                 * callee-saved for long-lived values in loops */
+                 * callee-saved for long-lived values in loops.
+                 *
+                 * BUGFIX (audit #3, loop crash): Loop-invariant vregs (constants,
+                 * Phi values) that span the entire loop body MUST get callee-saved
+                 * registers. Caller-saved registers get clobbered by the untag/retag
+                 * sequences within the loop body, corrupting the invariant value.
+                 *
+                 * Heuristic: if loop_depth > 0 AND the interval is long (> 20
+                 * instructions), prefer callee-saved. This ensures constants and
+                 * Phi values survive across loop iterations. */
                 uint32_t caller_free = *free_regs & VTX_CALLER_SAVED_MASK;
                 uint32_t callee_free = *free_regs & VTX_CALLEE_SAVED_MASK;
 
-                /* Heuristic: short-lived values (small interval range) prefer
-                 * caller-saved registers. Long-lived values in deep loops
-                 * prefer callee-saved registers (less save/restore overhead). */
                 uint32_t interval_length = current->end - current->start;
-                bool prefer_caller_saved = (interval_length < 20) || (current->loop_depth == 0);
+                /* Loop-invariant values MUST use callee-saved to survive the loop */
+                bool must_callee_saved = (current->loop_depth > 0 && interval_length > 20);
+                bool prefer_caller_saved = !must_callee_saved &&
+                    ((interval_length < 20) || (current->loop_depth == 0));
 
-                if (prefer_caller_saved && caller_free != 0) {
+                if (must_callee_saved && callee_free != 0) {
+                    reg_bit = callee_free & (~callee_free + 1u);
+                    callee_saved_used |= reg_bit;
+                } else if (prefer_caller_saved && caller_free != 0) {
                     reg_bit = caller_free & (~caller_free + 1u); /* lowest set bit */
                 } else if (callee_free != 0) {
                     reg_bit = callee_free & (~callee_free + 1u);
