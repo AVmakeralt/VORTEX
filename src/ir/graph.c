@@ -2559,6 +2559,21 @@ int vtx_graph_build(vtx_graph_t *graph,
         vtx_node_t *region_n = vtx_node_get(&graph->node_table, block->region_node);
         if (region_n == NULL || region_n->opcode != VTX_OP_Region) continue;
 
+        /* BUGFIX: Skip blocks inside loop bodies. If any predecessor is a
+         * loop header, this block is inside the loop body and its locals
+         * should use the loop header's Phis, not create new merge Phis.
+         * Creating merge Phis inside loop bodies causes circular references
+         * and wrong back-edge values. */
+        bool pred_is_loop_header = false;
+        for (uint32_t p = 0; p < block->pred_count; p++) {
+            uint32_t pred_idx = block->pred_indices[p];
+            if (blocks[pred_idx].is_loop_header) {
+                pred_is_loop_header = true;
+                break;
+            }
+        }
+        if (pred_is_loop_header) continue;
+
         for (uint16_t li = 0; li < max_locals; li++) {
             vtx_nodeid_t local_node = block->locals[li];
             if (local_node == VTX_NODEID_INVALID) continue;
@@ -2584,8 +2599,23 @@ int vtx_graph_build(vtx_graph_t *graph,
             if (!differ || pred_count < 2) continue;
 
             vtx_node_t *local_n = vtx_node_get(&graph->node_table, local_node);
+            /* BUGFIX: Check if this Phi belongs to THIS block's Region.
+             * If the Phi references a DIFFERENT Region/LoopBegin (e.g., it's
+             * a loop header's Phi that was inherited), DON'T modify it —
+             * create a new Phi for this merge point instead. Modifying a
+             * loop header's Phi corrupts its inputs and loses the back-edge. */
+            bool phi_belongs_to_this_block = false;
             if (local_n != NULL && local_n->opcode == VTX_OP_Phi) {
-                /* Already a Phi — update its inputs with exit locals */
+                for (uint32_t inp = 0; inp < local_n->input_count; inp++) {
+                    if (local_n->inputs[inp] == block->region_node) {
+                        phi_belongs_to_this_block = true;
+                        break;
+                    }
+                }
+            }
+
+            if (local_n != NULL && local_n->opcode == VTX_OP_Phi && phi_belongs_to_this_block) {
+                /* Already a Phi for THIS block — update its inputs with exit locals */
                 uint32_t data_idx = 0;
                 for (uint32_t p = 0; p < block->pred_count; p++) {
                     uint32_t pred_idx = block->pred_indices[p];
