@@ -2780,11 +2780,25 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
         if (r0 == 0xFF) {
             uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
             if (slot0 != VTX_NO_SPILL) {
+                /* BUGFIX: IDIV clobbers RAX and RDX. The divisor must NOT
+                 * be in RAX or RDX. Use R12 (callee-saved, not RAX/RDX)
+                 * as the spill load target instead of VTX_SPILL_TMP_REG
+                 * (which is also R12, so this is safe). */
                 emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
                 vtx_x86_emit_idiv_r(e, VTX_SPILL_TMP_REG);
             }
         } else {
-            vtx_x86_emit_idiv_r(e, r0);
+            /* BUGFIX: If the divisor is in RAX or RDX, we need to move it
+             * to a safe register first, because IDIV clobbers both RAX
+             * (quotient) and RDX (remainder). The isel should have already
+             * moved it to R8, but this is a safety net. */
+            if (r0 == 0 || r0 == 2) {
+                /* Divisor is in RAX or RDX — move to R12 first */
+                vtx_x86_emit_mov_rr(e, VTX_SPILL_TMP_REG, r0);
+                vtx_x86_emit_idiv_r(e, VTX_SPILL_TMP_REG);
+            } else {
+                vtx_x86_emit_idiv_r(e, r0);
+            }
         }
         break;
 
