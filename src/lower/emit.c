@@ -540,8 +540,39 @@ static void vtx_x86_emit_dec_r(vtx_x86_emit_t *e, uint8_t reg)
 /* SETcc r/m8: 0F 9x /0 (mod=11) */
 void vtx_x86_emit_setcc(vtx_x86_emit_t *e, uint8_t cond, uint8_t reg)
 {
-    /* SETcc doesn't need REX.W but may need REX.B for extended registers */
-    if (reg_hi(reg)) emit_rex(e, 0, 0, 0, 1);
+    /* SETcc writes a single byte to the low 8 bits of the destination register.
+     *
+     * In x86-64, the byte register encoding has a quirk:
+     *   - Without REX: registers 4-7 map to AH, CH, DH, BH
+     *   - With REX:    registers 4-7 map to SPL, BPL, SIL, DIL
+     *
+     * If the destination is RSP(4), RBP(5), RSI(6), or RDI(7), we MUST emit
+     * a REX prefix (even if REX.B is not needed) to select SPL/BPL/SIL/DIL
+     * instead of AH/CH/DH/BH. Without REX, SETcc would write to the wrong
+     * byte register, corrupting the result.
+     *
+     * BUGFIX (fact(5)=1 bug): The Cmp result was assigned to RDI (reg 7).
+     * Without a REX prefix, SETcc wrote to BH instead of DIL. The subsequent
+     * MOVZX then read DIL (which had garbage), producing wrong comparison
+     * results. This caused loops to exit prematurely (fact(5)=1 instead of
+     * 120, fib(10)=0 instead of 55, etc.).
+     *
+     * For registers 8-15, REX.B is needed to access the extended registers.
+     * For registers 0-3, no REX is needed (AL, CL, DL, BL are the same with
+     * or without REX), but emitting REX is harmless.
+     *
+     * Fix: Always emit at least a minimal REX prefix for reg >= 4. This
+     * ensures SPL/BPL/SIL/DIL are used for registers 4-7, and REX.B for
+     * registers 8-15. */
+    if (reg >= 4) {
+        if (reg_hi(reg)) {
+            /* reg >= 8: need REX.B */
+            emit_rex(e, 0, 0, 0, 1);
+        } else {
+            /* reg 4-7: need REX (without REX.B) to access SPL/BPL/SIL/DIL */
+            emit_byte(e, 0x40); /* minimal REX prefix */
+        }
+    }
     emit_byte(e, 0x0F);
     emit_byte(e, (uint8_t)(0x90 + cond));
     emit_modrm(e, 3, 0, reg & 7);
@@ -3198,6 +3229,54 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
                 }
             } else {
                 vtx_x86_emit_setcc(e, vtx_cond_to_x86(inst->cond), r0);
+            }
+        }
+        break;
+
+    case VTX_X86_MOVZX:
+        /* MOVZX r64, r/m8 — zero-extend byte to 64 bits.
+         *
+         * Used after SETCC to zero-extend the 1-byte result to the full
+         * 64-bit register. Without this, the upper 56 bits retain
+         * whatever garbage was in the register, causing the retag
+         * sequence (AND/SHL/OR) to produce wrong SMI values.
+         *
+         * Encoding: REX.W 0F B6 /r (mod=11 for register-register) */
+        r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
+        r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 != 0xFF && r1 != 0xFF) {
+            /* MOVZX r0, r1 — zero-extend r1's low byte into r0 */
+            /* REX.W + 0F B6 /r */
+            if (reg_hi(r0) || reg_hi(r1)) {
+                emit_rex(e, 1, reg_hi(r0), 0, reg_hi(r1));
+            } else {
+                emit_rex(e, 1, 0, 0, 0); /* REX.W for 64-bit result */
+            }
+            emit_byte(e, 0x0F);
+            emit_byte(e, 0xB6);
+            emit_modrm(e, 3, r0 & 7, r1 & 7);
+        } else if (r0 == 0xFF && r1 != 0xFF) {
+            /* Destination spilled — load byte from source into R12,
+             * zero-extend, store back to spill slot. */
+            uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+            if (slot0 != VTX_NO_SPILL) {
+                /* MOVZX R12, r1 (zero-extend byte) */
+                emit_rex(e, 1, reg_hi(12), 0, reg_hi(r1));
+                emit_byte(e, 0x0F);
+                emit_byte(e, 0xB6);
+                emit_modrm(e, 3, 12 & 7, r1 & 7);
+                emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+            }
+        } else if (r0 != 0xFF && r1 == 0xFF) {
+            /* Source spilled — load from spill, MOVZX, keep in r0 */
+            uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+            if (slot1 != VTX_NO_SPILL) {
+                emit_spill_load(e, slot1, VTX_SPILL_TMP_REG);
+                /* MOVZX r0, R12 */
+                emit_rex(e, 1, reg_hi(r0), 0, reg_hi(12));
+                emit_byte(e, 0x0F);
+                emit_byte(e, 0xB6);
+                emit_modrm(e, 3, r0 & 7, 12 & 7);
             }
         }
         break;

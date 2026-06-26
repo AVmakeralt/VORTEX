@@ -974,6 +974,50 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
     /* Set callee-saved mask */
     result->callee_saved_mask = callee_saved_used;
 
+    /* BUGFIX: Fallback assignment for unassigned vregs.
+     *
+     * Some vregs (especially temporaries created by the If/Cmp isel) may
+     * not get assigned a phys reg or spill slot if their intervals were
+     * not properly computed or if the linear scan missed them. Without
+     * this fallback, the emitter silently drops instructions that reference
+     * unassigned vregs, causing wrong results (e.g., fact(5)=1 instead of
+     * 120 because the If's CMP is dropped).
+     *
+     * Fix: Scan all instructions for VREG operands. For any vreg that has
+     * no phys reg (0xFF) and no spill slot (VTX_NO_SPILL), create a spill
+     * slot. The emitter will then emit spill loads/stores for it. */
+    for (uint32_t b = 0; b < stream->block_count; b++) {
+        vtx_inst_block_t *blk = &stream->blocks[b];
+        for (uint32_t i = 0; i < blk->inst_count; i++) {
+            vtx_inst_t *inst = &blk->insts[i];
+            for (int op = 0; op < VTX_INST_MAX_OPERANDS; op++) {
+                if (inst->opnd_kinds[op] != VTX_OPND_VREG) continue;
+                uint32_t vreg = inst->operands[op];
+                if (vreg >= vreg_count) continue;
+                if (result->vreg_to_phys[vreg] == 0xFF &&
+                    result->vreg_to_spill[vreg] == VTX_NO_SPILL) {
+                    /* Assign a spill slot as fallback */
+                    result->vreg_to_spill[vreg] = next_spill_slot++;
+                }
+            }
+            /* Also check memory operands */
+            if (inst->flags & VTX_INST_FLAG_HAS_MEM) {
+                if (inst->mem.base_vreg != VTX_VREG_INVALID &&
+                    inst->mem.base_vreg < vreg_count &&
+                    result->vreg_to_phys[inst->mem.base_vreg] == 0xFF &&
+                    result->vreg_to_spill[inst->mem.base_vreg] == VTX_NO_SPILL) {
+                    result->vreg_to_spill[inst->mem.base_vreg] = next_spill_slot++;
+                }
+                if (inst->mem.index_vreg != VTX_VREG_INVALID &&
+                    inst->mem.index_vreg < vreg_count &&
+                    result->vreg_to_phys[inst->mem.index_vreg] == 0xFF &&
+                    result->vreg_to_spill[inst->mem.index_vreg] == VTX_NO_SPILL) {
+                    result->vreg_to_spill[inst->mem.index_vreg] = next_spill_slot++;
+                }
+            }
+        }
+    }
+
     /* Compute frame size */
     /* Frame layout: [callee-saved pushes] [spill slots] [alignment] */
     uint32_t callee_pushes = 0;

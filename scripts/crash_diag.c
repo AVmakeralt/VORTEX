@@ -105,17 +105,91 @@ int main(void) {
     vtx_inst_stream_t *stream = vtx_isel_select(&schedule, &graph, &arena);
     if (!stream) { printf("ISEL FAILED\n"); return 1; }
 
+    /* Print pre-regalloc stream with source node IDs */
+    printf("\n=== Pre-regalloc stream (with node IDs) ===\n");
+    for (uint32_t b = 0; b < stream->block_count; b++) {
+        printf("Block %u: %u instructions\n", b, stream->blocks[b].inst_count);
+        for (uint32_t i = 0; i < stream->blocks[b].inst_count; i++) {
+            vtx_inst_t *inst = &stream->blocks[b].insts[i];
+            const char *opname = "?";
+            switch (inst->opcode) {
+                case 0: opname="NOP"; break;
+                case 1: opname="ADD"; break;
+                case 2: opname="SUB"; break;
+                case 3: opname="IMUL"; break;
+                case 10: opname="SHL"; break;
+                case 11: opname="SHR"; break;
+                case 12: opname="SAR"; break;
+                case 15: opname="OR"; break;
+                case 16: opname="AND"; break;
+                case 18: opname="CMP"; break;
+                case 20: opname="MOV"; break;
+                case 21: opname="MOVZX"; break;
+                case 29: opname="SETCC"; break;
+                case 37: opname="JMP"; break;
+                case 38: opname="JCC"; break;
+                case 40: opname="RET"; break;
+                case 62: opname="EPILOGUE"; break;
+            }
+            printf("  [%u] %s k0=%u op0=%u k1=%u op1=%u flags=0x%x imm=0x%llX node=N%u\n",
+                   i, opname,
+                   inst->opnd_kinds[0], inst->operands[0],
+                   inst->opnd_kinds[1], inst->operands[1],
+                   (unsigned)inst->flags,
+                   (unsigned long long)(uint64_t)inst->imm,
+                   inst->source_node);
+        }
+    }
+
+    /* Print vreg-to-node mapping */
+    printf("\n=== Vreg to Node mapping ===\n");
+    for (uint32_t v = 0; v < stream->vreg_count; v++) {
+        vtx_nodeid_t nid = vtx_isel_node_vreg(stream, v);
+        if (nid != VTX_VREG_INVALID) {
+            const vtx_node_t *n = vtx_node_get_const(&graph.node_table, nid);
+            printf("  vreg %u → N%u (%s)\n", v, nid,
+                   n ? vtx_node_opcode_name(n->opcode) : "?");
+        }
+    }
+
     vtx_regalloc_result_t *ra = vtx_regalloc_run(stream, &arena);
     if (!ra) { printf("REGALLOC FAILED\n"); return 1; }
 
-    /* Print vreg→phys mapping */
-    printf("=== Regalloc mapping ===\n");
+    /* Print vreg→phys mapping with node info */
+    printf("\n=== Regalloc mapping ===\n");
+    static const char *reg_names[] = {
+        "RAX","RCX","RDX","RBX","RSP","RBP","RSI","RDI",
+        "R8","R9","R10","R11","R12","R13","R14","R15"
+    };
     for (uint32_t v = 0; v < ra->vreg_to_phys_count; v++) {
         if (ra->vreg_to_phys[v] != 0xFF) {
-            printf("  vreg %u → phys %u\n", v, ra->vreg_to_phys[v]);
+            vtx_nodeid_t nid = VTX_VREG_INVALID;
+            const char *opname = "?";
+            /* Find which node maps to this vreg */
+            for (uint32_t n = 0; n < graph.node_table.count; n++) {
+                if (!graph.node_table.nodes[n].dead &&
+                    vtx_isel_node_vreg(stream, n) == v) {
+                    nid = n;
+                    opname = vtx_node_opcode_name(graph.node_table.nodes[n].opcode);
+                    break;
+                }
+            }
+            printf("  vreg %u (N%u/%s) → %s\n", v, nid, opname,
+                   ra->vreg_to_phys[v] < 16 ? reg_names[ra->vreg_to_phys[v]] : "?");
         }
         if (ra->vreg_to_spill[v] != 0xFFFFFFFF) {
-            printf("  vreg %u → spill %u\n", v, ra->vreg_to_spill[v]);
+            vtx_nodeid_t nid = VTX_VREG_INVALID;
+            const char *opname = "?";
+            for (uint32_t n = 0; n < graph.node_table.count; n++) {
+                if (!graph.node_table.nodes[n].dead &&
+                    vtx_isel_node_vreg(stream, n) == v) {
+                    nid = n;
+                    opname = vtx_node_opcode_name(graph.node_table.nodes[n].opcode);
+                    break;
+                }
+            }
+            printf("  vreg %u (N%u/%s) → spill %u\n", v, nid, opname,
+                   ra->vreg_to_spill[v]);
         }
     }
 
@@ -138,7 +212,6 @@ int main(void) {
 
     /* Now compile via pipeline and execute */
     vtx_pipeline_config_t config = vtx_pipeline_config_t2();
-    config.run_licm = false;  /* Disable LICM to test if it's causing the issue */
     vtx_code_cache_t cache; vtx_code_cache_init(&cache, 1<<20);
     vtx_method_registry_t reg; vtx_method_registry_init(&reg, &arena);
     config.code_cache=&cache; config.method_registry=&reg; config.method=&method;
