@@ -2691,6 +2691,16 @@ int vtx_graph_build(vtx_graph_t *graph,
         }
     }
 
+    /* Debug: Print latch locals before Phase 4 */
+    for (uint32_t bi = 0; bi < nblocks; bi++) {
+        if (blocks[bi].is_loop_end) {
+            for (uint16_t li = 0; li < max_locals && li < 5; li++) {
+                fprintf(stderr, " [%u]=N%u", li, blocks[bi].locals ? blocks[bi].locals[li] : VTX_NODEID_INVALID);
+            }
+            fprintf(stderr, "\n");
+        }
+    }
+
     /* Now handle loop headers: update Phi Input 0 and connect back-edges.
      *
      * The loop header's Phi was created in Phase 2 with Input 0 = the

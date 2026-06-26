@@ -97,8 +97,8 @@ int main(void) {
     vtx_method_desc_t method = {.name="f",.signature="(I)I",.bytecode=&bc,
         .compiled_code=NULL,.vtable_index=0,.arg_count=1,.is_virtual=false};
 
-    vtx_graph_build(&graph, &bc, &method, &arena);
-    vtx_graph_print(&graph);
+    /* Only build graph once — the pipeline will build it again */
+    /* Skip manual graph build to avoid double-building */
 
     /* Schedule + isel + regalloc manually to get the stream */
     vtx_schedule_t schedule;
