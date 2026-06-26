@@ -138,6 +138,7 @@ int main(void) {
 
     /* Now compile via pipeline and execute */
     vtx_pipeline_config_t config = vtx_pipeline_config_t2();
+    config.run_licm = false;  /* Disable LICM to test if it's causing the issue */
     vtx_code_cache_t cache; vtx_code_cache_init(&cache, 1<<20);
     vtx_method_registry_t reg; vtx_method_registry_init(&reg, &arena);
     config.code_cache=&cache; config.method_registry=&reg; config.method=&method;
