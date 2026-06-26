@@ -30,31 +30,40 @@
 
 static void segfault_handler(int sig, siginfo_t *si, void *ctx) {
     ucontext_t *uc = (ucontext_t *)ctx;
-    printf("\n=== SEGFAULT ===\n");
-    printf("Fault address: %p\n", si->si_addr);
-    printf("RIP: 0x%llx\n", (unsigned long long)uc->uc_mcontext.gregs[REG_RIP]);
-    printf("RAX: 0x%llx  RBX: 0x%llx  RCX: 0x%llx\n",
+    fflush(stdout);
+    fprintf(stderr, "\n=== SEGFAULT ===\n");
+    fprintf(stderr, "Fault address: %p\n", si->si_addr);
+    fprintf(stderr, "RIP: 0x%llx\n", (unsigned long long)uc->uc_mcontext.gregs[REG_RIP]);
+    fprintf(stderr, "RAX: 0x%llx  RBX: 0x%llx  RCX: 0x%llx\n",
            (unsigned long long)uc->uc_mcontext.gregs[REG_RAX],
            (unsigned long long)uc->uc_mcontext.gregs[REG_RBX],
            (unsigned long long)uc->uc_mcontext.gregs[REG_RCX]);
-    printf("RDX: 0x%llx  RSI: 0x%llx  RDI: 0x%llx\n",
+    fprintf(stderr, "RDX: 0x%llx  RSI: 0x%llx  RDI: 0x%llx\n",
            (unsigned long long)uc->uc_mcontext.gregs[REG_RDX],
            (unsigned long long)uc->uc_mcontext.gregs[REG_RSI],
            (unsigned long long)uc->uc_mcontext.gregs[REG_RDI]);
-    printf("R8:  0x%llx  R9:  0x%llx  R10: 0x%llx  R11: 0x%llx\n",
+    fprintf(stderr, "R8:  0x%llx  R9:  0x%llx  R10: 0x%llx  R11: 0x%llx\n",
            (unsigned long long)uc->uc_mcontext.gregs[REG_R8],
            (unsigned long long)uc->uc_mcontext.gregs[REG_R9],
            (unsigned long long)uc->uc_mcontext.gregs[REG_R10],
            (unsigned long long)uc->uc_mcontext.gregs[REG_R11]);
-    printf("R12: 0x%llx  R13: 0x%llx  R14: 0x%llx  R15: 0x%llx\n",
+    fprintf(stderr, "R12: 0x%llx  R13: 0x%llx  R14: 0x%llx  R15: 0x%llx\n",
            (unsigned long long)uc->uc_mcontext.gregs[REG_R12],
            (unsigned long long)uc->uc_mcontext.gregs[REG_R13],
            (unsigned long long)uc->uc_mcontext.gregs[REG_R14],
            (unsigned long long)uc->uc_mcontext.gregs[REG_R15]);
-    printf("RSP: 0x%llx  RBP: 0x%llx\n",
+    fprintf(stderr, "RSP: 0x%llx  RBP: 0x%llx\n",
            (unsigned long long)uc->uc_mcontext.gregs[REG_RSP],
            (unsigned long long)uc->uc_mcontext.gregs[REG_RBP]);
+    fflush(stderr);
     _exit(1);
+}
+
+static void alarm_handler(int sig) {
+    fflush(stdout);
+    fprintf(stderr, "\n=== ALARM: TIMEOUT (infinite loop) ===\n");
+    fflush(stderr);
+    _exit(2);
 }
 
 int main(void) {
@@ -63,6 +72,9 @@ int main(void) {
     sa.sa_sigaction = segfault_handler;
     sa.sa_flags = SA_SIGINFO;
     sigaction(SIGSEGV, &sa, NULL);
+
+    /* Set up alarm handler for timeout detection */
+    signal(SIGALRM, alarm_handler);
 
     vtx_assembler_t a; vtx_asm_init(&a);
     const char *prog =
@@ -83,6 +95,7 @@ int main(void) {
         .compiled_code=NULL,.vtable_index=0,.arg_count=1,.is_virtual=false};
 
     vtx_graph_build(&graph, &bc, &method, &arena);
+    vtx_graph_print(&graph);
 
     /* Schedule + isel + regalloc manually to get the stream */
     vtx_schedule_t schedule;
@@ -134,8 +147,8 @@ int main(void) {
 
     if (method.compiled_code) {
         uint8_t *code = (uint8_t*)method.compiled_code;
-        printf("\n=== Native code (200 bytes) ===\n");
-        for (int i=0; i<200; i++) {
+        printf("\n=== Native code (400 bytes) ===\n");
+        for (int i=0; i<400; i++) {
             printf("%02X ", code[i]);
             if((i+1)%16==0) printf("\n");
         }
@@ -146,8 +159,16 @@ int main(void) {
         typedef vtx_value_t (*entry_t)(const vtx_method_desc_t*,void*,void*,vtx_value_t*,uint32_t);
         entry_t e = (entry_t)method.compiled_code;
         vtx_value_t av = vtx_make_smi(3);
+
+        /* Set a 3-second alarm to catch infinite loops */
+        alarm(3);
         vtx_value_t r = e(&method, NULL, (void*)1, &av, 1);
+        alarm(0);
+        fflush(stdout);
+        printf("Function returned! raw=0x%llX\n", (unsigned long long)r);
+        fflush(stdout);
         printf("sum(3) = %lld (expected 6)\n", (long long)vtx_smi_value(r));
+        fflush(stdout);
     }
 
     vtx_compile_result_destroy(&result);

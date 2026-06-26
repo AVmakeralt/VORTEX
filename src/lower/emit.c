@@ -1956,18 +1956,55 @@ void vtx_x86_emit_prologue(vtx_x86_emit_t *e, uint32_t frame_size,
 
 void vtx_x86_emit_epilogue(vtx_x86_emit_t *e, uint32_t callee_saved_mask)
 {
-    /* mov rsp, rbp */
-    vtx_x86_emit_mov_rr(e, 4, 5); /* RSP = 4, RBP = 5 */
+    /* Restore RSP to the frame pointer. After this, RSP points at the
+     * saved RBP (which was pushed in the prologue BEFORE the callee-saved
+     * registers). The callee-saved registers live at NEGATIVE offsets
+     * from RBP:
+     *   [RBP-8]  = R15 (last pushed)
+     *   [RBP-16] = R14
+     *   [RBP-24] = R13
+     *   [RBP-32] = R12
+     *   [RBP-40] = RBX (first pushed)
+     *   [RBP]    = saved RBP
+     *   [RBP+8]  = saved RDX (profile_data)
+     *   [RBP+16] = saved RSI (deopt_info)
+     *   [RBP+24] = saved RDI (method_ptr)
+     *   [RBP+32] = return address
+     *
+     * BUGFIX (loop crash): The old code did MOV RSP, RBP then immediately
+     * popped callee-saved. But after MOV RSP, RBP, RSP points at saved
+     * RBP — NOT at the callee-saved area. The pops would read saved RBP,
+     * saved RDX, saved RSI, etc. into R15/R14/R13/R12/RBX, completely
+     * corrupting them. Then POP RBP would read the return address, and
+     * RET would pop from garbage, causing a segfault.
+     *
+     * Fix: After MOV RSP, RBP, SUB RSP by (8 * num_callee_saved) to
+     * point RSP at the last-pushed callee-saved register. Then pop in
+     * reverse push order (R15 first, RBX last). After the pops, RSP is
+     * back at RBP (pointing at saved RBP), so POP RBP restores the
+     * caller's RBP correctly. */
+    vtx_x86_emit_mov_rr(e, 4, 5); /* RSP = RBP */
 
-    /* Pop callee-saved registers (reverse order) */
+    /* Count how many callee-saved registers were pushed */
     static const uint8_t cs_regs[] = { 3, 12, 13, 14, 15 };
+    int cs_count = 0;
+    for (int i = 0; i < 5; i++) {
+        if (callee_saved_mask & (1u << cs_regs[i])) cs_count++;
+    }
+
+    /* SUB RSP, 8*cs_count to point at the last-pushed callee-saved */
+    if (cs_count > 0) {
+        vtx_x86_emit_sub_ri(e, 4, 8 * cs_count);
+    }
+
+    /* Pop callee-saved registers (reverse push order: R15, R14, R13, R12, RBX) */
     for (int i = 4; i >= 0; i--) {
         if (callee_saved_mask & (1u << cs_regs[i])) {
             vtx_x86_emit_pop_r(e, cs_regs[i]);
         }
     }
 
-    /* pop rbp */
+    /* pop rbp — RSP is now back at RBP, so this restores caller's RBP */
     vtx_x86_emit_pop_r(e, 5);
 
     /* Skip the 3 JIT header values pushed in prologue:

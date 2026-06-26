@@ -733,7 +733,21 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             cvt.d = node->constval.as.float_val;
             inst.imm = (int64_t)cvt.u;
         } else {
-            inst.imm = 0;
+            /* Void/undefined constants: emit SMI(0) as a safe default.
+             *
+             * BUGFIX (loop crash): Void constants are created by the IR
+             * builder for uninitialized locals. The old code emitted
+             * raw 0 (inst.imm = 0), which is NOT a valid NaN-boxed SMI.
+             * When used as a local's initial value, the loop body's
+             * untag/retag sequence would produce garbage, and when the
+             * loop didn't execute (arg=0), the function returned raw 0
+             * instead of SMI(0).
+             *
+             * SMI(0) = 0x7FF8000000000000 is the correct NaN-boxed
+             * representation of the integer 0. Emitting it here ensures
+             * that even if the void constant is not removed by DCE, it
+             * won't corrupt the value system. */
+            inst.imm = (int64_t)0x7FF8000000000000ULL;  /* SMI(0) */
         }
         inst.flags = VTX_INST_FLAG_HAS_IMM;
         inst.source_node = node_id;
