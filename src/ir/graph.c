@@ -2450,12 +2450,54 @@ int vtx_graph_build(vtx_graph_t *graph,
      * predecessors. Phase 4 must add the back-edge predecessor's values
      * as additional Phi inputs, so that each Phi has one data input per
      * Region/LoopBegin input. Without this, the SSA invariant was broken:
-     * the LoopBegin had N inputs but its Phis had N-1 data inputs. */
+     * the LoopBegin had N inputs but its Phis had N-1 data inputs.
+     *
+     * BUGFIX 2 (loop mismatch): The loop header's Phi was created in
+     * Phase 2 with Input 0 = predecessor's INITIAL local (e.g., undef
+     * void Constant). But Phase 3 updates the predecessor's locals to
+     * the EXIT state (e.g., SMI(0) after `store_local 1`). The Phi's
+     * Input 0 was never updated, so it still referenced the old undef.
+     * This caused the loop body to use the wrong initial value.
+     *
+     * Fix: After Phase 3, update each loop header Phi's Input 0 to
+     * reference the forward predecessor's EXIT local. */
     for (uint32_t bi = 0; bi < nblocks; bi++) {
         vtx_block_info_t *block = &blocks[bi];
         if (block->is_loop_header && block->region_node != VTX_NODEID_INVALID) {
             vtx_node_t *region_n = vtx_node_get(&graph->node_table, block->region_node);
             if (region_n != NULL && region_n->opcode == VTX_OP_LoopBegin) {
+                /* BUGFIX 2: Update Phi Input 0 with the forward predecessor's
+                 * EXIT local value (after Phase 3 ran). The Phi was created
+                 * in Phase 2 with the predecessor's INITIAL local, which is
+                 * now stale. */
+                if (block->locals != NULL) {
+                    for (uint16_t li = 0; li < max_locals; li++) {
+                        vtx_nodeid_t local_node = block->locals[li];
+                        if (local_node == VTX_NODEID_INVALID) continue;
+                        vtx_node_t *local_n = vtx_node_get(&graph->node_table, local_node);
+                        if (local_n != NULL && local_n->opcode == VTX_OP_Phi) {
+                            /* Find the forward (non-loop-end) predecessor */
+                            for (uint32_t p = 0; p < block->pred_count; p++) {
+                                uint32_t pred_idx = block->pred_indices[p];
+                                if (blocks[pred_idx].is_loop_end) continue;
+                                if (blocks[pred_idx].is_unreachable) continue;
+                                if (blocks[pred_idx].locals == NULL) continue;
+                                vtx_nodeid_t exit_val = blocks[pred_idx].locals[li];
+                                if (exit_val == VTX_NODEID_INVALID) continue;
+                                /* Update Input 0 of the Phi to the predecessor's EXIT local.
+                                 * Input 0 is the first data input (the Phi's inputs are:
+                                 * [forward_val, LoopBegin, back_edge_val (added later)]).
+                                 * Use vtx_node_replace_input to properly maintain
+                                 * output counts and use-def lists. */
+                                if (local_n->input_count > 0 && local_n->inputs[0] != exit_val) {
+                                    vtx_node_replace_input(&graph->node_table, local_node, 0, exit_val);
+                                }
+                                break; /* Only one forward predecessor for a loop header */
+                            }
+                        }
+                    }
+                }
+
                 /* Find the latch (backward-branching predecessor) */
                 for (uint32_t p = 0; p < block->pred_count; p++) {
                     uint32_t pred_idx = block->pred_indices[p];
