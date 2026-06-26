@@ -1,5 +1,5 @@
 /*
- * Crash diagnostic: trace a simple loop (fib(10)) to find where it crashes.
+ * Crash diagnostic: trace a simple loop (fact(5)) to find where it crashes.
  * Uses SIGSEGV handler to catch the crash and dump register state.
  */
 #define _GNU_SOURCE
@@ -78,13 +78,10 @@ int main(void) {
 
     vtx_assembler_t a; vtx_asm_init(&a);
     const char *prog =
-        ".method fib (I)I\n.arg_count 1\n.max_locals 4\n.max_stack 4\n"
-        "load_const_int 0\nstore_local 1\n"
-        "load_const_int 1\nstore_local 2\n"
-        "loop:\nload_local 0\nif_false done\n"
-        "load_local 1\nload_local 2\niadd\nstore_local 3\n"
-        "load_local 2\nstore_local 1\n"
-        "load_local 3\nstore_local 2\n"
+        ".method fact (I)I\n.arg_count 1\n.max_locals 2\n.max_stack 4\n"
+        "load_const_int 1\nstore_local 1\n"
+        "loop:\nload_local 0\nload_const_int 1\nicmp_le\nif_true done\n"
+        "load_local 1\nload_local 0\nimul\nstore_local 1\n"
         "load_local 0\nload_const_int 1\nisub\nstore_local 0\n"
         "goto loop\ndone:\nload_local 1\nreturn_value\n";
     vtx_asm_program(&a, prog);
@@ -157,11 +154,11 @@ int main(void) {
         }
         printf("\n\n");
 
-        printf("Executing fib(10)...\n");
+        printf("Executing fact(5)...\n");
         fflush(stdout);
         typedef vtx_value_t (*entry_t)(const vtx_method_desc_t*,void*,void*,vtx_value_t*,uint32_t);
         entry_t e = (entry_t)method.compiled_code;
-        vtx_value_t av = vtx_make_smi(10);
+        vtx_value_t av = vtx_make_smi(5);
 
         /* Set a 3-second alarm to catch infinite loops */
         alarm(3);
@@ -170,7 +167,7 @@ int main(void) {
         fflush(stdout);
         printf("Function returned! raw=0x%llX\n", (unsigned long long)r);
         fflush(stdout);
-        printf("fib(10) = %lld (expected 55)\n", (long long)vtx_smi_value(r));
+        printf("fact(5) = %lld (expected 120)\n", (long long)vtx_smi_value(r));
         fflush(stdout);
     }
 
