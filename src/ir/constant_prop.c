@@ -767,26 +767,37 @@ uint32_t vtx_constant_prop_run(vtx_graph_t *graph)
         }
     }
 
-    /* Phase 3: Simplify Phis with only one non-Top input */
+    /* Phase 3: Simplify Phis with only one non-Top input.
+     *
+     * BUGFIX (if-then-else wrong result): The old code skipped inputs with
+     * lattice value TOP, treating them as "unreachable predecessor". But
+     * TOP means "not yet visited", NOT "unreachable". If a Phi input is
+     * still TOP when Phase 3 runs, the Phi should NOT be simplified — it
+     * means SCCP hasn't converged for that input yet.
+     *
+     * Fix: Only simplify a Phi if ALL data inputs are non-top AND they all
+     * agree. If any input is still TOP, skip the Phi (don't simplify). */
     for (uint32_t i = 0; i < nt->count; i++) {
         vtx_node_t *node = &nt->nodes[i];
         if (node->dead || node->opcode != VTX_OP_Phi) continue;
 
         vtx_nodeid_t unique_val = VTX_NODEID_INVALID;
-        bool all_same_or_top = true;
+        bool all_same = true;
         bool has_non_top = false;
+        bool has_top = false;
 
-        /* Check data inputs (skip the last Region input) */
+        /* Check data inputs (skip control inputs) */
         for (uint32_t j = 0; j < node->input_count; j++) {
             vtx_nodeid_t inp = node->inputs[j];
             if (inp == VTX_NODEID_INVALID || inp >= node_count) continue;
 
-            /* Skip Region inputs — they're control, not data */
+            /* Skip Region/control inputs — they're control, not data */
             const vtx_node_t *inp_node = vtx_node_get_const(nt, inp);
             if (inp_node != NULL && vtx_nf_has(inp_node->flags, VTX_NF_CONTROL)) continue;
 
             if (lattice[inp].tag == VTX_LATTICE_TOP) {
-                /* Unreachable predecessor — skip */
+                /* Input not yet visited — don't simplify this Phi */
+                has_top = true;
                 continue;
             }
 
@@ -794,12 +805,14 @@ uint32_t vtx_constant_prop_run(vtx_graph_t *graph)
             if (unique_val == VTX_NODEID_INVALID) {
                 unique_val = inp;
             } else if (inp != unique_val) {
-                all_same_or_top = false;
+                all_same = false;
                 break;
             }
         }
 
-        if (has_non_top && all_same_or_top && unique_val != VTX_NODEID_INVALID) {
+        /* Only simplify if: no TOP inputs, at least one non-top input,
+         * and all non-top inputs agree. */
+        if (!has_top && has_non_top && all_same && unique_val != VTX_NODEID_INVALID) {
             /* Replace Phi with its single value */
             /* Bug #5 fix: Use O(K) replace_all_uses instead of O(N^2)
              * scan. Also properly disconnect the Phi's inputs from
