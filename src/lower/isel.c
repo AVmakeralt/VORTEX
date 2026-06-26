@@ -1247,9 +1247,14 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             idiv_inst.flags = VTX_INST_FLAG_CLOBBER_RAX | VTX_INST_FLAG_CLOBBER_RDX;
             vtx_isel_emit_inst(block, idiv_inst, arena);
 
-            /* RDX has the raw remainder. Retag in-place and map dst. */
-            emit_smi_retag(stream, block, rdx_vreg, node_id, arena);
-            vtx_isel_map_node_vreg(stream, node_id, rdx_vreg, arena);
+            /* RDX has the raw remainder. Copy to fresh vreg, retag, map dst.
+             * BUGFIX: Don't retag in-place — the fixed rdx_vreg may be spilled
+             * and the spill slot can collide with other vregs. Moving to a
+             * fresh vreg ensures the result is in a normal register. */
+            uint32_t mod_dst = vtx_isel_alloc_vreg(stream, arena);
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, mod_dst, rdx_vreg, node_id), arena);
+            emit_smi_retag(stream, block, mod_dst, node_id, arena);
+            vtx_isel_map_node_vreg(stream, node_id, mod_dst, arena);
             (void)rax_vreg;
         }
         break;
