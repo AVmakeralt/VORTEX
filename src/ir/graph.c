@@ -1516,8 +1516,15 @@ int vtx_graph_build(vtx_graph_t *graph,
                 forward_pred_count++;
                 single_pred_idx = pred_idx;
             }
-            /* If exactly one forward predecessor, re-inherit its EXIT locals */
-            if (forward_pred_count == 1 && blocks[single_pred_idx].locals != NULL) {
+            /* If exactly one forward predecessor, re-inherit its EXIT locals.
+             *
+             * BUGFIX: DON'T re-inherit from a loop header — blocks inside the
+             * loop body should use the Phis, and the latch/exit blocks get
+             * their values from Phase 4's back-edge fix and the Region Phi
+             * creation respectively. */
+            if (forward_pred_count == 1 &&
+                !blocks[single_pred_idx].is_loop_header &&
+                blocks[single_pred_idx].locals != NULL) {
                 for (uint16_t i = 0; i < max_locals; i++) {
                     /* Only update if the predecessor's exit local is valid
                      * and different from what we have. Don't overwrite locals
