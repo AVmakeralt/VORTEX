@@ -80,7 +80,7 @@ int main(void) {
 
     vtx_graph_build(&graph, &bc, &method, &arena);
     vtx_pipeline_config_t config = vtx_pipeline_config_t2();
-    config.run_gvn = false; config.run_sccp = false; config.run_dce = false; config.run_licm = false; config.run_bounds_check = false; config.run_pea = false; config.run_inlining = false; config.run_loop_spec = false; config.run_vectorize = false;
+    config.run_gvn = false;
     vtx_code_cache_t cache; vtx_code_cache_init(&cache, 1<<20);
     vtx_method_registry_t reg; vtx_method_registry_init(&reg, &arena);
     config.code_cache=&cache; config.method_registry=&reg; config.method=&method;
