@@ -1487,6 +1487,50 @@ int vtx_graph_build(vtx_graph_t *graph,
             continue;
         }
 
+        /* BUGFIX (if-then-else crash): Re-inherit locals from the predecessor's
+         * EXIT state (not the INITIAL state from Phase 2).
+         *
+         * Phase 2 set block->locals[i] = blocks[pred_idx].locals[i] using the
+         * predecessor's INITIAL locals (before Phase 3 ran). But by the time
+         * Phase 3 processes this block, the predecessor has already been
+         * processed (blocks are processed in order), and its locals reflect
+         * the EXIT state (after store_local instructions).
+         *
+         * Without this re-inheritance, load_local in this block reads stale
+         * initial values (e.g., void constants) instead of the updated values
+         * (e.g., SMI(0) from store_local). This caused the Add node to use
+         * the void constant instead of the stored value, producing wrong
+         * results and crashes.
+         *
+         * Only applies to non-loop, non-entry blocks with exactly one forward
+         * predecessor. Loop headers have their own Phi-based handling, and
+         * merge blocks with multiple predecessors have Phis created in Phase 2. */
+        if (bi > 0 && !block->is_loop_header && block->locals != NULL) {
+            /* Count forward predecessors */
+            uint32_t forward_pred_count = 0;
+            uint32_t single_pred_idx = 0;
+            for (uint32_t p = 0; p < block->pred_count; p++) {
+                uint32_t pred_idx = block->pred_indices[p];
+                if (blocks[pred_idx].is_loop_end) continue;
+                if (blocks[pred_idx].is_unreachable) continue;
+                forward_pred_count++;
+                single_pred_idx = pred_idx;
+            }
+            /* If exactly one forward predecessor, re-inherit its EXIT locals */
+            if (forward_pred_count == 1 && blocks[single_pred_idx].locals != NULL) {
+                for (uint16_t i = 0; i < max_locals; i++) {
+                    /* Only update if the predecessor's exit local is valid
+                     * and different from what we have. Don't overwrite locals
+                     * that this block's Phase 3 has already updated (but Phase 3
+                     * hasn't run for this block yet, so this is safe). */
+                    vtx_nodeid_t exit_val = blocks[single_pred_idx].locals[i];
+                    if (exit_val != VTX_NODEID_INVALID) {
+                        block->locals[i] = exit_val;
+                    }
+                }
+            }
+        }
+
         int32_t sp = 0; /* stack pointer (index into op_stack) */
 
         /* If this is a catch handler, the exception is on the stack */
@@ -2428,6 +2472,35 @@ int vtx_graph_build(vtx_graph_t *graph,
             pc += insn_len;
         }
 
+        /* BUGFIX (if-then-else crash): Create a Goto for fallthrough blocks.
+         *
+         * If the block's last instruction is NOT a terminator (Goto, If,
+         * Return, Throw), the block falls through to the next block. The
+         * block finder (line 603) records the successor edge, but no Goto
+         * node is created in the IR. Without a Goto, the scheduler can't
+         * place a terminator in the block, leaving it empty. The emitter
+         * then can't emit a JMP, causing crashes.
+         *
+         * Fix: If the block's control_node is not a Goto/If/Return/Throw,
+         * create a Goto node as the terminator. */
+        if (block->control_node != VTX_NODEID_INVALID && !block->is_unreachable) {
+            vtx_node_t *ctrl_n = vtx_node_get(&graph->node_table, block->control_node);
+            if (ctrl_n != NULL &&
+                ctrl_n->opcode != VTX_OP_Goto &&
+                ctrl_n->opcode != VTX_OP_If &&
+                ctrl_n->opcode != VTX_OP_Return &&
+                ctrl_n->opcode != VTX_OP_LoopEnd) {
+                /* Check if this block has a successor (fallthrough) */
+                if (block->succ_count > 0) {
+                    vtx_nodeid_t goto_n = vtx_node_create(&graph->node_table, VTX_OP_Goto);
+                    if (goto_n != VTX_NODEID_INVALID) {
+                        vtx_node_add_input(&graph->node_table, goto_n, block->control_node);
+                        block->control_node = goto_n;
+                    }
+                }
+            }
+        }
+
         /* Save exit operand stack state for this block.
          * This allows successor blocks to reconstruct their entry stack
          * from predecessor exit states. Critical for propagating values
@@ -2502,6 +2575,9 @@ int vtx_graph_build(vtx_graph_t *graph,
             }
 
             if (!differ || pred_count < 2) continue;
+
+            fprintf(stderr, "[graph] Block %u local %u: predecessors differ (pred_count=%u), creating Phi\n",
+                    bi, li, pred_count);
 
             vtx_node_t *local_n = vtx_node_get(&graph->node_table, local_node);
             if (local_n != NULL && local_n->opcode == VTX_OP_Phi) {
@@ -2802,6 +2878,37 @@ int vtx_graph_build(vtx_graph_t *graph,
                                         replaced = true;
                                         break;
                                     }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else if (term_op == VT_OP_GOTO ||
+                   (block->control_node != VTX_NODEID_INVALID &&
+                    vtx_node_get(&graph->node_table, block->control_node) != NULL &&
+                    vtx_node_get(&graph->node_table, block->control_node)->opcode == VTX_OP_Goto)) {
+            /* Goto terminator (explicit or fallthrough).
+             *
+             * BUGFIX (if-then-else crash): For fallthrough blocks where we
+             * created a Goto in Phase 3, connect the Goto's control output
+             * to the successor's Region node. The successor Region was
+             * created in Phase 2 with the predecessor's region_node as
+             * input. Replace it with the Goto node. */
+            if (block->succ_count >= 1) {
+                uint32_t target_idx = block->succ_indices[0];
+                if (target_idx < nblocks) {
+                    vtx_nodeid_t target_region = blocks[target_idx].region_node;
+                    if (target_region != VTX_NODEID_INVALID) {
+                        vtx_node_t *region_n = vtx_node_get(&graph->node_table, target_region);
+                        if (region_n != NULL) {
+                            /* Replace the predecessor's region_node with the Goto */
+                            vtx_nodeid_t search_for = block->control_node;
+                            for (uint32_t i = 0; i < region_n->input_count; i++) {
+                                if (region_n->inputs[i] == block->region_node ||
+                                    region_n->inputs[i] == search_for) {
+                                    vtx_node_replace_input(&graph->node_table, target_region, i, search_for);
+                                    break;
                                 }
                             }
                         }

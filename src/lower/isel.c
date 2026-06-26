@@ -2471,16 +2471,94 @@ static int resolve_phis(vtx_inst_stream_t *stream, const vtx_schedule_t *schedul
                         data_idx++;
                     }
                 } else {
-                    /* Non-loop: old approach — p-th input = p-th predecessor */
-                    if (p >= node->input_count) continue;
-                    uint32_t input_vreg = vtx_isel_node_vreg(stream, node->inputs[p]);
-                    if (input_vreg == VTX_VREG_INVALID || input_vreg == phi_vreg) continue;
+                    /* Non-loop: Match predecessor to Phi input by control output.
+                     *
+                     * BUGFIX (if-then-else wrong result): The old code assumed
+                     * the schedule's p-th predecessor corresponds to the Phi's
+                     * p-th data input. But the schedule may order predecessors
+                     * differently than the block finder. This caused the Phi
+                     * copies to swap values, producing wrong results.
+                     *
+                     * Fix: For each schedule predecessor p, find the predecessor's
+                     * control output (Goto/Proj). Then scan the Phi's inputs to
+                     * find the data input at the same index as the matching
+                     * Region input. This correctly matches predecessors to Phi
+                     * inputs regardless of ordering. */
+                    uint32_t pred_block_idx = sched_blk->pred_blocks[p];
+                    if (pred_block_idx >= schedule->count) continue;
 
-                    if (copy_count < MAX_PHI_COPIES) {
-                        copy_dst[copy_count] = phi_vreg;
-                        copy_src[copy_count] = input_vreg;
-                        copy_node[copy_count] = nid;
-                        copy_count++;
+                    /* Get the predecessor's control output.
+                     *
+                     * For Goto blocks: the Goto node is the control output.
+                     * For If blocks: the Proj node (not the If) is the control
+                     * output to the successor. The Proj is scheduled in the
+                     * predecessor block, but it may not be the last node.
+                     *
+                     * Fix: Scan ALL nodes in the predecessor's schedule and
+                     * check if any of them is an input to the current block's
+                     * Region. This correctly finds the Proj or Goto. */
+                    const vtx_schedule_block_t *pred_blk = &schedule->blocks[pred_block_idx];
+
+                    /* Find the Region node for this block */
+                    vtx_nodeid_t region_id = VTX_NODEID_INVALID;
+                    for (uint32_t pi = 0; pi < node->input_count; pi++) {
+                        vtx_nodeid_t inp = node->inputs[pi];
+                        if (inp == VTX_NODEID_INVALID || inp >= graph->node_table.count) continue;
+                        const vtx_node_t *inp_n = vtx_node_get_const(&graph->node_table, inp);
+                        if (inp_n && (inp_n->opcode == VTX_OP_Region ||
+                                      inp_n->opcode == VTX_OP_LoopBegin)) {
+                            region_id = inp;
+                            break;
+                        }
+                    }
+
+                    if (region_id == VTX_NODEID_INVALID) continue;
+                    const vtx_node_t *region_n = vtx_node_get_const(&graph->node_table, region_id);
+                    if (region_n == NULL) continue;
+
+                    /* Scan predecessor's scheduled nodes for one that is an
+                     * input to the Region. This finds the Proj or Goto that
+                     * connects this predecessor to the current block. */
+                    vtx_nodeid_t pred_ctrl = VTX_NODEID_INVALID;
+                    uint32_t matching_region_input_idx = 0;
+                    for (uint32_t sn = 0; sn < pred_blk->node_count; sn++) {
+                        vtx_nodeid_t cand = pred_blk->nodes[sn];
+                        for (uint32_t ri = 0; ri < region_n->input_count; ri++) {
+                            if (region_n->inputs[ri] == cand) {
+                                pred_ctrl = cand;
+                                matching_region_input_idx = ri;
+                                break;
+                            }
+                        }
+                        if (pred_ctrl != VTX_NODEID_INVALID) break;
+                    }
+
+                    if (pred_ctrl == VTX_NODEID_INVALID) {
+                        /* Fallback: use position-based approach */
+                        if (p >= node->input_count) continue;
+                        uint32_t input_vreg = vtx_isel_node_vreg(stream, node->inputs[p]);
+                        if (input_vreg == VTX_VREG_INVALID || input_vreg == phi_vreg) continue;
+                        if (copy_count < MAX_PHI_COPIES) {
+                            copy_dst[copy_count] = phi_vreg;
+                            copy_src[copy_count] = input_vreg;
+                            copy_node[copy_count] = nid;
+                            copy_count++;
+                        }
+                        continue;
+                    }
+
+                    /* Use the matching Region input index to find the
+                     * corresponding Phi data input. */
+                    if (matching_region_input_idx < node->input_count) {
+                        uint32_t input_vreg = vtx_isel_node_vreg(stream, node->inputs[matching_region_input_idx]);
+                        if (input_vreg != VTX_VREG_INVALID && input_vreg != phi_vreg) {
+                            if (copy_count < MAX_PHI_COPIES) {
+                                copy_dst[copy_count] = phi_vreg;
+                                copy_src[copy_count] = input_vreg;
+                                copy_node[copy_count] = nid;
+                                copy_count++;
+                            }
+                        }
                     }
                 }
             }
