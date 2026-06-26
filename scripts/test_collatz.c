@@ -80,6 +80,7 @@ int main(void) {
 
     vtx_graph_build(&graph, &bc, &method, &arena);
     vtx_pipeline_config_t config = vtx_pipeline_config_t2();
+    config.run_gvn = false;
     
     
     vtx_code_cache_t cache; vtx_code_cache_init(&cache, 1<<20);

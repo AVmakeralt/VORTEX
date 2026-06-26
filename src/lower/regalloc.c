@@ -390,6 +390,10 @@ static uint32_t coalesce_copies(vtx_inst_stream_t *stream,
             if (inst->opcode != VTX_X86_MOV) continue;
             if (inst->flags & VTX_INST_FLAG_HAS_IMM) continue;
             if (inst->flags & VTX_INST_FLAG_HAS_MEM) continue;
+            /* BUGFIX: Skip MOVs marked NO_COALESCE.
+             * These MOVs are followed by in-place modifications (SHL/SAR/AND/OR)
+             * that would corrupt the source vreg's value if coalesced. */
+            if (inst->flags & VTX_INST_FLAG_NO_COALESCE) continue;
             if (inst->opnd_kinds[0] != VTX_OPND_VREG) continue;
             if (inst->opnd_kinds[1] != VTX_OPND_VREG) continue;
 
@@ -594,9 +598,7 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
     uint32_t vreg_count = stream->vreg_count;
     vtx_live_interval_t *intervals = compute_live_intervals(stream, &interval_count, arena);
 
-    /* Perform register coalescing on the vreg-indexed array before compaction.
-     * coalesce_copies indexes the intervals array by vreg number, so the
-     * array must still be vreg-indexed at this point. */
+    /* Perform register coalescing on the vreg-indexed array before compaction. */
     if (intervals && vreg_count > 0) {
         coalesce_copies(stream, intervals, vreg_count);
     }

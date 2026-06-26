@@ -445,7 +445,22 @@ static void emit_smi_untag(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
                             uint32_t dst_vreg, uint32_t src_vreg,
                             vtx_nodeid_t node_id, vtx_arena_t *arena)
 {
-    vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst_vreg, src_vreg, node_id), arena);
+    /* BUGFIX: Mark this MOV as NO_COALESCE.
+     *
+     * The SHL and SAR below modify dst_vreg IN-PLACE. If the coalescing
+     * merges dst_vreg with src_vreg (which it would, since their intervals
+     * don't overlap), the SHL/SAR would corrupt src_vreg's value.
+     *
+     * This was the root cause of the collatz/gcd18/popcount divide-by-zero
+     * crashes: the constant 2 (used as the divisor) was coalesced with the
+     * untagged result. The SHL/SAR converted SMI(2) to 0, causing IDIV
+     * to divide by zero.
+     *
+     * The NO_COALESCE flag tells the coalescing pass to skip this MOV,
+     * preserving the original src_vreg value. */
+    vtx_inst_t mov = make_rr_inst(VTX_X86_MOV, dst_vreg, src_vreg, node_id);
+    mov.flags |= VTX_INST_FLAG_NO_COALESCE;
+    vtx_isel_emit_inst(block, mov, arena);
     vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, dst_vreg, 13, node_id), arena);
     vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, dst_vreg, 16, node_id), arena);
 }
@@ -1166,8 +1181,6 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             vtx_inst_t cqo;
             memset(&cqo, 0, sizeof(cqo));
             cqo.opcode = VTX_X86_CQO;
-            cqo.opnd_kinds[0] = VTX_OPND_VREG;
-            cqo.operands[0] = rdx_vreg;
             cqo.source_node = node_id;
             cqo.flags = VTX_INST_FLAG_CLOBBER_RAX | VTX_INST_FLAG_CLOBBER_RDX;
             vtx_isel_emit_inst(block, cqo, arena);
@@ -1176,14 +1189,6 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             idiv_inst.opcode = VTX_X86_IDIV;
             idiv_inst.opnd_kinds[0] = VTX_OPND_VREG;
             idiv_inst.operands[0] = rhs_safe;
-            /* Add rax_vreg and rdx_vreg as dummy operands so the regalloc
-             * sees them as used here, extending their intervals to cover
-             * CQO/IDIV. Without this, RDX isn't reserved and CQO clobbers
-             * other vregs assigned to RDX. The emitter ignores operands 1+ */
-            idiv_inst.opnd_kinds[1] = VTX_OPND_VREG;
-            idiv_inst.operands[1] = rax_vreg;
-            idiv_inst.opnd_kinds[2] = VTX_OPND_VREG;
-            idiv_inst.operands[2] = rdx_vreg;
             idiv_inst.source_node = node_id;
             idiv_inst.flags = VTX_INST_FLAG_CLOBBER_RAX | VTX_INST_FLAG_CLOBBER_RDX;
             vtx_isel_emit_inst(block, idiv_inst, arena);
@@ -1228,8 +1233,6 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             vtx_inst_t cqo;
             memset(&cqo, 0, sizeof(cqo));
             cqo.opcode = VTX_X86_CQO;
-            cqo.opnd_kinds[0] = VTX_OPND_VREG;
-            cqo.operands[0] = rdx_vreg;
             cqo.source_node = node_id;
             cqo.flags = VTX_INST_FLAG_CLOBBER_RAX | VTX_INST_FLAG_CLOBBER_RDX;
             vtx_isel_emit_inst(block, cqo, arena);
@@ -1238,11 +1241,6 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             idiv_inst.opcode = VTX_X86_IDIV;
             idiv_inst.opnd_kinds[0] = VTX_OPND_VREG;
             idiv_inst.operands[0] = rhs_safe;
-            /* Add rax_vreg and rdx_vreg as dummy operands (same as Div) */
-            idiv_inst.opnd_kinds[1] = VTX_OPND_VREG;
-            idiv_inst.operands[1] = rax_vreg;
-            idiv_inst.opnd_kinds[2] = VTX_OPND_VREG;
-            idiv_inst.operands[2] = rdx_vreg;
             idiv_inst.source_node = node_id;
             idiv_inst.flags = VTX_INST_FLAG_CLOBBER_RAX | VTX_INST_FLAG_CLOBBER_RDX;
             vtx_isel_emit_inst(block, idiv_inst, arena);
