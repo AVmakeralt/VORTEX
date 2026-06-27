@@ -508,6 +508,33 @@ int vtx_schedule_run(vtx_graph_t *graph, vtx_arena_t *arena, vtx_schedule_t *sch
                             }
                         }
                     }
+                } else if (is_pinned && !is_ctrl) {
+                    /* Pinned non-control node (e.g., Div/Mod): find the
+                     * block of the deepest (latest) input, not the first.
+                     * This ensures the node is placed in the block where
+                     * it should execute, not in a predecessor block. */
+                    uint32_t deepest_blk = (uint32_t)-1;
+                    for (uint32_t pi = 0; pi < node->input_count; pi++) {
+                        vtx_nodeid_t inp = node->inputs[pi];
+                        if (inp != VTX_NODEID_INVALID && inp < node_count) {
+                            uint32_t blk = schedule->node_block[inp];
+                            if (blk != (uint32_t)-1) {
+                                /* Use the latest assigned input block */
+                                if (deepest_blk == (uint32_t)-1) {
+                                    deepest_blk = blk;
+                                } else {
+                                    /* Pick the block with the higher index
+                                     * (later in execution order) */
+                                    if (blk > deepest_blk) deepest_blk = blk;
+                                }
+                            }
+                        }
+                    }
+                    if (deepest_blk != (uint32_t)-1) {
+                        schedule->node_block[i] = deepest_blk;
+                        changed = true;
+                        break;
+                    }
                 } else {
                     /* Control nodes: first input is the control dependency */
                     if (node->input_count > 0)

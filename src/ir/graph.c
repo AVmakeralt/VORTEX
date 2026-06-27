@@ -1847,6 +1847,17 @@ int vtx_graph_build(vtx_graph_t *graph,
                 if (result == VTX_NODEID_INVALID) return -1;
                 vtx_node_add_input(&graph->node_table, result, a);
                 vtx_node_add_input(&graph->node_table, result, b);
+                /* BUGFIX: Mark Div/Mod as SIDE_EFFECT so the scheduler
+                 * doesn't place them before guard checks. Also mark as
+                 * PINNED so the scheduler treats them like control nodes
+                 * and places them in the current block (not hoisted to
+                 * a predecessor). Without PINNED, the scheduler's LCA
+                 * computation may place Div/Mod in a block before the
+                 * if_false guard, causing divide-by-zero. */
+                if (ir_op == VTX_OP_Div || ir_op == VTX_OP_Mod) {
+                    vtx_node_get(&graph->node_table, result)->flags |=
+                        VTX_NF_SIDE_EFFECT | VTX_NF_PINNED;
+                }
                 op_stack[sp++] = result;
                 /* Exception edge: IDIV/IMOD can throw ArithmeticException */
                 if (ir_op == VTX_OP_Div || ir_op == VTX_OP_Mod) {
