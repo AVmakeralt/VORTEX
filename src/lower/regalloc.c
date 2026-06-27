@@ -663,17 +663,9 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
     if (!active && active_capacity > 0) return NULL;
 
     /* Free register pools: separate bitmasks for GPR and XMM.
-     * GPR: caller-saved + callee-saved, minus reserved (RSP, RBP).
-     *
-     * BUGFIX: Also reserve RAX(0) and RDX(2) for non-fixed vregs.
-     * IDIV/CQO clobber RAX and RDX. If the regalloc assigns RAX or RDX
-     * to a vreg whose live interval spans a CQO/IDIV, the vreg's value
-     * is corrupted. Fixed vregs (rax_vreg, rdx_vreg) still use RAX/RDX,
-     * but no other vreg will be assigned to them.
-     *
-     * This was the root cause of the collatz/gcd18/popcount divide-by-zero:
-     * the constant 2 was assigned to RAX, then the Mod's IDIV clobbered
-     * RAX with the quotient, so the Div read the quotient instead of 2. */
+     * GPR: caller-saved + callee-saved, minus reserved (RSP, RBP, RAX, RDX).
+     * RAX and RDX are reserved because IDIV/CQO clobbers them. Fixed vregs
+     * (rax_vreg, rdx_vreg) still use RAX/RDX via the is_fixed path. */
     uint32_t free_gpr_regs = VTX_CALLER_SAVED_MASK | VTX_CALLEE_SAVED_MASK;
     free_gpr_regs &= ~VTX_REG_RESERVED_MASK;
     free_gpr_regs &= ~(1u << 0);  /* RAX — reserved for IDIV quotient */
