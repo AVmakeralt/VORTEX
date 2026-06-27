@@ -1059,6 +1059,41 @@ int vtx_schedule_run(vtx_graph_t *graph, vtx_arena_t *arena, vtx_schedule_t *sch
                 }
             }
 
+            /* BUGFIX: For SIDE_EFFECT nodes (Div, Mod), don't place them
+             * in the LCA of their inputs — place them in the DEEPEST
+             * input block (the one with the highest dominator depth).
+             * This ensures Div/Mod are placed as late as possible,
+             * after any guard checks.
+             *
+             * Without this, the Mod in gcd18 is placed in Block 1 (loop
+             * header, where its inputs N6/N7 are), but it should be in
+             * Block 2 (the fall-through after if_false). Placing it in
+             * Block 1 causes it to execute even when b==0, causing
+             * divide-by-zero. */
+            if (vtx_nf_has(node->flags, VTX_NF_SIDE_EFFECT) && dom != NULL) {
+                /* Pick the input block with the highest dominator depth */
+                uint32_t deepest_block = lca_block;
+                uint32_t deepest_depth = 0;
+                for (uint32_t j = 0; j < node->input_count; j++) {
+                    vtx_nodeid_t inp = node->inputs[j];
+                    if (inp == VTX_NODEID_INVALID || inp >= node_count) continue;
+                    if (nt->nodes[inp].dead) continue;
+                    uint32_t ib = schedule->node_block[inp];
+                    if (ib == (uint32_t)-1 || ib >= schedule->count) continue;
+                    /* Skip globally-available inputs (Constants, Parameters) */
+                    vtx_node_t *inp_node = &nt->nodes[inp];
+                    if (inp_node->opcode == VTX_OP_Constant ||
+                        inp_node->opcode == VTX_OP_Parameter ||
+                        inp_node->opcode == VTX_OP_Start ||
+                        inp_node->opcode == VTX_OP_Province) continue;
+                    if (dom_depth[ib] > deepest_depth) {
+                        deepest_depth = dom_depth[ib];
+                        deepest_block = ib;
+                    }
+                }
+                lca_block = deepest_block;
+            }
+
             schedule->node_block[i] = lca_block;
             changed = true;
         }

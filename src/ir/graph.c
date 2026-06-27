@@ -1105,6 +1105,10 @@ static int process_instruction(vtx_graph_t *graph, vtx_block_info_t *block,
     case VT_OP_IDIV: {
         result = vtx_node_create(nt, VTX_OP_Div);
         if (result == VTX_NODEID_INVALID) return -1;
+        /* BUGFIX: Div/Mod can cause divide-by-zero (SIGFPE), which is a
+         * side effect. Mark as SIDE_EFFECT so the scheduler doesn't hoist
+         * them into blocks where they might execute before a guard check. */
+        vtx_node_get(nt, result)->flags |= VTX_NF_SIDE_EFFECT;
         break;
     }
     case VT_OP_FDIV: {
@@ -1117,6 +1121,8 @@ static int process_instruction(vtx_graph_t *graph, vtx_block_info_t *block,
     case VT_OP_IMOD: {
         result = vtx_node_create(nt, VTX_OP_Mod);
         if (result == VTX_NODEID_INVALID) return -1;
+        /* Same as Div: Mod can cause divide-by-zero */
+        vtx_node_get(nt, result)->flags |= VTX_NF_SIDE_EFFECT;
         break;
     }
     case VT_OP_ISHL: {
