@@ -3,8 +3,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-#include <signal.h>
-#include <unistd.h>
 #include "runtime/arena.h"
 #include "runtime/bytecode.h"
 #include "runtime/object.h"
@@ -12,15 +10,12 @@
 #include "runtime/gc.h"
 #include "ir/graph.h"
 #include "ir/node.h"
-#include "compile/pipeline.h"
-#include "codecache/cache.h"
-#include "codecache/install.h"
+#include "ir/schedule.h"
+#include "lower/isel.h"
+#include "lower/regalloc.h"
 #include "assembler.h"
 
-static void alarm_handler(int sig) { _exit(2); }
-
 int main(void) {
-    signal(SIGALRM, alarm_handler);
     vtx_assembler_t a; vtx_asm_init(&a);
     const char *prog =
         ".method popcount (I)I\n.arg_count 1\n.max_locals 3\n.max_stack 4\n"
@@ -40,26 +35,18 @@ int main(void) {
     vtx_method_desc_t method = {.name="f",.signature="(I)I",.bytecode=&bc,
         .compiled_code=NULL,.vtable_index=0,.arg_count=1,.is_virtual=false};
     vtx_graph_build(&graph, &bc, &method, &arena);
-    vtx_pipeline_config_t config = vtx_pipeline_config_t2();
-    
-    vtx_code_cache_t cache; vtx_code_cache_init(&cache, 1<<20);
-    vtx_method_registry_t reg; vtx_method_registry_init(&reg, &arena);
-    config.code_cache=&cache; config.method_registry=&reg; config.method=&method;
-    vtx_compile_result_t result; memset(&result,0,sizeof(result));
-    vtx_pipeline_run(&graph, &config, &arena, &result);
-    if (method.compiled_code) {
-        typedef vtx_value_t (*entry_t)(const vtx_method_desc_t*,void*,void*,vtx_value_t*,uint32_t);
-        entry_t e = (entry_t)method.compiled_code;
-        vtx_value_t av = vtx_make_smi(7);
-        alarm(3);
-        vtx_value_t r = e(&method, NULL, (void*)1, &av, 1);
-        alarm(0);
-        printf("popcount(7) = %lld (expected 3)\n", (long long)vtx_smi_value(r));
+    printf("=== IR Graph ===\n");
+    for (uint32_t i = 0; i < graph.node_table.count; i++) {
+        vtx_node_t *n = &graph.node_table.nodes[i];
+        if (n->dead) continue;
+        printf("  N%u: %s", i, vtx_node_opcode_name(n->opcode));
+        if (n->opcode == VTX_OP_Constant && n->constval.kind == VTX_TYPE_Int)
+            printf(" val=%lld", (long long)n->constval.as.int_val);
+        printf(" -> [");
+        for (uint32_t j = 0; j < n->input_count; j++)
+            printf("N%u%s", n->inputs[j], j+1<n->input_count?",":"");
+        printf("]\n");
     }
-    vtx_compile_result_destroy(&result);
-    vtx_pipeline_config_destroy(&config);
-    vtx_code_cache_destroy(&cache);
-    vtx_method_registry_destroy(&reg);
     vtx_arena_destroy(&arena);
     vtx_gc_destroy(&gc);
     vtx_type_system_destroy(&ts);

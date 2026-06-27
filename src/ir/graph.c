@@ -2823,6 +2823,22 @@ int vtx_graph_build(vtx_graph_t *graph,
                                     latch_val = blocks[pred_idx].locals[li];
                                 }
 
+                                /* BUGFIX: Don't add circular references.
+                                 * If the latch's exit local is the Phi itself
+                                 * (happens for unused locals that inherit the
+                                 * loop header's Phi), adding it creates a
+                                 * circular Phi → Phi reference that breaks
+                                 * SCCP convergence and causes wrong codegen.
+                                 * Use the forward input (Input 0) instead. */
+                                if (latch_val == (vtx_nodeid_t)ni) {
+                                    /* Circular — use the forward input instead */
+                                    if (phi_n->input_count > 0) {
+                                        latch_val = phi_n->inputs[0];
+                                    } else {
+                                        latch_val = VTX_NODEID_INVALID;
+                                    }
+                                }
+
                                 /* Only add if not already present (avoid duplicates) */
                                 bool already_has = false;
                                 for (uint32_t inp = 0; inp < phi_n->input_count; inp++) {
