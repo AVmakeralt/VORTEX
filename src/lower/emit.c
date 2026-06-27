@@ -307,22 +307,26 @@ void vtx_x86_emit_imul_rr(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
 /* IMUL r64, imm32: REX.W 69 /r id (7 bytes) or REX.W 6B /r ib (4 bytes for imm8) */
 void vtx_x86_emit_imul_ri(vtx_x86_emit_t *e, uint8_t dst, int32_t imm)
 {
+    /* BUGFIX: For the two-operand IMUL form, both reg and rm fields hold
+     * the destination register. For extended registers (R8-R15), we need
+     * BOTH REX.R (extends reg) AND REX.B (extends rm) set.
+     *
+     * The old code only set REX.B, which made reg=base register (RAX-RDI)
+     * while rm=extended register (R8-R15). This produced the three-operand
+     * form IMUL base_reg, ext_reg, imm instead of the two-operand form
+     * IMUL ext_reg, imm. For example, IMUL R13, 3 became IMUL RBP, R13, 3,
+     * corrupting RBP and causing segfaults. */
     int b = reg_hi(dst);
-    emit_rex(e, 1, 0, 0, b);
+    emit_rex(e, 1, b, 0, b);  /* REX.W=1, REX.R=b, REX.B=b */
     if (imm >= -128 && imm <= 127) {
         /* IMUL r64, imm8: REX.W 6B /r ib
-         * This is the two-operand form: dst = dst * imm.
-         * ModRM: mod=3 (register direct), reg=dst, rm=dst (same register).
-         * BUGFIX: The old code used rm=0 (RAX), which made the instruction
-         * compute dst = RAX * imm instead of dst = dst * imm. This caused
-         * the collatz program to compute 3*(n/2) instead of 3*n, because
-         * RAX held the Div result from a previous IDIV instruction. */
+         * Two-operand form: dst = dst * imm.
+         * ModRM: mod=3, reg=dst, rm=dst (same register). */
         emit_byte(e, 0x6B);
         emit_modrm(e, 3, dst & 7, dst & 7);
         emit_byte(e, (uint8_t)(imm & 0xFF));
     } else {
-        /* IMUL r64, imm32: REX.W 69 /r id
-         * Same fix: rm=dst for two-operand form. */
+        /* IMUL r64, imm32: REX.W 69 /r id */
         emit_byte(e, 0x69);
         emit_modrm(e, 3, dst & 7, dst & 7);
         emit_dword(e, (uint32_t)imm);
