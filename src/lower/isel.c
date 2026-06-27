@@ -445,19 +445,25 @@ static void emit_smi_untag(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
                             uint32_t dst_vreg, uint32_t src_vreg,
                             vtx_nodeid_t node_id, vtx_arena_t *arena)
 {
-    /* BUGFIX: Mark this MOV as NO_COALESCE.
+    /* SMI untag: convert NaN-boxed SMI to raw int64.
      *
-     * The SHL and SAR below modify dst_vreg IN-PLACE. If the coalescing
-     * merges dst_vreg with src_vreg (which it would, since their intervals
-     * don't overlap), the SHL/SAR would corrupt src_vreg's value.
+     * SMI(val) = HEADER | (val << 3)  where HEADER = 0x7FF8000000000000
      *
-     * This was the root cause of the collatz/gcd18/popcount divide-by-zero
-     * crashes: the constant 2 (used as the divisor) was coalesced with the
-     * untagged result. The SHL/SAR converted SMI(2) to 0, causing IDIV
-     * to divide by zero.
+     * Approach: SHL 13 + SAR 16
+     *   SHL 13: shifts the data bits left by 13. The header bits (bits 47-63)
+     *           overflow past bit 63 and are lost. The sign bit of val (bit 50)
+     *           moves to bit 63.
+     *   SAR 16: arithmetic right shift by 16. Sign-extends from bit 63 (the
+     *           original sign bit of val), giving the correct signed value.
      *
-     * The NO_COALESCE flag tells the coalescing pass to skip this MOV,
-     * preserving the original src_vreg value. */
+     * Example: SMI(2) = 0x7FF8000000000010
+     *   SHL 13: 0x0000000000020000 (header overflowed out, data at bit 17)
+     *   SAR 16: 0x0000000000000002 = 2 ✓
+     *
+     * Example: SMI(-1) = 0x7FFFFFFFFFFFFFF8
+     *   SHL 13: 0xFFFFFFFFFFFFC000 (sign bit set from val's bit 47)
+     *   SAR 16: 0xFFFFFFFFFFFFFFFF = -1 ✓
+     */
     vtx_inst_t mov = make_rr_inst(VTX_X86_MOV, dst_vreg, src_vreg, node_id);
     mov.flags |= VTX_INST_FLAG_NO_COALESCE;
     vtx_isel_emit_inst(block, mov, arena);
@@ -1582,7 +1588,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         uint32_t lhs_untagged = vtx_isel_alloc_vreg(stream, arena);
         uint32_t rhs_untagged = vtx_isel_alloc_vreg(stream, arena);
 
-        /* lhs_untagged = untag(lhs) */
+        /* lhs_untagged = untag(lhs) — SHL 13 + SAR 16 */
         vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, lhs_untagged, lhs, node_id), arena);
         vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, lhs_untagged, 13, node_id), arena);
         vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, lhs_untagged, 16, node_id), arena);

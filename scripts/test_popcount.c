@@ -43,6 +43,8 @@ int main(void) {
     vtx_pipeline_config_t config = vtx_pipeline_config_t2();
     
     
+    
+    
     vtx_code_cache_t cache; vtx_code_cache_init(&cache, 1<<20);
     vtx_method_registry_t reg; vtx_method_registry_init(&reg, &arena);
     config.code_cache=&cache; config.method_registry=&reg; config.method=&method;
@@ -53,9 +55,9 @@ int main(void) {
         entry_t e = (entry_t)method.compiled_code;
         vtx_value_t av = vtx_make_smi(7);
         alarm(3);
-        vtx_value_t r = e(&method, NULL, (void*)1, &av, 1);
+        uint8_t *code = (uint8_t*)method.compiled_code; printf("Native:"); for(int i=0;i<800;i++) printf(" %02X",code[i]); printf("\n"); fflush(stdout); vtx_value_t r = e(&method, NULL, (void*)1, &av, 1);
         alarm(0);
-        uint8_t *code = (uint8_t*)method.compiled_code; printf("Native:"); for(int i=0;i<800;i++) printf(" %02X",code[i]); printf("\n"); fflush(stdout); printf("popcount(7) = %lld (expected 3)\n", (long long)vtx_smi_value(r));
+        printf("popcount(7) = %lld (expected 3)\n", (long long)vtx_smi_value(r));
     }
     vtx_compile_result_destroy(&result);
     vtx_pipeline_config_destroy(&config);
