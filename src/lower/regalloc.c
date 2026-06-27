@@ -137,9 +137,13 @@ static vtx_live_interval_t *compute_live_intervals(vtx_inst_stream_t *stream,
                     }
                 }
 
-                /* Use: update end position */
-                if (pos > intervals[vreg].end) {
-                    intervals[vreg].end = pos;
+                /* Use: update end position.
+                 * BUGFIX: CQO's operand[0] is a pure definition (CQO writes RDX),
+                 * not a use. Don't update the end position for it. */
+                if (!(op == 0 && inst->opcode == VTX_X86_CQO)) {
+                    if (pos > intervals[vreg].end) {
+                        intervals[vreg].end = pos;
+                    }
                 }
 
                 /* Count uses for spill cost estimation */

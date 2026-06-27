@@ -1197,6 +1197,11 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             cqo.opcode = VTX_X86_CQO;
             cqo.source_node = node_id;
             cqo.flags = VTX_INST_FLAG_CLOBBER_RAX | VTX_INST_FLAG_CLOBBER_RDX;
+            /* Define rdx_vreg here so the live interval computation knows
+             * CQO writes to RDX. Without this, rdx_vreg has no definition,
+             * and the regalloc may not properly handle it. */
+            cqo.opnd_kinds[0] = VTX_OPND_VREG;
+            cqo.operands[0] = rdx_vreg;
             vtx_isel_emit_inst(block, cqo, arena);
             vtx_inst_t idiv_inst;
             memset(&idiv_inst, 0, sizeof(idiv_inst));
@@ -1251,6 +1256,11 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             cqo.opcode = VTX_X86_CQO;
             cqo.source_node = node_id;
             cqo.flags = VTX_INST_FLAG_CLOBBER_RAX | VTX_INST_FLAG_CLOBBER_RDX;
+            /* Define rdx_vreg here so the live interval computation knows
+             * CQO writes to RDX. Without this, rdx_vreg has no definition,
+             * and the regalloc may not properly handle it. */
+            cqo.opnd_kinds[0] = VTX_OPND_VREG;
+            cqo.operands[0] = rdx_vreg;
             vtx_isel_emit_inst(block, cqo, arena);
             vtx_inst_t idiv_inst;
             memset(&idiv_inst, 0, sizeof(idiv_inst));
