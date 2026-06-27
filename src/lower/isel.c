@@ -1524,6 +1524,12 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
     case VTX_OP_Cmp:
     case VTX_OP_CmpP: {
         if (node->input_count < 2) return -1;
+        /* BUGFIX: Ensure input nodes have vregs before looking them up.
+         * The scheduler may place a Cmp before its Phi inputs (cross-block
+         * dependency). By calling ensure_node_vreg, we assign vregs to
+         * the inputs even if they haven't been processed yet. */
+        ensure_node_vreg(stream, node->inputs[0], arena);
+        ensure_node_vreg(stream, node->inputs[1], arena);
         uint32_t lhs = vtx_isel_node_vreg(stream, node->inputs[0]);
         uint32_t rhs = vtx_isel_node_vreg(stream, node->inputs[1]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
@@ -2073,15 +2079,19 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
     /* ---- Phi / Region / Proj ---- */
     case VTX_OP_Phi: {
-        ensure_node_vreg(stream, node_id, arena);
-        /* G6 fix part 1: Ensure all Phi input nodes also have vregs assigned.
-         * Without this, resolve_phis() will find input_vreg == VTX_VREG_INVALID
-         * and silently skip the copy, losing data flow through the Phi. */
+        /* BUGFIX: Assign vreg to all Phi INPUT nodes first, then the Phi.
+         * If the Phi is processed before its inputs, the inputs won't have
+         * vregs yet. The old code called ensure_node_vreg for the Phi first,
+         * then for its inputs. But if a node that USES this Phi is processed
+         * between the Phi and its inputs, it will see the Phi's vreg but not
+         * the input's vreg. By assigning input vregs first, we ensure all
+         * nodes that reference the Phi's inputs have valid vregs. */
         for (uint32_t i = 0; i < node->input_count; i++) {
             if (node->inputs[i] != VTX_NODEID_INVALID) {
                 ensure_node_vreg(stream, node->inputs[i], arena);
             }
         }
+        ensure_node_vreg(stream, node_id, arena);
         break;
     }
 

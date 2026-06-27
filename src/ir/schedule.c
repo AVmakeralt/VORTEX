@@ -1188,9 +1188,36 @@ int vtx_schedule_run(vtx_graph_t *graph, vtx_arena_t *arena, vtx_schedule_t *sch
                     if (inp == VTX_NODEID_INVALID || inp >= node_count) continue;
                     if (schedule->node_block[inp] != bi) continue;
 
-                    /* Skip back-edge inputs (Phi with loop-carried value) */
+                    /* Skip back-edge inputs (Phi with loop-carried value).
+                     *
+                     * BUGFIX: The old code skipped ALL Phi inputs, which
+                     * meant non-loop Phis (merge point Phis inside the same
+                     * block) were also skipped. This caused nodes that use
+                     * merge Phis to be scheduled before the Phis, leading
+                     * to "vreg=INVALID" errors in the isel.
+                     *
+                     * Fix: Only skip loop header Phis (Phis in a different
+                     * block than the current node). For Phis in the SAME
+                     * block (merge point Phis), don't skip — they must be
+                     * scheduled before nodes that use them.
+                     *
+                     * However, we must be careful: a node in Block 0 may use
+                     * a Phi from Block 3 (cross-block use via a merged value).
+                     * The node_block check above already ensures we only
+                     * consider inputs IN THIS BLOCK, so we only need to
+                     * skip cross-block Phis. But the node_block check is
+                     * redundant with the Phi check — if the input is in a
+                     * different block, the node_block check already skipped it.
+                     *
+                     * The real issue: we skip ALL same-block Phis, but
+                     * same-block Phis ARE the dependency we need to check.
+                     * Remove the skip entirely for same-block Phis. */
                     vtx_node_t *inp_node = &nt->nodes[inp];
-                    if (inp_node->opcode == VTX_OP_Phi) continue;
+                    if (inp_node->opcode == VTX_OP_Phi) {
+                        /* Only skip if the Phi is in a DIFFERENT block */
+                        if (schedule->node_block[inp] != bi) continue;
+                        /* Same-block Phi: don't skip — must be before us */
+                    }
 
                     /* Find position of inp in this block */
                     for (uint32_t k = i + 1; k < blk->node_count; k++) {
