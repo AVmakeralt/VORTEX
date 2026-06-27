@@ -809,7 +809,9 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
     /* ---- Arithmetic: binary ---- */
     case VTX_OP_Add: {
         if (node->input_count < 2) return -1;
+        ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t lhs_vreg = vtx_isel_node_vreg(stream, node->inputs[0]);
+        ensure_node_vreg(stream, node->inputs[1], arena);
         uint32_t rhs_vreg = vtx_isel_node_vreg(stream, node->inputs[1]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (lhs_vreg == VTX_VREG_INVALID || rhs_vreg == VTX_VREG_INVALID) return -1;
@@ -900,7 +902,9 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
     case VTX_OP_Sub: {
         if (node->input_count < 2) return -1;
+        ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t lhs_vreg = vtx_isel_node_vreg(stream, node->inputs[0]);
+        ensure_node_vreg(stream, node->inputs[1], arena);
         uint32_t rhs_vreg = vtx_isel_node_vreg(stream, node->inputs[1]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (lhs_vreg == VTX_VREG_INVALID || rhs_vreg == VTX_VREG_INVALID) return -1;
@@ -956,7 +960,9 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
     case VTX_OP_Mul: {
         if (node->input_count < 2) return -1;
+        ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t lhs_vreg = vtx_isel_node_vreg(stream, node->inputs[0]);
+        ensure_node_vreg(stream, node->inputs[1], arena);
         uint32_t rhs_vreg = vtx_isel_node_vreg(stream, node->inputs[1]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (lhs_vreg == VTX_VREG_INVALID || rhs_vreg == VTX_VREG_INVALID) return -1;
@@ -1134,7 +1140,9 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
     case VTX_OP_Div: {
         if (node->input_count < 2) return -1;
+        ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t lhs_vreg = vtx_isel_node_vreg(stream, node->inputs[0]);
+        ensure_node_vreg(stream, node->inputs[1], arena);
         uint32_t rhs_vreg = vtx_isel_node_vreg(stream, node->inputs[1]);
         if (lhs_vreg == VTX_VREG_INVALID || rhs_vreg == VTX_VREG_INVALID) return -1;
 
@@ -1205,7 +1213,9 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
     case VTX_OP_Mod: {
         if (node->input_count < 2) return -1;
+        ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t lhs_vreg = vtx_isel_node_vreg(stream, node->inputs[0]);
+        ensure_node_vreg(stream, node->inputs[1], arena);
         uint32_t rhs_vreg = vtx_isel_node_vreg(stream, node->inputs[1]);
         if (lhs_vreg == VTX_VREG_INVALID || rhs_vreg == VTX_VREG_INVALID) return -1;
 
@@ -1261,7 +1271,9 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
     /* ---- Shifts ---- */
     case VTX_OP_Shl: {
         if (node->input_count < 2) return -1;
+        ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t val_vreg = vtx_isel_node_vreg(stream, node->inputs[0]);
+        ensure_node_vreg(stream, node->inputs[1], arena);
         uint32_t cnt_vreg = vtx_isel_node_vreg(stream, node->inputs[1]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (val_vreg == VTX_VREG_INVALID || cnt_vreg == VTX_VREG_INVALID) return -1;
@@ -1307,7 +1319,9 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
     case VTX_OP_Shr: {
         if (node->input_count < 2) return -1;
+        ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t val_vreg = vtx_isel_node_vreg(stream, node->inputs[0]);
+        ensure_node_vreg(stream, node->inputs[1], arena);
         uint32_t cnt_vreg = vtx_isel_node_vreg(stream, node->inputs[1]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (val_vreg == VTX_VREG_INVALID || cnt_vreg == VTX_VREG_INVALID) return -1;
@@ -1352,7 +1366,9 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
      * Correct sequence: untag both → bitwise op → retag. */
     case VTX_OP_And: {
         if (node->input_count < 2) return -1;
+        ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t lhs = vtx_isel_node_vreg(stream, node->inputs[0]);
+        ensure_node_vreg(stream, node->inputs[1], arena);
         uint32_t rhs = vtx_isel_node_vreg(stream, node->inputs[1]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (lhs == VTX_VREG_INVALID || rhs == VTX_VREG_INVALID) return -1;
@@ -1368,7 +1384,9 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
     case VTX_OP_Or: {
         if (node->input_count < 2) return -1;
+        ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t lhs = vtx_isel_node_vreg(stream, node->inputs[0]);
+        ensure_node_vreg(stream, node->inputs[1], arena);
         uint32_t rhs = vtx_isel_node_vreg(stream, node->inputs[1]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (lhs == VTX_VREG_INVALID || rhs == VTX_VREG_INVALID) return -1;
@@ -1384,7 +1402,9 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
     case VTX_OP_Xor: {
         if (node->input_count < 2) return -1;
+        ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t lhs = vtx_isel_node_vreg(stream, node->inputs[0]);
+        ensure_node_vreg(stream, node->inputs[1], arena);
         uint32_t rhs = vtx_isel_node_vreg(stream, node->inputs[1]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (lhs == VTX_VREG_INVALID || rhs == VTX_VREG_INVALID) return -1;
@@ -1401,6 +1421,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
     /* ---- Unary ---- */
     case VTX_OP_Neg: {
         if (node->input_count < 1) return -1;
+        ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t src = vtx_isel_node_vreg(stream, node->inputs[0]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (src == VTX_VREG_INVALID) return -1;
@@ -1445,6 +1466,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
     case VTX_OP_Not: {
         if (node->input_count < 1) return -1;
+        ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t src = vtx_isel_node_vreg(stream, node->inputs[0]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (src == VTX_VREG_INVALID) return -1;
@@ -1457,7 +1479,9 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
     /* ---- Min/Max (P1 isel: CMP+CMOV) ---- */
     case VTX_OP_Min: {
         if (node->input_count < 2) return -1;
+        ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t lhs = vtx_isel_node_vreg(stream, node->inputs[0]);
+        ensure_node_vreg(stream, node->inputs[1], arena);
         uint32_t rhs = vtx_isel_node_vreg(stream, node->inputs[1]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (lhs == VTX_VREG_INVALID || rhs == VTX_VREG_INVALID) return -1;
@@ -1490,7 +1514,9 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
     case VTX_OP_Max: {
         if (node->input_count < 2) return -1;
+        ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t lhs = vtx_isel_node_vreg(stream, node->inputs[0]);
+        ensure_node_vreg(stream, node->inputs[1], arena);
         uint32_t rhs = vtx_isel_node_vreg(stream, node->inputs[1]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (lhs == VTX_VREG_INVALID || rhs == VTX_VREG_INVALID) return -1;
@@ -1530,7 +1556,9 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
          * the inputs even if they haven't been processed yet. */
         ensure_node_vreg(stream, node->inputs[0], arena);
         ensure_node_vreg(stream, node->inputs[1], arena);
+        ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t lhs = vtx_isel_node_vreg(stream, node->inputs[0]);
+        ensure_node_vreg(stream, node->inputs[1], arena);
         uint32_t rhs = vtx_isel_node_vreg(stream, node->inputs[1]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (lhs == VTX_VREG_INVALID || rhs == VTX_VREG_INVALID) return -1;
@@ -1611,6 +1639,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
     /* ---- Memory ---- */
     case VTX_OP_Load: {
         if (node->input_count < 1) return -1;
+        ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t addr = vtx_isel_node_vreg(stream, node->inputs[0]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (addr == VTX_VREG_INVALID) return -1;
@@ -1621,7 +1650,9 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
     case VTX_OP_Store: {
         if (node->input_count < 2) return -1;
+        ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t addr = vtx_isel_node_vreg(stream, node->inputs[0]);
+        ensure_node_vreg(stream, node->inputs[1], arena);
         uint32_t val = vtx_isel_node_vreg(stream, node->inputs[1]);
         if (addr == VTX_VREG_INVALID || val == VTX_VREG_INVALID) return -1;
         vtx_x86_memop_t mem = { addr, VTX_VREG_INVALID, 0xFF, 0xFF, 1, 0 };
@@ -1631,6 +1662,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
     case VTX_OP_LoadField: {
         if (node->input_count < 1) return -1;
+        ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t obj = vtx_isel_node_vreg(stream, node->inputs[0]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (obj == VTX_VREG_INVALID) return -1;
@@ -1641,7 +1673,9 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
     case VTX_OP_StoreField: {
         if (node->input_count < 2) return -1;
+        ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t obj = vtx_isel_node_vreg(stream, node->inputs[0]);
+        ensure_node_vreg(stream, node->inputs[1], arena);
         uint32_t val = vtx_isel_node_vreg(stream, node->inputs[1]);
         if (obj == VTX_VREG_INVALID || val == VTX_VREG_INVALID) return -1;
         vtx_x86_memop_t mem = { obj, VTX_VREG_INVALID, 0xFF, 0xFF, 1, (int32_t)node->field_offset };
@@ -1687,7 +1721,9 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
     case VTX_OP_LoadIndexed: {
         if (node->input_count < 2) return -1;
+        ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t base = vtx_isel_node_vreg(stream, node->inputs[0]);
+        ensure_node_vreg(stream, node->inputs[1], arena);
         uint32_t idx = vtx_isel_node_vreg(stream, node->inputs[1]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (base == VTX_VREG_INVALID || idx == VTX_VREG_INVALID) return -1;
@@ -1698,8 +1734,11 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
     case VTX_OP_StoreIndexed: {
         if (node->input_count < 3) return -1;
+        ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t base = vtx_isel_node_vreg(stream, node->inputs[0]);
+        ensure_node_vreg(stream, node->inputs[1], arena);
         uint32_t idx = vtx_isel_node_vreg(stream, node->inputs[1]);
+        ensure_node_vreg(stream, node->inputs[2], arena);
         uint32_t val = vtx_isel_node_vreg(stream, node->inputs[2]);
         if (base == VTX_VREG_INVALID || idx == VTX_VREG_INVALID || val == VTX_VREG_INVALID) return -1;
         vtx_x86_memop_t mem = { base, idx, 0xFF, 0xFF, 8, 0 };
@@ -1949,6 +1988,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
     /* ---- Type operations ---- */
     case VTX_OP_CheckCast: {
         if (node->input_count < 1) return -1;
+        ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t obj = vtx_isel_node_vreg(stream, node->inputs[0]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (obj == VTX_VREG_INVALID) return -1;
@@ -1963,6 +2003,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
     case VTX_OP_InstanceOf: {
         if (node->input_count < 1) return -1;
+        ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t obj = vtx_isel_node_vreg(stream, node->inputs[0]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (obj == VTX_VREG_INVALID) return -1;
@@ -2101,6 +2142,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
     case VTX_OP_Proj: {
         if (node->input_count >= 1) {
+            ensure_node_vreg(stream, node->inputs[0], arena);
             uint32_t src = vtx_isel_node_vreg(stream, node->inputs[0]);
             if (src != VTX_VREG_INVALID)
                 vtx_isel_map_node_vreg(stream, node_id, src, arena);
@@ -2157,6 +2199,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
     case VTX_OP_Allocate: {
         if (node->input_count < 1) return -1;
+        ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t size_vreg = vtx_isel_node_vreg(stream, node->inputs[0]);
         if (size_vreg == VTX_VREG_INVALID) return -1;
         uint32_t rdi_vreg = vtx_isel_alloc_vreg_fixed(stream, arena, 7);
@@ -2196,7 +2239,9 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
     case VTX_OP_CmpF:
     case VTX_OP_CmpD: {
         if (node->input_count < 2) return -1;
+        ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t lhs = vtx_isel_node_vreg(stream, node->inputs[0]);
+        ensure_node_vreg(stream, node->inputs[1], arena);
         uint32_t rhs = vtx_isel_node_vreg(stream, node->inputs[1]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (lhs == VTX_VREG_INVALID || rhs == VTX_VREG_INVALID) return -1;
@@ -2304,6 +2349,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         /* VectorLoad: load 128-bit vector from [base + index*scale + disp]
          * Input 0: base address, Input 1: index (optional)
          * Emits: movapd dst, [base + index*scale + disp] */
+        ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t base = vtx_isel_node_vreg(stream, node->inputs[0]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (base == VTX_VREG_INVALID) return -1;
@@ -2329,6 +2375,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
         /* If we have an index input, set up SIB */
         if (node->input_count >= 2) {
+            ensure_node_vreg(stream, node->inputs[1], arena);
             uint32_t idx = vtx_isel_node_vreg(stream, node->inputs[1]);
             if (idx != VTX_VREG_INVALID) {
                 vload.mem.index_vreg = idx;
@@ -2345,6 +2392,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         if (node->input_count < 2) return -1;
         /* VectorStore: store 128-bit vector to [base + index*scale + disp]
          * Input 0: base address, Input 1: index (optional), Input last: value */
+        ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t base = vtx_isel_node_vreg(stream, node->inputs[0]);
         /* Find the value input (last input) */
         uint32_t val = vtx_isel_node_vreg(stream, node->inputs[node->input_count - 1]);
@@ -2366,6 +2414,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
         /* If we have an index input, set up SIB */
         if (node->input_count >= 3) {
+            ensure_node_vreg(stream, node->inputs[1], arena);
             uint32_t idx = vtx_isel_node_vreg(stream, node->inputs[1]);
             if (idx != VTX_VREG_INVALID) {
                 vstore.mem.index_vreg = idx;
@@ -2380,7 +2429,9 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
     case VTX_OP_VectorAdd: {
         if (node->input_count < 2) return -1;
+        ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t lhs = vtx_isel_node_vreg(stream, node->inputs[0]);
+        ensure_node_vreg(stream, node->inputs[1], arena);
         uint32_t rhs = vtx_isel_node_vreg(stream, node->inputs[1]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (lhs == VTX_VREG_INVALID || rhs == VTX_VREG_INVALID) return -1;
@@ -2393,7 +2444,9 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
     case VTX_OP_VectorMul: {
         if (node->input_count < 2) return -1;
+        ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t lhs = vtx_isel_node_vreg(stream, node->inputs[0]);
+        ensure_node_vreg(stream, node->inputs[1], arena);
         uint32_t rhs = vtx_isel_node_vreg(stream, node->inputs[1]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (lhs == VTX_VREG_INVALID || rhs == VTX_VREG_INVALID) return -1;
