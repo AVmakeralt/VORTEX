@@ -812,7 +812,30 @@ uint32_t vtx_constant_prop_run(vtx_graph_t *graph)
 
         /* Only simplify if: no TOP inputs, at least one non-top input,
          * and all non-top inputs agree. */
-        if (!has_top && has_non_top && all_same && unique_val != VTX_NODEID_INVALID) {
+        /* BUGFIX: Don't simplify Phis that have back-edge inputs.
+         * A loop Phi has inputs [forward, Region, back_edge]. The back_edge
+         * input is from a node inside the loop body, whose value changes
+         * each iteration. Even if all non-TOP inputs currently agree,
+         * the back-edge input may change in future iterations. Simplifying
+         * the Phi to a single value would lose the loop-carried dependency.
+         *
+         * Check if this Phi has a back-edge input by looking for inputs
+         * that are Phis (merge point Phis) or nodes from loop bodies. */
+        bool has_back_edge = false;
+        for (uint32_t j = 0; j < node->input_count; j++) {
+            vtx_nodeid_t inp = node->inputs[j];
+            if (inp == VTX_NODEID_INVALID || inp >= node_count) continue;
+            const vtx_node_t *inp_node = vtx_node_get_const(nt, inp);
+            if (inp_node != NULL && vtx_nf_has(inp_node->flags, VTX_NF_CONTROL)) continue;
+            /* Check if this input is itself a Phi (merge point) — indicates
+             * a loop-carried value that changes each iteration */
+            if (inp_node != NULL && inp_node->opcode == VTX_OP_Phi) {
+                has_back_edge = true;
+                break;
+            }
+        }
+
+        if (!has_top && has_non_top && all_same && unique_val != VTX_NODEID_INVALID && !has_back_edge) {
             /* Replace Phi with its single value */
             /* Bug #5 fix: Use O(K) replace_all_uses instead of O(N^2)
              * scan. Also properly disconnect the Phi's inputs from

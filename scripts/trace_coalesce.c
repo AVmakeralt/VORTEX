@@ -9,8 +9,8 @@
 #include "ir/node.h"
 #include "ir/schedule.h"
 #include "lower/isel.h"
+#include "lower/regalloc.h"
 #include "assembler.h"
-#define _GNU_SOURCE
 
 int main(void) {
     vtx_assembler_t a; vtx_asm_init(&a);
@@ -32,32 +32,43 @@ int main(void) {
     vtx_method_desc_t method = {.name="f",.signature="(I)I",.bytecode=&bc,
         .compiled_code=NULL,.vtable_index=0,.arg_count=1,.is_virtual=false};
     vtx_graph_build(&graph, &bc, &method, &arena);
-    printf("=== IR Graph ===\n");
-    for (uint32_t i = 0; i < graph.node_table.count; i++) {
-        vtx_node_t *n = &graph.node_table.nodes[i];
-        if (n->dead) continue;
-        printf("  N%u: %s", i, vtx_node_opcode_name(n->opcode));
-        if (n->opcode == VTX_OP_Constant && n->constval.kind == VTX_TYPE_Int)
-            printf(" val=%lld", (long long)n->constval.as.int_val);
-        printf(" -> [");
-        for (uint32_t j = 0; j < n->input_count; j++)
-            printf("N%u%s", n->inputs[j], j+1<n->input_count?",":"");
-        printf("]\n");
-    }
     vtx_schedule_t schedule;
     memset(&schedule, 0, sizeof(schedule));
     vtx_schedule_run(&graph, &arena, &schedule);
-    printf("\n=== Schedule ===\n");
-    for (uint32_t b = 0; b < schedule.count; b++) {
-        printf("Block %u:", b);
-        for (uint32_t n = 0; n < schedule.blocks[b].node_count; n++)
-            printf(" N%u", schedule.blocks[b].nodes[n]);
-        printf("\n");
+    vtx_inst_stream_t *stream = vtx_isel_select(&schedule, &graph, &arena);
+    if (!stream) { printf("ISEL FAILED\n"); return 1; }
+
+    /* Print pre-coalescing vreg references for PHI_COPY instructions */
+    printf("=== Pre-coalescing PHI_COPY vregs ===\n");
+    for (uint32_t b = 0; b < stream->block_count; b++) {
+        for (uint32_t i = 0; i < stream->blocks[b].inst_count; i++) {
+            vtx_inst_t *inst = &stream->blocks[b].insts[i];
+            if (inst->flags & 0x10000) {
+                printf("  Block %u [%u]: MOV vreg%u <- vreg%u (node=N%u)\n",
+                       b, i, inst->operands[0], inst->operands[1], inst->source_node);
+            }
+        }
     }
+
+    /* Run regalloc (which includes coalescing) */
+    vtx_regalloc_result_t *ra = vtx_regalloc_run(stream, &arena);
+
+    /* Print post-coalescing vreg references */
+    printf("\n=== Post-coalescing PHI_COPY vregs ===\n");
+    for (uint32_t b = 0; b < stream->block_count; b++) {
+        for (uint32_t i = 0; i < stream->blocks[b].inst_count; i++) {
+            vtx_inst_t *inst = &stream->blocks[b].insts[i];
+            if (inst->flags & 0x10000) {
+                printf("  Block %u [%u]: MOV k0=%u op0=%u k1=%u op1=%u (node=N%u)\n",
+                       b, i, inst->opnd_kinds[0], inst->operands[0],
+                       inst->opnd_kinds[1], inst->operands[1], inst->source_node);
+            }
+        }
+    }
+
     vtx_arena_destroy(&arena);
     vtx_gc_destroy(&gc);
     vtx_type_system_destroy(&ts);
     vtx_asm_destroy(&a);
     return 0;
 }
-
