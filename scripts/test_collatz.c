@@ -58,14 +58,14 @@ int main(void) {
 
     vtx_assembler_t a; vtx_asm_init(&a);
     const char *prog =
-        ".method collatz (I)I\n.arg_count 1\n.max_locals 3\n.max_stack 6\n"
-        "load_const_int 0\nstore_local 1\n"
-        "loop:\nload_local 0\nload_const_int 1\nicmp_eq\nif_true done\n"
-        "load_local 0\nload_const_int 2\nimod\nif_false even\n"
-        "load_local 0\nload_const_int 3\nimul\nload_const_int 1\niadd\nstore_local 0\n"
-        "goto inc\n"
-        "even:\nload_local 0\nload_const_int 2\nidiv\nstore_local 0\n"
-        "inc:\nload_local 1\nload_const_int 1\niadd\nstore_local 1\n"
+        ".method popcount (I)I\n.arg_count 1\n.max_locals 3\n.max_stack 6\n"
+        "load_const_int 0;store_local 1\n"
+        "loop:;load_local 0;if_false done\n"
+        "load_local 0;load_const_int 2;imod;load_const_int 1;icmp_eq;if_false skip\n"
+        "load_local 1;load_const_int 1;iadd;store_local 1\n"
+        "\n"
+        "skip:;load_local 0;load_const_int 2;idiv;store_local 0\n"
+        "goto loop\n"
         "goto loop\n"
         "done:\nload_local 1\nreturn_value\n";
     vtx_asm_program(&a, prog);
@@ -91,7 +91,7 @@ int main(void) {
     printf("pipeline rc=%d success=%d code=%p\n", prc, result.success, method.compiled_code);
 
     if (method.compiled_code) {
-        printf("Executing collatz(6)...\n"); fflush(stdout); uint8_t *code = (uint8_t*)method.compiled_code; printf("Native code:"); for(int i=0;i<500;i++){printf(" %02X",code[i]);} printf("\n"); fflush(stdout);
+        printf("Executing popcount(6)...\n"); fflush(stdout); uint8_t *code = (uint8_t*)method.compiled_code; printf("Native code:"); for(int i=0;i<500;i++){printf(" %02X",code[i]);} printf("\n"); fflush(stdout);
         fflush(stdout);
         typedef vtx_value_t (*entry_t)(const vtx_method_desc_t*,void*,void*,vtx_value_t*,uint32_t);
         entry_t e = (entry_t)method.compiled_code;
@@ -99,7 +99,7 @@ int main(void) {
         alarm(3);
         vtx_value_t r = e(&method, NULL, (void*)1, &av, 1);
         alarm(0);
-        printf("collatz(6) = %lld (expected 8)\n", (long long)vtx_smi_value(r));
+        printf("popcount(6) = %lld (expected 8)\n", (long long)vtx_smi_value(r));
     }
 
     vtx_compile_result_destroy(&result);
