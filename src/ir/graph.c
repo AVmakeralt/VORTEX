@@ -3020,7 +3020,10 @@ int vtx_graph_build(vtx_graph_t *graph,
      * Without this, the Mod in gcd18 is scheduled in the loop header
      * (where its Phi inputs are), causing it to execute even when b==0,
      * resulting in divide-by-zero. */
-    for (uint32_t bi = 0; bi < nblocks; bi++) {
+    /* Process blocks in REVERSE order so inner Ifs (higher block indices)
+     * are processed first. This ensures SIDE_EFFECT nodes get the Proj
+     * from the CLOSEST If (innermost), not the outermost. */
+    for (int32_t bi = (int32_t)nblocks - 1; bi >= 0; bi--) {
         vtx_block_info_t *block = &blocks[bi];
         if (block->succ_count < 2) continue;
 
@@ -3078,15 +3081,17 @@ int vtx_graph_build(vtx_graph_t *graph,
             if (!vtx_nf_has(node->flags, VTX_NF_SIDE_EFFECT)) continue;
             if (vtx_nf_has(node->flags, VTX_NF_CONTROL)) continue;
 
-            /* Check if any input is from the If's block (the predecessor) */
+            /* Check if any input is a Phi in the If's block (the predecessor).
+             * Only add Proj to SIDE_EFFECT nodes that directly use loop header
+             * Phis. But DON'T add if the node already has a Proj input from
+             * a different (closer) If. */
             bool has_input_from_if_block = false;
+            bool already_has_proj = false;
             for (uint32_t j = 0; j < node->input_count; j++) {
                 vtx_nodeid_t inp = node->inputs[j];
                 if (inp == VTX_NODEID_INVALID || inp >= graph->node_table.count) continue;
-                /* Check if this input is a Phi in the If's block */
                 vtx_node_t *inp_node = &graph->node_table.nodes[inp];
                 if (inp_node->opcode == VTX_OP_Phi) {
-                    /* Check if the Phi's Region is in the If's block */
                     for (uint32_t k = 0; k < inp_node->input_count; k++) {
                         if (inp_node->inputs[k] == block->region_node) {
                             has_input_from_if_block = true;
@@ -3094,8 +3099,13 @@ int vtx_graph_build(vtx_graph_t *graph,
                         }
                     }
                 }
-                if (has_input_from_if_block) break;
+                if (inp_node->opcode == VTX_OP_Proj) {
+                    already_has_proj = true;
+                }
             }
+
+            /* Skip if already has a Proj (from a closer If) */
+            if (already_has_proj) has_input_from_if_block = false;
 
             if (has_input_from_if_block) {
                 /* Add the fall-through Proj as a control input.
