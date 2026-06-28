@@ -509,29 +509,62 @@ int vtx_schedule_run(vtx_graph_t *graph, vtx_arena_t *arena, vtx_schedule_t *sch
                         }
                     }
                 } else if (is_pinned && !is_ctrl) {
-                    /* Pinned non-control node (e.g., Div/Mod): find the
-                     * block of the deepest (latest) input, not the first.
-                     * This ensures the node is placed in the block where
-                     * it should execute, not in a predecessor block. */
-                    uint32_t deepest_blk = (uint32_t)-1;
+                    /* Pinned non-control node (e.g., Div/Mod with a Proj
+                     * control dependency): find the block where the Proj
+                     * feeds into (the fall-through block). */
+                    uint32_t target_blk = (uint32_t)-1;
+
+                    /* Look for a Proj input — it indicates a control
+                     * dependency. Find the Region that has this Proj as
+                     * input, then find that Region's block. */
                     for (uint32_t pi = 0; pi < node->input_count; pi++) {
                         vtx_nodeid_t inp = node->inputs[pi];
-                        if (inp != VTX_NODEID_INVALID && inp < node_count) {
-                            uint32_t blk = schedule->node_block[inp];
-                            if (blk != (uint32_t)-1) {
-                                /* Use the latest assigned input block */
-                                if (deepest_blk == (uint32_t)-1) {
-                                    deepest_blk = blk;
-                                } else {
-                                    /* Pick the block with the higher index
-                                     * (later in execution order) */
-                                    if (blk > deepest_blk) deepest_blk = blk;
+                        if (inp == VTX_NODEID_INVALID || inp >= node_count) continue;
+                        vtx_node_t *inp_node = &nt->nodes[inp];
+                        if (inp_node->opcode != VTX_OP_Proj) continue;
+
+                        /* Search all Region/LoopBegin nodes for one that
+                         * has this Proj as an input. */
+                        for (uint32_t rn = 0; rn < node_count; rn++) {
+                            vtx_node_t *region = &nt->nodes[rn];
+                            if (region->dead) continue;
+                            if (region->opcode != VTX_OP_Region &&
+                                region->opcode != VTX_OP_LoopBegin) continue;
+                            for (uint32_t ri = 0; ri < region->input_count; ri++) {
+                                if (region->inputs[ri] == inp) {
+                                    /* Found the Region that this Proj feeds into.
+                                     * Find the block for this Region. */
+                                    uint32_t reg_blk = schedule->node_block[rn];
+                                    if (reg_blk != (uint32_t)-1) {
+                                        target_blk = reg_blk;
+                                    }
+                                    break;
+                                }
+                            }
+                            if (target_blk != (uint32_t)-1) break;
+                        }
+                        if (target_blk != (uint32_t)-1) break;
+                    }
+
+                    /* If no Proj found, fall back to deepest input block */
+                    if (target_blk == (uint32_t)-1) {
+                        for (uint32_t pi = 0; pi < node->input_count; pi++) {
+                            vtx_nodeid_t inp = node->inputs[pi];
+                            if (inp != VTX_NODEID_INVALID && inp < node_count) {
+                                uint32_t blk = schedule->node_block[inp];
+                                if (blk != (uint32_t)-1) {
+                                    if (target_blk == (uint32_t)-1) {
+                                        target_blk = blk;
+                                    } else {
+                                        if (blk > target_blk) target_blk = blk;
+                                    }
                                 }
                             }
                         }
                     }
-                    if (deepest_blk != (uint32_t)-1) {
-                        schedule->node_block[i] = deepest_blk;
+
+                    if (target_blk != (uint32_t)-1) {
+                        schedule->node_block[i] = target_blk;
                         changed = true;
                         break;
                     }

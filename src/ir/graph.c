@@ -3010,6 +3010,103 @@ int vtx_graph_build(vtx_graph_t *graph,
         }
     }
 
+    /* Phase 5.5: Add control dependencies to SIDE_EFFECT nodes.
+     *
+     * After Phase 5 creates Proj nodes, we need to connect SIDE_EFFECT nodes
+     * (Div, Mod) in fall-through blocks to the If's Proj. This tells the
+     * scheduler to place them in the fall-through block, not in the block
+     * where their inputs are.
+     *
+     * Without this, the Mod in gcd18 is scheduled in the loop header
+     * (where its Phi inputs are), causing it to execute even when b==0,
+     * resulting in divide-by-zero. */
+    for (uint32_t bi = 0; bi < nblocks; bi++) {
+        vtx_block_info_t *block = &blocks[bi];
+        if (block->succ_count < 2) continue;
+
+        /* Find the terminator */
+        size_t last_insn_pc = block->start_pc;
+        size_t scan = block->start_pc;
+        while (scan < block->end_pc) {
+            last_insn_pc = scan;
+            scan += vtx_bytecode_insn_length(bytecode, scan);
+        }
+        vtx_opcode_t term_op = vtx_bytecode_opcode_at(bytecode, last_insn_pc);
+        if (term_op != VT_OP_IF_TRUE && term_op != VT_OP_IF_FALSE) continue;
+
+        /* The If node is block->control_node */
+        vtx_node_t *if_node = vtx_node_get(&graph->node_table, block->control_node);
+        if (if_node == NULL || if_node->opcode != VTX_OP_If) continue;
+
+        /* Find the Proj nodes for this If */
+        vtx_nodeid_t fall_proj = VTX_NODEID_INVALID;
+        for (uint32_t ni = 0; ni < graph->node_table.count; ni++) {
+            vtx_node_t *pn = &graph->node_table.nodes[ni];
+            if (pn->dead || pn->opcode != VTX_OP_Proj) continue;
+            if (pn->input_count < 1 || pn->inputs[0] != block->control_node) continue;
+            /* For IF_FALSE: succ[1] is the fall-through (true path), gets proj_true.
+             * For IF_TRUE: succ[1] is the fall-through (false path), gets proj_false.
+             * The fall-through Proj has cond=NE for IF_FALSE (true taken on fall-through),
+             * cond=EQ for IF_TRUE (false taken on fall-through). */
+            if (term_op == VT_OP_IF_FALSE && pn->cond == VTX_COND_NE) {
+                fall_proj = ni;
+                break;
+            }
+            if (term_op == VT_OP_IF_TRUE && pn->cond == VTX_COND_EQ) {
+                fall_proj = ni;
+                break;
+            }
+        }
+        if (fall_proj == VTX_NODEID_INVALID) continue;
+
+        /* The fall-through block is succ[1] */
+        uint32_t fall_block_idx = block->succ_indices[1];
+        if (fall_block_idx >= nblocks) continue;
+
+        /* Add the fall-through Proj as a control input to SIDE_EFFECT nodes
+         * in the fall-through block. We mark the node as PINNED so the
+         * scheduler treats it as a control-dependent node. */
+        vtx_block_info_t *fall_block = &blocks[fall_block_idx];
+        vtx_nodeid_t fall_region = fall_block->region_node;
+        if (fall_region == VTX_NODEID_INVALID) continue;
+
+        /* Scan all nodes and find SIDE_EFFECT nodes whose inputs come from
+         * the If's block but should be in the fall-through block. */
+        for (uint32_t ni = 0; ni < graph->node_table.count; ni++) {
+            vtx_node_t *node = &graph->node_table.nodes[ni];
+            if (node->dead) continue;
+            if (!vtx_nf_has(node->flags, VTX_NF_SIDE_EFFECT)) continue;
+            if (vtx_nf_has(node->flags, VTX_NF_CONTROL)) continue;
+
+            /* Check if any input is from the If's block (the predecessor) */
+            bool has_input_from_if_block = false;
+            for (uint32_t j = 0; j < node->input_count; j++) {
+                vtx_nodeid_t inp = node->inputs[j];
+                if (inp == VTX_NODEID_INVALID || inp >= graph->node_table.count) continue;
+                /* Check if this input is a Phi in the If's block */
+                vtx_node_t *inp_node = &graph->node_table.nodes[inp];
+                if (inp_node->opcode == VTX_OP_Phi) {
+                    /* Check if the Phi's Region is in the If's block */
+                    for (uint32_t k = 0; k < inp_node->input_count; k++) {
+                        if (inp_node->inputs[k] == block->region_node) {
+                            has_input_from_if_block = true;
+                            break;
+                        }
+                    }
+                }
+                if (has_input_from_if_block) break;
+            }
+
+            if (has_input_from_if_block) {
+                /* Add the fall-through Proj as a control input.
+                 * This makes the node control-dependent on the Proj,
+                 * forcing the scheduler to place it in the fall-through block. */
+                vtx_node_add_input(&graph->node_table, ni, fall_proj);
+                node->flags |= VTX_NF_PINNED;
+            }
+        }
+    }
+
     /* Phase 6: Create the End node and connect all Return nodes to it.
      *
      * BUGFIX (audit #1, fuzz-discovered): The End node was never created,
