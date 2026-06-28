@@ -4354,7 +4354,8 @@ int vtx_x86_emit_function(vtx_x86_emit_t *emit, vtx_inst_stream_t *stream,
         /* DISABLED for debugging: peephole may be incorrectly NOP'ing
          * Constants' MOV imm instructions. */
         /* vtx_peephole_optimize(stream, result); */
-        vtx_branch_optimize(stream, emit, result);
+        /* vtx_branch_optimize(stream, emit, result); — disabled: inverts JCC
+         * before CMP, causing wrong condition checks */
     }
 
     /* ---- F1 fix: Initialize relocation table and label offset tracking ---- */
