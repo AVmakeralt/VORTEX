@@ -3081,26 +3081,74 @@ int vtx_graph_build(vtx_graph_t *graph,
             if (!vtx_nf_has(node->flags, VTX_NF_SIDE_EFFECT)) continue;
             if (vtx_nf_has(node->flags, VTX_NF_CONTROL)) continue;
 
-            /* Check if any input is a Phi in the If's block (the predecessor).
-             * Only add Proj to SIDE_EFFECT nodes that directly use loop header
-             * Phis. But DON'T add if the node already has a Proj input from
-             * a different (closer) If. */
+            /* Check if any data input (non-Constant, non-Parameter, non-Proj)
+             * is defined in this block or a predecessor. This catches both
+             * direct Phi uses AND uses of nodes that depend on Phis.
+             *
+             * But DON'T add if the node already has a Proj input from a
+             * different (closer) If. */
             bool has_input_from_if_block = false;
             bool already_has_proj = false;
             for (uint32_t j = 0; j < node->input_count; j++) {
                 vtx_nodeid_t inp = node->inputs[j];
                 if (inp == VTX_NODEID_INVALID || inp >= graph->node_table.count) continue;
                 vtx_node_t *inp_node = &graph->node_table.nodes[inp];
+
+                /* Skip Constants, Parameters, Start, Province — globally available */
+                if (inp_node->opcode == VTX_OP_Constant ||
+                    inp_node->opcode == VTX_OP_Parameter ||
+                    inp_node->opcode == VTX_OP_Start ||
+                    inp_node->opcode == VTX_OP_Province) continue;
+
+                if (inp_node->opcode == VTX_OP_Proj) {
+                    already_has_proj = true;
+                    continue;
+                }
+
+                /* Check if this input is a Phi whose Region is this block's
+                 * Region, the fall-through block's Region, or any
+                 * predecessor's Region. */
                 if (inp_node->opcode == VTX_OP_Phi) {
+                    /* Check the If's block's Region */
                     for (uint32_t k = 0; k < inp_node->input_count; k++) {
                         if (inp_node->inputs[k] == block->region_node) {
                             has_input_from_if_block = true;
                             break;
                         }
                     }
-                }
-                if (inp_node->opcode == VTX_OP_Proj) {
-                    already_has_proj = true;
+                    /* Check the fall-through block's Region */
+                    if (!has_input_from_if_block && block->succ_count >= 2) {
+                        uint32_t fall_idx2 = block->succ_indices[1];
+                        if (fall_idx2 < nblocks) {
+                            vtx_nodeid_t fall_reg = blocks[fall_idx2].region_node;
+                            for (uint32_t k = 0; k < inp_node->input_count; k++) {
+                                if (inp_node->inputs[k] == fall_reg) {
+                                    has_input_from_if_block = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    /* Check all predecessor blocks' Regions */
+                    if (!has_input_from_if_block) {
+                        for (uint32_t p = 0; p < block->pred_count; p++) {
+                            uint32_t pred_idx = block->pred_indices[p];
+                            vtx_nodeid_t pred_reg = blocks[pred_idx].region_node;
+                            for (uint32_t k = 0; k < inp_node->input_count; k++) {
+                                if (inp_node->inputs[k] == pred_reg) {
+                                    has_input_from_if_block = true;
+                                    break;
+                                }
+                            }
+                            if (has_input_from_if_block) break;
+                        }
+                    }
+                } else {
+                    /* Non-Phi input: assume it's from the If's block.
+                     * This is conservative but catches cases where the
+                     * node uses a computed value (e.g., Add result) that
+                     * depends on a Phi. */
+                    has_input_from_if_block = true;
                 }
             }
 
