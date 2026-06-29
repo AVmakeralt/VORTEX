@@ -55,7 +55,7 @@ int main(void) {
         entry_t e = (entry_t)method.compiled_code;
         vtx_value_t av = vtx_make_smi(7);
         alarm(3);
-        uint8_t *code = (uint8_t*)method.compiled_code; printf("Native:"); for(int i=0;i<800;i++) printf(" %02X",code[i]); printf("\n"); fflush(stdout); vtx_value_t r = e(&method, NULL, (void*)1, &av, 1);
+        uint8_t *code = (uint8_t*)method.compiled_code; printf("Native:"); for(int i=0;i<1200;i++) printf(" %02X",code[i]); printf("\n"); fflush(stdout); vtx_value_t r = e(&method, NULL, (void*)1, &av, 1);
         alarm(0);
         printf("popcount(7) = %lld (expected 3)\n", (long long)vtx_smi_value(r));
     }

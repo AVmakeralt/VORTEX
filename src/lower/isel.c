@@ -1947,6 +1947,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         for (uint32_t i = 0; i < node->input_count; i++) {
             const vtx_node_t *inp = vtx_node_get_const(&graph->node_table, node->inputs[i]);
             if (inp && vtx_nf_has(inp->flags, VTX_NF_DATA)) {
+                ensure_node_vreg(stream, node->inputs[i], arena);
                 cond_vreg = vtx_isel_node_vreg(stream, node->inputs[i]);
                 break;
             }
@@ -1960,9 +1961,15 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
          * For if_false (cond=EQ): JE jumps when cond == SMI(0) (falsy)
          */
         if (cond_vreg != VTX_VREG_INVALID) {
+            /* BUGFIX: The regalloc may assign the same physical register
+             * to smi_zero_vreg and cond_vreg, making CMP(x, x) which
+             * always sets ZF=1. Fix: mark the CMP as a definition of
+             * smi_zero_vreg (so its live interval extends to the CMP),
+             * preventing the regalloc from reusing cond_vreg's register. */
             uint32_t smi_zero_vreg = vtx_isel_alloc_vreg(stream, arena);
-            vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, smi_zero_vreg,
-                               (int64_t)0x7FF8000000000000ULL, node_id), arena);
+            vtx_inst_t mov_smi_zero = make_ri_inst(VTX_X86_MOV, smi_zero_vreg,
+                               (int64_t)0x7FF8000000000000ULL, node_id);
+            vtx_isel_emit_inst(block, mov_smi_zero, arena);
             vtx_inst_t cmp = make_rr_inst(VTX_X86_CMP, cond_vreg, smi_zero_vreg, node_id);
             cmp.flags |= VTX_INST_FLAG_FUSED | VTX_INST_FLAG_NO_TEST;
             vtx_isel_emit_inst(block, cmp, arena);
