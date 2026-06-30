@@ -100,7 +100,8 @@ void vtx_compile_context_set_method_lookup(
  * @param method   Method that needs compilation
  */
 void vtx_request_compilation(vtx_compile_context_t *ctx,
-                              const vtx_method_desc_t *method);
+                              const vtx_method_desc_t *method,
+                              uint64_t execution_count);
 
 /**
  * Check if a method has been submitted for compilation.

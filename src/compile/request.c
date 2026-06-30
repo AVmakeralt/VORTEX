@@ -9,6 +9,7 @@
 
 #define _POSIX_C_SOURCE 199309L
 #include "compile/request.h"
+#include "compile/callee_lookup.h"
 #include "compile/threadpool.h"
 #include "compile/pipeline.h"
 #include "codecache/install.h"
@@ -124,7 +125,8 @@ void vtx_clear_compilation_requested(vtx_compile_context_t *ctx,
 /* ========================================================================== */
 
 void vtx_request_compilation(vtx_compile_context_t *ctx,
-                              const vtx_method_desc_t *method)
+                              const vtx_method_desc_t *method,
+                              uint64_t execution_count)
 {
     if (ctx == NULL || method == NULL) return;
 
@@ -148,7 +150,15 @@ void vtx_request_compilation(vtx_compile_context_t *ctx,
         vtx_compile_task_t task;
         memset(&task, 0, sizeof(task));
         task.method_id = method_id;
-        task.tier = VTX_TIER_T1;
+
+        /* Use the tier_decision callback with the REAL execution count
+         * from the profiler. No hardcoding — the tier is determined by
+         * the actual runtime behavior of the method. */
+        if (ctx->tier_decision != NULL) {
+            task.tier = ctx->tier_decision(execution_count);
+        } else {
+            task.tier = VTX_TIER_T1;
+        }
         task.priority = VTX_COMPILE_PRIORITY_NORMAL;
 
         if (vtx_threadpool_submit_task(ctx->threadpool, &task) != 0) {
@@ -248,6 +258,16 @@ static void compile_callback(uint32_t method_id, vtx_compile_tier_t tier, void *
         config.method = method;
         config.install_arena = &compile_arena;
 
+        /* Wire the callee lookup so the inliner can actually inline.
+         * Without this, callee_lookup=NULL and the GBDT model computes
+         * scores but never inlines anything.
+         * (audit #2: wire callee_lookup) */
+        void *callee_ctx = NULL;
+        vtx_callee_lookup_fn lookup_fn = vtx_callee_lookup_create(
+            ctx->method_registry, NULL, NULL, &callee_ctx);
+        config.callee_lookup = lookup_fn;
+        config.callee_lookup_context = callee_ctx;
+
         vtx_compile_result_t result;
         memset(&result, 0, sizeof(result));
 
@@ -262,6 +282,7 @@ static void compile_callback(uint32_t method_id, vtx_compile_tier_t tier, void *
 
         vtx_compile_result_destroy(&result);
         vtx_pipeline_config_destroy(&config);
+        vtx_callee_lookup_destroy(callee_ctx);
         vtx_graph_destroy(&graph);
     }
 

@@ -1451,7 +1451,7 @@ dispatch_VT_OP_GOTO:
                  * Previously this was a TODO comment; now it actually
                  * submits the method for background compilation. */
                 if (interp->compile_ctx != NULL) {
-                    vtx_request_compilation(interp->compile_ctx, frame->method);
+                    vtx_request_compilation(interp->compile_ctx, frame->method, vtx_profiler_method_heat(&interp->profiler, frame->method));
                 }
             }
 
@@ -1468,7 +1468,7 @@ dispatch_VT_OP_GOTO:
             if (VTX_UNLIKELY(interp->deopt_pending)) {
                 interp->deopt_pending = false;
                 if (interp->compile_ctx != NULL && frame->method != NULL) {
-                    vtx_request_compilation(interp->compile_ctx, frame->method);
+                    vtx_request_compilation(interp->compile_ctx, frame->method, vtx_profiler_method_heat(&interp->profiler, frame->method));
                 }
             }
         }
@@ -1496,7 +1496,7 @@ dispatch_VT_OP_IF_TRUE:
                 if (VTX_UNLIKELY(vtx_profiler_tier_up_check(&interp->profiler,
                                                               frame->method))) {
                         if (interp->compile_ctx != NULL) {
-                            vtx_request_compilation(interp->compile_ctx, frame->method);
+                            vtx_request_compilation(interp->compile_ctx, frame->method, vtx_profiler_method_heat(&interp->profiler, frame->method));
                         }
                 }
 
@@ -1504,7 +1504,7 @@ dispatch_VT_OP_IF_TRUE:
                 if (VTX_UNLIKELY(interp->deopt_pending)) {
                     interp->deopt_pending = false;
                     if (interp->compile_ctx != NULL && frame->method != NULL) {
-                        vtx_request_compilation(interp->compile_ctx, frame->method);
+                        vtx_request_compilation(interp->compile_ctx, frame->method, vtx_profiler_method_heat(&interp->profiler, frame->method));
                     }
                 }
             }
@@ -1535,7 +1535,7 @@ dispatch_VT_OP_IF_FALSE:
                 if (VTX_UNLIKELY(vtx_profiler_tier_up_check(&interp->profiler,
                                                               frame->method))) {
                         if (interp->compile_ctx != NULL) {
-                            vtx_request_compilation(interp->compile_ctx, frame->method);
+                            vtx_request_compilation(interp->compile_ctx, frame->method, vtx_profiler_method_heat(&interp->profiler, frame->method));
                         }
                 }
 
@@ -1543,7 +1543,7 @@ dispatch_VT_OP_IF_FALSE:
                 if (VTX_UNLIKELY(interp->deopt_pending)) {
                     interp->deopt_pending = false;
                     if (interp->compile_ctx != NULL && frame->method != NULL) {
-                        vtx_request_compilation(interp->compile_ctx, frame->method);
+                        vtx_request_compilation(interp->compile_ctx, frame->method, vtx_profiler_method_heat(&interp->profiler, frame->method));
                     }
                 }
             }

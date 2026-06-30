@@ -157,6 +157,7 @@ add_library(vortex_compile STATIC
     compile/spec_versioning.c
     compile/orchestrator.c
     compile/request.c
+    compile/callee_lookup.c
 )
 target_include_directories(vortex_compile PUBLIC ${VORTEX_INCLUDE_DIRS})
 target_link_libraries(vortex_compile PUBLIC vortex_ir vortex_pea vortex_inliner vortex_lower vortex_deopt vortex_codecache vortex_guard vortex_profile vortex_baseline $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota> Threads::Threads)

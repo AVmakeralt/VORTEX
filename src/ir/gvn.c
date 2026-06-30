@@ -436,43 +436,26 @@ uint32_t vtx_gvn_run(vtx_graph_t *graph)
             /* Skip nodes that cannot be CSE'd:
              * - Control flow nodes (Region, If, Goto, etc.) — they have structural meaning
              * - Memory nodes (they have ordering constraints)
-             * - Side-effecting nodes (stores, calls — each has unique effects)
+             * - Side-effecting nodes (stores, calls, GUARDS — each is a
+             *   distinct runtime decision point)
              * - Pinned nodes (Phi, FrameState)
              * - Allocations (each allocation is unique)
              *
-             * BUGFIX (audit #10): Guards and DeoptGuards WERE skipped because
-             * they're side-effecting. But two guards on the SAME condition
-             * (e.g., two type checks on the same array reference) are redundant
-             * — the second guard can never fail if the first passed. CSE'ing
-             * them eliminates duplicate type checks, which is critical for
-             * array-heavy loops.
+             * DESIGN PRINCIPLE: No pass may reduce the number of runtime
+             * decision points without explicit authorization. Guards and
+             * DeoptGuards are runtime safety checks — even if two guards
+             * have the same condition, they are NOT necessarily redundant.
+             * The second guard may be on a different control path, or the
+             * checked value may have been redefined between them. GVN's
+             * hash-based congruence does NOT verify dominance or value
+             * preservation between the two guard sites.
              *
-             * Guard CSE is safe because:
-             * 1. A guard's effect is "deopt if condition is false"
-             * 2. If guard A and guard B have the same condition, and A
-             *    executes before B, then B's condition is guaranteed true
-             *    (A would have deopt'd otherwise). So B is redundant.
-             * 3. We must verify dominance (A dominates B) for this to be
-             *    safe, but GVN's hash-based congruence already ensures
-             *    same inputs. For simplicity, we CSE guards with identical
-             *    inputs and let DCE clean up the redundant one.
-             */
-            if (vtx_node_is_control(node->opcode)) {
-                /* Allow Guard and DeoptGuard through for CSE — they're
-                 * control nodes but duplicate guards are redundant. */
-                if (node->opcode != VTX_OP_Guard &&
-                    node->opcode != VTX_OP_DeoptGuard) {
-                    continue;
-                }
-            }
+             * Guard CSE must be done by an explicit guard-merging pass
+             * that verifies dominance and value preservation. GVN must
+             * not merge guards. */
+            if (vtx_node_is_control(node->opcode)) continue;
             if (vtx_node_is_memory(node->opcode)) continue;
-            if (vtx_node_is_side_effecting(node->opcode)) {
-                /* Allow Guard and DeoptGuard through for CSE */
-                if (node->opcode != VTX_OP_Guard &&
-                    node->opcode != VTX_OP_DeoptGuard) {
-                    continue;
-                }
-            }
+            if (vtx_node_is_side_effecting(node->opcode)) continue;
             if (vtx_nf_has(node->flags, VTX_NF_PINNED)) continue;
             if (node->opcode == VTX_OP_NewObject || node->opcode == VTX_OP_NewArray ||
                 node->opcode == VTX_OP_Allocate) continue;

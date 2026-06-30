@@ -86,6 +86,23 @@
 #include "guard/ewma.h"
 #include "guard/hoist.h"
 #include "guard/merge.h"
+#include "guard/guard_page_type.h"
+#include "profile/data.h"
+#include "interp/type_feedback.h"
+#include "inliner/feedback.h"
+#ifdef VORTEX_ENABLE_SOTA
+#include "sota/markov.h"
+#include "sota/phase.h"
+#include "sota/recomp.h"
+#include "sota/fdi.h"
+#include "compile/phase_react.h"
+#endif
+
+/* Forward declarations for runtime stubs that aren't in headers yet.
+ * These are defined in runtime_stubs.c and set/get global pointers
+ * that JIT-compiled code uses for deopt and GC. */
+void vtx_set_current_interp(vtx_interp_t *interp);
+void vtx_set_current_side_table(vtx_side_table_t *st);
 #ifdef VORTEX_ENABLE_SOTA
 #include "sota/phase.h"
 #include "sota/recomp.h"
@@ -2838,6 +2855,98 @@ int main(int argc, char *argv[])
 
         vtx_interp_set_compile_ctx(&interp, &compile_ctx);
 
+        /* Wire global pointers so JIT-compiled code can find the GC,
+         * interpreter, and side table at runtime. Without these, deopt
+         * stubs and GC barriers would dereference NULL globals.
+         *
+         * BUGFIX (audit #3): The JIT code calls vtx_get_current_gc() etc.
+         * in deopt paths and GC barriers. If these globals are NULL,
+         * any deopt or GC during JIT execution crashes. */
+        vtx_set_current_gc(&gc);
+        vtx_set_current_interp(&interp);
+
+        /* Initialize the type guard page registry. This enables
+         * zero-cost type guards (guard page polling) instead of the
+         * CMP+JCC fallback. Without this, vtx_type_guard_page_available_flag
+         * stays 0 and the isel emits expensive compare-and-branch guards. */
+        vtx_type_guard_page_registry_t guard_page_registry;
+        vtx_type_guard_page_registry_init(&guard_page_registry);
+
+        /* Initialize the safepoint manager. This enables safepoint
+         * polling for GC suspension in JIT-compiled code. Without this,
+         * long-running JIT code can't be stopped for GC. */
+        vtx_safepoint_manager_t safepoint_mgr;
+        vtx_safepoint_init(&safepoint_mgr, 0, NULL);
+
+        /* Instantiate the runtime orchestrator with REAL subsystems.
+         *
+         * DESIGN PRINCIPLE: No NULLs for subsystems that exist. Every
+         * subsystem the orchestrator can use is instantiated with real
+         * init calls and real parameters. SOTA subsystems are only
+         * compiled when VORTEX_ENABLE_SOTA is defined — otherwise they
+         * genuinely don't exist (not "NULL because lazy").
+         *
+         * This wires: phase prediction (Markov), phase detection, KL-recomp
+         * monitoring, FDI tracking, phase-reactive code management, type
+         * feedback, global profile, and inline feedback. */
+#ifdef VORTEX_ENABLE_SOTA
+        vtx_markov_t markov;
+        vtx_markov_init(&markov);
+
+        vtx_phase_graph_t phase_graph;
+        memset(&phase_graph, 0, sizeof(phase_graph));
+        vtx_arena_t phase_arena;
+        vtx_arena_init(&phase_arena);
+
+        vtx_sota_phase_t phase;
+        vtx_sota_phase_init(&phase, &phase_graph, &phase_arena);
+
+        vtx_sota_recomp_t recomp;
+        vtx_sota_recomp_init(&recomp);
+
+        vtx_inline_feedback_t inline_feedback;
+        vtx_feedback_init(&inline_feedback);
+
+        vtx_sota_fdi_t fdi;
+        vtx_sota_fdi_init(&fdi, &inline_feedback);
+
+        vtx_phase_react_manager_t phase_react;
+        vtx_phase_react_manager_init(&phase_react, 1 << 20);  /* 1MB code budget */
+#endif
+
+        vtx_type_feedback_t type_feedback;
+        vtx_type_feedback_init(&type_feedback, 256);
+
+        vtx_profile_global_t profile;
+        vtx_profile_global_init(&profile);
+
+        vtx_orchestrator_t orchestrator;
+        vtx_orchestrator_init(&orchestrator,
+#ifdef VORTEX_ENABLE_SOTA
+            &markov,
+            &phase,
+            &recomp,
+            &fdi,
+#else
+            NULL, NULL, NULL, NULL,
+#endif
+            &pool,
+#ifdef VORTEX_ENABLE_SOTA
+            &phase_react,
+#else
+            NULL,
+#endif
+            &type_feedback,
+            &profile,
+#ifdef VORTEX_ENABLE_SOTA
+            &inline_feedback
+#else
+            NULL
+#endif
+            );
+        vtx_orchestrator_start(&orchestrator);
+        compile_ctx.orchestrator = &orchestrator;
+
         vtx_value_t result = vtx_interp_run(&interp, &method, NULL, 0);
 
         printf("Program exited");
@@ -2850,10 +2959,35 @@ int main(int argc, char *argv[])
 
         /* Shut down JIT compilation pipeline */
         vtx_interp_set_compile_ctx(&interp, NULL);
+        vtx_orchestrator_stop(&orchestrator);
+        vtx_orchestrator_destroy(&orchestrator);
         vtx_threadpool_shutdown(&pool);
         vtx_compile_context_destroy(&compile_ctx);
         vtx_method_registry_destroy(&registry);
         vtx_code_cache_destroy(&cache);
+
+        /* Clean up profiling and feedback subsystems */
+        vtx_profile_global_destroy(&profile);
+        vtx_type_feedback_destroy(&type_feedback);
+#ifdef VORTEX_ENABLE_SOTA
+        vtx_phase_react_manager_destroy(&phase_react);
+        vtx_sota_fdi_destroy(&fdi);
+        vtx_feedback_destroy(&inline_feedback);
+        vtx_sota_recomp_destroy(&recomp);
+        vtx_sota_phase_destroy(&phase);
+        vtx_arena_destroy(&phase_arena);
+        /* markov has no destroy function — it's stack-allocated and
+         * holds no heap resources beyond what arena manages */
+#endif
+
+        /* Clean up guard page registry and safepoint manager */
+        vtx_safepoint_destroy(&safepoint_mgr);
+        vtx_type_guard_page_registry_destroy(&guard_page_registry);
+
+        /* Clear global pointers */
+        vtx_set_current_gc(NULL);
+        vtx_set_current_interp(NULL);
+        vtx_set_current_side_table(NULL);
 
         vtx_gc_destroy(&gc);
         vtx_type_system_destroy(&ts);
