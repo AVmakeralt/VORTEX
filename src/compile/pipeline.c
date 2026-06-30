@@ -776,7 +776,8 @@ static int run_lowering_pipeline(vtx_graph_t *graph,
      * the T2 instruction selector expects for Parameter nodes. */
     vtx_x86_emit_prologue(&emitter, ra_result->frame_size,
                            ra_result->callee_saved_mask,
-                           method_arg_count, method_max_locals);
+                           method_arg_count, method_max_locals,
+                           ra_result->is_leaf);
 
     /* Note: SMI constants (R10=HEADER, R11=DATA_MASK) are loaded as the
      * first instructions in block 0 of the instruction stream (emitted by

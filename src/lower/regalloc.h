@@ -188,6 +188,12 @@ typedef struct {
     /* Number of live intervals */
     uint32_t  interval_count;
     vtx_live_interval_t *intervals; /* array of live intervals (arena) */
+
+    /* True if the function contains no CALL instructions (leaf function).
+     * Leaf functions can use a lighter prologue/epilogue: skip the JIT
+     * header pushes (RDI/RSI/RDX for method/deopt/profile) since they're
+     * only needed for deopt, which can't happen in a leaf without calls. */
+    bool      is_leaf;
 } vtx_regalloc_result_t;
 
 /* ========================================================================== */

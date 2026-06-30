@@ -1228,7 +1228,7 @@ VTX_TEST(test_emit_04) {
 VTX_TEST(test_emit_05) {
     vtx_x86_emit_t emit;
     VTX_ASSERT_EQUAL(vtx_x86_emit_init(&emit, 4096), 0);
-    vtx_x86_emit_prologue(&emit, 32, 0, 0, 0);
+    vtx_x86_emit_prologue(&emit, 32, 0, 0, 0, true);
     VTX_ASSERT_TRUE(vtx_x86_emit_position(&emit) > 0);
     vtx_x86_emit_destroy(&emit);
 }
@@ -1236,9 +1236,9 @@ VTX_TEST(test_emit_05) {
 VTX_TEST(test_emit_06) {
     vtx_x86_emit_t emit;
     VTX_ASSERT_EQUAL(vtx_x86_emit_init(&emit, 4096), 0);
-    vtx_x86_emit_prologue(&emit, 32, 0, 0, 0);
+    vtx_x86_emit_prologue(&emit, 32, 0, 0, 0, true);
     uint32_t pos = vtx_x86_emit_position(&emit);
-    vtx_x86_emit_epilogue(&emit, 0);
+    vtx_x86_emit_epilogue(&emit, 0, true);
     VTX_ASSERT_TRUE(vtx_x86_emit_position(&emit) > pos);
     vtx_x86_emit_destroy(&emit);
 }

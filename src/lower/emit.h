@@ -524,7 +524,8 @@ int vtx_x86_emit_safepoint_poll_guard_page(vtx_x86_emit_t *e);
  */
 void vtx_x86_emit_prologue(vtx_x86_emit_t *e, uint32_t frame_size,
                             uint32_t callee_saved_mask,
-                            uint32_t arg_count, uint32_t max_locals);
+                            uint32_t arg_count, uint32_t max_locals,
+                            bool is_leaf);
 
 /**
  * Emit SMI constant initialization in the prologue.
@@ -539,11 +540,9 @@ void vtx_x86_emit_smi_constants(vtx_x86_emit_t *e);
  *   mov rsp, rbp
  *   pop rbp
  *   ret
- *
- * @param e                  Emitter
- * @param callee_saved_mask  Bitmask of callee-saved registers to restore
- */
-void vtx_x86_emit_epilogue(vtx_x86_emit_t *e, uint32_t callee_saved_mask);
+ * is_leaf must match the value passed to vtx_x86_emit_prologue(). */
+void vtx_x86_emit_epilogue(vtx_x86_emit_t *e, uint32_t callee_saved_mask,
+                            bool is_leaf);
 
 /**
  * Emit the entire instruction stream into the code buffer.

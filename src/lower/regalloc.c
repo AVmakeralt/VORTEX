@@ -1022,6 +1022,19 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
      * R12/R13 across the JIT call gets those variables corrupted. */
     result->callee_saved_mask = callee_saved_used | (1u << 12) | (1u << 13);
 
+    /* Detect leaf functions (no CALL instructions).
+     * Leaf functions can use a lighter prologue (skip JIT header pushes). */
+    result->is_leaf = true;
+    for (uint32_t b = 0; b < stream->block_count && result->is_leaf; b++) {
+        vtx_inst_block_t *blk = &stream->blocks[b];
+        for (uint32_t i = 0; i < blk->inst_count; i++) {
+            if (blk->insts[i].opcode == VTX_X86_CALL) {
+                result->is_leaf = false;
+                break;
+            }
+        }
+    }
+
     /* BUGFIX: Fallback assignment for unassigned vregs.
      *
      * Some vregs (especially temporaries created by the If/Cmp isel) may

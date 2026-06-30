@@ -1860,7 +1860,8 @@ int vtx_x86_emit_safepoint_poll_guard_page(vtx_x86_emit_t *e)
 
 void vtx_x86_emit_prologue(vtx_x86_emit_t *e, uint32_t frame_size,
                             uint32_t callee_saved_mask,
-                            uint32_t arg_count, uint32_t max_locals)
+                            uint32_t arg_count, uint32_t max_locals,
+                            bool is_leaf)
 {
     /* JIT calling convention prologue — matches T1 baseline layout:
      *
@@ -1870,6 +1871,7 @@ void vtx_x86_emit_prologue(vtx_x86_emit_t *e, uint32_t frame_size,
      *          RCX = args array pointer (4th arg)
      *          R8  = arg_count (5th arg)
      *
+     * Full prologue (non-leaf):
      *   push rdi              ; method_ptr   -> [RBP+24]
      *   push rsi              ; deopt_info   -> [RBP+16]
      *   push rdx              ; profile_data -> [RBP+8]
@@ -1878,29 +1880,29 @@ void vtx_x86_emit_prologue(vtx_x86_emit_t *e, uint32_t frame_size,
      *   push callee-saved regs (RBX, R12-R15 as needed)
      *   sub rsp, frame_size   ; locals + spills
      *
-     *   Then: copy args[i] from the args array (RCX) into the
-     *   System V argument registers (RDI, RSI, RDX, RCX, R8, R9)
-     *   so that the T2 instruction selector's Parameter mapping
-     *   (Parameter i → vtx_arg_regs[i]) works correctly.
-     *   The original register values (method, deopt_info, profile_data)
-     *   have already been saved on the stack, so RDI/RSI/RDX can be
-     *   safely overwritten.
+     * Leaf prologue (audit #7): Skip the 3 JIT header pushes (RDI/RSI/RDX)
+     * since they're only needed for deopt, which can't happen in a leaf
+     * function without calls. This saves 3 push + 3 pop + 24 bytes stack.
+     *   push rbp
+     *   mov rbp, rsp
+     *   push callee-saved regs
+     *   sub rsp, frame_size
      *
-     * This layout ensures that the deopt handler can find the method
-     * pointer at [RBP+24] and deopt_info at [RBP+16] — the same
-     * offsets used by T1 baseline JIT (see frame_layout.h).
-     * Without these saved values, T2/T3 deopt would crash because
-     * the deopt stubs cannot reconstruct interpreter state.
-     */
+     * Then: copy args[i] from the args array (RCX) into the
+     * System V argument registers (RDI, RSI, RDX, RCX, R8, R9)
+     * so that the T2 instruction selector's Parameter mapping
+     * (Parameter i → vtx_arg_regs[i]) works correctly. */
 
-    /* push method pointer (RDI) */
-    vtx_x86_emit_push_r(e, 7);  /* RDI = 7 */
+    if (!is_leaf) {
+        /* push method pointer (RDI) */
+        vtx_x86_emit_push_r(e, 7);  /* RDI = 7 */
 
-    /* push deopt_info (RSI) */
-    vtx_x86_emit_push_r(e, 6);  /* RSI = 6 */
+        /* push deopt_info (RSI) */
+        vtx_x86_emit_push_r(e, 6);  /* RSI = 6 */
 
-    /* push profile_data (RDX) */
-    vtx_x86_emit_push_r(e, 2);  /* RDX = 2 */
+        /* push profile_data (RDX) */
+        vtx_x86_emit_push_r(e, 2);  /* RDX = 2 */
+    }
 
     /* push rbp */
     vtx_x86_emit_push_r(e, 5); /* RBP = 5 */
@@ -1919,28 +1921,27 @@ void vtx_x86_emit_prologue(vtx_x86_emit_t *e, uint32_t frame_size,
 
     /* sub rsp, frame_size — adjusted for stack alignment.
      * At function entry (after CALL), RSP ≡ 8 (mod 16).
-     * After 4 pushes (rdi, rsi, rdx, rbp): RSP ≡ 8 - 32 ≡ 8 (mod 16).
-     * After N callee-saved pushes: RSP ≡ 8 - 8N (mod 16).
-     * After sub rsp, frame_size: need RSP ≡ 0 (mod 16).
-     * So frame_size ≡ 8 - 8N (mod 16), i.e.:
-     *   N even: frame_size ≡ 8 (mod 16)
-     *   N odd:  frame_size ≡ 0 (mod 16)
-     * We pad frame_size up to satisfy this constraint. */
+     * Non-leaf: 4 pushes (rdi, rsi, rdx, rbp) → RSP ≡ 8 - 32 ≡ 8 (mod 16).
+     * Leaf: 1 push (rbp) → RSP ≡ 8 - 8 ≡ 0 (mod 16).
+     * After N callee-saved pushes: RSP shifts by 8*N.
+     * After sub rsp, frame_size: need RSP ≡ 0 (mod 16). */
     if (frame_size > 0) {
         static const uint8_t cs_regs[] = { 3, 12, 13, 14, 15 };
         int cs_count = 0;
         for (int i = 0; i < 5; i++) {
             if (callee_saved_mask & (1u << cs_regs[i])) cs_count++;
         }
+        /* Total pushes before frame_size: non-leaf=4+N, leaf=1+N */
+        int total_pushes = (is_leaf ? 1 : 4) + cs_count;
         uint32_t aligned_size = frame_size;
-        /* Round up to next multiple of 8, then add 8 if cs_count is even */
         aligned_size = (aligned_size + 7u) & ~(uint32_t)7u;
         if (aligned_size == 0) aligned_size = 8;
-        /* Check if current alignment matches requirement */
-        bool need_mod8 = (cs_count % 2 == 0); /* need ≡ 8 (mod 16) */
+        /* total_pushes even → entry RSP ≡ 8 (mod 16) → need frame ≡ 8 (mod 16)
+         * total_pushes odd  → entry RSP ≡ 0 (mod 16) → need frame ≡ 0 (mod 16) */
+        bool need_mod8 = (total_pushes % 2 == 0);
         bool is_mod8 = (aligned_size % 16 == 8);
         if (need_mod8 != is_mod8) {
-            aligned_size += 8; /* toggle between ≡ 0 and ≡ 8 (mod 16) */
+            aligned_size += 8;
         }
         vtx_x86_emit_sub_ri(e, 4, (int32_t)aligned_size); /* RSP = 4 */
     }
@@ -2011,7 +2012,8 @@ void vtx_x86_emit_smi_constants(vtx_x86_emit_t *e)
     vtx_x86_emit_shr_ri(e, 11, 16);
 }
 
-void vtx_x86_emit_epilogue(vtx_x86_emit_t *e, uint32_t callee_saved_mask)
+void vtx_x86_emit_epilogue(vtx_x86_emit_t *e, uint32_t callee_saved_mask,
+                            bool is_leaf)
 {
     /* Restore RSP to the frame pointer. After this, RSP points at the
      * saved RBP (which was pushed in the prologue BEFORE the callee-saved
@@ -2064,11 +2066,14 @@ void vtx_x86_emit_epilogue(vtx_x86_emit_t *e, uint32_t callee_saved_mask)
     /* pop rbp — RSP is now back at RBP, so this restores caller's RBP */
     vtx_x86_emit_pop_r(e, 5);
 
-    /* Skip the 3 JIT header values pushed in prologue:
+    /* Skip the 3 JIT header values pushed in prologue (non-leaf only):
      *   profile_data (RDX), deopt_info (RSI), method_ptr (RDI)
      * These were pushed before RBP so they sit above the saved RBP.
-     * T1 uses "add rsp, 24" to skip them — we do the same. */
-    vtx_x86_emit_add_ri(e, 4, 24);  /* RSP += 24 */
+     * T1 uses "add rsp, 24" to skip them — we do the same.
+     * For leaf functions, these were never pushed, so skip the add. */
+    if (!is_leaf) {
+        vtx_x86_emit_add_ri(e, 4, 24);  /* RSP += 24 */
+    }
 
     /* ret */
     vtx_x86_emit_ret(e);
@@ -3507,7 +3512,7 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
          * The epilogue includes the ret instruction itself, so we
          * don't emit a separate ret here. */
         if (ra) {
-            vtx_x86_emit_epilogue(e, ra->callee_saved_mask);
+            vtx_x86_emit_epilogue(e, ra->callee_saved_mask, ra->is_leaf);
         } else {
             vtx_x86_emit_ret(e);
         }
