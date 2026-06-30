@@ -27,6 +27,7 @@
 
 #include "compile/pipeline.h"
 #include "codecache/install.h"
+#include "ir/strength_reduce.h"
 
 #include <time.h>
 #include <string.h>
@@ -929,6 +930,23 @@ int vtx_pipeline_run(vtx_graph_t *graph,
         if (verify_between_passes(graph, config, "SCCP") != 0) {
             result->stats = stats;
             return -1;
+        }
+    }
+
+    /* ================================================================== */
+    /* Phase 2.5: Strength Reduction                                      */
+    /*                                                                    */
+    /* Replaces expensive ops with cheaper equivalents:                   */
+    /*   Mul(x, 2^k) → Shl(x, k)                                         */
+    /*   Mul(x, 1) → x, Mul(x, 0) → 0, Div(x, 1) → x                    */
+    /*                                                                    */
+    /* Runs after SCCP (constants are propagated) and before DCE (dead    */
+    /* nodes from the replacement are cleaned up).                        */
+    /* ================================================================== */
+    if (config->run_sccp) {
+        uint32_t sr_replaced = vtx_strength_reduce_run(graph);
+        if (sr_replaced > 0) {
+            verify_between_passes(graph, config, "StrengthReduce");
         }
     }
 

@@ -880,7 +880,15 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
              *
              * For now, we always take the safe path. A future optimization
              * can re-introduce the fast paths with a range check.
-             (void)rhs_const;  /* silence unused warning */
+             *
+             * BUGFIX (audit #6): The fast path ADD+OR-HEADER was re-enabled
+             * but produces wrong results for some inputs (popcount mismatch).
+             * The issue is that the OR-HEADER doesn't fix data-bit corruption
+             * when the ADD overflows past bit 50. Disabled until a proper
+             * range analysis can prove no overflow. The untag+add+retag
+             * path below is always correct. */
+            (void)rhs_const;  /* silence unused warning */
+            /* For large constants, fall through to the general path */
         }
 
         /* Variable + Variable (or Variable + Const): untag both, add, retag.
@@ -941,7 +949,9 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
          */
         int64_t rhs_const;
         if (try_get_const_int(graph, node->inputs[1], &rhs_const)) {
-            (void)rhs_const;  /* silence unused warning */
+            /* Sub(x, Const) fast path disabled — same overflow issue as Add.
+             * See Add(x, Const) for details. */
+            (void)rhs_const;
             /* fall through to untag+sub+retag */
         }
 
