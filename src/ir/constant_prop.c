@@ -862,6 +862,58 @@ uint32_t vtx_constant_prop_run(vtx_graph_t *graph)
         }
     }
 
+    /* Phase 4: Eliminate guards whose conditions are provably true.
+     *
+     * BUGFIX (audit #12): SCCP never evaluated guard conditions, so
+     * Guard(Cmp(x,x) == EQ) after Cmp folds to 1 was still emitted as
+     * a runtime TEST+JCC. Now we check each Guard's condition input:
+     * if it's a constant 1 (true), the guard always passes and can be
+     * removed. If it's constant 0 (false), the guard always deopts —
+     * we leave it (the deopt will fire at runtime).
+     *
+     * Guard inputs: [control, condition]
+     * DeoptGuard inputs: [control, condition, FrameState] */
+    for (uint32_t i = 0; i < nt->count; i++) {
+        vtx_node_t *node = &nt->nodes[i];
+        if (node->dead) continue;
+        if (node->opcode != VTX_OP_Guard && node->opcode != VTX_OP_DeoptGuard)
+            continue;
+        if (node->input_count < 2) continue;
+
+        vtx_nodeid_t cond_id = node->inputs[1];
+        if (cond_id == VTX_NODEID_INVALID || cond_id >= node_count) continue;
+
+        /* Check if the condition is a constant */
+        if (lattice[cond_id].tag == VTX_LATTICE_CONSTANT &&
+            lattice[cond_id].value.kind == VTX_TYPE_Int) {
+            int64_t cond_val = lattice[cond_id].value.as.int_val;
+            if (cond_val != 0) {
+                /* Condition is always true — guard always passes.
+                 * Redirect all uses of this guard to its control input
+                 * (the guard passes control through unchanged). */
+                vtx_nodeid_t ctrl_input = node->inputs[0];
+                vtx_node_replace_all_uses(nt, (vtx_nodeid_t)i, ctrl_input);
+
+                /* Disconnect inputs and mark dead */
+                for (uint32_t j = 0; j < node->input_count; j++) {
+                    if (node->inputs[j] != VTX_NODEID_INVALID &&
+                        node->inputs[j] < nt->count) {
+                        vtx_node_t *producer = &nt->nodes[node->inputs[j]];
+                        vtx_node_remove_use_entry(producer, (vtx_nodeid_t)i, j);
+                        if (producer->output_count > 0) producer->output_count--;
+                    }
+                }
+                node->input_count = 0;
+                node->use_count = 0;
+                node->dead = true;
+                node->output_count = 0;
+                simplified++;
+            }
+            /* If cond_val == 0, the guard always deopts — leave it.
+             * The runtime deopt will fire, which is correct behavior. */
+        }
+    }
+
     free(lattice);
     worklist_destroy(&wl);
     return simplified;

@@ -28,6 +28,8 @@
 #include "compile/pipeline.h"
 #include "codecache/install.h"
 #include "ir/strength_reduce.h"
+#include "guard/hoist.h"
+#include "guard/merge.h"
 
 #include <time.h>
 #include <string.h>
@@ -157,7 +159,8 @@ vtx_pipeline_config_t vtx_pipeline_config_t2(void)
     cfg.run_pea           = true;
     cfg.run_inlining      = true;
     cfg.run_speculative   = false;  /* no speculation in T2 */
-    cfg.run_verify        = false;  /* disabled by default for performance */
+    cfg.run_verify        = true;   /* verify between passes — catches bugs
+                                      * that would silently produce wrong code */
     cfg.run_loop_spec     = true;   /* enable loop specialization */
     cfg.run_vectorize     = true;   /* enable SIMD vectorization */
     cfg.gvn_iterations    = 3;
@@ -1214,6 +1217,18 @@ int vtx_pipeline_run(vtx_graph_t *graph,
         if (config->run_dce) {
             run_dce_pass(graph, 1, &stats.dce_time_ns, false);
         }
+
+        /* Guard hoisting: move loop-invariant guards (type checks, null
+         * checks) to the preheader so they execute once instead of every
+         * iteration.
+         * (audit #4: wire vtx_hoist_guards) */
+        vtx_hoist_guards(graph, &schedule, arena);
+
+        /* Guard merging: merge adjacent guards on the same value into a
+         * single guard. E.g., two null checks on the same reference become
+         * one null check.
+         * (audit #13: wire vtx_merge_guards) */
+        vtx_merge_guards(graph, arena);
     }
 
     /* ================================================================== */

@@ -47,19 +47,33 @@ bool vtx_hoist_is_invariant(const vtx_graph_t *graph,
     const vtx_node_t *guard = vtx_node_get_const(&graph->node_table, guard_node);
     if (guard == NULL || !is_guard_opcode(guard->opcode)) return false;
 
-    /* A guard is loop-invariant if ALL its inputs are defined outside the loop.
-     * We check each input:
-     *   - If the input is a Constant or Start, it's always invariant
-     *   - If the input is a Parameter, it's always invariant (defined at entry)
-     *   - Otherwise, check that the input's block has loop_depth < guard's loop_depth */
+    /* A guard is loop-invariant if its CONDITION and all condition
+     * dependencies are defined outside the loop.
+     *
+     * BUGFIX (audit #4): The old code checked ALL inputs including the
+     * control input (input[0]). But guards have [control, condition]
+     * inputs, and the control input is typically a Region/Proj from
+     * inside the loop body. This made is_invariant return false for
+     * ~all guards, so hoisting never fired.
+     *
+     * Fix: Skip control inputs when checking invariance. Only check the
+     * condition input (input[1]) and its transitive data dependencies.
+     * The control input will be re-wired to the preheader's control
+     * during the actual hoist transform. */
     for (uint32_t i = 0; i < guard->input_count; i++) {
         vtx_nodeid_t input_id = guard->inputs[i];
         if (input_id == VTX_NODEID_INVALID) continue;
 
-        /* Structural inputs: always invariant */
         const vtx_node_t *input = vtx_node_get_const(&graph->node_table, input_id);
         if (input == NULL) continue;
 
+        /* Skip control inputs — they're re-wired to the preheader */
+        if (vtx_nf_has(input->flags, VTX_NF_CONTROL)) continue;
+
+        /* Skip FrameState inputs — they're handled separately for safety */
+        if (input->opcode == VTX_OP_FrameState) continue;
+
+        /* Structural inputs: always invariant */
         if (input->opcode == VTX_OP_Constant ||
             input->opcode == VTX_OP_Start ||
             input->opcode == VTX_OP_Province ||
@@ -70,7 +84,7 @@ bool vtx_hoist_is_invariant(const vtx_graph_t *graph,
         /* Check the input's loop depth */
         uint32_t input_depth = node_loop_depth(schedule, input_id);
         if (input_depth >= loop_depth) {
-            /* This input is defined inside the loop → guard is NOT invariant */
+            /* This data input is defined inside the loop → guard is NOT invariant */
             return false;
         }
     }

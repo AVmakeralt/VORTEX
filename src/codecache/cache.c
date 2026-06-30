@@ -26,8 +26,15 @@ static vtx_code_segment_t *segment_alloc(uint32_t size)
     if (page_size <= 0) page_size = 4096;
     uint32_t aligned_size = (size + (uint32_t)page_size - 1) & ~((uint32_t)page_size - 1);
 
+    /* W^X (Write XOR Execute): Allocate as PROT_WRITE | PROT_READ first,
+     * then mprotect to PROT_EXEC | PROT_READ after writing is done.
+     *
+     * BUGFIX (audit #18): The old code used PROT_EXEC | PROT_WRITE | PROT_READ
+     * simultaneously, which is a W^X violation. Hardened kernels (PaX, SELinux
+     * execmem policy, OpenBSD) refuse RWX mappings. On ARM, the instruction
+     * cache also needs __builtin___clear_cache() after writing executable code. */
     void *mem = mmap(NULL, aligned_size,
-                     PROT_EXEC | PROT_WRITE | PROT_READ,
+                     PROT_WRITE | PROT_READ,
                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (mem == MAP_FAILED) return NULL;
 
@@ -117,6 +124,12 @@ void *vtx_code_cache_alloc(vtx_code_cache_t *cache, uint32_t size)
     /* Try to allocate from the current segment */
     vtx_code_segment_t *seg = cache->current_segment;
     if (seg && seg->writable && (size <= seg->size - seg->used)) {
+        /* BUGFIX (audit #19): Align seg->used to 16 bytes before allocating.
+         * This ensures function entry points are 16-byte aligned, avoiding
+         * icache line splits on entry. The old code only aligned the SIZE
+         * but not the USED offset, so the second function in a segment
+         * started at an unaligned offset. */
+        seg->used = (seg->used + 15u) & ~15u;
         void *ptr = seg->memory + seg->used;
         seg->used += size;
         seg->method_count++;
@@ -162,6 +175,9 @@ int vtx_code_cache_finalize(vtx_code_cache_t *cache)
     if (mprotect(seg->memory, seg->size, PROT_EXEC | PROT_READ) != 0) {
         return -1;
     }
+    /* Flush instruction cache — required on ARM/AArch64 where the I-cache
+     * is not coherent with the D-cache. On x86 this is a no-op but harmless. */
+    __builtin___clear_cache((char *)seg->memory, (char *)seg->memory + seg->size);
     seg->writable = false;
     return 0;
 }
@@ -180,6 +196,8 @@ int vtx_code_cache_make_exec(vtx_code_cache_t *cache, void *ptr, uint32_t size)
     if (mprotect((void *)start, end - start, PROT_EXEC | PROT_READ) != 0) {
         return -1;
     }
+    /* Flush instruction cache for the newly-executable region. */
+    __builtin___clear_cache((char *)start, (char *)end);
     return 0;
 }
 

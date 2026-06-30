@@ -20,7 +20,21 @@ static bool is_node_essential(const vtx_node_t *node)
     /* Memory nodes are essential — they define memory ordering */
     if (vtx_nf_has(node->flags, VTX_NF_MEMORY)) return true;
 
-    /* Side-effecting nodes must be kept */
+    /* BUGFIX (audit #11): Guards and DeoptGuards are NOT essential when
+     * they have zero users. A Guard with no dependent code can't trigger
+     * a useful deopt — it just wastes code size and a branch slot.
+     * The old code treated all SIDE_EFFECT nodes as essential, keeping
+     * dead guards alive forever. After SCCP folds a guard's condition to
+     * a constant, the dead Guard + its FrameState + its Cmp inputs all
+     * linger as zombie nodes.
+     *
+     * Exceptions: CheckCast can throw, so it stays essential. Store/
+     * Call nodes modify state that matters even with no data users. */
+    if (node->opcode == VTX_OP_Guard || node->opcode == VTX_OP_DeoptGuard) {
+        return false;  /* removable if no users */
+    }
+
+    /* Side-effecting nodes must be kept (except guards, handled above) */
     if (vtx_nf_has(node->flags, VTX_NF_SIDE_EFFECT)) return true;
 
     /* Pinned nodes must be kept (their position in the graph matters) */
@@ -29,8 +43,11 @@ static bool is_node_essential(const vtx_node_t *node)
     /* Parameters are essential — they represent method inputs */
     if (node->opcode == VTX_OP_Parameter) return true;
 
-    /* FrameState nodes are essential for deopt */
-    if (node->opcode == VTX_OP_FrameState) return true;
+    /* FrameState nodes are essential for deopt — BUT only if a live
+     * Guard uses them. If all guards are dead, the FrameState is dead too.
+     * We handle this by letting DCE remove FrameStates with zero outputs
+     * (they're not marked essential here unless used by a live guard). */
+    if (node->opcode == VTX_OP_FrameState) return false;  /* removable if unused */
 
     /* CheckCast has side effects (can throw ClassCastException) */
     if (node->opcode == VTX_OP_CheckCast) return true;
