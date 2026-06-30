@@ -527,6 +527,13 @@ void vtx_x86_emit_prologue(vtx_x86_emit_t *e, uint32_t frame_size,
                             uint32_t arg_count, uint32_t max_locals);
 
 /**
+ * Emit SMI constant initialization in the prologue.
+ * Loads R10 = VTX_NAN_BOX_HEADER and R11 = VTX_NAN_DATA_MASK once.
+ * Called after vtx_x86_emit_prologue() if the function uses SMI arithmetic.
+ */
+void vtx_x86_emit_smi_constants(vtx_x86_emit_t *e);
+
+/**
  * Emit function epilogue:
  *   pop callee-saved registers
  *   mov rsp, rbp

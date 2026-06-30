@@ -1996,6 +1996,21 @@ void vtx_x86_emit_prologue(vtx_x86_emit_t *e, uint32_t frame_size,
     }
 }
 
+void vtx_x86_emit_smi_constants(vtx_x86_emit_t *e)
+{
+    /* Load R10 = VTX_NAN_BOX_HEADER (0x7FF8000000000000)
+     * Load R11 = VTX_NAN_DATA_MASK (0x0000FFFFFFFFFFFF = (-1) >> 16)
+     *
+     * These are loaded ONCE in the prologue so that every emit_smi_retag
+     * call can skip the 3-instruction constant reload and just do
+     * AND + SHL + OR (3 instructions instead of 6).
+     *
+     * R10 = register 10, R11 = register 11. */
+    vtx_x86_emit_mov_imm64(e, 10, VTX_NAN_BOX_HEADER);
+    vtx_x86_emit_mov_imm64(e, 11, 0xFFFFFFFFFFFFFFFFULL);
+    vtx_x86_emit_shr_ri(e, 11, 16);
+}
+
 void vtx_x86_emit_epilogue(vtx_x86_emit_t *e, uint32_t callee_saved_mask)
 {
     /* Restore RSP to the frame pointer. After this, RSP points at the

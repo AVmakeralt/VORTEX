@@ -395,62 +395,50 @@ static uint32_t run_inlining_pass(vtx_graph_t *graph,
         vtx_node_t *call_node = vtx_graph_node(graph, call_id);
         if (!call_node || call_node->dead) continue;
 
-        /* Compute features for this call site.
-         * In a full implementation, features would be extracted from
-         * profile data, the call node's context, and the callee. */
-        vtx_inline_features_t features;
-        memset(&features, 0, sizeof(features));
+        /* Look up the callee graph via the callback, if provided.
+         * We do this BEFORE feature extraction so the extractor can use
+         * the callee graph for precise features (instruction count, has_loops,
+         * has_try_catch, allocates, calls_virtual). */
+        const vtx_graph_t *callee_graph = NULL;
+        if (config && config->callee_lookup) {
+            callee_graph = config->callee_lookup(
+                call_node->method_index,
+                config->callee_lookup_context);
+        }
 
-        /* Set basic features using the feature index constants:
-         *   [0]  callee_size              — heuristic estimate
-         *   [1]  callee_instruction_count — heuristic estimate
-         *   [2]  call_site_frequency      — moderate (hot if still in graph)
-         *   [3]  caller_size              — from caller node count
-         *   [4]  call_depth               — current depth = 1
-         *   [5]  callee_is_hot            — heuristic
-         *   [6]  callee_has_loops         — unknown, conservative
-         *   [7]  callee_has_try_catch     — unknown, conservative
-         *   [8]  callee_allocates         — unknown, conservative
-         *   [9]  callee_calls_virtual     — from call node opcode
-         *   [10] receiver_type_certainty  — moderate (0.5)
-         *   [11] constant_arg_ratio       — conservative (0.0)
-         *   [12] estimated_register_pressure — heuristic
-         *   [13] callee_deopt_rate        — conservative (0.0)
-         *   [14] inline_history           — 0 (first time)
+        /* Build the feature extraction context from real data.
          *
-         * For the pipeline driver, we use conservative defaults that
-         * will be overridden by real profile data when available. */
-        features.features[0]  = 64.0;        /* callee bytecode size estimate */
-        features.features[1]  = 32.0;        /* callee instruction count estimate */
-        features.features[2]  = 0.5;         /* call_site_frequency (normalized) */
-        features.features[3]  = (double)graph->node_table.count; /* caller_size */
-        features.features[4]  = 1.0;         /* call_depth */
-        features.features[5]  = 0.5;         /* callee_is_hot */
-        features.features[6]  = 0.0;         /* callee_has_loops (unknown) */
-        features.features[7]  = 0.0;         /* callee_has_try_catch (unknown) */
-        features.features[8]  = 0.0;         /* callee_allocates (unknown) */
-        features.features[9]  = (call_node->opcode == VTX_OP_CallVirtual ||
-                                  call_node->opcode == VTX_OP_CallInterface)
-                                 ? 1.0 : 0.0;  /* callee_calls_virtual */
-        features.features[10] = 0.5;         /* receiver_type_certainty */
-        features.features[11] = 0.0;         /* constant_arg_ratio */
-        features.features[12] = 0.5;         /* estimated_register_pressure */
-        features.features[13] = 0.0;         /* callee_deopt_rate */
-        features.features[14] = 0.0;         /* inline_history */
+         * BUGFIX (audit #8): The old code hand-filled the features struct
+         * with constants (callee_size=64, callee_is_hot=0.5, etc.), making
+         * the GBDT model receive essentially constant inputs and produce
+         * essentially constant output. The "ML inliner" was a heuristic
+         * in disguise. Now we call the real vtx_features_extract() with
+         * a properly populated context. */
+        vtx_inline_context_t ctx;
+        memset(&ctx, 0, sizeof(ctx));
+        ctx.caller_bytecode_size = (config && config->method && config->method->bytecode)
+                                    ? (uint32_t)config->method->bytecode->length : 0;
+        ctx.call_depth = 1;
+        ctx.inline_history = 0;
+        ctx.callee_bytecode_size = 64;  /* conservative default if unknown */
+        ctx.callee_method_id = call_node->method_index;
+        ctx.callee_deopt_count = 0;
+        ctx.callee_invocation_count = 0;
+        ctx.caller_node_count = graph->node_table.count;
+        ctx.callee_graph = callee_graph;
+
+        /* Extract real features from the graph, call node, and context.
+         * Profile data is not available in the pipeline config (T2 compiles
+         * without profile), so pass NULL — the extractor falls back to
+         * conservative estimates for profile-dependent features. */
+        vtx_inline_features_t features = vtx_features_extract(
+            graph, call_id, NULL, &ctx);
 
         /* Run GBDT inference */
         double score = vtx_gbdt_infer(model, &features);
         decisions++;
 
         if (vtx_gbdt_should_inline(score)) {
-            /* Look up the callee graph via the callback, if provided */
-            const vtx_graph_t *callee_graph = NULL;
-            if (config && config->callee_lookup) {
-                callee_graph = config->callee_lookup(
-                    call_node->method_index,
-                    config->callee_lookup_context);
-            }
-
             if (callee_graph != NULL) {
                 /* Check if inlining is legal */
                 if (callee_graph->node_table.count <= effective_size_limit &&
@@ -788,6 +776,11 @@ static int run_lowering_pipeline(vtx_graph_t *graph,
     vtx_x86_emit_prologue(&emitter, ra_result->frame_size,
                            ra_result->callee_saved_mask,
                            method_arg_count, method_max_locals);
+
+    /* Note: SMI constants (R10=HEADER, R11=DATA_MASK) are loaded as the
+     * first instructions in block 0 of the instruction stream (emitted by
+     * isel), NOT here. This way the regalloc sees the definitions and
+     * doesn't spill the fixed vregs. */
 
     /* Note: Epilogue is emitted by the RET instruction handler in
      * emit_single_inst(), which calls vtx_x86_emit_epilogue() to

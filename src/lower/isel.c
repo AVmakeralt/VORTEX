@@ -465,6 +465,7 @@ static void emit_smi_untag(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
      *   SHL 13: 0xFFFFFFFFFFFFC000 (sign bit set from val's bit 47)
      *   SAR 16: 0xFFFFFFFFFFFFFFFF = -1 ✓
      */
+    stream->uses_smi = true;
     vtx_inst_t mov = make_rr_inst(VTX_X86_MOV, dst_vreg, src_vreg, node_id);
     mov.flags |= VTX_INST_FLAG_NO_COALESCE;
     vtx_isel_emit_inst(block, mov, arena);
@@ -483,9 +484,13 @@ static void emit_smi_untag(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
  *   = 0x7FF7FFFFFFFFFFB0, but SMI(-10) = 0x7FFFFFFFFFFFFFF0.
  * The mask-and-OR approach is the ONLY correct retag.
  *
- * Uses two scratch registers:
+ * Uses two scratch registers (initialized ONCE in the prologue):
  *   - smi_scratch_vreg (R10): holds HEADER = 0x7FF8000000000000
  *   - smi_mask_vreg (R11): holds DATA_MASK = 0x0000FFFFFFFFFFFF
+ *
+ * BUGFIX (audit #2): The old code reloaded HEADER and DATA_MASK into R10/R11
+ * on EVERY retag call (3 instructions, ~24 bytes each time). Now the prologue
+ * loads them once, and retag is just AND + SHL + OR (3 instructions, ~10 bytes).
  *
  * @param stream   Instruction stream
  * @param block    Current instruction block
@@ -497,13 +502,9 @@ static void emit_smi_retag(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
                             uint32_t dst_vreg, vtx_nodeid_t node_id,
                             vtx_arena_t *arena)
 {
-    /* Load HEADER into scratch (R10) */
-    vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, stream->smi_scratch_vreg,
-                        (int64_t)VTX_NAN_BOX_HEADER, node_id), arena);
-    /* Load DATA_MASK into mask scratch (R11): computed as (-1) >> 16 */
-    vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, stream->smi_mask_vreg,
-                        (int64_t)-1, node_id), arena);
-    vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHR, stream->smi_mask_vreg, 16, node_id), arena);
+    stream->uses_smi = true;
+    /* R10 (smi_scratch_vreg) and R11 (smi_mask_vreg) are loaded ONCE in the
+     * prologue by vtx_x86_emit_smi_constants(). Here we just use them. */
     /* AND with DATA_MASK: truncate to 48 bits */
     vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_AND, dst_vreg, stream->smi_mask_vreg, node_id), arena);
     /* SHL 3: shift data into position [50:3] */
@@ -519,8 +520,10 @@ static void emit_smi_retag(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 static void emit_smi_load_header(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
                                   vtx_nodeid_t node_id, vtx_arena_t *arena)
 {
-    vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, stream->smi_scratch_vreg,
-                        (int64_t)VTX_NAN_BOX_HEADER, node_id), arena);
+    stream->uses_smi = true;
+    /* R10 is already loaded with HEADER by the prologue — nothing to do here.
+     * The caller should use stream->smi_scratch_vreg directly. */
+    (void)block; (void)node_id; (void)arena;
 }
 
 /**
@@ -3002,6 +3005,41 @@ vtx_inst_stream_t *vtx_isel_select(const vtx_schedule_t *schedule,
                 return NULL;
             }
         }
+    }
+
+    /* If any SMI arithmetic was emitted, prepend the SMI constant loads
+     * (R10=HEADER, R11=DATA_MASK) to block 0. The retag/untag sequences
+     * rely on these constants being in R10/R11.
+     *
+     * BUGFIX (audit #2): The old code reloaded these constants on every
+     * retag call. Now we load them once here. We emit them as instructions
+     * in the stream (not as raw emitter calls) so the regalloc sees the
+     * definitions and doesn't spill the fixed vregs.
+     *
+     * We use a special source_node of VTX_NODEID_INVALID to indicate these
+     * are prologue instructions with no corresponding IR node. */
+    if (stream->uses_smi && stream->block_count > 0) {
+        vtx_inst_block_t *blk0 = &stream->blocks[0];
+        /* Ensure capacity for 3 extra instructions at the front */
+        if (vtx_isel_block_ensure_capacity(blk0, 3, arena) != 0) return NULL;
+        /* Shift existing instructions right by 3 */
+        memmove(&blk0->insts[3], &blk0->insts[0],
+                blk0->inst_count * sizeof(vtx_inst_t));
+        /* MOV R10, VTX_NAN_BOX_HEADER */
+        vtx_inst_t mov_r10 = make_ri_inst(VTX_X86_MOV, stream->smi_scratch_vreg,
+                                           (int64_t)VTX_NAN_BOX_HEADER, VTX_NODEID_INVALID);
+        mov_r10.flags |= VTX_INST_FLAG_NO_COALESCE;
+        blk0->insts[0] = mov_r10;
+        /* MOV R11, -1 */
+        vtx_inst_t mov_r11 = make_ri_inst(VTX_X86_MOV, stream->smi_mask_vreg,
+                                           (int64_t)-1, VTX_NODEID_INVALID);
+        mov_r11.flags |= VTX_INST_FLAG_NO_COALESCE;
+        blk0->insts[1] = mov_r11;
+        /* SHR R11, 16 → R11 = 0x0000FFFFFFFFFFFF (DATA_MASK) */
+        vtx_inst_t shr_r11 = make_ri_inst(VTX_X86_SHR, stream->smi_mask_vreg,
+                                           16, VTX_NODEID_INVALID);
+        blk0->insts[2] = shr_r11;
+        blk0->inst_count += 3;
     }
 
     /* Resolve Phi nodes: emit parallel copy sequences at predecessor block ends */

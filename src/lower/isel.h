@@ -359,6 +359,12 @@ typedef struct {
      * R11 is reserved in VTX_REG_RESERVED_MASK so regalloc won't touch it. */
     uint32_t          smi_mask_vreg;          /* vreg id fixed to R11 */
 
+    /* Set to true if any SMI arithmetic (Add/Sub/Mul/And/Or/Xor/Shl/Shr)
+     * is emitted. The prologue uses this to decide whether to initialize
+     * R10=HEADER and R11=DATA_MASK once at function entry. The retag/untag
+     * sequences then skip the redundant constant loads. */
+    bool              uses_smi;
+
     /* Reference to the graph for node lookups */
     const vtx_schedule_t *schedule;
 } vtx_inst_stream_t;
