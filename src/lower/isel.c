@@ -22,6 +22,7 @@
 #include "lower/isel.h"
 #include "ir/graph.h"
 #include "compile/safepoint.h"
+#include "runtime/object.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -498,7 +499,7 @@ static void emit_smi_retag(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 {
     /* Load HEADER into scratch (R10) */
     vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, stream->smi_scratch_vreg,
-                        (int64_t)0x7FF8000000000000ULL, node_id), arena);
+                        (int64_t)VTX_NAN_BOX_HEADER, node_id), arena);
     /* Load DATA_MASK into mask scratch (R11): computed as (-1) >> 16 */
     vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, stream->smi_mask_vreg,
                         (int64_t)-1, node_id), arena);
@@ -519,7 +520,7 @@ static void emit_smi_load_header(vtx_inst_stream_t *stream, vtx_inst_block_t *bl
                                   vtx_nodeid_t node_id, vtx_arena_t *arena)
 {
     vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, stream->smi_scratch_vreg,
-                        (int64_t)0x7FF8000000000000ULL, node_id), arena);
+                        (int64_t)VTX_NAN_BOX_HEADER, node_id), arena);
 }
 
 /**
@@ -742,7 +743,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
              * expects NaN-boxed SMIs (e.g., 0x7FF8000000000150).
              * SMI tag: VTX_NAN_BOX_HEADER | (val << 3) | VTX_TAG_SMI */
             int64_t raw = node->constval.as.int_val;
-            uint64_t smi_val = 0x7FF8000000000000ULL
+            uint64_t smi_val = VTX_NAN_BOX_HEADER
                              | (((uint64_t)raw & 0x0000FFFFFFFFFFFFULL) << 3)
                              | 0ULL; /* VTX_TAG_SMI = 0 */
             inst.imm = (int64_t)smi_val;
@@ -768,7 +769,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
              * representation of the integer 0. Emitting it here ensures
              * that even if the void constant is not removed by DCE, it
              * won't corrupt the value system. */
-            inst.imm = (int64_t)0x7FF8000000000000ULL;  /* SMI(0) */
+            inst.imm = (int64_t)VTX_NAN_BOX_HEADER;  /* SMI(0) */
         }
         inst.flags = VTX_INST_FLAG_HAS_IMM;
         inst.source_node = node_id;
@@ -1044,7 +1045,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             /* Special case: Mul(x, 0) → SMI(0) = HEADER */
             if (rhs_const == 0) {
                 vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, dst,
-                                    (int64_t)0x7FF8000000000000ULL, node_id), arena);
+                                    (int64_t)VTX_NAN_BOX_HEADER, node_id), arena);
                 break;
             }
 
@@ -1102,7 +1103,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             /* Mul(c, x) = Mul(x, c) — same sequence with rhs as variable */
             if (lhs_const == 0) {
                 vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, dst,
-                                    (int64_t)0x7FF8000000000000ULL, node_id), arena);
+                                    (int64_t)VTX_NAN_BOX_HEADER, node_id), arena);
                 break;
             }
             if (lhs_const == 1) {
@@ -1987,7 +1988,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
              * preventing the regalloc from reusing cond_vreg's register. */
             uint32_t smi_zero_vreg = vtx_isel_alloc_vreg(stream, arena);
             vtx_inst_t mov_smi_zero = make_ri_inst(VTX_X86_MOV, smi_zero_vreg,
-                               (int64_t)0x7FF8000000000000ULL, node_id);
+                               (int64_t)VTX_NAN_BOX_HEADER, node_id);
             vtx_isel_emit_inst(block, mov_smi_zero, arena);
             vtx_inst_t cmp = make_rr_inst(VTX_X86_CMP, cond_vreg, smi_zero_vreg, node_id);
             cmp.flags |= VTX_INST_FLAG_FUSED | VTX_INST_FLAG_NO_TEST;
@@ -2983,15 +2984,12 @@ vtx_inst_stream_t *vtx_isel_select(const vtx_schedule_t *schedule,
         inst_blk->block_id = b;
 
         for (uint32_t n = 0; n < sched_blk->node_count; n++) {
-            fprintf(stderr, " %u", sched_blk->nodes[n]);
-        }
-        fprintf(stderr, "\n");
-    
-        for (uint32_t n = 0; n < sched_blk->node_count; n++) {
             vtx_nodeid_t node_id = sched_blk->nodes[n];
             if (select_node(stream, inst_blk, graph, node_id, arena) != 0) {
                 const vtx_node_t *dbg_node = vtx_node_get_const(&graph->node_table, node_id);
                 if (dbg_node) {
+                    fprintf(stderr, "ISEL FAIL on N%u (%s), inputs:",
+                            node_id, vtx_node_opcode_name(dbg_node->opcode));
                     for (uint32_t di = 0; di < dbg_node->input_count; di++) {
                         vtx_nodeid_t dinp = dbg_node->inputs[di];
                         const vtx_node_t *dinp_n = vtx_node_get_const(&graph->node_table, dinp);
