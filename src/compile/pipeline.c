@@ -1198,6 +1198,21 @@ int vtx_pipeline_run(vtx_graph_t *graph,
         if (result->schedule) {
             memcpy(result->schedule, &schedule, sizeof(vtx_schedule_t));
         }
+
+        /* Outer fixpoint: re-run GVN+SCCP+DCE after LICM to clean up
+         * trivial Phis created by hoisting (Phi with both inputs now equal)
+         * and dead code exposed by the hoisted invariants.
+         * (audit #9: outer fixpoint after LICM) */
+        if (config->run_gvn) {
+            run_gvn_pass(graph, 1, &stats.gvn_time_ns);
+        }
+        if (config->run_sccp) {
+            run_sccp_pass(graph, 1, &stats.sccp_time_ns);
+            vtx_strength_reduce_run(graph);
+        }
+        if (config->run_dce) {
+            run_dce_pass(graph, 1, &stats.dce_time_ns, false);
+        }
     }
 
     /* ================================================================== */
@@ -1213,6 +1228,13 @@ int vtx_pipeline_run(vtx_graph_t *graph,
         if (verify_between_passes(graph, config, "BoundsCheck") != 0) {
             result->stats = stats;
             return -1;
+        }
+
+        /* Outer fixpoint: re-run DCE after bounds check to remove dead
+         * guards and Cmp nodes whose conditions were proven.
+         * (audit #9: outer fixpoint after bounds check) */
+        if (config->run_dce) {
+            run_dce_pass(graph, 1, &stats.dce_time_ns, false);
         }
     }
 

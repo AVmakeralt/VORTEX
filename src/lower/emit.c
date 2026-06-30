@@ -4434,13 +4434,24 @@ int vtx_x86_emit_function(vtx_x86_emit_t *emit, vtx_inst_stream_t *stream,
 {
     if (!emit || !stream) return -1;
 
-    /* Apply peephole optimizations before emission */
+    /* Apply peephole optimizations before emission.
+     *
+     * The peephole optimizer applies safe within-block patterns:
+     *   - MOV r,r → NOP (redundant move)
+     *   - CMP r,0 → TEST r,r (1 byte shorter, only for untagged values)
+     *   - ADD/SUB r,0 → NOP
+     *   - XOR r,0 → NOP
+     *   - OR r,0 / AND r,-1 → NOP
+     *   - MOV r,0 → XOR r,r (1 byte shorter)
+     *
+     * Pattern 8 (dead store elimination) is disabled because it uses
+     * within-block liveness only — cross-block liveness is needed for
+     * correctness (Constants defined in block 0 are used in successor blocks).
+     *
+     * The branch optimizer remains disabled — it inverts JCC before CMP,
+     * causing wrong condition checks. */
     if (result) {
-        /* DISABLED for debugging: peephole may be incorrectly NOP'ing
-         * Constants' MOV imm instructions. */
-        /* vtx_peephole_optimize(stream, result); */
-        /* vtx_branch_optimize(stream, emit, result); — disabled: inverts JCC
-         * before CMP, causing wrong condition checks */
+        vtx_peephole_optimize(stream, result);
     }
 
     /* ---- F1 fix: Initialize relocation table and label offset tracking ---- */
