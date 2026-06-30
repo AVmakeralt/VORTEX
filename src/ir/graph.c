@@ -3081,6 +3081,17 @@ int vtx_graph_build(vtx_graph_t *graph,
             if (!vtx_nf_has(node->flags, VTX_NF_SIDE_EFFECT)) continue;
             if (vtx_nf_has(node->flags, VTX_NF_CONTROL)) continue;
 
+            /* BUGFIX (collatz/popcount timeout): If this SIDE_EFFECT node IS
+             * the condition being tested by this If, it must execute BEFORE
+             * the If — it cannot be pinned to a Proj from this same If.
+             * Pinning it creates a cycle: SIDE_EFFECT -> Proj -> If -> SIDE_EFFECT.
+             * The scheduler then fails to place the node correctly, and the
+             * emitted code reads uninitialized stack slots for the condition,
+             * causing infinite loops. */
+            if (if_node->input_count >= 2 && if_node->inputs[1] == (vtx_nodeid_t)ni) {
+                continue;
+            }
+
             /* Check if any data input (non-Constant, non-Parameter, non-Proj)
              * is defined in this block or a predecessor. This catches both
              * direct Phi uses AND uses of nodes that depend on Phis.
