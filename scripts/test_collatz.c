@@ -83,6 +83,7 @@ int main(void) {
     
     
     
+    
     vtx_code_cache_t cache; vtx_code_cache_init(&cache, 1<<20);
     vtx_method_registry_t reg; vtx_method_registry_init(&reg, &arena);
     config.code_cache=&cache; config.method_registry=&reg; config.method=&method;
