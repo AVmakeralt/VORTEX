@@ -56,6 +56,7 @@ add_library(vortex_ir STATIC
     ir/tbaa.c
     ir/spec_elim.c
     ir/strength_reduce.c
+    ir/loop_unroll.c
 )
 target_include_directories(vortex_ir PUBLIC ${VORTEX_INCLUDE_DIRS})
 target_link_libraries(vortex_ir PUBLIC vortex_common)

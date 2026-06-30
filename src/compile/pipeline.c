@@ -28,6 +28,7 @@
 #include "compile/pipeline.h"
 #include "codecache/install.h"
 #include "ir/strength_reduce.h"
+#include "ir/loop_unroll.h"
 #include "guard/hoist.h"
 #include "guard/merge.h"
 
@@ -1229,6 +1230,11 @@ int vtx_pipeline_run(vtx_graph_t *graph,
          * one null check.
          * (audit #13: wire vtx_merge_guards) */
         vtx_merge_guards(graph, arena);
+
+        /* Loop unrolling: unroll small loops by factor 2 to reduce loop
+         * overhead and enable more instruction-level parallelism.
+         * (audit #3: wire loop unrolling) */
+        vtx_loop_unroll_run(graph, &schedule, arena, 2);
     }
 
     /* ================================================================== */
