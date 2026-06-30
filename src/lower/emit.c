@@ -2542,31 +2542,55 @@ int vtx_branch_optimize(vtx_inst_stream_t *stream, vtx_x86_emit_t *emit,
  * Spill slot address: [rbp - 8 * (slot + 1)]
  * RBP = register 5.
  */
-static void emit_spill_load(vtx_x86_emit_t *e, uint32_t spill_slot, uint8_t tmp_reg)
+/**
+ * Compute the RBP-relative displacement for a spill slot.
+ *
+ * BUGFIX (T2 JIT crashes caller with -O3): Spill slots were at
+ * [rbp - 8*(slot+1)], starting at rbp-8. But the callee-saved registers
+ * are pushed AFTER `mov rbp, rsp`, so they occupy rbp-8 through
+ * rbp-(8*cs_count). Spill slot 0 at rbp-8 OVERWRITES the last-pushed
+ * callee-saved register, corrupting the caller's register values.
+ *
+ * Fix: spill slots start BELOW the callee-saved area, at
+ * [rbp - 8*(slot + 1 + cs_count)].
+ */
+static int32_t spill_disp(uint32_t spill_slot, const vtx_regalloc_result_t *ra)
 {
-    int32_t disp = -(int32_t)(8 * (spill_slot + 1));
+    uint32_t cs_count = 0;
+    if (ra) {
+        static const uint8_t cs_regs[] = { 3, 12, 13, 14, 15 };
+        for (int i = 0; i < 5; i++) {
+            if (ra->callee_saved_mask & (1u << cs_regs[i])) cs_count++;
+        }
+    }
+    return -(int32_t)(8 * (spill_slot + 1 + cs_count));
+}
+
+static void emit_spill_load(vtx_x86_emit_t *e, uint32_t spill_slot, uint8_t tmp_reg,
+                            const vtx_regalloc_result_t *ra)
+{
+    int32_t disp = spill_disp(spill_slot, ra);
     vtx_x86_emit_mov_rmem(e, tmp_reg, 5, disp); /* mov tmp, [rbp + disp] */
 }
 
 /**
  * Emit a store from a temporary GPR register into a spill slot.
- * Spill slot address: [rbp - 8 * (slot + 1)]
- * RBP = register 5.
  */
-static void emit_spill_store(vtx_x86_emit_t *e, uint32_t spill_slot, uint8_t tmp_reg)
+static void emit_spill_store(vtx_x86_emit_t *e, uint32_t spill_slot, uint8_t tmp_reg,
+                             const vtx_regalloc_result_t *ra)
 {
-    int32_t disp = -(int32_t)(8 * (spill_slot + 1));
+    int32_t disp = spill_disp(spill_slot, ra);
     vtx_x86_emit_mov_memr(e, 5, disp, tmp_reg); /* mov [rbp + disp], tmp */
 }
 
 /**
  * Emit a load from a spill slot into a temporary XMM register.
  * Uses MOVSD xmm, [rbp + disp] — F2 0F 10 /r with RBP-relative addressing.
- * Spill slot address: [rbp - 8 * (slot + 1)]
  */
-static void emit_spill_load_xmm(vtx_x86_emit_t *e, uint32_t spill_slot, uint8_t tmp_xmm)
+static void emit_spill_load_xmm(vtx_x86_emit_t *e, uint32_t spill_slot, uint8_t tmp_xmm,
+                                const vtx_regalloc_result_t *ra)
 {
-    int32_t disp = -(int32_t)(8 * (spill_slot + 1));
+    int32_t disp = spill_disp(spill_slot, ra);
     /* F2 0F 10 /r — movsd xmm, r/m64
      * We use the same vtx_x86_emit_rm helper but need the F2 prefix.
      * Encoding: F2 [REX] 0F 10 ModR/M + displacement */
@@ -2586,9 +2610,10 @@ static void emit_spill_load_xmm(vtx_x86_emit_t *e, uint32_t spill_slot, uint8_t 
  * Uses MOVSD [rbp + disp], xmm — F2 0F 11 /r with RBP-relative addressing.
  * Spill slot address: [rbp - 8 * (slot + 1)]
  */
-static void emit_spill_store_xmm(vtx_x86_emit_t *e, uint32_t spill_slot, uint8_t tmp_xmm)
+static void emit_spill_store_xmm(vtx_x86_emit_t *e, uint32_t spill_slot, uint8_t tmp_xmm,
+                                 const vtx_regalloc_result_t *ra)
 {
-    int32_t disp = -(int32_t)(8 * (spill_slot + 1));
+    int32_t disp = spill_disp(spill_slot, ra);
     /* F2 0F 11 /r — movsd r/m64, xmm */
     int r = reg_hi(tmp_xmm);
     int b = reg_hi(5); /* RBP = 5 */
@@ -2657,9 +2682,9 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
                 /* Destination is spilled — load from spill, add imm, store back */
                 uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
                 if (slot0 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
                     vtx_x86_emit_add_ri(e, VTX_SPILL_TMP_REG, (int32_t)inst->imm);
-                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
                 }
             } else {
                 vtx_x86_emit_add_ri(e, r0, (int32_t)inst->imm);
@@ -2670,15 +2695,15 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
                 /* Destination spilled, source in register */
                 uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
                 if (slot0 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
                     vtx_x86_emit_add_rr(e, VTX_SPILL_TMP_REG, r1);
-                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
                 }
             } else if (r0 != 0xFF && r1 == 0xFF) {
                 /* Source spilled */
                 uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
                 if (slot1 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot1, VTX_SPILL_TMP_REG);
+                    emit_spill_load(e, slot1, VTX_SPILL_TMP_REG, ra);
                     vtx_x86_emit_add_rr(e, r0, VTX_SPILL_TMP_REG);
                 }
             } else if (r0 == 0xFF && r1 == 0xFF) {
@@ -2686,11 +2711,11 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
                 uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
                 uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
                 if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
                     /* Use R13 as second temp (R13 = 13) */
-                    emit_spill_load(e, slot1, 13);
+                    emit_spill_load(e, slot1, 13, ra);
                     vtx_x86_emit_add_rr(e, VTX_SPILL_TMP_REG, 13);
-                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
                 }
             } else {
                 vtx_x86_emit_add_rr(e, r0, r1);
@@ -2704,9 +2729,9 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
             if (r0 == 0xFF) {
                 uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
                 if (slot0 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
                     vtx_x86_emit_sub_ri(e, VTX_SPILL_TMP_REG, (int32_t)inst->imm);
-                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
                 }
             } else {
                 vtx_x86_emit_sub_ri(e, r0, (int32_t)inst->imm);
@@ -2716,24 +2741,24 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
             if (r0 == 0xFF && r1 != 0xFF) {
                 uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
                 if (slot0 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
                     vtx_x86_emit_sub_rr(e, VTX_SPILL_TMP_REG, r1);
-                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
                 }
             } else if (r0 != 0xFF && r1 == 0xFF) {
                 uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
                 if (slot1 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot1, VTX_SPILL_TMP_REG);
+                    emit_spill_load(e, slot1, VTX_SPILL_TMP_REG, ra);
                     vtx_x86_emit_sub_rr(e, r0, VTX_SPILL_TMP_REG);
                 }
             } else if (r0 == 0xFF && r1 == 0xFF) {
                 uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
                 uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
                 if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
-                    emit_spill_load(e, slot1, 13);
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
+                    emit_spill_load(e, slot1, 13, ra);
                     vtx_x86_emit_sub_rr(e, VTX_SPILL_TMP_REG, 13);
-                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
                 }
             } else {
                 vtx_x86_emit_sub_rr(e, r0, r1);
@@ -2749,9 +2774,9 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
                 /* Destination is spilled */
                 uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
                 if (slot0 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
                     vtx_x86_emit_imul_ri(e, VTX_SPILL_TMP_REG, (int32_t)inst->imm);
-                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
                 }
             } else {
                 vtx_x86_emit_imul_ri(e, r0, (int32_t)inst->imm);
@@ -2761,24 +2786,24 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
             if (r0 == 0xFF && r1 != 0xFF) {
                 uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
                 if (slot0 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
                     vtx_x86_emit_imul_rr(e, VTX_SPILL_TMP_REG, r1);
-                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
                 }
             } else if (r0 != 0xFF && r1 == 0xFF) {
                 uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
                 if (slot1 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot1, VTX_SPILL_TMP_REG);
+                    emit_spill_load(e, slot1, VTX_SPILL_TMP_REG, ra);
                     vtx_x86_emit_imul_rr(e, r0, VTX_SPILL_TMP_REG);
                 }
             } else if (r0 == 0xFF && r1 == 0xFF) {
                 uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
                 uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
                 if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
-                    emit_spill_load(e, slot1, 13);
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
+                    emit_spill_load(e, slot1, 13, ra);
                     vtx_x86_emit_imul_rr(e, VTX_SPILL_TMP_REG, 13);
-                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
                 }
             } else if (r0 != 0xFF && r1 != 0xFF) {
                 vtx_x86_emit_imul_rr(e, r0, r1);
@@ -2795,7 +2820,7 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
                  * be in RAX or RDX. Use R12 (callee-saved, not RAX/RDX)
                  * as the spill load target instead of VTX_SPILL_TMP_REG
                  * (which is also R12, so this is safe). */
-                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
                 vtx_x86_emit_idiv_r(e, VTX_SPILL_TMP_REG);
             }
         } else {
@@ -2819,7 +2844,7 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
             /* Destination is spilled */
             uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
             if (slot0 != VTX_NO_SPILL) {
-                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
                 if (inst->flags & VTX_INST_FLAG_HAS_IMM) {
                     vtx_x86_emit_shl_ri(e, VTX_SPILL_TMP_REG, (uint8_t)(inst->imm & 0x3F));
                 } else {
@@ -2830,7 +2855,7 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
                     }
                     vtx_x86_emit_shl_cl(e, VTX_SPILL_TMP_REG);
                 }
-                emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
             }
         } else {
             if (inst->flags & VTX_INST_FLAG_HAS_IMM) {
@@ -2843,7 +2868,7 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
                     /* Count is spilled — load into RCX */
                     uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
                     if (slot1 != VTX_NO_SPILL) {
-                        emit_spill_load(e, slot1, 1); /* load into RCX */
+                        emit_spill_load(e, slot1, 1, ra); /* load into RCX */
                     }
                 } else if (r1 != 1) {
                     /* Count is in a register other than RCX — move it */
@@ -2860,7 +2885,7 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
             /* Destination is spilled */
             uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
             if (slot0 != VTX_NO_SPILL) {
-                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
                 if (inst->flags & VTX_INST_FLAG_HAS_IMM) {
                     vtx_x86_emit_shr_ri(e, VTX_SPILL_TMP_REG, (uint8_t)(inst->imm & 0x3F));
                 } else {
@@ -2870,7 +2895,7 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
                     }
                     vtx_x86_emit_shr_cl(e, VTX_SPILL_TMP_REG);
                 }
-                emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
             }
         } else {
             if (inst->flags & VTX_INST_FLAG_HAS_IMM) {
@@ -2880,7 +2905,7 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
                 if (r1 == 0xFF) {
                     uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
                     if (slot1 != VTX_NO_SPILL) {
-                        emit_spill_load(e, slot1, 1);
+                        emit_spill_load(e, slot1, 1, ra);
                     }
                 } else if (r1 != 1) {
                     vtx_x86_emit_mov_rr(e, 1, r1);
@@ -2896,7 +2921,7 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
             /* Destination is spilled */
             uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
             if (slot0 != VTX_NO_SPILL) {
-                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
                 if (inst->flags & VTX_INST_FLAG_HAS_IMM) {
                     vtx_x86_emit_sar_ri(e, VTX_SPILL_TMP_REG, (uint8_t)(inst->imm & 0x3F));
                 } else {
@@ -2906,7 +2931,7 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
                     }
                     vtx_x86_emit_sar_cl(e, VTX_SPILL_TMP_REG);
                 }
-                emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
             }
         } else {
             if (inst->flags & VTX_INST_FLAG_HAS_IMM) {
@@ -2916,7 +2941,7 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
                 if (r1 == 0xFF) {
                     uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
                     if (slot1 != VTX_NO_SPILL) {
-                        emit_spill_load(e, slot1, 1);
+                        emit_spill_load(e, slot1, 1, ra);
                     }
                 } else if (r1 != 1) {
                     vtx_x86_emit_mov_rr(e, 1, r1);
@@ -2933,9 +2958,9 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
                 /* Destination is spilled */
                 uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
                 if (slot0 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
                     vtx_x86_emit_and_ri(e, VTX_SPILL_TMP_REG, (int32_t)inst->imm);
-                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
                 }
             } else {
                 vtx_x86_emit_and_ri(e, r0, (int32_t)inst->imm);
@@ -2945,24 +2970,24 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
             if (r0 == 0xFF && r1 != 0xFF) {
                 uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
                 if (slot0 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
                     vtx_x86_emit_and_rr(e, VTX_SPILL_TMP_REG, r1);
-                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
                 }
             } else if (r0 != 0xFF && r1 == 0xFF) {
                 uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
                 if (slot1 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot1, VTX_SPILL_TMP_REG);
+                    emit_spill_load(e, slot1, VTX_SPILL_TMP_REG, ra);
                     vtx_x86_emit_and_rr(e, r0, VTX_SPILL_TMP_REG);
                 }
             } else if (r0 == 0xFF && r1 == 0xFF) {
                 uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
                 uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
                 if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
-                    emit_spill_load(e, slot1, 13);
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
+                    emit_spill_load(e, slot1, 13, ra);
                     vtx_x86_emit_and_rr(e, VTX_SPILL_TMP_REG, 13);
-                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
                 }
             } else {
                 vtx_x86_emit_and_rr(e, r0, r1);
@@ -2977,9 +3002,9 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
                 /* Destination is spilled */
                 uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
                 if (slot0 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
                     vtx_x86_emit_or_ri(e, VTX_SPILL_TMP_REG, (int32_t)inst->imm);
-                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
                 }
             } else {
                 vtx_x86_emit_or_ri(e, r0, (int32_t)inst->imm);
@@ -2989,24 +3014,24 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
             if (r0 == 0xFF && r1 != 0xFF) {
                 uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
                 if (slot0 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
                     vtx_x86_emit_or_rr(e, VTX_SPILL_TMP_REG, r1);
-                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
                 }
             } else if (r0 != 0xFF && r1 == 0xFF) {
                 uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
                 if (slot1 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot1, VTX_SPILL_TMP_REG);
+                    emit_spill_load(e, slot1, VTX_SPILL_TMP_REG, ra);
                     vtx_x86_emit_or_rr(e, r0, VTX_SPILL_TMP_REG);
                 }
             } else if (r0 == 0xFF && r1 == 0xFF) {
                 uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
                 uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
                 if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
-                    emit_spill_load(e, slot1, 13);
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
+                    emit_spill_load(e, slot1, 13, ra);
                     vtx_x86_emit_or_rr(e, VTX_SPILL_TMP_REG, 13);
-                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
                 }
             } else {
                 vtx_x86_emit_or_rr(e, r0, r1);
@@ -3021,9 +3046,9 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
                 /* Destination is spilled */
                 uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
                 if (slot0 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
                     vtx_x86_emit_xor_ri(e, VTX_SPILL_TMP_REG, (int32_t)inst->imm);
-                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
                 }
             } else {
                 vtx_x86_emit_xor_ri(e, r0, (int32_t)inst->imm);
@@ -3033,24 +3058,24 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
             if (r0 == 0xFF && r1 != 0xFF) {
                 uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
                 if (slot0 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
                     vtx_x86_emit_xor_rr(e, VTX_SPILL_TMP_REG, r1);
-                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
                 }
             } else if (r0 != 0xFF && r1 == 0xFF) {
                 uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
                 if (slot1 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot1, VTX_SPILL_TMP_REG);
+                    emit_spill_load(e, slot1, VTX_SPILL_TMP_REG, ra);
                     vtx_x86_emit_xor_rr(e, r0, VTX_SPILL_TMP_REG);
                 }
             } else if (r0 == 0xFF && r1 == 0xFF) {
                 uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
                 uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
                 if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
-                    emit_spill_load(e, slot1, 13);
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
+                    emit_spill_load(e, slot1, 13, ra);
                     vtx_x86_emit_xor_rr(e, VTX_SPILL_TMP_REG, 13);
-                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
                 }
             } else {
                 vtx_x86_emit_xor_rr(e, r0, r1);
@@ -3065,7 +3090,7 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
                 /* Destination is spilled */
                 uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
                 if (slot0 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
                     vtx_x86_emit_cmp_ri(e, VTX_SPILL_TMP_REG, (int32_t)inst->imm);
                 }
             } else {
@@ -3076,21 +3101,21 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
             if (r0 == 0xFF && r1 != 0xFF) {
                 uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
                 if (slot0 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
                     vtx_x86_emit_cmp_rr(e, VTX_SPILL_TMP_REG, r1);
                 }
             } else if (r0 != 0xFF && r1 == 0xFF) {
                 uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
                 if (slot1 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot1, VTX_SPILL_TMP_REG);
+                    emit_spill_load(e, slot1, VTX_SPILL_TMP_REG, ra);
                     vtx_x86_emit_cmp_rr(e, r0, VTX_SPILL_TMP_REG);
                 }
             } else if (r0 == 0xFF && r1 == 0xFF) {
                 uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
                 uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
                 if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
-                    emit_spill_load(e, slot1, 13);
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
+                    emit_spill_load(e, slot1, 13, ra);
                     vtx_x86_emit_cmp_rr(e, VTX_SPILL_TMP_REG, 13);
                 }
             } else {
@@ -3106,7 +3131,7 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
                 /* Destination is spilled */
                 uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
                 if (slot0 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
                     vtx_x86_emit_test_ri(e, VTX_SPILL_TMP_REG, (int32_t)inst->imm);
                 }
             } else {
@@ -3117,21 +3142,21 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
             if (r0 == 0xFF && r1 != 0xFF) {
                 uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
                 if (slot0 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
                     vtx_x86_emit_test_rr(e, VTX_SPILL_TMP_REG, r1);
                 }
             } else if (r0 != 0xFF && r1 == 0xFF) {
                 uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
                 if (slot1 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot1, VTX_SPILL_TMP_REG);
+                    emit_spill_load(e, slot1, VTX_SPILL_TMP_REG, ra);
                     vtx_x86_emit_test_rr(e, r0, VTX_SPILL_TMP_REG);
                 }
             } else if (r0 == 0xFF && r1 == 0xFF) {
                 uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
                 uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
                 if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
-                    emit_spill_load(e, slot1, 13);
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
+                    emit_spill_load(e, slot1, 13, ra);
                     vtx_x86_emit_test_rr(e, VTX_SPILL_TMP_REG, 13);
                 }
             } else {
@@ -3188,7 +3213,7 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
                     } else {
                         vtx_x86_emit_mov_imm64(e, VTX_SPILL_TMP_REG, (uint64_t)imm);
                     }
-                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
                 }
             } else {
                 if (imm >= INT32_MIN && imm <= INT32_MAX) {
@@ -3204,21 +3229,21 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
                 /* Destination spilled, source in register */
                 uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
                 if (slot0 != VTX_NO_SPILL) {
-                    emit_spill_store(e, slot0, r1);
+                    emit_spill_store(e, slot0, r1, ra);
                 }
             } else if (r0 != 0xFF && r1 == 0xFF) {
                 /* Source spilled, destination in register */
                 uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
                 if (slot1 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot1, r0);
+                    emit_spill_load(e, slot1, r0, ra);
                 }
             } else if (r0 == 0xFF && r1 == 0xFF) {
                 /* Both spilled */
                 uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
                 uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
                 if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot1, VTX_SPILL_TMP_REG);
-                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_load(e, slot1, VTX_SPILL_TMP_REG, ra);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
                 }
             } else if (r0 != r1) {
                 vtx_x86_emit_mov_rr(e, r0, r1);
@@ -3231,9 +3256,9 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
         if (r0 == 0xFF) {
             uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
             if (slot0 != VTX_NO_SPILL) {
-                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
                 vtx_x86_emit_neg_r(e, VTX_SPILL_TMP_REG);
-                emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
             }
         } else {
             vtx_x86_emit_neg_r(e, r0);
@@ -3245,9 +3270,9 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
         if (r0 == 0xFF) {
             uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
             if (slot0 != VTX_NO_SPILL) {
-                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
                 vtx_x86_emit_not_r(e, VTX_SPILL_TMP_REG);
-                emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
             }
         } else {
             vtx_x86_emit_not_r(e, r0);
@@ -3259,9 +3284,9 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
         if (r0 == 0xFF) {
             uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
             if (slot0 != VTX_NO_SPILL) {
-                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
                 vtx_x86_emit_inc_r(e, VTX_SPILL_TMP_REG);
-                emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
             }
         } else {
             vtx_x86_emit_inc_r(e, r0);
@@ -3273,9 +3298,9 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
         if (r0 == 0xFF) {
             uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
             if (slot0 != VTX_NO_SPILL) {
-                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
                 vtx_x86_emit_dec_r(e, VTX_SPILL_TMP_REG);
-                emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
             }
         } else {
             vtx_x86_emit_dec_r(e, r0);
@@ -3294,7 +3319,7 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
                 uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
                 if (slot0 != VTX_NO_SPILL) {
                     vtx_x86_emit_setcc(e, vtx_cond_to_x86(inst->cond), VTX_SPILL_TMP_REG);
-                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
                 }
             } else {
                 vtx_x86_emit_setcc(e, vtx_cond_to_x86(inst->cond), r0);
@@ -3334,13 +3359,13 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
                 emit_byte(e, 0x0F);
                 emit_byte(e, 0xB6);
                 emit_modrm(e, 3, 12 & 7, r1 & 7);
-                emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
             }
         } else if (r0 != 0xFF && r1 == 0xFF) {
             /* Source spilled — load from spill, MOVZX, keep in r0 */
             uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
             if (slot1 != VTX_NO_SPILL) {
-                emit_spill_load(e, slot1, VTX_SPILL_TMP_REG);
+                emit_spill_load(e, slot1, VTX_SPILL_TMP_REG, ra);
                 /* MOVZX r0, R12 */
                 emit_rex(e, 1, reg_hi(r0), 0, reg_hi(12));
                 emit_byte(e, 0x0F);
@@ -3358,15 +3383,15 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
                 /* Destination spilled, source in register */
                 uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
                 if (slot0 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
                     vtx_x86_emit_cmovcc(e, vtx_cond_to_x86(inst->cond), VTX_SPILL_TMP_REG, r1);
-                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
                 }
             } else if (r0 != 0xFF && r1 == 0xFF) {
                 /* Source spilled */
                 uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
                 if (slot1 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot1, VTX_SPILL_TMP_REG);
+                    emit_spill_load(e, slot1, VTX_SPILL_TMP_REG, ra);
                     vtx_x86_emit_cmovcc(e, vtx_cond_to_x86(inst->cond), r0, VTX_SPILL_TMP_REG);
                 }
             } else if (r0 == 0xFF && r1 == 0xFF) {
@@ -3374,10 +3399,10 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
                 uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
                 uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
                 if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
-                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
-                    emit_spill_load(e, slot1, 13);
+                    emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
+                    emit_spill_load(e, slot1, 13, ra);
                     vtx_x86_emit_cmovcc(e, vtx_cond_to_x86(inst->cond), VTX_SPILL_TMP_REG, 13);
-                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
                 }
             } else {
                 vtx_x86_emit_cmovcc(e, vtx_cond_to_x86(inst->cond), r0, r1);
@@ -3407,7 +3432,7 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
                     } else {
                         vtx_x86_emit_lea_rmem(e, VTX_SPILL_TMP_REG, base, disp);
                     }
-                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                    emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
                 }
             } else {
                 if (index != 0xFF) {
@@ -3425,7 +3450,7 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
         if (r0 == 0xFF) {
             uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
             if (slot0 != VTX_NO_SPILL) {
-                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
                 vtx_x86_emit_push_r(e, VTX_SPILL_TMP_REG);
             }
         } else {
@@ -3439,7 +3464,7 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
             uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
             if (slot0 != VTX_NO_SPILL) {
                 vtx_x86_emit_pop_r(e, VTX_SPILL_TMP_REG);
-                emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
+                emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
             }
         } else {
             vtx_x86_emit_pop_r(e, r0);
@@ -3480,14 +3505,14 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
             /* Destination spilled, source in register */
             uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
             if (slot0 != VTX_NO_SPILL) {
-                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
+                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
                 vtx_x86_emit_ucomisd(e, VTX_SPILL_TMP_REG, r1);
             }
         } else if (r0 != 0xFF && r1 == 0xFF) {
             /* Source spilled */
             uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
             if (slot1 != VTX_NO_SPILL) {
-                emit_spill_load(e, slot1, VTX_SPILL_TMP_REG);
+                emit_spill_load(e, slot1, VTX_SPILL_TMP_REG, ra);
                 vtx_x86_emit_ucomisd(e, r0, VTX_SPILL_TMP_REG);
             }
         } else if (r0 == 0xFF && r1 == 0xFF) {
@@ -3495,8 +3520,8 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
             uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
             uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
             if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
-                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG);
-                emit_spill_load(e, slot1, 13);
+                emit_spill_load(e, slot0, VTX_SPILL_TMP_REG, ra);
+                emit_spill_load(e, slot1, 13, ra);
                 vtx_x86_emit_ucomisd(e, VTX_SPILL_TMP_REG, 13);
             }
         } else {
@@ -3512,15 +3537,15 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
              * Load spilled dst into XMM temp, operate, store back. */
             uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
             if (slot0 != VTX_NO_SPILL) {
-                emit_spill_load_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+                emit_spill_load_xmm(e, slot0, VTX_SPILL_XMM_TMP, ra);
                 vtx_x86_emit_addsd(e, VTX_SPILL_XMM_TMP, r1);
-                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP, ra);
             }
         } else if (r0 != 0xFF && r1 == 0xFF) {
             /* Source XMM spilled */
             uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
             if (slot1 != VTX_NO_SPILL) {
-                emit_spill_load_xmm(e, slot1, VTX_SPILL_XMM_TMP);
+                emit_spill_load_xmm(e, slot1, VTX_SPILL_XMM_TMP, ra);
                 vtx_x86_emit_addsd(e, r0, VTX_SPILL_XMM_TMP);
             }
         } else if (r0 == 0xFF && r1 == 0xFF) {
@@ -3528,11 +3553,11 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
             uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
             uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
             if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
-                emit_spill_load_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+                emit_spill_load_xmm(e, slot0, VTX_SPILL_XMM_TMP, ra);
                 /* Use XMM15 as second temp (XMM15 = 15) */
-                emit_spill_load_xmm(e, slot1, 15);
+                emit_spill_load_xmm(e, slot1, 15, ra);
                 vtx_x86_emit_addsd(e, VTX_SPILL_XMM_TMP, 15);
-                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP, ra);
             }
         } else {
             vtx_x86_emit_addsd(e, r0, r1);
@@ -3545,24 +3570,24 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
         if (r0 == 0xFF && r1 != 0xFF) {
             uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
             if (slot0 != VTX_NO_SPILL) {
-                emit_spill_load_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+                emit_spill_load_xmm(e, slot0, VTX_SPILL_XMM_TMP, ra);
                 vtx_x86_emit_subsd(e, VTX_SPILL_XMM_TMP, r1);
-                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP, ra);
             }
         } else if (r0 != 0xFF && r1 == 0xFF) {
             uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
             if (slot1 != VTX_NO_SPILL) {
-                emit_spill_load_xmm(e, slot1, VTX_SPILL_XMM_TMP);
+                emit_spill_load_xmm(e, slot1, VTX_SPILL_XMM_TMP, ra);
                 vtx_x86_emit_subsd(e, r0, VTX_SPILL_XMM_TMP);
             }
         } else if (r0 == 0xFF && r1 == 0xFF) {
             uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
             uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
             if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
-                emit_spill_load_xmm(e, slot0, VTX_SPILL_XMM_TMP);
-                emit_spill_load_xmm(e, slot1, 15);
+                emit_spill_load_xmm(e, slot0, VTX_SPILL_XMM_TMP, ra);
+                emit_spill_load_xmm(e, slot1, 15, ra);
                 vtx_x86_emit_subsd(e, VTX_SPILL_XMM_TMP, 15);
-                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP, ra);
             }
         } else {
             vtx_x86_emit_subsd(e, r0, r1);
@@ -3575,24 +3600,24 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
         if (r0 == 0xFF && r1 != 0xFF) {
             uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
             if (slot0 != VTX_NO_SPILL) {
-                emit_spill_load_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+                emit_spill_load_xmm(e, slot0, VTX_SPILL_XMM_TMP, ra);
                 vtx_x86_emit_mulsd(e, VTX_SPILL_XMM_TMP, r1);
-                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP, ra);
             }
         } else if (r0 != 0xFF && r1 == 0xFF) {
             uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
             if (slot1 != VTX_NO_SPILL) {
-                emit_spill_load_xmm(e, slot1, VTX_SPILL_XMM_TMP);
+                emit_spill_load_xmm(e, slot1, VTX_SPILL_XMM_TMP, ra);
                 vtx_x86_emit_mulsd(e, r0, VTX_SPILL_XMM_TMP);
             }
         } else if (r0 == 0xFF && r1 == 0xFF) {
             uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
             uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
             if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
-                emit_spill_load_xmm(e, slot0, VTX_SPILL_XMM_TMP);
-                emit_spill_load_xmm(e, slot1, 15);
+                emit_spill_load_xmm(e, slot0, VTX_SPILL_XMM_TMP, ra);
+                emit_spill_load_xmm(e, slot1, 15, ra);
                 vtx_x86_emit_mulsd(e, VTX_SPILL_XMM_TMP, 15);
-                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP, ra);
             }
         } else {
             vtx_x86_emit_mulsd(e, r0, r1);
@@ -3605,24 +3630,24 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
         if (r0 == 0xFF && r1 != 0xFF) {
             uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
             if (slot0 != VTX_NO_SPILL) {
-                emit_spill_load_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+                emit_spill_load_xmm(e, slot0, VTX_SPILL_XMM_TMP, ra);
                 vtx_x86_emit_divsd(e, VTX_SPILL_XMM_TMP, r1);
-                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP, ra);
             }
         } else if (r0 != 0xFF && r1 == 0xFF) {
             uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
             if (slot1 != VTX_NO_SPILL) {
-                emit_spill_load_xmm(e, slot1, VTX_SPILL_XMM_TMP);
+                emit_spill_load_xmm(e, slot1, VTX_SPILL_XMM_TMP, ra);
                 vtx_x86_emit_divsd(e, r0, VTX_SPILL_XMM_TMP);
             }
         } else if (r0 == 0xFF && r1 == 0xFF) {
             uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
             uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
             if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
-                emit_spill_load_xmm(e, slot0, VTX_SPILL_XMM_TMP);
-                emit_spill_load_xmm(e, slot1, 15);
+                emit_spill_load_xmm(e, slot0, VTX_SPILL_XMM_TMP, ra);
+                emit_spill_load_xmm(e, slot1, 15, ra);
                 vtx_x86_emit_divsd(e, VTX_SPILL_XMM_TMP, 15);
-                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP, ra);
             }
         } else {
             vtx_x86_emit_divsd(e, r0, r1);
@@ -3635,24 +3660,24 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
         if (r0 == 0xFF && r1 != 0xFF) {
             uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
             if (slot0 != VTX_NO_SPILL) {
-                emit_spill_load_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+                emit_spill_load_xmm(e, slot0, VTX_SPILL_XMM_TMP, ra);
                 vtx_x86_emit_xorps(e, VTX_SPILL_XMM_TMP, r1);
-                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP, ra);
             }
         } else if (r0 != 0xFF && r1 == 0xFF) {
             uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
             if (slot1 != VTX_NO_SPILL) {
-                emit_spill_load_xmm(e, slot1, VTX_SPILL_XMM_TMP);
+                emit_spill_load_xmm(e, slot1, VTX_SPILL_XMM_TMP, ra);
                 vtx_x86_emit_xorps(e, r0, VTX_SPILL_XMM_TMP);
             }
         } else if (r0 == 0xFF && r1 == 0xFF) {
             uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
             uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
             if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
-                emit_spill_load_xmm(e, slot0, VTX_SPILL_XMM_TMP);
-                emit_spill_load_xmm(e, slot1, 15);
+                emit_spill_load_xmm(e, slot0, VTX_SPILL_XMM_TMP, ra);
+                emit_spill_load_xmm(e, slot1, 15, ra);
                 vtx_x86_emit_xorps(e, VTX_SPILL_XMM_TMP, 15);
-                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP, ra);
             }
         } else {
             vtx_x86_emit_xorps(e, r0, r1);
@@ -3666,21 +3691,21 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
             /* Destination XMM spilled, source in register */
             uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
             if (slot0 != VTX_NO_SPILL) {
-                emit_spill_store_xmm(e, slot0, r1);
+                emit_spill_store_xmm(e, slot0, r1, ra);
             }
         } else if (r0 != 0xFF && r1 == 0xFF) {
             /* Source XMM spilled, destination in register */
             uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
             if (slot1 != VTX_NO_SPILL) {
-                emit_spill_load_xmm(e, slot1, r0);
+                emit_spill_load_xmm(e, slot1, r0, ra);
             }
         } else if (r0 == 0xFF && r1 == 0xFF) {
             /* Both XMM spilled */
             uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
             uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
             if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
-                emit_spill_load_xmm(e, slot1, VTX_SPILL_XMM_TMP);
-                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+                emit_spill_load_xmm(e, slot1, VTX_SPILL_XMM_TMP, ra);
+                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP, ra);
             }
         } else if (r0 != r1) {
             vtx_x86_emit_movsd(e, r0, r1);
@@ -3714,19 +3739,19 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
         if (r0 == 0xFF && r1 != 0xFF) {
             uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
             if (slot0 != VTX_NO_SPILL) {
-                emit_spill_store_xmm(e, slot0, r1);
+                emit_spill_store_xmm(e, slot0, r1, ra);
             }
         } else if (r0 != 0xFF && r1 == 0xFF) {
             uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
             if (slot1 != VTX_NO_SPILL) {
-                emit_spill_load_xmm(e, slot1, r0);
+                emit_spill_load_xmm(e, slot1, r0, ra);
             }
         } else if (r0 == 0xFF && r1 == 0xFF) {
             uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
             uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
             if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
-                emit_spill_load_xmm(e, slot1, VTX_SPILL_XMM_TMP);
-                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP);
+                emit_spill_load_xmm(e, slot1, VTX_SPILL_XMM_TMP, ra);
+                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP, ra);
             }
         } else if (r0 != r1) {
             /* movaps xmm, xmm: 66 0F 28 ModR/M(mod=11) */

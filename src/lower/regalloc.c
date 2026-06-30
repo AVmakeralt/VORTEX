@@ -1008,8 +1008,19 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
         }
     }
 
-    /* Set callee-saved mask */
-    result->callee_saved_mask = callee_saved_used;
+    /* Set callee-saved mask.
+     *
+     * BUGFIX (T2 JIT crashes caller with -O3): R12 (VTX_SPILL_TMP_REG) and
+     * R13 (memory operand spill scratch) are used by the emitter's spill
+     * load/store code as scratch registers. They are NOT assigned to any
+     * vreg (they're in VTX_REG_RESERVED_MASK), so callee_saved_used never
+     * includes them. But the JIT code WILL clobber them if any spill
+     * occurs. The prologue MUST save them so the caller's values are
+     * preserved.
+     *
+     * Without this fix, C code compiled with -O3 that keeps variables in
+     * R12/R13 across the JIT call gets those variables corrupted. */
+    result->callee_saved_mask = callee_saved_used | (1u << 12) | (1u << 13);
 
     /* BUGFIX: Fallback assignment for unassigned vregs.
      *
