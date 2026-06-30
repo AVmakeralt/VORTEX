@@ -66,8 +66,18 @@ static const uint8_t vtx_callee_saved_regs[VTX_CALLEE_SAVED_COUNT] = {
     15, /* R15 */
 };
 
-/* Bitmask for reserved registers */
-#define VTX_REG_RESERVED_MASK ((1u << 4) | (1u << 5) | (1u << 10) | (1u << 11))  /* RSP=4, RBP=5, R10=10 (SMI header), R11=11 (SMI mask) */
+/* Bitmask for reserved registers.
+ *
+ * BUGFIX: R12 and R13 must be reserved because the emitter uses them as
+ * scratch registers for spill reloads (VTX_SPILL_TMP_REG = R12) and
+ * spilled memory operand reloads (R13). If the regalloc assigns R12 or
+ * R13 to a vreg, spill reloads clobber that vreg's value.
+ *
+ * This was the root cause of all 9 timeouts: the If isel's CMP compared
+ * cond_vreg (in R12) against smi_zero_vreg (spilled, reloaded into R12),
+ * producing CMP(R12, R12) which always sets ZF=1, making if_false
+ * always jump and skipping the loop body → infinite loop. */
+#define VTX_REG_RESERVED_MASK ((1u << 4) | (1u << 5) | (1u << 10) | (1u << 11) | (1u << 12) | (1u << 13))  /* RSP=4, RBP=5, R10=10, R11=11, R12=12 (spill tmp), R13=13 (mem spill tmp) */
 
 /* Bitmask for caller-saved registers */
 #define VTX_CALLER_SAVED_MASK \
