@@ -1294,38 +1294,51 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (val_vreg == VTX_VREG_INVALID || cnt_vreg == VTX_VREG_INVALID) return -1;
 
-        /* BUGFIX (audit #3): Shl must operate on the RAW integer, not the
-         * NaN-boxed SMI. Shifting the NaN-boxed value corrupts both the
-         * header bits and the data bits. Correct sequence:
-         *   untag val → SHL by count → retag result. */
+        /* Shl must operate on the RAW integer, not the NaN-boxed SMI.
+         * Sequence: untag val → SHL by count → retag result.
+         *
+         * For variable shifts, x86 SHL r64, CL requires the count in CL.
+         * We use a dedicated shift_dst vreg (separate from dst) so the
+         * regalloc can freely assign shift_dst and cnt_untagged to any
+         * registers. The emitter moves cnt_untagged to RCX before the
+         * SHL. Since shift_dst is the SHL's destination (not dst), and
+         * cnt_untagged is a use, their live intervals overlap at the SHL
+         * and the regalloc gives them different registers. */
         {
             uint32_t val_untagged = vtx_isel_alloc_vreg(stream, arena);
             emit_smi_untag(stream, block, val_untagged, val_vreg, node_id, arena);
 
-            /* Move untagged value to dst, then shift. */
-            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, val_untagged, node_id), arena);
-
             const vtx_node_t *cnt_node = vtx_node_get_const(&graph->node_table, node->inputs[1]);
             if (cnt_node && cnt_node->opcode == VTX_OP_Constant &&
                 cnt_node->constval.kind == VTX_TYPE_Int) {
+                /* Constant shift: SHL dst, imm8 — no RCX involvement. */
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, val_untagged, node_id), arena);
                 vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, dst,
                                    cnt_node->constval.as.int_val, node_id), arena);
             } else {
-                uint32_t rcx_vreg = vtx_isel_alloc_vreg_fixed(stream, arena, 1);
-                /* The count is also an SMI — untag it to get the raw shift amount. */
+                /* Variable shift: use shift_dst so dst is NOT involved in
+                 * the SHL (avoids dst==RCX conflict with CL count). */
                 uint32_t cnt_untagged = vtx_isel_alloc_vreg(stream, arena);
                 emit_smi_untag(stream, block, cnt_untagged, cnt_vreg, node_id, arena);
-                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, rcx_vreg, cnt_untagged, node_id), arena);
+
+                uint32_t shift_dst = vtx_isel_alloc_vreg(stream, arena);
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, shift_dst, val_untagged, node_id), arena);
+
                 vtx_inst_t shl_inst;
                 memset(&shl_inst, 0, sizeof(shl_inst));
                 shl_inst.opcode = VTX_X86_SHL;
                 shl_inst.opnd_kinds[0] = VTX_OPND_VREG;
-                shl_inst.operands[0] = dst;
-                shl_inst.opnd_kinds[1] = VTX_OPND_PREG;
-                shl_inst.operands[1] = 1;
+                shl_inst.operands[0] = shift_dst;
+                shl_inst.opnd_kinds[1] = VTX_OPND_VREG;
+                shl_inst.operands[1] = cnt_untagged;
                 shl_inst.source_node = node_id;
                 shl_inst.flags = VTX_INST_FLAG_CLOBBER_RCX;
                 vtx_isel_emit_inst(block, shl_inst, arena);
+
+                /* Retag directly into dst */
+                emit_smi_retag(stream, block, shift_dst, node_id, arena);
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, shift_dst, node_id), arena);
+                break;
             }
 
             emit_smi_retag(stream, block, dst, node_id, arena);
@@ -1342,32 +1355,38 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (val_vreg == VTX_VREG_INVALID || cnt_vreg == VTX_VREG_INVALID) return -1;
 
-        /* BUGFIX (audit #3): Same as Shl — must untag, shift raw, retag. */
+        /* Same as Shl — must untag, shift raw, retag. */
         {
             uint32_t val_untagged = vtx_isel_alloc_vreg(stream, arena);
             emit_smi_untag(stream, block, val_untagged, val_vreg, node_id, arena);
-            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, val_untagged, node_id), arena);
 
             const vtx_node_t *cnt_node = vtx_node_get_const(&graph->node_table, node->inputs[1]);
             if (cnt_node && cnt_node->opcode == VTX_OP_Constant &&
                 cnt_node->constval.kind == VTX_TYPE_Int) {
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, val_untagged, node_id), arena);
                 vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHR, dst,
                                    cnt_node->constval.as.int_val, node_id), arena);
             } else {
-                uint32_t rcx_vreg = vtx_isel_alloc_vreg_fixed(stream, arena, 1);
                 uint32_t cnt_untagged = vtx_isel_alloc_vreg(stream, arena);
                 emit_smi_untag(stream, block, cnt_untagged, cnt_vreg, node_id, arena);
-                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, rcx_vreg, cnt_untagged, node_id), arena);
+
+                uint32_t shift_dst = vtx_isel_alloc_vreg(stream, arena);
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, shift_dst, val_untagged, node_id), arena);
+
                 vtx_inst_t shr_inst;
                 memset(&shr_inst, 0, sizeof(shr_inst));
                 shr_inst.opcode = VTX_X86_SHR;
                 shr_inst.opnd_kinds[0] = VTX_OPND_VREG;
-                shr_inst.operands[0] = dst;
-                shr_inst.opnd_kinds[1] = VTX_OPND_PREG;
-                shr_inst.operands[1] = 1;
+                shr_inst.operands[0] = shift_dst;
+                shr_inst.opnd_kinds[1] = VTX_OPND_VREG;
+                shr_inst.operands[1] = cnt_untagged;
                 shr_inst.source_node = node_id;
                 shr_inst.flags = VTX_INST_FLAG_CLOBBER_RCX;
                 vtx_isel_emit_inst(block, shr_inst, arena);
+
+                emit_smi_retag(stream, block, shift_dst, node_id, arena);
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, shift_dst, node_id), arena);
+                break;
             }
 
             emit_smi_retag(stream, block, dst, node_id, arena);

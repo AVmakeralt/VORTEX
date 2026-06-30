@@ -2823,6 +2823,11 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
                 if (inst->flags & VTX_INST_FLAG_HAS_IMM) {
                     vtx_x86_emit_shl_ri(e, VTX_SPILL_TMP_REG, (uint8_t)(inst->imm & 0x3F));
                 } else {
+                    /* Variable shift: move count to RCX, then SHL tmp, CL */
+                    r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+                    if (r1 != 0xFF && r1 != 1) {
+                        vtx_x86_emit_mov_rr(e, 1, r1); /* MOV RCX, count_reg */
+                    }
                     vtx_x86_emit_shl_cl(e, VTX_SPILL_TMP_REG);
                 }
                 emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
@@ -2831,6 +2836,19 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
             if (inst->flags & VTX_INST_FLAG_HAS_IMM) {
                 vtx_x86_emit_shl_ri(e, r0, (uint8_t)(inst->imm & 0x3F));
             } else {
+                /* Variable shift: operand[1] is the count vreg (resolved to PREG).
+                 * x86 SHL r64, CL requires the count in CL. Move it to RCX first. */
+                r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+                if (r1 == 0xFF) {
+                    /* Count is spilled — load into RCX */
+                    uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+                    if (slot1 != VTX_NO_SPILL) {
+                        emit_spill_load(e, slot1, 1); /* load into RCX */
+                    }
+                } else if (r1 != 1) {
+                    /* Count is in a register other than RCX — move it */
+                    vtx_x86_emit_mov_rr(e, 1, r1); /* MOV RCX, count_reg */
+                }
                 vtx_x86_emit_shl_cl(e, r0);
             }
         }
@@ -2846,6 +2864,10 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
                 if (inst->flags & VTX_INST_FLAG_HAS_IMM) {
                     vtx_x86_emit_shr_ri(e, VTX_SPILL_TMP_REG, (uint8_t)(inst->imm & 0x3F));
                 } else {
+                    r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+                    if (r1 != 0xFF && r1 != 1) {
+                        vtx_x86_emit_mov_rr(e, 1, r1);
+                    }
                     vtx_x86_emit_shr_cl(e, VTX_SPILL_TMP_REG);
                 }
                 emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
@@ -2854,6 +2876,15 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
             if (inst->flags & VTX_INST_FLAG_HAS_IMM) {
                 vtx_x86_emit_shr_ri(e, r0, (uint8_t)(inst->imm & 0x3F));
             } else {
+                r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+                if (r1 == 0xFF) {
+                    uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+                    if (slot1 != VTX_NO_SPILL) {
+                        emit_spill_load(e, slot1, 1);
+                    }
+                } else if (r1 != 1) {
+                    vtx_x86_emit_mov_rr(e, 1, r1);
+                }
                 vtx_x86_emit_shr_cl(e, r0);
             }
         }
@@ -2869,6 +2900,10 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
                 if (inst->flags & VTX_INST_FLAG_HAS_IMM) {
                     vtx_x86_emit_sar_ri(e, VTX_SPILL_TMP_REG, (uint8_t)(inst->imm & 0x3F));
                 } else {
+                    r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+                    if (r1 != 0xFF && r1 != 1) {
+                        vtx_x86_emit_mov_rr(e, 1, r1);
+                    }
                     vtx_x86_emit_sar_cl(e, VTX_SPILL_TMP_REG);
                 }
                 emit_spill_store(e, slot0, VTX_SPILL_TMP_REG);
@@ -2877,6 +2912,15 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
             if (inst->flags & VTX_INST_FLAG_HAS_IMM) {
                 vtx_x86_emit_sar_ri(e, r0, (uint8_t)(inst->imm & 0x3F));
             } else {
+                r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+                if (r1 == 0xFF) {
+                    uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+                    if (slot1 != VTX_NO_SPILL) {
+                        emit_spill_load(e, slot1, 1);
+                    }
+                } else if (r1 != 1) {
+                    vtx_x86_emit_mov_rr(e, 1, r1);
+                }
                 vtx_x86_emit_sar_cl(e, r0);
             }
         }

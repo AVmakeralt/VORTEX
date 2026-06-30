@@ -2856,15 +2856,26 @@ int vtx_graph_build(vtx_graph_t *graph,
                                     }
                                 }
 
-                                /* Only add if not already present (avoid duplicates) */
-                                bool already_has = false;
-                                for (uint32_t inp = 0; inp < phi_n->input_count; inp++) {
-                                    if (phi_n->inputs[inp] == latch_val) {
-                                        already_has = true;
-                                        break;
-                                    }
-                                }
-                                if (!already_has && latch_val != VTX_NODEID_INVALID) {
+                                /* Add the back-edge value as a Phi input.
+                                 *
+                                 * BUGFIX (stress_integration Phi input count):
+                                 * The old code skipped adding the back-edge if
+                                 * the value was "already present" in the Phi.
+                                 * But when the forward and back-edge values
+                                 * happen to be the same node (e.g., both
+                                 * reference the same Constant), this skip
+                                 * leaves the Phi with too few inputs,
+                                 * breaking the SSA invariant (Phi input count
+                                 * must equal Region input count + 1).
+                                 *
+                                 * The verifier then fails with:
+                                 *   "Phi N6 has 2 inputs, expected 3"
+                                 *
+                                 * Fix: ALWAYS add the back-edge input. The
+                                 * SSA invariant requires one data input per
+                                 * Region predecessor, regardless of whether
+                                 * the values coincide. */
+                                if (latch_val != VTX_NODEID_INVALID) {
                                     vtx_node_add_input(nt, (vtx_nodeid_t)ni, latch_val);
                                 }
                             }
