@@ -3156,10 +3156,59 @@ int vtx_graph_build(vtx_graph_t *graph,
             if (already_has_proj) has_input_from_if_block = false;
 
             if (has_input_from_if_block) {
-                /* Add the fall-through Proj as a control input.
-                 * This makes the node control-dependent on the Proj,
-                 * forcing the scheduler to place it in the fall-through block. */
-                vtx_node_add_input(&graph->node_table, ni, fall_proj);
+                /* BUGFIX: Determine which successor block the SIDE_EFFECT node
+                 * belongs to by checking which block has it in its locals array.
+                 * This is the block where store_local uses the node's result.
+                 *
+                 * If the node is in the fall-through block, add the fall-through Proj.
+                 * If the node is in the jump target block, add the jump target Proj.
+                 *
+                 * Without this, the Div in collatz gets the fall-through Proj (odd
+                 * branch) instead of the jump target Proj (even branch), causing it
+                 * to execute in the wrong branch. */
+
+                /* Find the OTHER Proj (the jump target, not the fall-through) */
+                vtx_nodeid_t jump_proj = VTX_NODEID_INVALID;
+                for (uint32_t pn = 0; pn < graph->node_table.count; pn++) {
+                    vtx_node_t *pn_node = &graph->node_table.nodes[pn];
+                    if (pn_node->dead || pn_node->opcode != VTX_OP_Proj) continue;
+                    if (pn_node->input_count < 1 || pn_node->inputs[0] != block->control_node) continue;
+                    if (pn == fall_proj) continue; /* skip the fall-through Proj */
+                    jump_proj = pn;
+                    break;
+                }
+
+                /* Check which successor block has this node in its locals */
+                vtx_nodeid_t selected_proj = fall_proj; /* default: fall-through */
+                if (jump_proj != VTX_NODEID_INVALID && block->succ_count >= 2) {
+                    uint32_t fall_idx = block->succ_indices[1]; /* fall-through */
+                    uint32_t jump_idx = block->succ_indices[0]; /* jump target */
+
+                    /* Check if the node is in the jump target's locals */
+                    if (jump_idx < nblocks && blocks[jump_idx].locals != NULL) {
+                        for (uint16_t li = 0; li < max_locals; li++) {
+                            if (blocks[jump_idx].locals[li] == (vtx_nodeid_t)ni) {
+                                /* Node is used in the jump target block */
+                                selected_proj = jump_proj;
+                                break;
+                            }
+                        }
+                    }
+                    /* If not in jump target, check fall-through */
+                    if (selected_proj == fall_proj &&
+                        fall_idx < nblocks && blocks[fall_idx].locals != NULL) {
+                        for (uint16_t li = 0; li < max_locals; li++) {
+                            if (blocks[fall_idx].locals[li] == (vtx_nodeid_t)ni) {
+                                /* Node is used in the fall-through block */
+                                selected_proj = fall_proj;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                /* Add the selected Proj as a control input */
+                vtx_node_add_input(&graph->node_table, ni, selected_proj);
                 node->flags |= VTX_NF_PINNED;
             }
         }

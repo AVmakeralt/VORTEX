@@ -3409,7 +3409,8 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
 
     case VTX_X86_JCC:
         if (inst->flags & VTX_INST_FLAG_HAS_COND) {
-            vtx_x86_emit_jcc_rel32(e, vtx_cond_to_x86(inst->cond), 0);
+            uint8_t x86_cond = vtx_cond_to_x86(inst->cond);
+            vtx_x86_emit_jcc_rel32(e, x86_cond, 0);
         }
         break;
 
