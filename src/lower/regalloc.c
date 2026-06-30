@@ -702,7 +702,18 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
                               ? &free_xmm_regs : &free_gpr_regs;
 
         /* Expire: remove from active any interval that ended before current starts.
-         * Only free registers in the same class. */
+         * Only free registers in the same class.
+         *
+         * BUGFIX: Use <= instead of < to prevent two intervals that share
+         * the same end/start position from being considered non-overlapping.
+         * If interval A ends at position P and interval B starts at position P,
+         * they are BOTH live at position P and must NOT share a register.
+         * This was the root cause of CMP(x, x) in the If isel: cond_vreg
+         * ended at the CMP position, and smi_zero_vreg started at the MOV
+         * position (which is the CMP position minus 1). With the loop
+         * extension making both cover the full loop, they had the same
+         * start and end, and the expire logic freed cond_vreg's register
+         * before assigning smi_zero_vreg. */
         uint32_t new_active_count = 0;
         for (uint32_t j = 0; j < active_count; j++) {
             vtx_live_interval_t *a = active[j];
