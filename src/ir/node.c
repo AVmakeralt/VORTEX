@@ -761,18 +761,23 @@ void vtx_node_table_clear_dead(vtx_node_table_t *table)
         node->input_count = write_idx;
     }
 
-    /* Now clear all dead flags.
-     * Bug #15 fix: Also clear use_count on previously-dead nodes.
-     * If clear_dead is called without a preceding DCE pass that sets
-     * use_count=0, the dead nodes could have stale use-def list
-     * entries. After clearing the dead flag, these nodes become
-     * "live" again (zombies) with potentially stale use entries,
-     * which corrupts later passes. Clearing use_count prevents this. */
+    /* Now mark dead nodes as permanently dead by setting input_count=0
+     * and use_count=0 so they're inert. Do NOT clear the dead flag —
+     * dead nodes must stay dead. Resurrecting them causes passes like
+     * strength_reduce to process them again, creating duplicate
+     * replacement nodes that break the scheduler.
+     *
+     * The original code cleared dead=false ("resurrecting" dead nodes).
+     * This was intentional for mark-bit semantics but wrong for
+     * use-after-DCE semantics. DCE marks nodes dead, and they should
+     * STAY dead. clear_dead should only clean up references to dead
+     * nodes in live nodes' input arrays, not resurrect the dead. */
     for (uint32_t i = 0; i < table->count; i++) {
         if (table->nodes[i].dead) {
             table->nodes[i].use_count = 0;
+            table->nodes[i].input_count = 0;
+            table->nodes[i].output_count = 0;
         }
-        table->nodes[i].dead = false;
     }
 }
 

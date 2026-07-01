@@ -410,7 +410,8 @@ VTX_TEST(node_table_clear_dead)
     vtx_node_get(&table, id)->dead = true;
 
     vtx_node_table_clear_dead(&table);
-    VTX_ASSERT_FALSE(vtx_node_get_const(&table, id)->dead);
+    /* clear_dead now keeps dead nodes dead (doesn't resurrect) */
+    VTX_ASSERT_TRUE(vtx_node_get_const(&table, id)->dead);
 
     vtx_node_table_destroy(&table);
 }

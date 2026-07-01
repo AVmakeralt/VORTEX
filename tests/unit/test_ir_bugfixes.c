@@ -273,11 +273,12 @@ VTX_TEST(bug15_clear_dead_cleans_use_lists)
     vtx_node_add_use_entry(add_node, 100, 1);
     VTX_ASSERT_TRUE(add_node->use_count >= 2);
 
-    /* Clear dead flags */
+    /* Clear dead — now keeps dead nodes dead (doesn't resurrect) */
     vtx_node_table_clear_dead(&table);
 
-    /* After clearing, the previously-dead node should have use_count=0 */
-    VTX_ASSERT_FALSE(vtx_node_get(&table, add)->dead);
+    /* After clearing, the previously-dead node should have use_count=0
+     * and remain dead (dead flag is NOT cleared anymore). */
+    VTX_ASSERT_TRUE(vtx_node_get(&table, add)->dead);
     VTX_ASSERT_EQUAL(vtx_node_get(&table, add)->use_count, (uint32_t)0);
 
     vtx_node_table_destroy(&table);
