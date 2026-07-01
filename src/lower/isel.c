@@ -3091,14 +3091,19 @@ vtx_inst_stream_t *vtx_isel_select(const vtx_schedule_t *schedule,
             if (select_node(stream, inst_blk, graph, node_id, arena) != 0) {
                 const vtx_node_t *dbg_node = vtx_node_get_const(&graph->node_table, node_id);
                 if (dbg_node) {
-                    fprintf(stderr, "ISEL FAIL on N%u (%s), inputs:",
-                            node_id, vtx_node_opcode_name(dbg_node->opcode));
+                    fprintf(stderr, "ISEL FAIL on N%u (%s), input_count=%u, inputs:",
+                            node_id, vtx_node_opcode_name(dbg_node->opcode),
+                            dbg_node->input_count);
                     for (uint32_t di = 0; di < dbg_node->input_count; di++) {
                         vtx_nodeid_t dinp = dbg_node->inputs[di];
-                        const vtx_node_t *dinp_n = vtx_node_get_const(&graph->node_table, dinp);
+                        const vtx_node_t *dinp_n = (dinp < graph->node_table.count) ?
+                            vtx_node_get_const(&graph->node_table, dinp) : NULL;
                         uint32_t dvreg = vtx_isel_node_vreg(stream, dinp);
-                        fprintf(stderr, " N%u(%s,vreg=%u)", dinp,
-                                dinp_n ? vtx_node_opcode_name(dinp_n->opcode) : "?", dvreg);
+                        fprintf(stderr, " N%u(%s,vreg=%u,dead=%d)",
+                                dinp,
+                                dinp_n ? vtx_node_opcode_name(dinp_n->opcode) : "INVALID",
+                                dvreg,
+                                dinp_n ? (int)dinp_n->dead : -1);
                     }
                 }
                 fprintf(stderr, "\n");

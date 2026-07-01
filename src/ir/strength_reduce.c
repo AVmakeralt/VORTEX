@@ -165,21 +165,26 @@ uint32_t vtx_strength_reduce_run(vtx_graph_t *graph)
                 vtx_node_add_input(nt, sar_node, add_node);
                 vtx_node_add_input(nt, sar_node, shift_const);
 
-                /* Redirect all uses of the original Div node to the new Sar */
+                /* Redirect all uses of the original Div node to the new Sar.
+                 * This properly updates use-def lists on both old and new. */
                 vtx_node_replace_all_uses(nt, (vtx_nodeid_t)i, sar_node);
 
-                /* Mark the original Div as dead */
-                /* Disconnect its inputs */
+                /* Mark the original Div as dead. The scheduler filters
+                 * dead nodes, so it won't be selected for isel.
+                 *
+                 * IMPORTANT: Disconnect inputs properly using the use-def
+                 * list API so that clear_dead doesn't leave dangling
+                 * references. */
                 for (uint32_t j = 0; j < node->input_count; j++) {
-                    if (node->inputs[j] != VTX_NODEID_INVALID && node->inputs[j] < nt->count) {
-                        vtx_node_t *producer = &nt->nodes[node->inputs[j]];
+                    vtx_nodeid_t inp = node->inputs[j];
+                    if (inp != VTX_NODEID_INVALID && inp < nt->count) {
+                        vtx_node_t *producer = &nt->nodes[inp];
                         vtx_node_remove_use_entry(producer, (vtx_nodeid_t)i, j);
                         if (producer->output_count > 0) producer->output_count--;
                     }
                 }
-                node->input_count = 0;
-                node->use_count = 0;
                 node->dead = true;
+                node->use_count = 0;
                 node->output_count = 0;
                 replaced++;
                 continue;
