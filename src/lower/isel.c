@@ -1308,9 +1308,19 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
              * BUGFIX: rhs_safe must NOT be RAX or RDX because:
              *   - MOV rax_vreg, lhs clobbers RAX
              *   - CQO clobbers RDX
-             * Use a fixed vreg on R8 (caller-saved, not RAX/RDX) to ensure
-             * the regalloc doesn't assign rhs_safe to RAX or RDX. */
-            uint32_t rhs_safe = vtx_isel_alloc_vreg_fixed(stream, arena, 8); /* R8 */
+             * Previously this used a fixed R8 vreg, but R8 is not in
+             * VTX_REG_RESERVED_MASK, so the regalloc could also assign
+             * other vregs (e.g., a loop Phi) to R8. When the Mod's rhs_safe
+             * and the Div's lhs_vreg both got R8, the Div would read the
+             * Mod's leftover rhs value instead of n, producing wrong results
+             * (e.g., popcount(8) returned 0 instead of 1).
+             *
+             * Using a regular vreg lets the regalloc pick a register that
+             * doesn't conflict with lhs_vreg. The CLOBBER_RAX | CLOBBER_RDX
+             * flags on CQO and IDIV tell the regalloc that RAX and RDX are
+             * unavailable during this range, so rhs_safe will be assigned
+             * to a safe register (not RAX/RDX, and not any conflicting vreg). */
+            uint32_t rhs_safe = vtx_isel_alloc_vreg(stream, arena);
             vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, rhs_safe, rhs_untagged, node_id), arena);
 
             vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, rax_vreg, lhs_untagged, node_id), arena);
@@ -1368,8 +1378,11 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             if (rax_vreg == VTX_VREG_INVALID || rdx_vreg == VTX_VREG_INVALID) return -1;
 
             /* Move rhs to a safe register before CQO clobbers RDX.
-             * BUGFIX: same as Div — use fixed R8 to avoid RAX/RDX. */
-            uint32_t rhs_safe = vtx_isel_alloc_vreg_fixed(stream, arena, 8); /* R8 */
+             * BUGFIX: same as Div — use a regular vreg (not fixed R8) to
+             * avoid conflicts with other vregs that the regalloc may have
+             * assigned to R8. The CLOBBER_RAX | CLOBBER_RDX flags ensure
+             * the regalloc picks a safe register. */
+            uint32_t rhs_safe = vtx_isel_alloc_vreg(stream, arena);
             vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, rhs_safe, rhs_untagged, node_id), arena);
 
             vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, rax_vreg, lhs_untagged, node_id), arena);

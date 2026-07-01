@@ -3093,6 +3093,178 @@ int vtx_graph_build(vtx_graph_t *graph,
                 continue;
             }
 
+            /* BUGFIX (popcount mismatch): The direct check above only catches
+             * the case where SIDE_EFFECT is the If's direct condition. But the
+             * same cycle arises when SIDE_EFFECT is a TRANSITIVE data input of
+             * the If's condition. For popcount:
+             *
+             *   N18(Mod) -> N20(Cmp) -> N21(If) -> N33(Proj) -> N18(Mod)
+             *
+             * The If's condition is N20(Cmp), not N18(Mod) directly, so the
+             * direct check passes. But pinning N18 to N33 still creates a
+             * cycle: N18 must execute before N20, N20 before N21, N21 before
+             * N33, and N33 before N18. The scheduler then places N18 in
+             * Block 3 (the successor), and at runtime the If reads an
+             * uninitialized/stale value for its condition — producing wrong
+             * results (e.g., popcount(7) returns 1 instead of 3).
+             *
+             * Fix: if the SIDE_EFFECT node's bytecode_pc is within the If's
+             * block's bytecode range, the SIDE_EFFECT was created in the same
+             * block as the If and must execute BEFORE the If (the If is the
+             * block's terminator). Don't move it to a successor block.
+             *
+             * This is precise: it doesn't false-positive on loop Phis (gcd)
+             * where the SIDE_EFFECT is in a DIFFERENT block (the loop body)
+             * and legitimately should be pinned to the loop body's Proj. */
+            /* BUGFIX (popcount mismatch): The direct check above only catches
+             * the case where SIDE_EFFECT is the If's DIRECT condition. But the
+             * same cycle arises when SIDE_EFFECT is a TRANSITIVE data input of
+             * the If's condition. For popcount:
+             *
+             *   N18(Mod) -> N20(Cmp) -> N21(If) -> N33(Proj) -> N18(Mod)
+             *
+             * The If's condition is N20(Cmp), not N18(Mod) directly, so the
+             * direct check passes. But pinning N18 to N33 still creates a
+             * cycle: N18 must execute before N20, N20 before N21, N21 before
+             * N33, and N33 before N18. The scheduler then places N18 in
+             * Block 3 (the successor), and at runtime the If reads a stale
+             * value for its condition — producing wrong results (e.g.,
+             * popcount(7) returns 1 instead of 3).
+             *
+             * Fix: walk the data-input chain from the If's condition and
+             * skip pinning if the SIDE_EFFECT node is transitively reachable.
+             *
+             * IMPORTANT: When walking through a LOOP Phi (one whose control
+             * input is a LoopBegin), we must NOT follow the back-edge input.
+             * The back-edge value comes from the PREVIOUS iteration, so the
+             * current iteration's SIDE_EFFECT doesn't need to execute before
+             * the current iteration's If. Following the back-edge would
+             * false-positive on gcd, where the Mod's result feeds the loop
+             * Phi's back-edge but the Mod is legitimately in the loop body
+             * (after the If, not before it).
+             *
+             * Loop Phi structure: [forward_value, LoopBegin, back_edge_value]
+             *   - input[1] is LoopBegin (control)
+             *   - input[0] is forward edge (before loop)
+             *   - input[2] is back edge (from previous iteration)
+             *
+             * Merge Phi structure: [pred1_value, pred2_value, Region]
+             *   - input[2] is Region (control)
+             *   - input[0] and input[1] are predecessor values
+             */
+            if (if_node->input_count >= 2) {
+                vtx_nodeid_t cond = if_node->inputs[1];
+                if (cond != VTX_NODEID_INVALID && cond < graph->node_table.count) {
+                    uint32_t nt_count = graph->node_table.count;
+                    uint8_t *visited = (uint8_t *)calloc(nt_count, 1);
+                    if (visited) {
+                        vtx_nodeid_t *stack = (vtx_nodeid_t *)malloc(
+                            nt_count * sizeof(vtx_nodeid_t));
+                        if (stack) {
+                            int32_t wsp = 0;
+                            vtx_node_t *cond_node = &graph->node_table.nodes[cond];
+                            /* If the condition is itself a loop Phi, only
+                             * push the forward edge (input[0]), NOT the
+                             * back-edge (input[2]). The back-edge value is
+                             * from the PREVIOUS iteration. */
+                            bool cond_is_loop_phi = false;
+                            if (cond_node->opcode == VTX_OP_Phi &&
+                                cond_node->input_count >= 3) {
+                                vtx_nodeid_t maybe_loop = cond_node->inputs[1];
+                                if (maybe_loop < nt_count &&
+                                    graph->node_table.nodes[maybe_loop].opcode ==
+                                        VTX_OP_LoopBegin) {
+                                    cond_is_loop_phi = true;
+                                    vtx_nodeid_t fwd = cond_node->inputs[0];
+                                    if (fwd != VTX_NODEID_INVALID && fwd < nt_count) {
+                                        visited[fwd] = 1;
+                                        stack[wsp++] = fwd;
+                                    }
+                                }
+                            }
+                            if (!cond_is_loop_phi) {
+                                for (uint32_t k = 0; k < cond_node->input_count; k++) {
+                                    vtx_nodeid_t inp = cond_node->inputs[k];
+                                    if (inp != VTX_NODEID_INVALID && inp < nt_count) {
+                                        visited[inp] = 1;
+                                        stack[wsp++] = inp;
+                                    }
+                                }
+                            }
+                            while (wsp > 0) {
+                                vtx_nodeid_t cur = stack[--wsp];
+                                if (cur == (vtx_nodeid_t)ni) {
+                                    /* SIDE_EFFECT is a transitive data input
+                                     * of the If's condition — skip pinning */
+                                    wsp = 0;
+                                    visited[ni] = 1;
+                                    break;
+                                }
+                                vtx_node_t *cur_node = &graph->node_table.nodes[cur];
+                                /* Skip pure control nodes */
+                                if (cur_node->opcode == VTX_OP_Proj ||
+                                    cur_node->opcode == VTX_OP_Region ||
+                                    cur_node->opcode == VTX_OP_Goto ||
+                                    cur_node->opcode == VTX_OP_LoopEnd ||
+                                    cur_node->opcode == VTX_OP_If ||
+                                    cur_node->opcode == VTX_OP_LoopBegin ||
+                                    cur_node->opcode == VTX_OP_Start ||
+                                    cur_node->opcode == VTX_OP_Province) {
+                                    continue;
+                                }
+                                /* For loop Phis, only follow the forward edge
+                                 * (input[0]), NOT the back-edge (input[2]).
+                                 * input[1] is the LoopBegin (control). */
+                                if (cur_node->opcode == VTX_OP_Phi &&
+                                    cur_node->input_count >= 3) {
+                                    vtx_nodeid_t maybe_loop = cur_node->inputs[1];
+                                    if (maybe_loop < nt_count &&
+                                        graph->node_table.nodes[maybe_loop].opcode ==
+                                            VTX_OP_LoopBegin) {
+                                        /* Loop Phi: only follow forward edge */
+                                        vtx_nodeid_t fwd = cur_node->inputs[0];
+                                        if (fwd != VTX_NODEID_INVALID && fwd < nt_count &&
+                                            !visited[fwd]) {
+                                            visited[fwd] = 1;
+                                            stack[wsp++] = fwd;
+                                        }
+                                        continue;
+                                    }
+                                    /* Merge Phi: follow all data inputs
+                                     * (skip the Region at input[2]) */
+                                    for (uint32_t k = 0; k < cur_node->input_count; k++) {
+                                        vtx_nodeid_t inp = cur_node->inputs[k];
+                                        if (inp == VTX_NODEID_INVALID || inp >= nt_count) continue;
+                                        if (visited[inp]) continue;
+                                        /* Skip Region (control input) */
+                                        vtx_node_t *inp_n = &graph->node_table.nodes[inp];
+                                        if (inp_n->opcode == VTX_OP_Region ||
+                                            inp_n->opcode == VTX_OP_LoopBegin) continue;
+                                        visited[inp] = 1;
+                                        stack[wsp++] = inp;
+                                    }
+                                    continue;
+                                }
+                                /* Regular node: follow all data inputs */
+                                for (uint32_t k = 0; k < cur_node->input_count; k++) {
+                                    vtx_nodeid_t inp = cur_node->inputs[k];
+                                    if (inp == VTX_NODEID_INVALID || inp >= nt_count) continue;
+                                    if (visited[inp]) continue;
+                                    visited[inp] = 1;
+                                    stack[wsp++] = inp;
+                                }
+                            }
+                            free(stack);
+                        }
+                        bool is_transitive = visited[ni] != 0;
+                        free(visited);
+                        if (is_transitive) {
+                            continue; /* skip pinning — would create cycle */
+                        }
+                    }
+                }
+            }
+
             /* Check if any data input (non-Constant, non-Parameter, non-Proj)
              * is defined in this block or a predecessor. This catches both
              * direct Phi uses AND uses of nodes that depend on Phis.
