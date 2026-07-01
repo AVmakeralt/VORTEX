@@ -58,6 +58,7 @@ typedef enum {
     VTX_OP_Mod,
     VTX_OP_Shl,
     VTX_OP_Shr,
+    VTX_OP_Sar,     /* arithmetic shift right (fills with sign bit) */
     VTX_OP_And,
     VTX_OP_Or,
     VTX_OP_Xor,

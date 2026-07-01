@@ -1449,6 +1449,55 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         break;
     }
 
+    case VTX_OP_Sar: {
+        if (node->input_count < 2) return -1;
+        ensure_node_vreg(stream, node->inputs[0], arena);
+        uint32_t val_vreg = vtx_isel_node_vreg(stream, node->inputs[0]);
+        ensure_node_vreg(stream, node->inputs[1], arena);
+        uint32_t cnt_vreg = vtx_isel_node_vreg(stream, node->inputs[1]);
+        uint32_t dst = ensure_node_vreg(stream, node_id, arena);
+        if (val_vreg == VTX_VREG_INVALID || cnt_vreg == VTX_VREG_INVALID) return -1;
+
+        /* SAR = arithmetic shift right (sign-extends). Same untag/retag
+         * as SHR, but emits VTX_X86_SAR instead of VTX_X86_SHR. */
+        {
+            uint32_t val_untagged = vtx_isel_alloc_vreg(stream, arena);
+            emit_smi_untag(stream, block, val_untagged, val_vreg, node_id, arena);
+
+            const vtx_node_t *cnt_node = vtx_node_get_const(&graph->node_table, node->inputs[1]);
+            if (cnt_node && cnt_node->opcode == VTX_OP_Constant &&
+                cnt_node->constval.kind == VTX_TYPE_Int) {
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, val_untagged, node_id), arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, dst,
+                                   cnt_node->constval.as.int_val, node_id), arena);
+            } else {
+                uint32_t cnt_untagged = vtx_isel_alloc_vreg(stream, arena);
+                emit_smi_untag(stream, block, cnt_untagged, cnt_vreg, node_id, arena);
+
+                uint32_t shift_dst = vtx_isel_alloc_vreg(stream, arena);
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, shift_dst, val_untagged, node_id), arena);
+
+                vtx_inst_t sar_inst;
+                memset(&sar_inst, 0, sizeof(sar_inst));
+                sar_inst.opcode = VTX_X86_SAR;
+                sar_inst.opnd_kinds[0] = VTX_OPND_VREG;
+                sar_inst.operands[0] = shift_dst;
+                sar_inst.opnd_kinds[1] = VTX_OPND_VREG;
+                sar_inst.operands[1] = cnt_untagged;
+                sar_inst.source_node = node_id;
+                sar_inst.flags = VTX_INST_FLAG_CLOBBER_RCX;
+                vtx_isel_emit_inst(block, sar_inst, arena);
+
+                emit_smi_retag(stream, block, shift_dst, node_id, arena);
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, shift_dst, node_id), arena);
+                break;
+            }
+
+            emit_smi_retag(stream, block, dst, node_id, arena);
+        }
+        break;
+    }
+
     /* ---- Bitwise ---- */
     /* BUGFIX (audit #3): Bitwise ops (And/Or/Xor) operating directly on
      * NaN-boxed SMIs corrupt the result. Example: Xor(SMI(a), SMI(a)) = 0

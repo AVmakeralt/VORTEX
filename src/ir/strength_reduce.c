@@ -83,19 +83,107 @@ uint32_t vtx_strength_reduce_run(vtx_graph_t *graph)
             }
             /* Div(x, 2^k) → signed shift with rounding correction.
              *
-             * Requires VTX_OP_Sar (arithmetic shift right) which doesn't
-             * exist yet in the IR. VTX_OP_Shr is logical shift (fills
-             * with zeros), which gives wrong results for negative numbers.
+             * C's / rounds toward zero: Div(-7, 2) = -3.
+             * SAR rounds toward -inf: SAR(-7, 1) = -4.
              *
-             * TODO: Add VTX_OP_Sar to the IR, then implement:
-             *   t = x >> 63              (arithmetic, gives 0 or -1)
+             * The standard fix (used by gcc/clang -O2):
+             *   t = x >> 63              (arithmetic shift, sign mask: 0 or -1)
              *   t = t & ((1<<k) - 1)     (mask low bits if negative)
-             *   result = (x + t) >> k    (arithmetic shift with correction)
+             *   result = (x + t) >> k    (add correction, then arithmetic shift)
              *
              * This is 3 instructions instead of CQO+IDIV (~25 cycles).
-             * For collatz where n/2 is the loop body, this is 5-10x faster.
-             *
-             * For now, Div by powers of 2 stays as IDIV. */
+             * For collatz where n/2 is the loop body, this is 5-10x faster. */
+            shift = power_of_two_log2(rhs_val);
+            if (shift >= 1 && shift <= 62) {
+                /* All intermediate nodes operate on RAW INT values, not
+                 * NaN-boxed SMIs. We mark them RAW_INT so the isel
+                 * skips untag/retag. The original Div's input (lhs_id)
+                 * is a tagged SMI — the first Sar untag is needed.
+                 * The final Sar (replacing the Div) must retag because
+                 * its consumer expects a tagged SMI. */
+
+                /* Create: sign = x >> 63 (arithmetic shift on RAW int)
+                 * Input lhs_id is a tagged SMI, so this Sar must untag
+                 * its input. Do NOT mark as RAW_INT. */
+                vtx_nodeid_t sign_node = vtx_node_create(nt, VTX_OP_Sar);
+                if (sign_node == VTX_NODEID_INVALID) continue;
+                vtx_node_t *sn = vtx_node_get(nt, sign_node);
+                sn->flags = VTX_NF_DATA;
+                sn->type = VTX_TYPE_Int;
+                vtx_node_add_input(nt, sign_node, lhs_id);
+                vtx_nodeid_t const63 = vtx_node_create(nt, VTX_OP_Constant);
+                vtx_node_t *c63 = vtx_node_get(nt, const63);
+                c63->constval.kind = VTX_TYPE_Int;
+                c63->constval.as.int_val = 63;
+                c63->type = VTX_TYPE_Int;
+                vtx_node_add_input(nt, sign_node, const63);
+
+                /* Create: mask = (1 << k) - 1 */
+                int64_t mask = (1LL << shift) - 1;
+                vtx_nodeid_t mask_node = vtx_node_create(nt, VTX_OP_Constant);
+                vtx_node_t *mn = vtx_node_get(nt, mask_node);
+                mn->constval.kind = VTX_TYPE_Int;
+                mn->constval.as.int_val = mask;
+                mn->type = VTX_TYPE_Int;
+
+                /* Create: correction = sign & mask
+                 * Both inputs are tagged SMIs (sign_node retags its output,
+                 * mask is a Constant which isel tags). The And isel will
+                 * untag both, AND, retag. This is correct. */
+                vtx_nodeid_t corr_node = vtx_node_create(nt, VTX_OP_And);
+                if (corr_node == VTX_NODEID_INVALID) continue;
+                vtx_node_t *cn = vtx_node_get(nt, corr_node);
+                cn->flags = VTX_NF_DATA;
+                cn->type = VTX_TYPE_Int;
+                vtx_node_add_input(nt, corr_node, sign_node);
+                vtx_node_add_input(nt, corr_node, mask_node);
+
+                /* Create: corrected = x + correction
+                 * Both x and correction are tagged SMIs. The Add isel
+                 * will untag both, ADD, retag. Correct. */
+                vtx_nodeid_t add_node = vtx_node_create(nt, VTX_OP_Add);
+                if (add_node == VTX_NODEID_INVALID) continue;
+                vtx_node_t *an = vtx_node_get(nt, add_node);
+                an->flags = VTX_NF_DATA;
+                an->type = VTX_TYPE_Int;
+                vtx_node_add_input(nt, add_node, lhs_id);
+                vtx_node_add_input(nt, add_node, corr_node);
+
+                /* Create: shift_const = k */
+                vtx_nodeid_t shift_const = vtx_node_create(nt, VTX_OP_Constant);
+                vtx_node_t *sc = vtx_node_get(nt, shift_const);
+                sc->constval.kind = VTX_TYPE_Int;
+                sc->constval.as.int_val = shift;
+                sc->type = VTX_TYPE_Int;
+
+                /* Create the final Sar node: result = corrected >> k */
+                vtx_nodeid_t sar_node = vtx_node_create(nt, VTX_OP_Sar);
+                if (sar_node == VTX_NODEID_INVALID) continue;
+                vtx_node_t *sar_n = vtx_node_get(nt, sar_node);
+                sar_n->flags = VTX_NF_DATA;
+                sar_n->type = VTX_TYPE_Int;
+                vtx_node_add_input(nt, sar_node, add_node);
+                vtx_node_add_input(nt, sar_node, shift_const);
+
+                /* Redirect all uses of the original Div node to the new Sar */
+                vtx_node_replace_all_uses(nt, (vtx_nodeid_t)i, sar_node);
+
+                /* Mark the original Div as dead */
+                /* Disconnect its inputs */
+                for (uint32_t j = 0; j < node->input_count; j++) {
+                    if (node->inputs[j] != VTX_NODEID_INVALID && node->inputs[j] < nt->count) {
+                        vtx_node_t *producer = &nt->nodes[node->inputs[j]];
+                        vtx_node_remove_use_entry(producer, (vtx_nodeid_t)i, j);
+                        if (producer->output_count > 0) producer->output_count--;
+                    }
+                }
+                node->input_count = 0;
+                node->use_count = 0;
+                node->dead = true;
+                node->output_count = 0;
+                replaced++;
+                continue;
+            }
             break;
 
         case VTX_OP_Mod:

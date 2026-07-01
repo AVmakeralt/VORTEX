@@ -37,6 +37,7 @@ const vtx_node_opcode_info_t vtx_node_opcode_table[VTX_NODE_OP_COUNT] = {
     OP_INFO(Mod,            VTX_NF_DATA, 2),
     OP_INFO(Shl,            VTX_NF_DATA, 2),
     OP_INFO(Shr,            VTX_NF_DATA, 2),
+    OP_INFO(Sar,            VTX_NF_DATA, 2),
     OP_INFO(And,            VTX_NF_DATA, 2),
     OP_INFO(Or,             VTX_NF_DATA, 2),
     OP_INFO(Xor,            VTX_NF_DATA, 2),
