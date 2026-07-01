@@ -25,6 +25,11 @@ typedef struct {
     uint32_t                *pc_map;         /* parallel array: bytecode_pc for each native_offset */
     uint32_t                 pc_map_count;   /* number of entries in pc_map/native_offsets */
     uint32_t                *stack_depth_map;/* stack depth at each native_offset */
+
+    /* Side table for deopt: maps native PC → FrameState + live registers.
+     * Set at install time so the deopt handler can find it from the
+     * deopt_info pointer in the JIT frame header. */
+    struct vtx_side_table   *side_table;
 } vtx_deopt_info_t;
 
 #endif /* VORTEX_DEOPT_TYPES_H */

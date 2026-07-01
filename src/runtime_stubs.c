@@ -22,6 +22,7 @@
 #include "interp/frame.h"
 #include "deopt/side_table.h"
 #include "deopt/frame_state.h"
+#include "deopt/types.h"
 
 /* ========================================================================== */
 /* Global state                                                                */
@@ -770,33 +771,49 @@ void vtx_deopt_handler_stub(uint32_t frame_state_index, uint32_t native_pc)
      * side table + deopt_runtime_transition mechanism.
      */
 
-    /* Step 1: Look up the FrameState from the side table */
-    if (the_side_table != NULL) {
+    /* Step 1: Look up the FrameState from the side table.
+     *
+     * The side table is found via the deopt_info pointer in the JIT
+     * frame header. We walk the RBP chain to find the JIT frame,
+     * read deopt_info from [rbp+16], and get the side table from there.
+     *
+     * This is the correct approach for multi-method programs where
+     * different methods have different side tables. The global
+     * the_side_table is a fallback for T1 (which doesn't set
+     * deopt_info->side_table). */
+    void *our_frame = __builtin_frame_address(0);
+    void *caller_frame = *(void **)our_frame;
+    void *jit_rbp = caller_frame;
+
+    vtx_side_table_t *active_side_table = NULL;
+
+    /* Try to get the side table from the JIT frame's deopt_info */
+    if (jit_rbp != NULL) {
+        /* Read deopt_info from [rbp + 16] (see frame_layout.h) */
+        vtx_deopt_info_t *deopt_info = *(vtx_deopt_info_t **)
+            ((uint8_t *)jit_rbp + 16);
+        if (deopt_info != NULL && deopt_info->side_table != NULL) {
+            active_side_table = deopt_info->side_table;
+        }
+    }
+
+    /* Fallback to global side table (used by T1 baseline) */
+    if (active_side_table == NULL) {
+        active_side_table = the_side_table;
+    }
+
+    if (active_side_table != NULL) {
         vtx_frame_state_t *fs =
-            vtx_side_table_get_frame_state(the_side_table, frame_state_index);
+            vtx_side_table_get_frame_state(active_side_table, frame_state_index);
 
         if (fs != NULL) {
             /*
              * We have the frame state.  Now we need to reconstruct
              * the interpreter frame and transfer control.
              *
-             * Get the JIT frame pointer.  The JIT code that called us
-             * set up RBP to point to its frame.  We can recover it by
-             * walking up one frame from our own.
-             *
-             * Bug #14 fix: __builtin_frame_address(1) (caller's frame
-             * address) is undefined behavior per the C standard when
-             * inlined or optimized. Replace with a portable stack walk
-             * that reads from the saved RBP chain.
-             *
-             * On x86-64 with frame pointers, each frame's RBP points to
-             * the saved RBP of the caller. So:
-             *   *(void **)frame_pointer = caller's RBP
-             * We use __builtin_frame_address(0) for our own frame, then
-             * walk the RBP chain to find the JIT frame (our caller). */
-            void *our_frame = __builtin_frame_address(0);
-            void *caller_frame = *(void **)our_frame;  /* walk the RBP chain */
-            void *jit_rbp = caller_frame;
+             * The JIT frame pointer (jit_rbp) was already recovered
+             * above when we walked the RBP chain to find the side table.
+             */
             if (jit_rbp != NULL) {
                 /* Step 2: Call the runtime transition function to
                  * reconstruct the interpreter frame. */

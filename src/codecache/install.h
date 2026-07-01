@@ -7,6 +7,7 @@
 #include "vortex_config.h"
 #include "codecache/cache.h"
 #include "deopt/side_table.h"
+#include "deopt/types.h"
 #include "lower/reloc.h"
 #include "runtime/type_system.h"
 #include "runtime/arena.h"
@@ -67,6 +68,7 @@ struct vtx_compiled_method {
 
     /* Deoptimization metadata */
     vtx_side_table_t        *side_table;        /* deopt side table */
+    vtx_deopt_info_t        *deopt_info;        /* deopt info (pc map + side table ptr) */
 
     /* Relocation table (for re-applying external call relocations
      * if the code is moved or re-installed) */

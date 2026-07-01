@@ -31,6 +31,7 @@
 #include "ir/loop_unroll.h"
 #include "guard/hoist.h"
 #include "guard/merge.h"
+#include "deopt/frame_state.h"
 
 #include <time.h>
 #include <string.h>
@@ -840,6 +841,77 @@ static int run_lowering_pipeline(vtx_graph_t *graph,
             vtx_x86_emit_destroy(&emitter);
             *time_ns = elapsed_ns(start);
             return -1;
+        }
+
+        /* Step 10.5: Populate real FrameState objects in the side table.
+         *
+         * The side table entries reference frame_state_index, which is
+         * the NodeID of the Guard's FrameState node in the IR. We now
+         * create real vtx_frame_state_t objects from the IR FrameState
+         * nodes and store them in the side table's frame_states array.
+         *
+         * Without this, the side table has NULL frame_states and any
+         * deopt would abort with "can't reconstruct interpreter state."
+         *
+         * The FrameState IR node has inputs:
+         *   [0] = control node
+         *   [1] = memory node
+         *   [2..2+max_locals] = local variable values (as NodeIDs)
+         *
+         * We create a vtx_frame_state_t with:
+         *   - bytecode_pc from the guard node
+         *   - method_id from the method
+         *   - locals array from the FrameState node's inputs
+         *   - empty stack (T2 doesn't track operand stack at deopt points
+         *     yet — the live register map in the side table handles this)
+         */
+        for (uint32_t g = 0; g < guard_arr.count; g++) {
+            vtx_guard_desc_t *guard = &guard_arr.guards[g];
+            vtx_node_t *guard_node = &graph->node_table.nodes[guard->guard_node];
+
+            /* Find the FrameState node for this guard */
+            vtx_nodeid_t fs_id = guard_node->frame_state;
+            if (fs_id == VTX_NODEID_INVALID || fs_id >= graph->node_table.count) {
+                /* No FrameState — create a minimal one with just the PC */
+                vtx_frame_state_t *fs = vtx_frame_state_create(arena,
+                    guard->bytecode_pc, 0, 0, 0);
+                uint32_t fs_idx2 = vtx_side_table_add_frame_state(side_table, fs);
+                guard->frame_state_index = fs_idx2;
+                continue;
+            }
+
+            vtx_node_t *fs_node = &graph->node_table.nodes[fs_id];
+            if (fs_node->dead) {
+                vtx_frame_state_t *fs = vtx_frame_state_create(arena,
+                    guard->bytecode_pc, 0, 0, 0);
+                uint32_t fs_idx2 = vtx_side_table_add_frame_state(side_table, fs);
+                guard->frame_state_index = fs_idx2;
+                continue;
+            }
+
+            /* Count locals from the FrameState node's inputs.
+             * Inputs: [0]=control, [1]=memory, [2..]=locals */
+            uint32_t local_count = 0;
+            if (fs_node->input_count > 2) {
+                local_count = fs_node->input_count - 2;
+            }
+
+            /* Create the FrameState */
+            vtx_frame_state_t *fs = vtx_frame_state_create(arena,
+                fs_node->bytecode_pc != 0 ? fs_node->bytecode_pc : guard->bytecode_pc,
+                0, /* method_id — filled at install time */
+                local_count,
+                0  /* stack_count — T2 uses live register maps instead */);
+
+            /* Fill in locals from the FrameState node's inputs */
+            for (uint32_t li = 0; li < local_count && li + 2 < fs_node->input_count; li++) {
+                vtx_nodeid_t local_node = fs_node->inputs[li + 2];
+                vtx_frame_state_set_local(fs, li, local_node);
+            }
+
+            /* Store in the side table */
+            uint32_t fs_idx2 = vtx_side_table_add_frame_state(side_table, fs);
+            guard->frame_state_index = fs_idx2;
         }
     }
 

@@ -180,7 +180,7 @@ bool vtx_install_method(vtx_code_cache_t *cache,
     cm->code_start = (uint8_t *)code_mem;
     cm->code_size = code_size;
     cm->side_table = side_table;
-    cm->reloc_table = reloc_table;  /* save for potential re-patching */
+    cm->reloc_table = reloc_table;
     cm->is_installed = true;
     cm->is_valid = true;
     cm->last_used_timestamp = 0;
@@ -188,6 +188,13 @@ bool vtx_install_method(vtx_code_cache_t *cache,
     cm->next = NULL;
     cm->poly_ics = poly_ics;
     cm->poly_ic_count = poly_ic_count;
+
+    /* Wire the side table into deopt_info so the deopt handler can
+     * find it from the JIT frame header. Without this, the deopt
+     * handler can't reconstruct interpreter state. */
+    if (cm->deopt_info != NULL && side_table != NULL) {
+        cm->deopt_info->side_table = side_table;
+    }
 
     /* Copy dependency sets */
     if (dep_type_count > 0 && dep_types) {
