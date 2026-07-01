@@ -243,13 +243,26 @@ static int64_t call_jit2(void *c) {
     return vtx_smi_value(ctx->entry(&m, NULL, (void*)1, args, 2));
 }
 
-/* ----- Native caller wrappers ----- */
-static int64_t call_native_sum(void *c) { return native_sum_loop((int64_t)(intptr_t)c); }
-static int64_t call_native_fib(void *c) { return native_fib_iter((int64_t)(intptr_t)c); }
-static int64_t call_native_gcd(void *c) {
-    int64_t *p = (int64_t *)c; return native_gcd(p[0], p[1]);
+/* ----- Native caller wrappers -----
+ * Use function pointers to prevent gcc from constant-propagating
+ * the argument values into the functions via IPA. Without this,
+ * gcc sees native_sum_loop(100) at the call site and clones the
+ * function with n=100 baked in, unrolls 2×, etc. — producing
+ * unfair specialized code that the JIT can't match. */
+static int64_t hide_arg(int64_t x) {
+    asm volatile("" : "+r"(x) : : "memory");
+    return x;
 }
-static int64_t call_native_collatz(void *c) { return native_collatz((int64_t)(intptr_t)c); }
+
+static int64_t call_native_sum(void *c) { return native_sum_loop(hide_arg((int64_t)(intptr_t)c)); }
+static int64_t call_native_fib(void *c) { return native_fib_iter(hide_arg((int64_t)(intptr_t)c)); }
+static int64_t call_native_gcd(void *c) {
+    int64_t *p = (int64_t *)c;
+    int64_t a = hide_arg(p[0]);
+    int64_t b = hide_arg(p[1]);
+    return native_gcd(a, b);
+}
+static int64_t call_native_collatz(void *c) { return native_collatz(hide_arg((int64_t)(intptr_t)c)); }
 
 /* ----- T0 wrappers ----- */
 static int64_t call_t0_sum(void *c) {

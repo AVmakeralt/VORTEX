@@ -1020,7 +1020,13 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
      *
      * Without this fix, C code compiled with -O3 that keeps variables in
      * R12/R13 across the JIT call gets those variables corrupted. */
-    result->callee_saved_mask = callee_saved_used | (1u << 12) | (1u << 13);
+    /* R12 (VTX_SPILL_TMP_REG) and R13 (memory operand spill scratch) are
+     * only needed when the function has spills. If there are no spills,
+     * don't save them — saves 4 instructions + 16 bytes stack per call. */
+    result->callee_saved_mask = callee_saved_used;
+    if (result->spill_count > 0) {
+        result->callee_saved_mask |= (1u << 12) | (1u << 13);
+    }
 
     /* Detect leaf functions (no CALL instructions).
      * Leaf functions can use a lighter prologue (skip JIT header pushes). */

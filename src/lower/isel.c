@@ -466,8 +466,13 @@ static void emit_smi_untag(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
      *   SAR 16: 0xFFFFFFFFFFFFFFFF = -1 ✓
      */
     stream->uses_smi = true;
+    /* The MOV copies the SMI value to a new vreg, then SHL+SAR modify it
+     * in place. The coalescer's overlap check is sufficient to prevent
+     * unsafe coalescing — if src_vreg is still live after this untag,
+     * the intervals overlap and coalescing is rejected. Removing
+     * NO_COALESCE allows the regalloc to coalesce when src is dead
+     * after the untag, saving one MOV per operand. */
     vtx_inst_t mov = make_rr_inst(VTX_X86_MOV, dst_vreg, src_vreg, node_id);
-    mov.flags |= VTX_INST_FLAG_NO_COALESCE;
     vtx_isel_emit_inst(block, mov, arena);
     vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, dst_vreg, 13, node_id), arena);
     vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, dst_vreg, 16, node_id), arena);

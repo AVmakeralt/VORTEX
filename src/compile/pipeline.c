@@ -1192,11 +1192,6 @@ int vtx_pipeline_run(vtx_graph_t *graph,
             stats.sccp_constants_propagated += post_inline_sccp;
             stats.sccp_time_ns += post_inline_sccp_ns;
 
-            /* Re-run strength reduction after post-inline SCCP — new
-             * constants may have been exposed by inlining. */
-            vtx_strength_reduce_run(graph);
-            vtx_node_table_clear_dead(&graph->node_table);
-
             if (verify_between_passes(graph, config, "Post-inline SCCP") != 0) {
                 result->stats = stats;
                 return -1;
@@ -1318,8 +1313,10 @@ int vtx_pipeline_run(vtx_graph_t *graph,
         }
         if (config->run_sccp) {
             run_sccp_pass(graph, 1, &stats.sccp_time_ns);
-            vtx_strength_reduce_run(graph);
-            vtx_node_table_clear_dead(&graph->node_table);
+            /* Note: strength reduction is NOT re-run here. The first pass
+             * (Phase 2.5) already replaced all Div(x, 2^k) with Sar chains.
+             * Re-running here would try to replace already-dead Div nodes
+             * and create duplicate Sar chains, producing wrong code. */
         }
         if (config->run_dce) {
             run_dce_pass(graph, 1, &stats.dce_time_ns, false);
