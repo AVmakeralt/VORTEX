@@ -565,6 +565,20 @@ static inline vtx_value_t vtx_dispatch_jit(
 /* Main interpreter dispatch loop                                              */
 /* ========================================================================== */
 
+void vtx_interp_set_deopt_pc(vtx_frame_t *frame, uint32_t pc)
+{
+    /* Store the resume PC in the interpreter's global state.
+     * The dispatch loop checks deopt_resume_pending on entry
+     * and uses deopt_resume_pc as the starting PC. */
+    extern vtx_interp_t *vtx_get_current_interp(void);
+    vtx_interp_t *interp = vtx_get_current_interp();
+    if (interp) {
+        interp->deopt_resume_pc = pc;
+        interp->deopt_resume_pending = true;
+        interp->current_frame = frame;
+    }
+}
+
 vtx_value_t vtx_interp_run(vtx_interp_t *interp,
                             const vtx_method_desc_t *method,
                             vtx_value_t *args,
@@ -735,6 +749,20 @@ vtx_value_t vtx_interp_run(vtx_interp_t *interp,
     vtx_bytecode_t *bc = frame->bytecode;
     const uint8_t *code = bc->code;
     size_t pc = 0;
+
+    /* Check for deopt resume: if the deopt handler set up a frame
+     * with a specific resume PC, start executing from there instead
+     * of PC=0. */
+    if (interp->deopt_resume_pending) {
+        pc = interp->deopt_resume_pc;
+        interp->deopt_resume_pending = false;
+        /* Reload frame state since deopt may have set current_frame */
+        frame = interp->current_frame;
+        sp = frame->operand_stack + frame->stack_top;
+        locals_arr = frame->locals;
+        bc = frame->bytecode;
+        code = bc->code;
+    }
     vtx_value_t result = VTX_VALUE_UNDEFINED;
     vtx_value_t a, b, val;
     uint16_t operand;

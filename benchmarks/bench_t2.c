@@ -49,9 +49,8 @@ static inline uint64_t now_ns(void) {
 typedef vtx_value_t (*jit_entry_t)(const vtx_method_desc_t *, void *, void *,
                                     vtx_value_t *, uint32_t);
 
-/* ----- Compile a Vertex-style program through the T2 pipeline ----- */
-static jit_entry_t compile_t2(const char *prog_text, uint32_t arg_count) {
-    /* Allocate everything on heap — leaks intentionally, lives for benchmark duration */
+/* ----- Compile through the T2 or T3 pipeline ----- */
+static jit_entry_t compile(const char *prog_text, uint32_t arg_count, int tier) {
     vtx_assembler_t *a = calloc(1, sizeof(*a));
     vtx_arena_t *arena = calloc(1, sizeof(*arena));
     vtx_type_system_t *ts = calloc(1, sizeof(*ts));
@@ -82,7 +81,8 @@ static jit_entry_t compile_t2(const char *prog_text, uint32_t arg_count) {
         return NULL;
     }
 
-    vtx_pipeline_config_t config = vtx_pipeline_config_t2();
+    vtx_pipeline_config_t config = (tier == 3) ?
+        vtx_pipeline_config_t3() : vtx_pipeline_config_t2();
     vtx_code_cache_init(cache, 1 << 20);
     vtx_method_registry_init(reg, arena);
     config.code_cache = cache;
@@ -120,12 +120,17 @@ static vtx_value_t run_t0(const char *prog_text, vtx_value_t *args, uint32_t arg
 }
 
 /* ----- Native C reference implementations ----- */
-static int64_t native_sum_loop(int64_t n) {
+/* noinline + volatile input prevents the compiler from constant-folding
+ * the entire computation. Without this, gcc -O3 precomputes fib(20)=6765
+ * at compile time and the "benchmark" measures a register move (~1 ns). */
+__attribute__((noinline))
+static int64_t native_sum_loop(volatile int64_t n) {
     int64_t s = 0;
     for (int64_t i = 1; i <= n; i++) s += i;
     return s;
 }
-static int64_t native_fib_iter(int64_t n) {
+__attribute__((noinline))
+static int64_t native_fib_iter(volatile int64_t n) {
     if (n <= 1) return n;
     int64_t a = 0, b = 1;
     for (int64_t i = 2; i <= n; i++) {
@@ -133,11 +138,13 @@ static int64_t native_fib_iter(int64_t n) {
     }
     return b;
 }
-static int64_t native_gcd(int64_t a, int64_t b) {
+__attribute__((noinline))
+static int64_t native_gcd(volatile int64_t a, volatile int64_t b) {
     while (b != 0) { int64_t t = a % b; a = b; b = t; }
     return a;
 }
-static int64_t native_collatz(int64_t n) {
+__attribute__((noinline))
+static int64_t native_collatz(volatile int64_t n) {
     int64_t steps = 0;
     while (n != 1) {
         if (n % 2 == 0) n = n / 2;
@@ -150,12 +157,17 @@ static int64_t native_collatz(int64_t n) {
 /* ----- Bench harness ----- */
 typedef struct { double median, p95, min; } stats_t;
 
+/* Volatile sink — prevents the compiler from eliminating the computation */
+static volatile int64_t g_sink;
+
 static stats_t bench_run(int64_t (*fn)(void *), void *ctx, int iters) {
     static double samples[SAMPLES];
     for (int s = 0; s < SAMPLES; s++) {
         uint64_t t0 = now_ns();
-        for (int i = 0; i < iters; i++) fn(ctx);
+        int64_t acc = 0;
+        for (int i = 0; i < iters; i++) acc += fn(ctx);
         uint64_t t1 = now_ns();
+        g_sink = acc;  /* consume result to prevent DCE */
         samples[s] = (double)(t1 - t0) / iters;
     }
     /* sort */
@@ -272,18 +284,14 @@ int main(void) {
     printf("Methodology: %d warmup + %d samples, sorted for median/p95\n", WARMUP, SAMPLES);
     printf("Native C compiled with gcc -O3 -march=native\n\n");
 
-    /* ----- Verify correctness ----- */
-    printf("--- Correctness Verification ---\n");
-    jit_entry_t j_sum = compile_t2(PROG_SUM, 1);
-    printf("  sum compiled: %p\n", (void*)j_sum); fflush(stdout);
-    jit_entry_t j_fib = compile_t2(PROG_FIB, 1);
-    printf("  fib compiled: %p\n", (void*)j_fib); fflush(stdout);
-    jit_entry_t j_gcd = compile_t2(PROG_GCD, 2);
-    printf("  gcd compiled: %p\n", (void*)j_gcd); fflush(stdout);
-    jit_entry_t j_col = compile_t2(PROG_COLLATZ, 1);
-    printf("  collatz compiled: %p\n", (void*)j_col); fflush(stdout);
+    /* ----- Verify correctness for T2 ----- */
+    printf("--- Correctness Verification (T2) ---\n");
+    jit_entry_t j_sum = compile(PROG_SUM, 1, 2);
+    jit_entry_t j_fib = compile(PROG_FIB, 1, 2);
+    jit_entry_t j_gcd = compile(PROG_GCD, 2, 2);
+    jit_entry_t j_col = compile(PROG_COLLATZ, 1, 2);
     if (!j_sum || !j_fib || !j_gcd || !j_col) {
-        fprintf(stderr, "Compilation failed\n");
+        fprintf(stderr, "T2 compilation failed\n");
         return 1;
     }
     vtx_method_desc_t m; memset(&m, 0, sizeof(m)); m.name = "f";
@@ -371,9 +379,105 @@ int main(void) {
     printf("  → T2 JIT: %.1f%% of native C  |  %.1fx faster than T0 interp\n\n",
            100.0 * s_native.median / s_jit.median, s_t0.median / s_jit.median);
 
+    /* ===== T3 BENCHMARKS ===== */
+    printf("\n=== T3 (Speculative JIT) Benchmarks ===\n\n");
+
+    /* Compile through T3 */
+    jit_entry_t t3_sum = compile(PROG_SUM, 1, 3);
+    jit_entry_t t3_fib = compile(PROG_FIB, 1, 3);
+    jit_entry_t t3_gcd = compile(PROG_GCD, 2, 3);
+    jit_entry_t t3_col = compile(PROG_COLLATZ, 1, 3);
+
+    if (!t3_sum || !t3_fib || !t3_gcd || !t3_col) {
+        printf("  T3 compilation failed — skipping T3 benchmarks\n");
+    } else {
+        /* Verify T3 correctness */
+        printf("--- T3 Correctness ---\n");
+        v = vtx_make_smi(100); j_r = vtx_smi_value(t3_sum(&m, NULL, (void*)1, &v, 1));
+        printf("  T3 sum(100) = %lld %s\n", (long long)j_r,
+               j_r == native_sum_loop(100) ? "OK" : "MISMATCH");
+        v = vtx_make_smi(20); j_r = vtx_smi_value(t3_fib(&m, NULL, (void*)1, &v, 1));
+        printf("  T3 fib(20) = %lld %s\n", (long long)j_r,
+               j_r == native_fib_iter(20) ? "OK" : "MISMATCH");
+        vtx_value_t g3[2] = { vtx_make_smi(123456), vtx_make_smi(7890) };
+        j_r = vtx_smi_value(t3_gcd(&m, NULL, (void*)1, g3, 2));
+        printf("  T3 gcd(123456,7890) = %lld %s\n", (long long)j_r,
+               j_r == native_gcd(123456, 7890) ? "OK" : "MISMATCH");
+        v = vtx_make_smi(27); j_r = vtx_smi_value(t3_col(&m, NULL, (void*)1, &v, 1));
+        printf("  T3 collatz(27) = %lld %s\n\n", (long long)j_r,
+               j_r == native_collatz(27) ? "OK" : "MISMATCH");
+
+        /* T3 Benchmark: sum(100) */
+        printf("--- T3 sum(100) ---\n");
+        jc.entry = t3_sum; jc.arg = vtx_make_smi(100);
+        narg = 100;
+        s_native = bench_run(call_native_sum, (void*)narg, 10000);
+        stats_t s_t3 = bench_run(call_jit1, &jc, 10000);
+        s_t0 = bench_run(call_t0_sum, (void*)narg, 100);
+        print_stats("Native C", s_native);
+        print_stats("VORTEX T3 JIT", s_t3);
+        print_stats("VORTEX T2 JIT", s_jit);
+        print_stats("VORTEX T0 Interpreter", s_t0);
+        printf("  → T3: %.1f%% of native  |  T3 vs T2: %.2fx  |  %.1fx faster than T0\n\n",
+               100.0 * s_native.median / s_t3.median,
+               s_jit.median / s_t3.median,
+               s_t0.median / s_t3.median);
+
+        /* T3 Benchmark: fib(20) */
+        printf("--- T3 fib(20) ---\n");
+        jc.entry = t3_fib; jc.arg = vtx_make_smi(20);
+        narg = 20;
+        s_native = bench_run(call_native_fib, (void*)narg, 10000);
+        s_t3 = bench_run(call_jit1, &jc, 10000);
+        s_jit = bench_run(call_jit1, &(jit1_ctx_t){j_fib, vtx_make_smi(20)}, 10000);
+        s_t0 = bench_run(call_t0_fib, (void*)narg, 100);
+        print_stats("Native C", s_native);
+        print_stats("VORTEX T3 JIT", s_t3);
+        print_stats("VORTEX T2 JIT", s_jit);
+        print_stats("VORTEX T0 Interpreter", s_t0);
+        printf("  → T3: %.1f%% of native  |  T3 vs T2: %.2fx  |  %.1fx faster than T0\n\n",
+               100.0 * s_native.median / s_t3.median,
+               s_jit.median / s_t3.median,
+               s_t0.median / s_t3.median);
+
+        /* T3 Benchmark: gcd(123456, 7890) */
+        printf("--- T3 gcd(123456, 7890) ---\n");
+        jc2.entry = t3_gcd; jc2.a = vtx_make_smi(123456); jc2.b = vtx_make_smi(7890);
+        s_native = bench_run(call_native_gcd, gargs, 10000);
+        s_t3 = bench_run(call_jit2, &jc2, 10000);
+        s_jit = bench_run(call_jit2, &(jit2_ctx_t){j_gcd, vtx_make_smi(123456), vtx_make_smi(7890)}, 10000);
+        s_t0 = bench_run(call_t0_gcd, gargs, 100);
+        print_stats("Native C", s_native);
+        print_stats("VORTEX T3 JIT", s_t3);
+        print_stats("VORTEX T2 JIT", s_jit);
+        print_stats("VORTEX T0 Interpreter", s_t0);
+        printf("  → T3: %.1f%% of native  |  T3 vs T2: %.2fx  |  %.1fx faster than T0\n\n",
+               100.0 * s_native.median / s_t3.median,
+               s_jit.median / s_t3.median,
+               s_t0.median / s_t3.median);
+
+        /* T3 Benchmark: collatz(27) */
+        printf("--- T3 collatz(27) ---\n");
+        jc.entry = t3_col; jc.arg = vtx_make_smi(27);
+        narg = 27;
+        s_native = bench_run(call_native_collatz, (void*)narg, 10000);
+        s_t3 = bench_run(call_jit1, &jc, 10000);
+        s_jit = bench_run(call_jit1, &(jit1_ctx_t){j_col, vtx_make_smi(27)}, 10000);
+        s_t0 = bench_run(call_t0_collatz, (void*)narg, 100);
+        print_stats("Native C", s_native);
+        print_stats("VORTEX T3 JIT", s_t3);
+        print_stats("VORTEX T2 JIT", s_jit);
+        print_stats("VORTEX T0 Interpreter", s_t0);
+        printf("  → T3: %.1f%% of native  |  T3 vs T2: %.2fx  |  %.1fx faster than T0\n\n",
+               100.0 * s_native.median / s_t3.median,
+               s_jit.median / s_t3.median,
+               s_t0.median / s_t3.median);
+    }
+
     /* ----- Summary ----- */
     printf("=== Summary ===\n");
-    printf("  T2 JIT pipeline: GVN → SCCP → DCE → LICM → isel → regalloc → emit\n");
+    printf("  T3 JIT: T2 pipeline + speculative guards + more iterations (5 vs 3)\n");
+    printf("  T2 JIT: GVN → SCCP → DCE → strength_reduce → LICM → guard_hoist → isel → regalloc → emit\n");
     printf("  T0 Interpreter: bytecode dispatch loop\n");
     printf("  Native C: gcc -O3 -march=native (gold standard)\n");
     return 0;

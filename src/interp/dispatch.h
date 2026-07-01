@@ -85,6 +85,13 @@ typedef struct {
     bool                deopt_pending;
     uint32_t            deopt_method_id;   /* method_id that was invalidated */
 
+    /* Deopt resume PC: when deopt occurs, the interpreter resumes
+     * execution at this bytecode PC in the deoptimized frame.
+     * Set by vtx_deopt_runtime_transition before the interpreter
+     * re-enters the dispatch loop. */
+    uint32_t            deopt_resume_pc;
+    bool                deopt_resume_pending;
+
     /* Pending exception (VTX_VALUE_UNDEFINED if none) */
     vtx_value_t         exception;
 
@@ -110,6 +117,13 @@ int vtx_interp_init(vtx_interp_t *interp, vtx_type_system_t *ts, vtx_gc_t *gc);
  * Destroy the interpreter and release all resources.
  */
 void vtx_interp_destroy(vtx_interp_t *interp);
+
+/**
+ * Set the deopt resume PC for a frame. Called by the deopt runtime
+ * transition after reconstructing the interpreter frame. The dispatch
+ * loop checks deopt_resume_pending and resumes at deopt_resume_pc.
+ */
+void vtx_interp_set_deopt_pc(vtx_frame_t *frame, uint32_t pc);
 
 /**
  * Execute a method with the given arguments.

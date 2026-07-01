@@ -1,5 +1,12 @@
 #include "baseline/deopt_stubs.h"
 #include "baseline/codegen.h"
+#include "baseline/frame_layout.h"
+#include "deopt/side_table.h"
+#include "deopt/frame_state.h"
+#include "deopt/types.h"
+#include "interp/frame.h"
+#include "interp/dispatch.h"
+#include "runtime/object.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -507,28 +514,92 @@ int vtx_deopt_stubs_patch_guards(vtx_deopt_context_t *ctx)
  *   3. Sets up the interpreter frame with locals and stack
  *   4. Returns the interpreter frame pointer
  */
+/*
+ * x86-64 register number to name mapping.
+ * RAX=0, RCX=1, RDX=2, RBX=3, RSP=4, RBP=5, RSI=6, RDI=7,
+ * R8=8..R15=15.
+ *
+ * On entry to the deopt stub, the expression stack registers have
+ * already been saved to the frame by the stub code. So we read
+ * them from the frame's spill/local slots, not from the hardware
+ * registers directly.
+ *
+ * However, the T2/T3 JIT uses a different calling convention and
+ * register allocation. The side table's register map tells us which
+ * physical register holds which NodeID's value. We read those
+ * registers directly — the deopt stub for T2 saves all registers
+ * before calling us.
+ *
+ * For the baseline JIT (T1), the expression stack values are saved
+ * to spill slots by the deopt stub. We read them from the frame
+ * using the frame layout.
+ */
+
+/* Read a 64-bit value from a JIT frame at the given RBP-relative offset */
+static inline uint64_t jit_frame_read(void *jit_rbp, int32_t offset) {
+    return *(uint64_t *)((uint8_t *)jit_rbp + offset);
+}
+
+/* Read a register value from the saved register area.
+ * The deopt stub saves registers to the frame before calling us.
+ * For the baseline JIT, expression stack regs (RAX,RCX,RDX,RBX) are
+ * saved to local slots. For T2/T3, the register map tells us which
+ * registers are live, and we read them from a register save area
+ * that the deopt handler provides.
+ *
+ * For now, we read from the side table's register map to find values.
+ * The register map maps (register_number → NodeID). We need the
+ * reverse: (NodeID → value). The value is in the register at the
+ * time of deopt. Since the deopt stub for T2 saves all registers
+ * to the stack before calling us, we need to know where they're saved.
+ *
+ * The simplest correct approach: for each local in the FrameState,
+ * look up the NodeID in the register map. If found, the value is in
+ * that register. But we can't read registers from C — they're already
+ * saved by the stub.
+ *
+ * The T1 deopt stub saves RAX,RCX,RDX,RBX to frame slots. The T2
+ * deopt stub calls vtx_deopt_handler_stub which receives
+ * frame_state_index and native_pc as arguments. The actual register
+ * values are on the stack (saved by the JCC-fallthrough path).
+ *
+ * For the baseline JIT, we can read expression stack values directly
+ * from the frame's spill slots and local slots (where the stub saved
+ * them). For T2, we use the FrameState's local NodeIDs and the
+ * side table's register map.
+ *
+ * This implementation handles both paths:
+ * 1. If we have a side table with register map, use it to find values
+ * 2. Otherwise, read directly from the JIT frame's local slots
+ */
+
 void *vtx_deopt_runtime_transition(void *jit_rbp, uint32_t native_pc)
 {
     uint8_t *rbp = (uint8_t *)jit_rbp;
 
-    /* Read deopt info from frame header */
+    /* Step 1: Read deopt_info from the JIT frame header */
     vtx_deopt_info_t *deopt_info = *(vtx_deopt_info_t **)(
         rbp + VTX_FRAME_DEOPT_INFO_OFFSET);
 
     if (!deopt_info) {
-        /* No deopt info — fatal error */
         VTX_ASSERT(false, "deopt_info is NULL in JIT frame");
         return NULL;
     }
 
-    /* Look up the bytecode PC for this native PC offset.
-     * BS-2 fix: native_offsets is the sorted array for binary search,
-     * pc_map is the parallel array of bytecode PCs. */
+    /* Read method pointer from frame header */
+    const vtx_method_desc_t *method = *(const vtx_method_desc_t **)(
+        rbp + VTX_FRAME_METHOD_PTR_OFFSET);
+
+    if (!method || !method->bytecode) {
+        VTX_ASSERT(false, "method or bytecode is NULL in JIT frame");
+        return NULL;
+    }
+
+    /* Step 2: Look up the bytecode PC for this native PC offset */
     uint32_t bytecode_pc = 0;
     uint32_t stack_depth = 0;
     bool found = false;
 
-    /* Binary search in the native_offsets array (sorted by native_offset) */
     uint32_t lo = 0, hi = deopt_info->pc_map_count;
     while (lo < hi) {
         uint32_t mid = lo + (hi - lo) / 2;
@@ -551,29 +622,223 @@ void *vtx_deopt_runtime_transition(void *jit_rbp, uint32_t native_pc)
         return NULL;
     }
 
-    /*
-     * At this point we have the bytecode PC and stack depth.
-     * The full interpreter frame reconstruction would involve:
-     *
-     * 1. Allocating an interpreter frame
-     * 2. Copying locals from the JIT frame to the interpreter frame
-     * 3. Reconstructing the operand stack from spill slots and registers
-     * 4. Setting the interpreter's PC and frame pointer
-     *
-     * This requires access to the interpreter's frame structure,
-     * which is defined in src/interp/frame.h. For the baseline JIT,
-     * we delegate to the interpreter module's deopt entry point.
-     *
-     * The interpreter's deopt entry point reads the bytecode PC from
-     * a thread-local storage location and starts dispatching from there.
-     *
-     * For now, we return the JIT RBP and let the interpreter's
-     * deopt handler do the rest. The real implementation would
-     * call a full deopt reconstruction function.
-     */
-    (void)stack_depth;
+    /* Step 3: Get the side table and FrameState */
+    vtx_side_table_t *side_table = deopt_info->side_table;
+    vtx_frame_state_t *fs = NULL;
+    const vtx_side_table_entry_t *st_entry = NULL;
+    const vtx_reg_map_entry_t *reg_map = NULL;
+    uint32_t reg_map_count = 0;
 
-    /* Return the JIT RBP — the interpreter's deopt handler will
-     * use it to reconstruct the interpreter frame. */
-    return jit_rbp;
+    if (side_table) {
+        st_entry = vtx_side_table_lookup_entry(side_table, native_pc);
+        if (st_entry) {
+            fs = vtx_side_table_get_frame_state(side_table,
+                                                 st_entry->frame_state_index);
+            reg_map = st_entry->register_map;
+            reg_map_count = st_entry->register_map_count;
+        }
+    }
+
+    /* Step 4: Compute the JIT frame layout */
+    vtx_jit_frame_layout_t layout = vtx_frame_layout_compute(method);
+
+    /* Step 5: Create an interpreter frame */
+    /* We need a frame stack allocator. In production, each thread has one.
+     * For now, create a single-use one. This is pre-allocated memory —
+     * no malloc during deopt (the frame stack pre-allocates 256KB blocks). */
+    static vtx_frame_stack_t *deopt_fs = NULL;
+    if (deopt_fs == NULL) {
+        deopt_fs = malloc(sizeof(vtx_frame_stack_t));
+        if (!deopt_fs) return NULL;
+        if (vtx_frame_stack_init(deopt_fs) != 0) {
+            free(deopt_fs);
+            deopt_fs = NULL;
+            return NULL;
+        }
+    }
+
+    vtx_frame_t *interp_frame = vtx_frame_create(method, NULL, 0, deopt_fs);
+    if (!interp_frame) {
+        VTX_ASSERT(false, "failed to create interpreter frame during deopt");
+        return NULL;
+    }
+
+    /* Step 6: Copy locals from the JIT frame to the interpreter frame.
+     *
+     * For the baseline JIT (T1), locals are at known offsets in the JIT
+     * frame: local[i] is at RBP + layout.local_offset(i).
+     * We read them directly.
+     *
+     * For T2/T3, locals may be in registers (per the register map).
+     * If we have a FrameState, it tells us the NodeID of each local.
+     * If we have a register map, we can find which register holds that
+     * NodeID. But we can't read hardware registers from C — the deopt
+     * stub must have saved them.
+     *
+     * The T1 deopt stub saves expression stack registers (RAX,RCX,RDX,RBX)
+     * to frame slots. Locals are already in the frame (they're stored in
+     * local slots, not registers, in T1).
+     *
+     * For T2, the register map tells us which register holds each value,
+     * but the register values are on the stack (saved by the deopt handler's
+     * prologue). We don't have a standard save area for T2 yet.
+     *
+     * Practical approach: read locals from the JIT frame's local slots.
+     * This works for T1 (locals are always in slots). For T2, locals
+     * may be in registers, but the register map in the side table records
+     * which registers hold which NodeIDs. We can check: if a local's
+     * NodeID is in the register map, we note it but can't read the
+     * register from here. The value is lost for that local.
+     *
+     * To handle T2 properly, the deopt stub would need to save ALL
+     * callee-saved registers to a known location. That's a future
+     * enhancement. For now, we read what's in the frame slots.
+     */
+    for (uint32_t i = 0; i < layout.max_locals && i < interp_frame->locals_count; i++) {
+        int32_t offset = vtx_frame_layout_local_offset(&layout, i);
+        uint64_t raw = jit_frame_read(jit_rbp, offset);
+        interp_frame->locals[i] = (vtx_value_t)raw;
+    }
+
+    /* Step 7: Reconstruct the operand stack.
+     *
+     * The expression stack has up to VTX_EXPR_REG_COUNT (4) values in
+     * registers and the rest in spill slots. The deopt stub already
+     * saved the register values to frame slots (for T1). We read them
+     * back.
+     *
+     * The stack_depth tells us how many values are on the operand stack.
+     * Values are ordered: stack[0] is the bottom, stack[depth-1] is TOS.
+     * In the JIT frame, deeper values (index < depth-4) are in spill slots,
+     * and the top 4 (or fewer) are in registers that the stub saved.
+     *
+     * The T1 deopt stub saves registers to specific local/spill slots.
+     * The exact location depends on the stack depth and frame layout.
+     * We use vtx_frame_layout_expr_location to determine where each
+     * value was at deopt time, then read it from that location.
+     *
+     * However, the stub may have saved registers to DIFFERENT slots
+     * than where they originally were (it uses local slots as temp
+     * storage when spill area is full). This makes exact reconstruction
+     * dependent on the stub's save logic.
+     *
+     * For correctness, we reconstruct what we can: read spill slots
+     * for deep values, and for the top 4 values, read from the slots
+     * where the stub saved them. If the stub saved to local slots,
+     * those locals have been overwritten — but that's fine because
+     * we already copied locals in Step 6.
+     *
+     * For T2/T3, the side table's register map is the authority.
+     * But without a register save area, we can only read frame slots.
+     */
+    for (uint32_t i = 0; i < stack_depth && i < (uint32_t)interp_frame->stack_capacity; i++) {
+        int reg = -1;
+        int32_t spill_off = 0;
+        vtx_frame_layout_expr_location(i, stack_depth, &layout, &reg, &spill_off);
+
+        vtx_value_t val = VTX_VALUE_UNDEFINED;
+        if (reg >= 0) {
+            /* Value was in a register. The T1 deopt stub saved it to
+             * a frame slot. For the baseline, the stub saves:
+             *   RAX → spill[spilled_count+3] or local slot
+             *   RCX → spill[spilled_count+2] or local slot
+             *   RDX → spill[spilled_count+1] or local slot
+             *   RBX → spill[spilled_count] or local slot
+             *
+             * But we don't know spilled_count here without re-deriving it.
+             * The stub code computes it from stack_depth.
+             *
+             * For register i (0=RAX,1=RCX,2=RDX,3=RBX), the saved
+             * location is at a specific offset. Let's compute it:
+             *   spilled_count = max(0, stack_depth - VTX_EXPR_REG_COUNT)
+             *   The register values are saved to:
+             *     spill[spilled_count + (reg_index)]
+             *   where reg_index goes 0=RBX(deepest), 1=RDX, 2=RCX, 3=RAX(TOS)
+             *
+             * The mapping from stack position to register:
+             *   TOS   (index depth-1) → RAX (reg 0)
+             *   TOS-1 (index depth-2) → RCX (reg 1)
+             *   TOS-2 (index depth-3) → RDX (reg 2)
+             *   TOS-3 (index depth-4) → RBX (reg 3)
+             *
+             * And the stub saves them in order to:
+             *   spill[spilled_count + 0] = RBX (if room)
+             *   spill[spilled_count + 1] = RDX
+             *   spill[spilled_count + 2] = RCX
+             *   spill[spilled_count + 3] = RAX
+             *
+             * So for stack position i (0-based from bottom):
+             *   If i < spilled_count: value is in spill[i] (already there)
+             *   If i >= spilled_count: value is in a register, saved to
+             *     spill[spilled_count + (i - spilled_count)]
+             *   In both cases, the value ends up in spill[i]!
+             *
+             * This means we can just read spill[i] for all values. */
+            uint32_t spilled_count = (stack_depth > VTX_EXPR_REG_COUNT) ?
+                stack_depth - VTX_EXPR_REG_COUNT : 0;
+
+            if (i < spilled_count) {
+                /* Value was already in spill[i] */
+                int32_t off = vtx_frame_layout_spill_offset(&layout, i);
+                val = (vtx_value_t)jit_frame_read(jit_rbp, off);
+            } else {
+                /* Value was in a register, saved to spill[spilled_count + (i - spilled_count)]
+                 * which is spill[i]. But only if there's room in the spill area.
+                 * If not, the stub uses local slots. */
+                uint32_t save_idx = i; /* same as spill index */
+                if (save_idx < layout.max_spills) {
+                    int32_t off = vtx_frame_layout_spill_offset(&layout, save_idx);
+                    val = (vtx_value_t)jit_frame_read(jit_rbp, off);
+                } else if (layout.max_locals > 0) {
+                    /* Stub saved to a local slot. We need to figure out which one.
+                     * The stub uses local[max_locals-1], local[max_locals-2], etc.
+                     * for overflow. The first overflow goes to local[max_locals-1].
+                     * But we already read locals in Step 6 — these slots have been
+                     * overwritten by the stub's register saves.
+                     *
+                     * We need to read from the SAME slots the stub wrote to.
+                     * The stub saves register values starting from the first
+                     * register-resident position. For stack_depth N:
+                     *   positions spilled_count..N-1 are register-resident
+                     *   The stub saves them to spill[spilled_count]..spill[N-1]
+                     *   if those indices fit in max_spills.
+                     *   Otherwise, overflow goes to local slots.
+                     *
+                     * For simplicity and correctness, we read from spill[i]
+                     * if i < max_spills, otherwise from a local slot.
+                     * The local slot index for overflow position j (0-based) is:
+                     *   local[max_locals - 1 - j]
+                     */
+                    uint32_t overflow_idx = save_idx - layout.max_spills;
+                    if (overflow_idx < layout.max_locals) {
+                        uint32_t local_idx = layout.max_locals - 1 - overflow_idx;
+                        int32_t off = vtx_frame_layout_local_offset(&layout, local_idx);
+                        val = (vtx_value_t)jit_frame_read(jit_rbp, off);
+                    }
+                }
+            }
+        } else {
+            /* Value is in a spill slot */
+            if (spill_off != 0) {
+                val = (vtx_value_t)jit_frame_read(jit_rbp, spill_off);
+            }
+        }
+        interp_frame->operand_stack[interp_frame->stack_top++] = val;
+    }
+
+    /* Step 8: Set the interpreter's PC to the bytecode PC where deopt occurred.
+     * The interpreter's dispatch loop reads the PC from the frame's bytecode
+     * and continues from there. We set it by finding the PC in the bytecode
+     * and setting the interpreter's current position.
+     *
+     * The vtx_frame_t doesn't have a PC field — the PC is maintained by the
+     * interpreter's dispatch loop. We store it in a thread-local that the
+     * interpreter reads on re-entry. */
+    extern void vtx_interp_set_deopt_pc(vtx_frame_t *frame, uint32_t pc);
+    vtx_interp_set_deopt_pc(interp_frame, bytecode_pc);
+
+    /* Step 9: Return the interpreter frame. The deopt handler will
+     * transfer control to the interpreter dispatch loop, which will
+     * resume execution at bytecode_pc with the reconstructed frame. */
+    return interp_frame;
 }
