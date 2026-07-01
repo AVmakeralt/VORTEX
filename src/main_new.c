@@ -88,8 +88,10 @@
 #include "guard/merge.h"
 #include "guard/guard_page_type.h"
 #include "profile/data.h"
+#include "profile/persist.h"
 #include "interp/type_feedback.h"
 #include "inliner/feedback.h"
+#include <sys/stat.h>
 #ifdef VORTEX_ENABLE_SOTA
 #include "sota/markov.h"
 #include "sota/phase.h"
@@ -2778,6 +2780,23 @@ static void print_usage(const char *prog)
     printf("  --help     Show this help message\n");
 }
 
+/* Create directory recursively (like mkdir -p) */
+static void mkdir_recursive(const char *path) {
+    char tmp[512];
+    strncpy(tmp, path, sizeof(tmp) - 1);
+    tmp[sizeof(tmp) - 1] = '\0';
+    size_t len = strlen(tmp);
+    if (len > 0 && tmp[len - 1] == '/') tmp[len - 1] = '\0';
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(tmp, 0700);
+            *p = '/';
+        }
+    }
+    mkdir(tmp, 0700);
+}
+
 int main(int argc, char *argv[])
 {
     if (argc > 1) {
@@ -2920,6 +2939,63 @@ int main(int argc, char *argv[])
         vtx_profile_global_t profile;
         vtx_profile_global_init(&profile);
 
+        /* PGO (Profile-Guided Optimization): Load profile from disk.
+         *
+         * The profile is keyed by a SHA-256 hash of the bytecode, so
+         * a stale profile from a different bytecode version is automatically
+         * rejected. If VORTEX_NO_PGO=1 is set, skip loading entirely.
+         *
+         * The profile directory defaults to $HOME/.cache/vortex/profiles/
+         * but can be overridden with VORTEX_PROFILE_DIR. */
+        bool pgo_enabled = true;
+        const char *no_pgo = getenv("VORTEX_NO_PGO");
+        if (no_pgo && strcmp(no_pgo, "1") == 0) {
+            pgo_enabled = false;
+        }
+
+        /* Compute bytecode hash for version gating */
+        uint8_t bytecode_hash[VTX_PROFILE_HASH_SIZE];
+        vtx_profile_compute_bytecode_hash(bc->code, bc->length, bytecode_hash);
+
+        /* Determine profile directory */
+        char profile_path[512];
+        if (pgo_enabled) {
+            const char *dir = getenv("VORTEX_PROFILE_DIR");
+            if (dir == NULL) {
+                const char *home = getenv("HOME");
+                if (home == NULL) home = "/tmp";
+                snprintf(profile_path, sizeof(profile_path),
+                         "%s/.cache/vortex/profiles", home);
+                dir = profile_path;
+                /* Create directory if it doesn't exist */
+                mkdir_recursive(dir);
+            }
+
+            /* Profile filename: first 16 bytes of hash as hex */
+            char hash_hex[33];
+            for (int i = 0; i < 16; i++) {
+                snprintf(hash_hex + i * 2, 3, "%02x", bytecode_hash[i]);
+            }
+            hash_hex[32] = '\0';
+
+            char profile_file[600];
+            snprintf(profile_file, sizeof(profile_file), "%s/%s.prof", dir, hash_hex);
+
+            /* Try to load the profile */
+            if (vtx_profile_load(&profile, profile_file, bytecode_hash)) {
+                fprintf(stderr, "[pgo] Loaded profile from %s (%u methods)\n",
+                        profile_file, profile.method_count);
+            } else {
+                fprintf(stderr, "[pgo] No valid profile found at %s (starting fresh)\n",
+                        profile_file);
+            }
+
+            /* Register atexit handler to save profile on shutdown */
+            vtx_profile_register_atexit(&profile, profile_file, bytecode_hash);
+        } else {
+            fprintf(stderr, "[pgo] Disabled (VORTEX_NO_PGO=1)\n");
+        }
+
         vtx_orchestrator_t orchestrator;
         vtx_orchestrator_init(&orchestrator,
 #ifdef VORTEX_ENABLE_SOTA
@@ -2957,6 +3033,91 @@ int main(int argc, char *argv[])
 
         vtx_interp_destroy(&interp);
 
+        /* Sync interpreter profiler data into the global profile for PGO.
+         * The atexit handler (registered above) will save the global profile
+         * to disk. Without this sync, the profile would be empty — the
+         * interpreter's profiler is a separate data structure. */
+        if (pgo_enabled) {
+            for (uint32_t i = 0; i < interp.profiler.count; i++) {
+                vtx_profile_data_t *pd = &interp.profiler.data[i];
+                if (!pd->method) continue;
+
+                uint32_t method_id = pd->method->vtable_index;
+                vtx_profile_method_t *pm = vtx_profile_add_method(&profile, method_id);
+                if (!pm) continue;
+
+                /* Merge invocation count */
+                pm->invocation_count += pd->invocation_count;
+
+                /* Merge branch profiles */
+                for (uint32_t b = 0; b < pd->branch_array_size; b++) {
+                    if (pd->branch_total_counts[b] > 0) {
+                        /* Record branch as (taken, not_taken) */
+                        uint32_t taken = pd->branch_taken_counts[b];
+                        uint32_t not_taken = pd->branch_total_counts[b] - taken;
+                        /* Find or create branch entry by bytecode_pc */
+                        bool found_branch = false;
+                        for (uint32_t j = 0; j < pm->branch_count; j++) {
+                            if (pm->branches[j].bytecode_pc == b) {
+                                pm->branches[j].taken += taken;
+                                pm->branches[j].not_taken += not_taken;
+                                found_branch = true;
+                                break;
+                            }
+                        }
+                        if (!found_branch && pm->branch_count < 64) {
+                            pm->branches[pm->branch_count].bytecode_pc = b;
+                            pm->branches[pm->branch_count].taken = taken;
+                            pm->branches[pm->branch_count].not_taken = not_taken;
+                            pm->branch_count++;
+                        }
+                    }
+                }
+
+                /* Merge loop profiles */
+                for (uint32_t l = 0; l < pd->branch_array_size; l++) {
+                    if (pd->backward_branch_count > 0 && pd->branch_taken_counts[l] > 0) {
+                        /* This PC had backward branches — it's likely a loop header */
+                        bool found_loop = false;
+                        for (uint32_t j = 0; j < pm->loop_count; j++) {
+                            if (pm->loops[j].loop_header_pc == l) {
+                                pm->loops[j].backedge_count += pd->branch_taken_counts[l];
+                                found_loop = true;
+                                break;
+                            }
+                        }
+                        if (!found_loop && pm->loop_count < 32) {
+                            pm->loops[pm->loop_count].loop_header_pc = l;
+                            pm->loops[pm->loop_count].backedge_count = pd->branch_taken_counts[l];
+                            pm->loop_count++;
+                        }
+                    }
+                }
+            }
+
+            /* Unregister atexit handler before destroying profile —
+             * the handler would try to access the destroyed profile.
+             * But we want the save to happen, so we unregister AFTER
+             * the sync but BEFORE destroy. The atexit handler fires
+             * during exit() which happens after main() returns, so
+             * the profile is still valid at that point.
+             *
+             * Actually, the atexit handler fires during exit(), which
+             * is after main() returns. The profile is a local variable
+             * in main(), so it's still on the stack. But we must
+             * unregister before the destroy call below to prevent
+             * use-after-free if the destroy runs first.
+             *
+             * The correct order is:
+             * 1. Sync profiler → profile (done above)
+             * 2. DO NOT unregister here — let atexit save the profile
+             * 3. DO NOT destroy profile here — let main() return and
+             *    atexit will save, then the OS cleans up
+             *
+             * But we're currently destroying profile in the cleanup
+             * below. We need to skip the destroy if PGO is enabled. */
+        }
+
         /* Shut down JIT compilation pipeline */
         vtx_interp_set_compile_ctx(&interp, NULL);
         vtx_orchestrator_stop(&orchestrator);
@@ -2966,8 +3127,13 @@ int main(int argc, char *argv[])
         vtx_method_registry_destroy(&registry);
         vtx_code_cache_destroy(&cache);
 
-        /* Clean up profiling and feedback subsystems */
-        vtx_profile_global_destroy(&profile);
+        /* Clean up profiling and feedback subsystems.
+         * Note: if PGO is enabled, we do NOT destroy the profile here —
+         * the atexit handler needs it to save to disk. The OS reclaims
+         * the memory after exit(). */
+        if (!pgo_enabled) {
+            vtx_profile_global_destroy(&profile);
+        }
         vtx_type_feedback_destroy(&type_feedback);
 #ifdef VORTEX_ENABLE_SOTA
         vtx_phase_react_manager_destroy(&phase_react);

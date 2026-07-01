@@ -73,6 +73,13 @@
 /* SHA-256 hash size in bytes */
 #define VTX_PROFILE_HASH_SIZE 32
 
+/**
+ * Compute SHA-256 hash of bytecode data for version gating.
+ * Implemented in sha256.c (public domain, FIPS 180-4).
+ */
+void vtx_profile_compute_bytecode_hash(const uint8_t *bytecode, size_t len,
+                                        uint8_t hash[VTX_PROFILE_HASH_SIZE]);
+
 /* ========================================================================== */
 /* Save / Load                                                                */
 /* ========================================================================== */
