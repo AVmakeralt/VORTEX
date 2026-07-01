@@ -656,11 +656,11 @@ VTX_TEST(test_persist_01)
     vtx_profile_global_init(&global);
     vtx_profile_add_method(&global, 1);
     vtx_profile_record_invocation(&global, 1);
-    bool ok = vtx_profile_save(&global, "/tmp/vtx_test_persist_01.bin");
+    bool ok = vtx_profile_save(&global, "/tmp/vtx_test_persist_01.bin", NULL);
     VTX_ASSERT_TRUE(ok);
     vtx_profile_global_t loaded;
     vtx_profile_global_init(&loaded);
-    ok = vtx_profile_load(&loaded, "/tmp/vtx_test_persist_01.bin");
+    ok = vtx_profile_load(&loaded, "/tmp/vtx_test_persist_01.bin", NULL);
     VTX_ASSERT_TRUE(ok);
     vtx_profile_global_destroy(&global);
     vtx_profile_global_destroy(&loaded);
@@ -674,11 +674,11 @@ VTX_TEST(test_persist_02)
     vtx_profile_add_method(&global, 10);
     vtx_profile_record_invocation(&global, 10);
     vtx_profile_record_invocation(&global, 10);
-    bool ok = vtx_profile_save(&global, "/tmp/vtx_test_persist_02.bin");
+    bool ok = vtx_profile_save(&global, "/tmp/vtx_test_persist_02.bin", NULL);
     VTX_ASSERT_TRUE(ok);
     vtx_profile_global_t loaded;
     vtx_profile_global_init(&loaded);
-    ok = vtx_profile_load(&loaded, "/tmp/vtx_test_persist_02.bin");
+    ok = vtx_profile_load(&loaded, "/tmp/vtx_test_persist_02.bin", NULL);
     VTX_ASSERT_TRUE(ok);
     vtx_profile_method_t *m = vtx_profile_get_method(&loaded, 10);
     VTX_ASSERT_NOT_NULL(m);
@@ -695,11 +695,11 @@ VTX_TEST(test_persist_03)
     vtx_profile_global_t global;
     vtx_profile_global_init(&global);
     vtx_profile_record_callsite_type(&global, 10, 0, 5);
-    bool ok = vtx_profile_save(&global, "/tmp/vtx_test_persist_03.bin");
+    bool ok = vtx_profile_save(&global, "/tmp/vtx_test_persist_03.bin", NULL);
     VTX_ASSERT_TRUE(ok);
     vtx_profile_global_t loaded;
     vtx_profile_global_init(&loaded);
-    ok = vtx_profile_load(&loaded, "/tmp/vtx_test_persist_03.bin");
+    ok = vtx_profile_load(&loaded, "/tmp/vtx_test_persist_03.bin", NULL);
     VTX_ASSERT_TRUE(ok);
     const vtx_callsite_profile_t *cs = vtx_profile_get_callsite(&loaded, 10, 0);
     VTX_ASSERT_NOT_NULL(cs);
@@ -713,7 +713,7 @@ VTX_TEST(test_persist_04)
 {
     vtx_profile_global_t global;
     vtx_profile_global_init(&global);
-    bool ok = vtx_profile_save(&global, "/tmp/vtx_test_persist_04.bin");
+    bool ok = vtx_profile_save(&global, "/tmp/vtx_test_persist_04.bin", NULL);
     VTX_ASSERT_TRUE(ok);
     FILE *f = fopen("/tmp/vtx_test_persist_04.bin", "rb");
     VTX_ASSERT_NOT_NULL(f);
@@ -726,7 +726,7 @@ VTX_TEST(test_persist_05)
 {
     vtx_profile_global_t global;
     vtx_profile_global_init(&global);
-    bool ok = vtx_profile_load(&global, "/tmp/vtx_nonexistent_file_12345.bin");
+    bool ok = vtx_profile_load(&global, "/tmp/vtx_nonexistent_file_12345.bin", NULL);
     VTX_ASSERT_FALSE(ok);
     vtx_profile_global_destroy(&global);
 }
@@ -738,11 +738,11 @@ VTX_TEST(test_persist_06)
     for (int i = 0; i < 5; i++) {
         vtx_profile_record_invocation(&global, 42);
     }
-    bool ok = vtx_profile_save(&global, "/tmp/vtx_test_persist_06.bin");
+    bool ok = vtx_profile_save(&global, "/tmp/vtx_test_persist_06.bin", NULL);
     VTX_ASSERT_TRUE(ok);
     vtx_profile_global_t loaded;
     vtx_profile_global_init(&loaded);
-    ok = vtx_profile_load(&loaded, "/tmp/vtx_test_persist_06.bin");
+    ok = vtx_profile_load(&loaded, "/tmp/vtx_test_persist_06.bin", NULL);
     VTX_ASSERT_TRUE(ok);
     vtx_profile_method_t *m = vtx_profile_get_method(&loaded, 42);
     VTX_ASSERT_NOT_NULL(m);
@@ -759,11 +759,11 @@ VTX_TEST(test_persist_07)
     for (uint32_t i = 0; i < 10; i++) {
         vtx_profile_record_invocation(&global, i);
     }
-    bool ok = vtx_profile_save(&global, "/tmp/vtx_test_persist_07.bin");
+    bool ok = vtx_profile_save(&global, "/tmp/vtx_test_persist_07.bin", NULL);
     VTX_ASSERT_TRUE(ok);
     vtx_profile_global_t loaded;
     vtx_profile_global_init(&loaded);
-    ok = vtx_profile_load(&loaded, "/tmp/vtx_test_persist_07.bin");
+    ok = vtx_profile_load(&loaded, "/tmp/vtx_test_persist_07.bin", NULL);
     VTX_ASSERT_TRUE(ok);
     VTX_ASSERT_EQUAL(loaded.method_count, 10u);
     vtx_profile_global_destroy(&global);
@@ -777,11 +777,11 @@ VTX_TEST(test_persist_08)
     vtx_profile_global_init(&global);
     vtx_profile_record_branch(&global, 10, 100, true);
     vtx_profile_record_branch(&global, 10, 100, false);
-    bool ok = vtx_profile_save(&global, "/tmp/vtx_test_persist_08.bin");
+    bool ok = vtx_profile_save(&global, "/tmp/vtx_test_persist_08.bin", NULL);
     VTX_ASSERT_TRUE(ok);
     vtx_profile_global_t loaded;
     vtx_profile_global_init(&loaded);
-    ok = vtx_profile_load(&loaded, "/tmp/vtx_test_persist_08.bin");
+    ok = vtx_profile_load(&loaded, "/tmp/vtx_test_persist_08.bin", NULL);
     VTX_ASSERT_TRUE(ok);
     const vtx_branch_profile_t *br = vtx_profile_get_branch(&loaded, 10, 100);
     VTX_ASSERT_NOT_NULL(br);
@@ -799,12 +799,12 @@ VTX_TEST(test_persist_09)
     /* Merge: save, then load into a profile that already has data */
     vtx_profile_record_invocation(&global, 10);
     vtx_profile_record_invocation(&global, 10);
-    bool ok = vtx_profile_save(&global, "/tmp/vtx_test_persist_09.bin");
+    bool ok = vtx_profile_save(&global, "/tmp/vtx_test_persist_09.bin", NULL);
     VTX_ASSERT_TRUE(ok);
     vtx_profile_global_t loaded;
     vtx_profile_global_init(&loaded);
     vtx_profile_record_invocation(&loaded, 10);
-    ok = vtx_profile_load(&loaded, "/tmp/vtx_test_persist_09.bin");
+    ok = vtx_profile_load(&loaded, "/tmp/vtx_test_persist_09.bin", NULL);
     VTX_ASSERT_TRUE(ok);
     vtx_profile_method_t *m = vtx_profile_get_method(&loaded, 10);
     VTX_ASSERT_NOT_NULL(m);
@@ -819,7 +819,7 @@ VTX_TEST(test_persist_10)
 {
     vtx_profile_global_t global;
     vtx_profile_global_init(&global);
-    int rc = vtx_profile_register_atexit(&global, "/tmp/vtx_test_atexit.bin");
+    int rc = vtx_profile_register_atexit(&global, "/tmp/vtx_test_atexit.bin", NULL);
     VTX_ASSERT_EQUAL(rc, 0);
     vtx_profile_unregister_atexit(); /* clear atexit ref before destroying global */
     vtx_profile_global_destroy(&global);

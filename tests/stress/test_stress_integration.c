@@ -2970,11 +2970,11 @@ VTX_TEST(test_profgraph_11)
     vtx_profile_record_invocation(&global, 42);
     vtx_profile_record_invocation(&global, 42);
     vtx_profile_record_invocation(&global, 42);
-    bool ok = vtx_profile_save(&global, "/tmp/vtx_test_profgraph_11.bin");
+    bool ok = vtx_profile_save(&global, "/tmp/vtx_test_profgraph_11.bin", NULL);
     VTX_ASSERT_TRUE(ok);
     vtx_profile_global_t loaded;
     vtx_profile_global_init(&loaded);
-    ok = vtx_profile_load(&loaded, "/tmp/vtx_test_profgraph_11.bin");
+    ok = vtx_profile_load(&loaded, "/tmp/vtx_test_profgraph_11.bin", NULL);
     VTX_ASSERT_TRUE(ok);
     vtx_profile_method_t *m = vtx_profile_get_method(&loaded, 42);
     VTX_ASSERT_NOT_NULL(m);

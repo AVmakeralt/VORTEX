@@ -5,6 +5,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <fcntl.h>
 
 /* ========================================================================== */
 /* CRC32 implementation (ISO 3309 / ITU-T V.42)                              */
@@ -128,6 +131,11 @@ static void writer_u8(vtx_writer_t *w, uint8_t val)
     writer_write(w, &val, 1);
 }
 
+static void writer_bytes(vtx_writer_t *w, const uint8_t *data, size_t len)
+{
+    writer_write(w, data, len);
+}
+
 /* ========================================================================== */
 /* Internal: buffered reader                                                  */
 /* ========================================================================== */
@@ -185,6 +193,11 @@ static bool reader_u8(vtx_reader_t *r, uint8_t *out)
     return reader_read(r, out, 1);
 }
 
+static bool reader_bytes(vtx_reader_t *r, uint8_t *out, size_t len)
+{
+    return reader_read(r, out, len);
+}
+
 /* ========================================================================== */
 /* Save implementation                                                        */
 /* ========================================================================== */
@@ -237,7 +250,8 @@ static bool write_method_profile(vtx_writer_t *w, const vtx_profile_method_t *m)
     return !w->error;
 }
 
-bool vtx_profile_save(const vtx_profile_global_t *global, const char *filename)
+bool vtx_profile_save(const vtx_profile_global_t *global, const char *filename,
+                      const uint8_t bytecode_hash[VTX_PROFILE_HASH_SIZE])
 {
     if (!global || !filename) return false;
 
@@ -248,8 +262,16 @@ bool vtx_profile_save(const vtx_profile_global_t *global, const char *filename)
     memcpy(tmpname, filename, flen);
     memcpy(tmpname + flen, ".tmp", 5);
 
-    FILE *fp = fopen(tmpname, "w+b");
+    /* Open with 0600 permissions (owner read/write only) for security.
+     * Use O_RDWR because we need to seek back and read for CRC computation. */
+    int fd = open(tmpname, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+    if (fd < 0) {
+        free(tmpname);
+        return false;
+    }
+    FILE *fp = fdopen(fd, "w+b");
     if (!fp) {
+        close(fd);
         free(tmpname);
         return false;
     }
@@ -259,8 +281,7 @@ bool vtx_profile_save(const vtx_profile_global_t *global, const char *filename)
     writer_init(&w, fp, false); /* first pass: no CRC yet */
 
     /* Write magic + version (these are part of the CRC'd region) */
-    /* We need to compute CRC over everything after the CRC field.
-     * So the layout is: magic(4) | version(4) | crc(4) | data...
+    /* Layout: magic(4) | version(4) | crc(4) | bytecode_hash(32) | data...
      * CRC covers everything after crc field. */
 
     /* Write magic and version */
@@ -268,6 +289,14 @@ bool vtx_profile_save(const vtx_profile_global_t *global, const char *filename)
     writer_u32(&w, VTX_PROFILE_VERSION);
     /* Placeholder CRC = 0 */
     writer_u32(&w, 0u);
+    /* Write bytecode hash (32 bytes) — used for version gating on load */
+    if (bytecode_hash) {
+        writer_bytes(&w, bytecode_hash, VTX_PROFILE_HASH_SIZE);
+    } else {
+        uint8_t zero_hash[VTX_PROFILE_HASH_SIZE];
+        memset(zero_hash, 0, sizeof(zero_hash));
+        writer_bytes(&w, zero_hash, VTX_PROFILE_HASH_SIZE);
+    }
     /* Method count and call edge count */
     writer_u32(&w, global->method_count);
     writer_u32(&w, global->call_edge_count);
@@ -436,7 +465,8 @@ static bool read_method_profile(vtx_reader_t *r, vtx_profile_method_t *m)
     return true;
 }
 
-bool vtx_profile_load(vtx_profile_global_t *global, const char *filename)
+bool vtx_profile_load(vtx_profile_global_t *global, const char *filename,
+                      const uint8_t expected_hash[VTX_PROFILE_HASH_SIZE])
 {
     if (!global || !filename) return false;
 
@@ -455,9 +485,24 @@ bool vtx_profile_load(vtx_profile_global_t *global, const char *filename)
     if (magic != VTX_PROFILE_MAGIC)    goto fail;
     if (version != VTX_PROFILE_VERSION) goto fail;
 
-    /* Now compute CRC of the remaining data */
-    long data_start = ftell(fp);
-    if (data_start < 0) goto fail;
+    /* Read the bytecode hash (32 bytes) and verify it matches */
+    uint8_t stored_hash[VTX_PROFILE_HASH_SIZE];
+    if (!reader_bytes(&r, stored_hash, VTX_PROFILE_HASH_SIZE)) goto fail;
+
+    if (expected_hash) {
+        /* Compare the stored hash with the expected hash.
+         * If they don't match, the profile was collected against different
+         * bytecode and must be rejected to prevent wrong optimizations. */
+        if (memcmp(stored_hash, expected_hash, VTX_PROFILE_HASH_SIZE) != 0) {
+            goto fail;
+        }
+    }
+
+    /* Now compute CRC of everything after the CRC field (offset 12).
+     * This includes the bytecode hash + method data + call edges.
+     * Must match the save's CRC computation range. */
+    long data_start = 12; /* magic(4) + version(4) + crc(4) */
+    if (fseek(fp, data_start, SEEK_SET) != 0) goto fail;
 
     /* Seek to end to get file size */
     if (fseek(fp, 0, SEEK_END) != 0) goto fail;
@@ -480,8 +525,11 @@ bool vtx_profile_load(vtx_profile_global_t *global, const char *filename)
 
     if (computed_crc != stored_crc) goto fail;
 
-    /* Seek back to data region for reading */
-    fseek(fp, data_start, SEEK_SET);
+    /* Seek back to after the bytecode hash for reading profile data.
+     * data_start is 12 (after CRC field), and the hash is 32 bytes,
+     * so the actual profile data starts at offset 12 + 32 = 44. */
+    long read_start = data_start + VTX_PROFILE_HASH_SIZE;
+    fseek(fp, read_start, SEEK_SET);
     reader_init(&r, fp, false);
 
     /* Read method count and call edge count */
@@ -546,18 +594,20 @@ fail:
 
 static vtx_profile_global_t *g_atexit_global = NULL;
 static char                 *g_atexit_filename = NULL;
+static uint8_t               g_atexit_hash[VTX_PROFILE_HASH_SIZE];
 
 static void profile_atexit_handler(void)
 {
     if (g_atexit_global && g_atexit_filename) {
-        vtx_profile_save(g_atexit_global, g_atexit_filename);
+        vtx_profile_save(g_atexit_global, g_atexit_filename, g_atexit_hash);
     }
     free(g_atexit_filename);
     g_atexit_filename = NULL;
 }
 
 int vtx_profile_register_atexit(vtx_profile_global_t *global,
-                                 const char *filename)
+                                 const char *filename,
+                                 const uint8_t bytecode_hash[VTX_PROFILE_HASH_SIZE])
 {
     if (!global || !filename) return -1;
 
@@ -567,6 +617,13 @@ int vtx_profile_register_atexit(vtx_profile_global_t *global,
     g_atexit_global = global;
     g_atexit_filename = strdup(filename);
     if (!g_atexit_filename) return -1;
+
+    /* Store the bytecode hash for the atexit save */
+    if (bytecode_hash) {
+        memcpy(g_atexit_hash, bytecode_hash, VTX_PROFILE_HASH_SIZE);
+    } else {
+        memset(g_atexit_hash, 0, VTX_PROFILE_HASH_SIZE);
+    }
 
     if (atexit(profile_atexit_handler) != 0) {
         free(g_atexit_filename);

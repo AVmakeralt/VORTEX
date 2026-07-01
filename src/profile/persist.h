@@ -63,8 +63,15 @@
 /* Profile file format magic number: "VORT" in ASCII */
 #define VTX_PROFILE_MAGIC 0x564F5254u
 
-/* Profile format version. Increment when format changes. */
-#define VTX_PROFILE_VERSION 1u
+/* Profile format version. Increment when format changes.
+ *
+ * Version 2: Added bytecode_hash (32 bytes) to header for version gating.
+ *            Profile is invalidated automatically if bytecode changes.
+ * Version 1: Original format (no bytecode hash). */
+#define VTX_PROFILE_VERSION 2u
+
+/* SHA-256 hash size in bytes */
+#define VTX_PROFILE_HASH_SIZE 32
 
 /* ========================================================================== */
 /* Save / Load                                                                */
@@ -74,18 +81,31 @@
  * Save global profile data to a binary file.
  * Returns true on success, false on failure.
  * The file is written atomically (write to temp, then rename).
+ * File permissions are set to 0600 (owner read/write only).
+ *
+ * @param global         The profile data to save
+ * @param filename       Output filename
+ * @param bytecode_hash  SHA-256 hash of the bytecode this profile was
+ *                       collected against. Stored in the header so that
+ *                       a profile from a different bytecode version is
+ *                       automatically rejected on load. May be NULL to
+ *                       skip the hash (not recommended for production).
  */
-bool vtx_profile_save(const vtx_profile_global_t *global, const char *filename);
+bool vtx_profile_save(const vtx_profile_global_t *global, const char *filename,
+                      const uint8_t bytecode_hash[VTX_PROFILE_HASH_SIZE]);
 
 /**
  * Load global profile data from a binary file.
  * If the file's version doesn't match VTX_PROFILE_VERSION, the file is ignored
  * and false is returned. If the CRC32 doesn't match, false is returned.
+ * If expected_hash is non-NULL and the stored bytecode hash doesn't match,
+ * false is returned (profile is from a different bytecode version).
  * On success, the loaded data is MERGED into the existing global profile
  * (existing data is preserved and augmented with loaded data).
  * Returns true on success, false on failure.
  */
-bool vtx_profile_load(vtx_profile_global_t *global, const char *filename);
+bool vtx_profile_load(vtx_profile_global_t *global, const char *filename,
+                      const uint8_t expected_hash[VTX_PROFILE_HASH_SIZE]);
 
 /* ========================================================================== */
 /* atexit handler                                                             */
@@ -97,7 +117,8 @@ bool vtx_profile_load(vtx_profile_global_t *global, const char *filename);
  * Returns 0 on success, -1 on failure.
  */
 int vtx_profile_register_atexit(vtx_profile_global_t *global,
-                                 const char *filename);
+                                 const char *filename,
+                                 const uint8_t bytecode_hash[VTX_PROFILE_HASH_SIZE]);
 
 /**
  * Unregister the atexit handler. Clears the stored global pointer
