@@ -1221,6 +1221,68 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             break;
         }
 
+        /* Check if divisor is a constant power of 2.
+         * If so, emit SAR with rounding correction instead of IDIV.
+         * This is done at isel level (not IR level) to avoid scheduler
+         * placement issues — the isel emits instructions in the correct
+         * block context. */
+        int64_t div_const;
+        if (try_get_const_int(graph, node->inputs[1], &div_const) && div_const > 0) {
+            int shift = -1;
+            int64_t v = div_const;
+            if (v > 0 && (v & (v - 1)) == 0) {
+                while (v > 1) { shift++; v >>= 1; }
+                shift++; /* shift = log2(div_const) */
+            }
+
+            if (shift >= 1 && shift <= 62) {
+                /* Div(x, 2^k) → (x + (x>>63 & mask)) >> k
+                 *
+                 * Emit:
+                 *   untag lhs → lhs_raw
+                 *   mov tmp, lhs_raw
+                 *   sar tmp, 63           (sign mask: 0 or -1)
+                 *   and tmp, (1<<k)-1     (correction)
+                 *   add tmp, lhs_raw      (corrected = x + correction)
+                 *   sar tmp, k            (result = corrected >> k)
+                 *   mov dst, tmp
+                 *   retag dst
+                 */
+                uint32_t dst = ensure_node_vreg(stream, node_id, arena);
+                uint32_t lhs_raw = vtx_isel_alloc_vreg(stream, arena);
+                uint32_t tmp = vtx_isel_alloc_vreg(stream, arena);
+
+                /* Untag lhs. Use NO_COALESCE to prevent lhs_raw from being
+                 * coalesced with lhs_vreg — we need lhs_raw to stay alive
+                 * across the SAR+AND+ADD sequence where tmp is modified. */
+                stream->uses_smi = true;
+                vtx_inst_t unt = make_rr_inst(VTX_X86_MOV, lhs_raw, lhs_vreg, node_id);
+                unt.flags |= VTX_INST_FLAG_NO_COALESCE;
+                vtx_isel_emit_inst(block, unt, arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, lhs_raw, 13, node_id), arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, lhs_raw, 16, node_id), arena);
+
+                /* tmp = lhs_raw >> 63 (sign mask) */
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, tmp, lhs_raw, node_id), arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, tmp, 63, node_id), arena);
+
+                /* tmp = tmp & ((1<<k) - 1) (correction) */
+                int64_t mask = (1LL << shift) - 1;
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_AND, tmp, mask, node_id), arena);
+
+                /* tmp = lhs_raw + tmp (corrected) */
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_ADD, tmp, lhs_raw, node_id), arena);
+
+                /* tmp = tmp >> k (result) */
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, tmp, shift, node_id), arena);
+
+                /* retag and store to dst */
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, tmp, node_id), arena);
+                emit_smi_retag(stream, block, dst, node_id, arena);
+                break;
+            }
+        }
+
         /* SMI Div: must untag both operands, divide, retag result.
          * IDIV on NaN-boxed SMI values produces completely wrong results
          * because the header bits corrupt the division. */

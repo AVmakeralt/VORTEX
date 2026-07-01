@@ -327,7 +327,18 @@ int main(void) {
     fflush(stdout);
 
     printf("  calling collatz(27)...\n"); fflush(stdout);
-    printf("  collatz(27)  SKIPPED (known Sar bug in loops)\n");
+    v = vtx_make_smi(27);
+    alarm(5);
+    vtx_value_t col_result = j_col(&m, NULL, (void*)1, &v, 1);
+    alarm(0);
+    if (vtx_is_smi(col_result)) {
+        j_r = vtx_smi_value(col_result);
+        printf("  collatz(27)  T2=%lld  native=%lld  %s\n",
+               (long long)j_r, (long long)native_collatz(27),
+               j_r == native_collatz(27) ? "OK" : "MISMATCH");
+    } else {
+        printf("  collatz(27)  T2=NON-SMI (bug)\n");
+    }
     fflush(stdout);
     printf("\n");
 
@@ -371,8 +382,17 @@ int main(void) {
            100.0 * s_native.median / s_jit.median, s_t0.median / s_jit.median);
 
     /* ----- Benchmark: collatz(27) ----- */
-    /* Skip collatz benchmark — known Sar strength reduction bug in loops */
-    printf("--- collatz(27) --- SKIPPED (known Sar bug)\n\n");
+    printf("--- collatz(27) ---\n");
+    jc.entry = j_col; jc.arg = vtx_make_smi(27);
+    narg = 27;
+    s_native = bench_run(call_native_collatz, (void*)narg, 10000);
+    s_jit = bench_run(call_jit1, &jc, 10000);
+    s_t0 = bench_run(call_t0_collatz, (void*)narg, 100);
+    print_stats("Native C", s_native);
+    print_stats("VORTEX T2 JIT", s_jit);
+    print_stats("VORTEX T0 Interpreter", s_t0);
+    printf("  → T2 JIT: %.1f%% of native C  |  %.1fx faster than T0 interp\n\n",
+           100.0 * s_native.median / s_jit.median, s_t0.median / s_jit.median);
 
     /* ===== T3 BENCHMARKS ===== */
     printf("\n=== T3 (Speculative JIT) Benchmarks ===\n\n");
@@ -398,7 +418,17 @@ int main(void) {
         j_r = vtx_smi_value(t3_gcd(&m, NULL, (void*)1, g3, 2));
         printf("  T3 gcd(123456,7890) = %lld %s\n", (long long)j_r,
                j_r == native_gcd(123456, 7890) ? "OK" : "MISMATCH");
-        printf("  T3 collatz(27) = SKIPPED (known Sar bug)\n\n");
+        v = vtx_make_smi(27);
+        alarm(5);
+        col_result = t3_col(&m, NULL, (void*)1, &v, 1);
+        alarm(0);
+        if (vtx_is_smi(col_result)) {
+            j_r = vtx_smi_value(col_result);
+            printf("  T3 collatz(27) = %lld %s\n\n", (long long)j_r,
+                   j_r == native_collatz(27) ? "OK" : "MISMATCH");
+        } else {
+            printf("  T3 collatz(27) = NON-SMI (bug)\n\n");
+        }
 
         /* T3 Benchmark: sum(100) */
         printf("--- T3 sum(100) ---\n");
@@ -449,8 +479,22 @@ int main(void) {
                s_jit.median / s_t3.median,
                s_t0.median / s_t3.median);
 
-        /* T3 Benchmark: collatz(27) — SKIPPED (known Sar bug) */
-        printf("--- T3 collatz(27) --- SKIPPED (known Sar bug)\n\n");
+        /* T3 Benchmark: collatz(27) */
+        printf("--- T3 collatz(27) ---\n");
+        jc.entry = t3_col; jc.arg = vtx_make_smi(27);
+        narg = 27;
+        s_native = bench_run(call_native_collatz, (void*)narg, 10000);
+        s_t3 = bench_run(call_jit1, &jc, 10000);
+        s_jit = bench_run(call_jit1, &(jit1_ctx_t){j_col, vtx_make_smi(27)}, 10000);
+        s_t0 = bench_run(call_t0_collatz, (void*)narg, 100);
+        print_stats("Native C", s_native);
+        print_stats("VORTEX T3 JIT", s_t3);
+        print_stats("VORTEX T2 JIT", s_jit);
+        print_stats("VORTEX T0 Interpreter", s_t0);
+        printf("  → T3: %.1f%% of native  |  T3 vs T2: %.2fx  |  %.1fx faster than T0\n\n",
+               100.0 * s_native.median / s_t3.median,
+               s_jit.median / s_t3.median,
+               s_t0.median / s_t3.median);
     }
 
     /* ----- Summary ----- */
