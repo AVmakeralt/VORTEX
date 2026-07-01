@@ -893,27 +893,53 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
         /* Variable + Variable (or Variable + Const): untag both, add, retag.
          *
-         * The NaN-boxed SMI identity SMI(a)+SMI(b)-HEADER = SMI(a+b) is
-         * FUNDAMENTALLY WRONG when carry from data bits corrupts the header
-         * area. This happens whenever either operand is negative or the
-         * result wraps.
-         * Example: SMI(-1) + SMI(1) - HEADER = 0x8000000000000000, not SMI(0).
-         * Example: SMI(0) - 8 = 0x7FF7FFFFFFFFFFFF8, not SMI(-1).
-         *
-         * The ONLY correct approach: untag both to raw int64, add, then
-         * retag using mask-and-OR (SHL 3 + ADD HEADER is also wrong for
-         * negative results). */
+         * SMI tag elision: if the node is marked RAW_INT, the inputs are
+         * already untagged (by a previous op in the chain) and the output
+         * will be consumed by another RAW_INT op. Skip untag and retag.
+         * The chain entry untag and chain exit retag are handled by the
+         * boundary nodes (non-RAW_INT ops that need tagged SMIs). */
         {
-            uint32_t lhs_untagged = vtx_isel_alloc_vreg(stream, arena);
-            uint32_t rhs_untagged = vtx_isel_alloc_vreg(stream, arena);
+            bool is_raw = vtx_nf_has(node->flags, VTX_NF_RAW_INT);
 
-            emit_smi_untag(stream, block, lhs_untagged, lhs_vreg, node_id, arena);
-            emit_smi_untag(stream, block, rhs_untagged, rhs_vreg, node_id, arena);
+            /* Check if inputs are RAW_INT (already untagged) or need untagging */
+            const vtx_node_t *lhs_node = vtx_node_get_const(&graph->node_table, node->inputs[0]);
+            const vtx_node_t *rhs_node = vtx_node_get_const(&graph->node_table, node->inputs[1]);
+            bool lhs_is_raw = lhs_node && vtx_nf_has(lhs_node->flags, VTX_NF_RAW_INT);
+            bool rhs_is_raw = rhs_node && vtx_nf_has(rhs_node->flags, VTX_NF_RAW_INT);
 
+            uint32_t lhs_untagged, rhs_untagged;
+
+            if (lhs_is_raw) {
+                /* Input is already raw int — use it directly */
+                lhs_untagged = lhs_vreg;
+            } else {
+                /* Input needs untagging */
+                lhs_untagged = vtx_isel_alloc_vreg(stream, arena);
+                emit_smi_untag(stream, block, lhs_untagged, lhs_vreg, node_id, arena);
+            }
+
+            if (rhs_is_raw) {
+                rhs_untagged = rhs_vreg;
+            } else {
+                rhs_untagged = vtx_isel_alloc_vreg(stream, arena);
+                emit_smi_untag(stream, block, rhs_untagged, rhs_vreg, node_id, arena);
+            }
+
+            /* The actual operation */
             vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_ADD, lhs_untagged, rhs_untagged, node_id), arena);
 
-            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_untagged, node_id), arena);
-            emit_smi_retag(stream, block, dst, node_id, arena);
+            if (is_raw) {
+                /* Output is raw int — no retag needed. The consumer will
+                 * either use it directly (another RAW_INT op) or retag it
+                 * at chain exit. Just move to dst. */
+                if (dst != lhs_untagged) {
+                    vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_untagged, node_id), arena);
+                }
+            } else {
+                /* Output needs retagging (chain exit or single op) */
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_untagged, node_id), arena);
+                emit_smi_retag(stream, block, dst, node_id, arena);
+            }
         }
         break;
     }
@@ -956,24 +982,39 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         }
 
         /* Variable - Variable (or Variable - Const): untag both, sub, retag.
-         *
-         * The NaN-boxed SMI identity SMI(a)-SMI(b)+HEADER = SMI(a-b) is
-         * FUNDAMENTALLY WRONG for the same reason as Add: carry/borrow from
-         * data bits corrupts the header area.
-         * Example: SMI(0) - SMI(1) + HEADER = 0x7FF7FFFFFFFFFFF8, not SMI(-1).
-         *
-         * The ONLY correct approach: untag both, subtract, retag. */
+         * SMI tag elision: skip untag/retag for RAW_INT chains. */
         {
-            uint32_t lhs_untagged = vtx_isel_alloc_vreg(stream, arena);
-            uint32_t rhs_untagged = vtx_isel_alloc_vreg(stream, arena);
+            bool is_raw = vtx_nf_has(node->flags, VTX_NF_RAW_INT);
+            const vtx_node_t *lhs_node = vtx_node_get_const(&graph->node_table, node->inputs[0]);
+            const vtx_node_t *rhs_node = vtx_node_get_const(&graph->node_table, node->inputs[1]);
+            bool lhs_is_raw = lhs_node && vtx_nf_has(lhs_node->flags, VTX_NF_RAW_INT);
+            bool rhs_is_raw = rhs_node && vtx_nf_has(rhs_node->flags, VTX_NF_RAW_INT);
 
-            emit_smi_untag(stream, block, lhs_untagged, lhs_vreg, node_id, arena);
-            emit_smi_untag(stream, block, rhs_untagged, rhs_vreg, node_id, arena);
+            uint32_t lhs_untagged, rhs_untagged;
+
+            if (lhs_is_raw) {
+                lhs_untagged = lhs_vreg;
+            } else {
+                lhs_untagged = vtx_isel_alloc_vreg(stream, arena);
+                emit_smi_untag(stream, block, lhs_untagged, lhs_vreg, node_id, arena);
+            }
+            if (rhs_is_raw) {
+                rhs_untagged = rhs_vreg;
+            } else {
+                rhs_untagged = vtx_isel_alloc_vreg(stream, arena);
+                emit_smi_untag(stream, block, rhs_untagged, rhs_vreg, node_id, arena);
+            }
 
             vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_SUB, lhs_untagged, rhs_untagged, node_id), arena);
 
-            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_untagged, node_id), arena);
-            emit_smi_retag(stream, block, dst, node_id, arena);
+            if (is_raw) {
+                if (dst != lhs_untagged) {
+                    vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_untagged, node_id), arena);
+                }
+            } else {
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_untagged, node_id), arena);
+                emit_smi_retag(stream, block, dst, node_id, arena);
+            }
         }
         break;
     }

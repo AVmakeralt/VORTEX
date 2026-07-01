@@ -29,6 +29,7 @@
 #include "codecache/install.h"
 #include "ir/strength_reduce.h"
 #include "ir/loop_unroll.h"
+#include "ir/smi_tag_elision.h"
 #include "guard/hoist.h"
 #include "guard/merge.h"
 #include "deopt/frame_state.h"
@@ -1024,6 +1025,20 @@ int vtx_pipeline_run(vtx_graph_t *graph,
         uint32_t sr_replaced = vtx_strength_reduce_run(graph);
         if (sr_replaced > 0) {
             verify_between_passes(graph, config, "StrengthReduce");
+        }
+    }
+
+    /* ================================================================== */
+    /* Phase 2.6: SMI Tag Elision                                         */
+    /*                                                                    */
+    /* Marks straight-line arithmetic chains as RAW_INT so the isel skips */
+    /* per-op untag/retag. One untag at chain entry, one retag at exit.  */
+    /* This is the single highest-ROI optimization for SMI-heavy loops.  */
+    /* ================================================================== */
+    if (config->run_sccp) {
+        uint32_t elided = vtx_smi_tag_elision_run(graph);
+        if (elided > 0) {
+            verify_between_passes(graph, config, "SMITagElision");
         }
     }
 

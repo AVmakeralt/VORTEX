@@ -154,6 +154,8 @@ typedef enum {
     VTX_NF_SIDE_EFFECT= (1u << 3),   /* node has side effects (keeps alive in DCE) */
     VTX_NF_PINNED     = (1u << 4),   /* node must not float freely (e.g. Phi) */
     VTX_NF_WRITE_BARRIER = (1u << 5), /* node requires a GC write barrier (StoreField/StoreIndexed of ref) */
+    VTX_NF_RAW_INT    = (1u << 6),   /* SMI tag elision: node operates on raw int64,
+                                      * not NaN-boxed SMI. isel skips untag/retag. */
 } vtx_node_flags_t;
 
 /* Bitwise operators for flags */
