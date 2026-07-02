@@ -47,6 +47,8 @@
 #include "deopt/stack_walk.h"
 #include "deopt/coordinator.h"
 #include "codecache/versioned.h"
+#include "runtime/safepoint_manager.h"
+#include "runtime/gc.h"
 #include "baseline/codegen.h"
 #include "baseline/guards.h"
 #include "baseline/frame_layout.h"
@@ -2800,6 +2802,53 @@ static void mkdir_recursive(const char *path) {
     mkdir(tmp, 0700);
 }
 
+/* Conservative JIT root scanner for GC.
+ *
+ * Walks the native stack (RBP chain) and pushes any value that looks like
+ * a NaN-boxed heap pointer as a GC root. This is conservative — it may
+ * push non-roots (keeping some dead objects alive), but it's safe (never
+ * frees a live object).
+ *
+ * This is the integration point for the stack walker. A precise scanner
+ * using vtx_stack_walk + side tables would be more efficient but requires
+ * the full stack walk config (side table registry, node table, etc). */
+static void jit_root_scan_conservative(vtx_gc_t *gc)
+{
+    if (gc == NULL) return;
+
+    /* Walk the RBP chain starting from the current frame's caller.
+     * Each frame's local variables and spilled registers may contain
+     * heap pointers. We scan the frame's local area (between RBP and
+     * RSP) for values that look like NaN-boxed heap pointers. */
+    void *fp;
+    /* Get the current frame pointer */
+    fp = __builtin_frame_address(0);
+    if (fp == NULL) return;
+
+    /* Walk up the frame chain (max 64 frames to prevent infinite loops) */
+    for (int depth = 0; depth < 64 && fp != NULL; depth++) {
+        void **frame = (void **)fp;
+        /* The saved RBP is at [frame], the return address is at [frame+1].
+         * Local variables are at negative offsets from RBP.
+         * Scan the local area (8 slots below RBP) for heap pointers. */
+        for (int i = -8; i <= 2; i++) {
+            uint64_t val = (uint64_t)frame[i];
+            /* Check if this looks like a NaN-boxed heap pointer:
+             * VTX_NAN_BOX_HEADER = 0x7FF8000000000000
+             * VTX_TAG_HEAP_PTR = 1 (low 3 bits)
+             * So a heap pointer looks like 0x7FF8000000000001 | (ptr >> 3 << 3)
+             * We check: top 16 bits == 0x7FF8, low 3 bits == 1 */
+            if ((val & 0xFFFF000000000000ULL) == 0x7FF8000000000000ULL &&
+                (val & 0x7ULL) == VTX_TAG_HEAP_PTR) {
+                /* This looks like a heap pointer — push it as a root */
+                vtx_gc_root_push(gc, (vtx_value_t)val);
+            }
+        }
+        /* Move to caller frame */
+        fp = *frame;
+    }
+}
+
 int main(int argc, char *argv[])
 {
     if (argc > 1) {
@@ -2907,16 +2956,38 @@ int main(int argc, char *argv[])
             compile_ctx.versioned_cache = NULL;
         }
 
-        /* Safepoint manager: the compile/safepoint.h version is already
-         * initialized below (vtx_safepoint_init). The runtime/safepoint_manager.h
-         * version (multi-threaded, GC-integrated) can't be included simultaneously
-         * due to a typedef name conflict. The GC's safepoint_mgr field is
-         * left NULL — the GC falls back to single-threaded collection
-         * (vtx_gc_collect_young without requesting all threads to safepoint).
-         * This is safe for single-threaded execution but needs the runtime
-         * safepoint_manager for multi-threaded GC. */
-        compile_ctx.safepoint_mgr = NULL;
-        gc.safepoint_mgr = NULL;
+        /* Safepoint manager: instantiate the runtime/safepoint_manager.h
+         * version (multi-threaded, GC-integrated). This provides:
+         *   - vtx_safepoint_request_all: called by GC before collection
+         *   - vtx_safepoint_mgr_check: called by JIT code at loop back-edges
+         *   - Thread registration/unregistration
+         * The compile/safepoint.h version (vtx_compile_safepoint_mgr_t) is
+         * a separate, simpler system for code cache install/invalidate
+         * processing, initialized below as compile_safepoint_mgr. */
+        vtx_safepoint_manager_t rt_safepoint_mgr;
+        if (vtx_safepoint_manager_init(&rt_safepoint_mgr, &gc) == 0) {
+            compile_ctx.safepoint_mgr = &rt_safepoint_mgr;
+            vtx_safepoint_thread_register(&rt_safepoint_mgr);
+            /* Wire into GC so vtx_gc_safepoint requests all threads to
+             * safepoint before collecting. */
+            gc.safepoint_mgr = &rt_safepoint_mgr;
+        } else {
+            compile_ctx.safepoint_mgr = NULL;
+            gc.safepoint_mgr = NULL;
+        }
+
+        /* Wire JIT root scanning into the GC.
+         *
+         * The GC calls jit_root_scan_fn during collection to find GC roots
+         * in JIT-compiled frames on the native stack. We use a conservative
+         * scanner: walk the RBP chain and push any value that looks like a
+         * heap pointer (NaN-boxed with HEAP_PTR tag) as a root.
+         *
+         * This is safe (may keep some dead objects alive, but never frees
+         * live ones) and simple (doesn't need side tables or frame states).
+         * A precise scanner using vtx_stack_walk + side tables would be
+         * more efficient but requires the full stack walk config. */
+        gc.jit_root_scan_fn = jit_root_scan_conservative;
 
         /* Allocate the deoptless continuation tables array.
          * The pipeline creates a per-method table on first compile.
@@ -2956,7 +3027,7 @@ int main(int argc, char *argv[])
         /* Initialize the safepoint manager. This enables safepoint
          * polling for GC suspension in JIT-compiled code. Without this,
          * long-running JIT code can't be stopped for GC. */
-        vtx_safepoint_manager_t safepoint_mgr;
+        vtx_compile_safepoint_mgr_t safepoint_mgr;
         vtx_safepoint_init(&safepoint_mgr, 0, NULL);
 
         /* Instantiate the runtime orchestrator with REAL subsystems.
@@ -3194,6 +3265,10 @@ int main(int argc, char *argv[])
         }
         if (compile_ctx.versioned_cache != NULL) {
             vtx_versioned_cache_destroy(&versioned_cache);
+        }
+        if (compile_ctx.safepoint_mgr != NULL) {
+            vtx_safepoint_thread_unregister(&rt_safepoint_mgr);
+            vtx_safepoint_manager_destroy(&rt_safepoint_mgr);
         }
         vtx_method_registry_destroy(&registry);
         vtx_code_cache_destroy(&cache);

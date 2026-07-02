@@ -237,7 +237,7 @@ VTX_TEST(test_pipe_14) {
 }
 
 VTX_TEST(test_pipe_15) {
-    vtx_safepoint_manager_t sp;
+    vtx_compile_safepoint_mgr_t sp;
     memset(&sp, 0, sizeof(sp));
     /* Init requires non-NULL registry and code_cache; verify destroy on zeroed is safe */
     vtx_safepoint_destroy(&sp);
@@ -245,7 +245,7 @@ VTX_TEST(test_pipe_15) {
 }
 
 VTX_TEST(test_pipe_16) {
-    vtx_safepoint_manager_t sp;
+    vtx_compile_safepoint_mgr_t sp;
     memset(&sp, 0, sizeof(sp));
     sp.state = VTX_SP_CLEAR;
     VTX_ASSERT_FALSE(vtx_safepoint_is_pending(&sp));
@@ -261,7 +261,7 @@ VTX_TEST(test_pipe_16) {
 }
 
 VTX_TEST(test_pipe_17) {
-    vtx_safepoint_manager_t sp;
+    vtx_compile_safepoint_mgr_t sp;
     memset(&sp, 0, sizeof(sp));
     sp.state = VTX_SP_CLEAR;
     /* Request install on a manager with no registry — still sets state */
@@ -271,7 +271,7 @@ VTX_TEST(test_pipe_17) {
 }
 
 VTX_TEST(test_pipe_18) {
-    vtx_safepoint_manager_t sp;
+    vtx_compile_safepoint_mgr_t sp;
     memset(&sp, 0, sizeof(sp));
     sp.state = VTX_SP_CLEAR;
     sp.state = VTX_SP_INVALIDATE_PENDING;

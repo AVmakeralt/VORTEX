@@ -246,7 +246,7 @@ typedef struct {
     uint64_t                     total_installations; /* number of installations performed */
     uint64_t                     total_invalidations; /* number of invalidations performed */
     uint64_t                     total_time_ns;       /* cumulative time in safe point handlers */
-} vtx_safepoint_manager_t;
+} vtx_compile_safepoint_mgr_t;
 
 /* ========================================================================== */
 /* Lifecycle                                                                   */
@@ -260,14 +260,14 @@ typedef struct {
  * @param code_cache Code cache (used for installation)
  * @return           0 on success, -1 on failure
  */
-int vtx_safepoint_init(vtx_safepoint_manager_t *manager,
+int vtx_safepoint_init(vtx_compile_safepoint_mgr_t *manager,
                         vtx_method_registry_t *registry,
                         vtx_code_cache_t *code_cache);
 
 /**
  * Destroy the safe point manager and free resources.
  */
-void vtx_safepoint_destroy(vtx_safepoint_manager_t *manager);
+void vtx_safepoint_destroy(vtx_compile_safepoint_mgr_t *manager);
 
 /* ========================================================================== */
 /* Safe point check                                                            */
@@ -286,7 +286,7 @@ void vtx_safepoint_destroy(vtx_safepoint_manager_t *manager);
  * @return         0 if no action needed, 1 if installations were processed,
  *                 -1 if invalidation requires deopt
  */
-int vtx_safepoint_check(vtx_safepoint_manager_t *manager, void *interp);
+int vtx_safepoint_check(vtx_compile_safepoint_mgr_t *manager, void *interp);
 
 /* ========================================================================== */
 /* Installation requests                                                       */
@@ -304,7 +304,7 @@ int vtx_safepoint_check(vtx_safepoint_manager_t *manager, void *interp);
  * @param compiled_method  Compiled method metadata
  * @return                 0 on success, -1 on failure
  */
-int vtx_safepoint_request_install(vtx_safepoint_manager_t *manager,
+int vtx_safepoint_request_install(vtx_compile_safepoint_mgr_t *manager,
                                    uint32_t method_id,
                                    vtx_compiled_method_t *compiled_method);
 
@@ -322,7 +322,7 @@ int vtx_safepoint_request_install(vtx_safepoint_manager_t *manager,
  * @param method_id Method ID to invalidate
  * @return          0 on success, -1 on failure
  */
-int vtx_safepoint_request_invalidate(vtx_safepoint_manager_t *manager,
+int vtx_safepoint_request_invalidate(vtx_compile_safepoint_mgr_t *manager,
                                       uint32_t method_id);
 
 /* ========================================================================== */
@@ -334,7 +334,7 @@ int vtx_safepoint_request_invalidate(vtx_safepoint_manager_t *manager,
  * Returns true if a safe point is pending (slow path needed).
  * This is designed to be inlined at every safe point in compiled code.
  */
-static inline bool vtx_safepoint_is_pending(const vtx_safepoint_manager_t *manager)
+static inline bool vtx_safepoint_is_pending(const vtx_compile_safepoint_mgr_t *manager)
 {
     return __atomic_load_n(&manager->state, __ATOMIC_ACQUIRE) != VTX_SP_CLEAR;
 }

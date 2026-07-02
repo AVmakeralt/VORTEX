@@ -31,13 +31,13 @@
 #include <errno.h>
 
 /** Global safepoint manager pointer for signal handler access */
-static vtx_safepoint_manager_t *vtx_global_safepoint_manager = NULL;
+static vtx_compile_safepoint_mgr_t *vtx_global_safepoint_manager = NULL;
 
 /** Global flag for guard page availability — now defined in vortex_common
  * (arena.c) to break the circular dependency between vortex_lower and
  * vortex_compile. This file only sets the flag, it does not define it. */
 
-vtx_safepoint_manager_t *vtx_get_safepoint_manager(void)
+vtx_compile_safepoint_mgr_t *vtx_get_safepoint_manager(void)
 {
     return vtx_global_safepoint_manager;
 }
@@ -57,7 +57,7 @@ volatile int vtx_safepoint_flag = 0;
 /* Lifecycle                                                                   */
 /* ========================================================================== */
 
-int vtx_safepoint_init(vtx_safepoint_manager_t *manager,
+int vtx_safepoint_init(vtx_compile_safepoint_mgr_t *manager,
                         vtx_method_registry_t *registry,
                         vtx_code_cache_t *code_cache)
 {
@@ -88,7 +88,7 @@ int vtx_safepoint_init(vtx_safepoint_manager_t *manager,
     return 0;
 }
 
-void vtx_safepoint_destroy(vtx_safepoint_manager_t *manager)
+void vtx_safepoint_destroy(vtx_compile_safepoint_mgr_t *manager)
 {
     if (!manager) return;
 
@@ -124,7 +124,7 @@ void vtx_safepoint_destroy(vtx_safepoint_manager_t *manager)
 /* Internal: process pending installations                                     */
 /* ========================================================================== */
 
-static uint32_t process_installations(vtx_safepoint_manager_t *manager)
+static uint32_t process_installations(vtx_compile_safepoint_mgr_t *manager)
 {
     uint32_t installed = 0;
 
@@ -175,7 +175,7 @@ static uint32_t process_installations(vtx_safepoint_manager_t *manager)
 /* Internal: process pending invalidations                                     */
 /* ========================================================================== */
 
-static uint32_t process_invalidations(vtx_safepoint_manager_t *manager,
+static uint32_t process_invalidations(vtx_compile_safepoint_mgr_t *manager,
                                        uint32_t *first_invalidated_method_id)
 {
     uint32_t invalidated = 0;
@@ -224,7 +224,7 @@ static uint32_t process_invalidations(vtx_safepoint_manager_t *manager,
 /* Safe point check                                                            */
 /* ========================================================================== */
 
-int vtx_safepoint_check(vtx_safepoint_manager_t *manager, void *interp)
+int vtx_safepoint_check(vtx_compile_safepoint_mgr_t *manager, void *interp)
 {
     VTX_ASSERT(manager != NULL, "manager must not be NULL");
 
@@ -296,7 +296,7 @@ int vtx_safepoint_check(vtx_safepoint_manager_t *manager, void *interp)
 /* Installation requests                                                       */
 /* ========================================================================== */
 
-int vtx_safepoint_request_install(vtx_safepoint_manager_t *manager,
+int vtx_safepoint_request_install(vtx_compile_safepoint_mgr_t *manager,
                                    uint32_t method_id,
                                    vtx_compiled_method_t *compiled_method)
 {
@@ -341,7 +341,7 @@ int vtx_safepoint_request_install(vtx_safepoint_manager_t *manager,
 /* Invalidation requests                                                       */
 /* ========================================================================== */
 
-int vtx_safepoint_request_invalidate(vtx_safepoint_manager_t *manager,
+int vtx_safepoint_request_invalidate(vtx_compile_safepoint_mgr_t *manager,
                                       uint32_t method_id)
 {
     VTX_ASSERT(manager != NULL, "manager must not be NULL");
@@ -448,7 +448,7 @@ static void vtx_guard_page_sigsegv_handler(int sig, siginfo_t *info, void *ucont
 
         /* Perform the safepoint check. This processes pending
          * installations and invalidations. */
-        vtx_safepoint_manager_t *mgr = vtx_get_safepoint_manager();
+        vtx_compile_safepoint_mgr_t *mgr = vtx_get_safepoint_manager();
         if (mgr) {
             vtx_safepoint_check(mgr, NULL);
         }
