@@ -3156,6 +3156,20 @@ int main(int argc, char *argv[])
         vtx_orchestrator_start(&orchestrator);
         compile_ctx.orchestrator = &orchestrator;
 
+        /* Wire type_feedback and markov into the compile context so the
+         * runtime compilation path (request.c) can forward them to the
+         * pipeline config. Without this:
+         *   - T3 speculative guards have no type feedback → no speculation
+         *   - The pipeline has no Markov chain → no predictive compilation
+         * Both were previously NULL because main_new.c created them but
+         * never passed them to the compile context. */
+        compile_ctx.type_feedback = &type_feedback;
+#ifdef VORTEX_ENABLE_SOTA
+        compile_ctx.markov = &markov;
+#else
+        compile_ctx.markov = NULL;
+#endif
+
         vtx_value_t result = vtx_interp_run(&interp, &method, NULL, 0);
 
         printf("Program exited");

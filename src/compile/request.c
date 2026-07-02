@@ -295,6 +295,14 @@ static void compile_callback(uint32_t method_id, vtx_compile_tier_t tier, void *
         config.deoptless_table_count = ctx->deoptless_table_count;
         config.deoptless_table_capacity = ctx->deoptless_table_capacity;
 
+        /* Wire type feedback so T3 speculative guards can use observed
+         * receiver types from the interpreter's inline caches. */
+        config.type_feedback = ctx->type_feedback;
+
+        /* Wire the Markov chain so the pipeline can check for predicted
+         * phase transitions and proactively compile hot methods. */
+        config.markov = ctx->markov;
+
         /* Wire the callee lookup so the inliner can actually inline.
          * Without this, callee_lookup=NULL and the GBDT model computes
          * scores but never inlines anything.

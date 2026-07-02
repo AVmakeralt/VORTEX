@@ -7,6 +7,7 @@
 #include "runtime/object.h"
 #include "runtime/type_system.h"  /* for vtx_method_desc_t */
 #include "compile/priority.h"    /* for vtx_compile_tier_t */
+#include "interp/type_feedback.h" /* for vtx_type_feedback_t */
 
 /* Forward declarations */
 struct vtx_threadpool;
@@ -19,6 +20,7 @@ struct vtx_deopt_coord;
 struct vtx_versioned_cache;
 struct vtx_safepoint_manager;
 struct vtx_deoptless_table;
+struct vtx_markov;
 
 /**
  * VORTEX Compilation Request
@@ -60,6 +62,15 @@ typedef struct {
     struct vtx_deoptless_table  **deoptless_tables;
     uint32_t                      deoptless_table_count;
     uint32_t                      deoptless_table_capacity;
+
+    /* Type feedback from the interpreter. Forwarded to the pipeline config
+     * so T3 speculative guards can use observed receiver types. */
+    const vtx_type_feedback_t    *type_feedback;
+
+    /* Markov chain for predictive compilation. Forwarded to the pipeline
+     * config so the pipeline can check for predicted phase transitions
+     * and proactively compile methods that will be hot in the next phase. */
+    struct vtx_markov             *markov;
 
     /* Method lookup: given a method_id, returns the method descriptor.
      * This is needed by the threadpool worker to find the method's
