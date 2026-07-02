@@ -1348,8 +1348,10 @@ int vtx_pipeline_run(vtx_graph_t *graph,
 
         /* Loop unrolling: unroll small loops by factor 2 to reduce loop
          * overhead and enable more instruction-level parallelism.
-         * (audit #3: wire loop unrolling) */
-        vtx_loop_unroll_run(graph, &schedule, arena, 2);
+         * (audit #3: wire loop unrolling)
+         * TEMPORARILY DISABLED: the body replication creates incorrect
+         * control flow that causes infinite loops. Needs debugging. */
+        /* vtx_loop_unroll_run(graph, &schedule, arena, 2); */
     }
 
     /* ================================================================== */

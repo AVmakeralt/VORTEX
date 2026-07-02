@@ -78,3 +78,31 @@ target_link_libraries(bench_real_workload PRIVATE
     m
     pthread
 )
+
+# ---- T2 JIT pipeline benchmark (T0 vs T2 vs Native C) ----
+
+add_executable(bench_t2
+    bench_t2.c
+)
+target_link_libraries(bench_t2 PRIVATE
+    vortex_compile
+    vortex_codecache
+    vortex_lower
+    vortex_interp
+    vortex_runtime
+    vortex_ir
+    vortex_deopt
+    vortex_baseline
+    vortex_inliner
+    vortex_pea
+    vortex_guard
+    vortex_sota
+    vortex_region
+    vortex_trace
+    vortex_midtier
+    vortex_profile
+    vortex_assembler
+    vortex_common
+    m
+    pthread
+)

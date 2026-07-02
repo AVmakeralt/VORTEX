@@ -1487,6 +1487,10 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
         /* Fix #2: Mod(x, 2^k) → x - (((x + (x>>63 & mask)) >> k) << k)
          *
+         * TEMPORARILY DISABLED: causes infinite loop in collatz. Needs
+         * debugging — likely a regalloc or codegen issue in the sequence
+         * when used inside a loop. Fall through to the IDIV path.
+         *
          * IDIV is ~25 cycles; this sequence is ~6 ALU ops at 1 cycle each.
          * The formula computes truncated-toward-zero division (matches C99
          * `%` as the interpreter uses) and then multiplies back and
@@ -1500,6 +1504,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
          *   6 % 4  = 2  (t=1, t<<2=4, 6-4=2)
          *  -6 % 4  = -2 (corr=3, t=(-6+3)>>2=-1, t<<2=-4, -6-(-4)=-2)
          */
+#if 0
         int64_t mod_const;
         if (try_get_const_int(graph, node->inputs[1], &mod_const) && mod_const > 0) {
             int shift = -1;
@@ -1553,6 +1558,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
                 break;
             }
         }
+#endif
 
         /* SMI Mod: must untag both operands, IDIV, retag remainder (in RDX). */
         {
