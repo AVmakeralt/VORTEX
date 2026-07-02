@@ -855,6 +855,26 @@ void vtx_deopt_handler_stub(uint32_t frame_state_index, uint32_t native_pc)
                     now_ns);
             }
 
+            /* Record the failed guard in the deoptless continuation table.
+             *
+             * The deoptless table tracks which guards have failed for each
+             * method. When a guard fails repeatedly, the JIT can compile a
+             * deoptless continuation (a version of the method with the guard
+             * removed) and patch the guard site to jump to the continuation
+             * instead of the deopt stub. This avoids the expensive
+             * deopt→interpret→recompile cycle.
+             *
+             * We look up the table by method_id and call
+             * vtx_deoptless_record_failed_guard to track the failure. */
+            if (the_interp != NULL && the_interp->compile_ctx != NULL &&
+                the_interp->compile_ctx->deoptless_tables != NULL &&
+                fs->method_id < the_interp->compile_ctx->deoptless_table_count &&
+                the_interp->compile_ctx->deoptless_tables[fs->method_id] != NULL) {
+                vtx_deoptless_record_failed_guard(
+                    the_interp->compile_ctx->deoptless_tables[fs->method_id],
+                    fs->bytecode_pc  /* guard_id */);
+            }
+
             /*
              * We have the frame state.  Now we need to reconstruct
              * the interpreter frame and transfer control.

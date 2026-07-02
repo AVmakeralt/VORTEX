@@ -190,6 +190,13 @@ typedef struct vtx_gc_t {
      * and runtime/safepoint_manager.h (both define vtx_safepoint_manager_t).
      * The GC casts it to vtx_safepoint_manager_t* from safepoint_manager.h. */
     void *safepoint_mgr;
+
+    /* JIT stack scanning callback. When non-NULL, the GC calls this during
+     * collection to scan JIT-compiled frames on the native stack for GC
+     * roots. The callback receives the GC pointer and should call
+     * vtx_gc_root_push for each root it finds. This is wired to
+     * vtx_stack_walk in deopt/stack_walk.c. */
+    void (*jit_root_scan_fn)(struct vtx_gc_t *gc);
 } vtx_gc_t;
 
 /* ========================================================================== */

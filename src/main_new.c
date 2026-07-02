@@ -2918,6 +2918,15 @@ int main(int argc, char *argv[])
         compile_ctx.safepoint_mgr = NULL;
         gc.safepoint_mgr = NULL;
 
+        /* Allocate the deoptless continuation tables array.
+         * The pipeline creates a per-method table on first compile.
+         * The deopt handler looks up the table by method_id to find
+         * pre-compiled continuations when a guard fails. */
+        compile_ctx.deoptless_table_capacity = 256;
+        compile_ctx.deoptless_table_count = 256;
+        compile_ctx.deoptless_tables = (struct vtx_deoptless_table **)
+            calloc(compile_ctx.deoptless_table_capacity, sizeof(struct vtx_deoptless_table *));
+
         /* Create and wire threadpool for background compilation */
         vtx_threadpool_t pool;
         if (vtx_threadpool_init(&pool, 1) == 0) {  /* 1 compile thread */

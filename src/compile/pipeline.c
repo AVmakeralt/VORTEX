@@ -28,6 +28,7 @@
 #include "compile/pipeline.h"
 #include "compile/orchestrator.h"
 #include "codecache/install.h"
+#include "deopt/deoptless.h"
 #include "ir/strength_reduce.h"
 
 /* Forward declarations from codecache/versioned.h (can't include directly
@@ -1578,6 +1579,29 @@ int vtx_pipeline_run(vtx_graph_t *graph,
                                              method_id,
                                              config->method->compiled_code,
                                              result->native_size);
+            }
+
+            /* Create a deoptless continuation table for this method.
+             * The deopt handler uses this to look up pre-compiled
+             * continuations when a guard fails, avoiding the expensive
+             * deopt→interpret→recompile cycle. The table is stored in
+             * the deoptless_tables array indexed by method_id. */
+            if (config->deoptless_tables != NULL &&
+                method_id < config->deoptless_table_count) {
+                if (config->deoptless_tables[method_id] == NULL) {
+                    /* Allocate and initialize the table */
+                    vtx_deoptless_table_t *dtable =
+                        (vtx_deoptless_table_t *)malloc(sizeof(vtx_deoptless_table_t));
+                    if (dtable != NULL) {
+                        if (vtx_deoptless_table_init(dtable, method_id,
+                                                       config->method->compiled_code,
+                                                       graph) == 0) {
+                            config->deoptless_tables[method_id] = dtable;
+                        } else {
+                            free(dtable);
+                        }
+                    }
+                }
             }
         }
     }

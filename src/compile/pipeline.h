@@ -39,6 +39,7 @@ typedef const vtx_graph_t *(*vtx_callee_lookup_fn)(uint32_t method_index, void *
 /* Forward declarations */
 struct vtx_orchestrator;
 struct vtx_versioned_cache;
+struct vtx_deoptless_table;
 
 /* Pipeline configuration */
 typedef struct {
@@ -108,6 +109,13 @@ typedef struct {
      * This enables N+1 versioning (old versions kept alive until no
      * thread references them) and safe hot-swap recompilation. */
     struct vtx_versioned_cache  *versioned_cache;
+
+    /* Deoptless continuation tables: array indexed by method_id. The
+     * pipeline creates a table for each compiled method so the deopt
+     * handler can look up continuation versions. */
+    struct vtx_deoptless_table **deoptless_tables;
+    uint32_t                     deoptless_table_count;
+    uint32_t                     deoptless_table_capacity;
 } vtx_pipeline_config_t;
 
 /* Pipeline statistics */

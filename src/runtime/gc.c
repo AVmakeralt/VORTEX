@@ -979,6 +979,17 @@ void vtx_gc_collect_young(vtx_gc_t *gc)
         gc->root_stack[i].value = trace_value(gc, gc->root_stack[i].value);
     }
 
+    /* Phase 1b: Scan JIT-compiled frames on the native stack for GC roots.
+     * The JIT root scan callback walks the stack and calls vtx_gc_root_push
+     * for each root it finds. Those roots are then traced in Phase 3. */
+    if (gc->jit_root_scan_fn != NULL) {
+        gc->jit_root_scan_fn(gc);
+        /* Trace any new roots pushed by the JIT scan */
+        for (uint32_t i = 0; i < gc->root_count; i++) {
+            gc->root_stack[i].value = trace_value(gc, gc->root_stack[i].value);
+        }
+    }
+
     /* Phase 2: Trace old→young references.
      * If card table is available, scan dirty cards (more efficient — only
      * scans cards that were actually written to). Otherwise, fall back

@@ -57,6 +57,25 @@ void vtx_compile_context_destroy(vtx_compile_context_t *ctx)
     }
     ctx->compilation_requested_count = 0;
     ctx->compilation_requested_capacity = 0;
+
+    /* Destroy all deoptless tables */
+    if (ctx->deoptless_tables != NULL) {
+        for (uint32_t i = 0; i < ctx->deoptless_table_count; i++) {
+            if (ctx->deoptless_tables[i] != NULL) {
+                /* vtx_deoptless_table_destroy is declared in deoptless.h.
+                 * We can't include it here (circular dep), so call via
+                 * a function pointer or just free the table struct.
+                 * The table's internal versions are arena-allocated, so
+                 * freeing the table struct is sufficient. */
+                free(ctx->deoptless_tables[i]);
+                ctx->deoptless_tables[i] = NULL;
+            }
+        }
+        free(ctx->deoptless_tables);
+        ctx->deoptless_tables = NULL;
+    }
+    ctx->deoptless_table_count = 0;
+    ctx->deoptless_table_capacity = 0;
 }
 
 void vtx_compile_context_set_method_lookup(
@@ -268,6 +287,13 @@ static void compile_callback(uint32_t method_id, vtx_compile_tier_t tier, void *
          * versions. This enables N+1 versioning and safe reclamation
          * of old compiled code. */
         config.versioned_cache = ctx->versioned_cache;
+
+        /* Wire the deoptless tables so the pipeline can create per-method
+         * continuation tables. The deopt handler uses these to look up
+         * pre-compiled continuations when a guard fails. */
+        config.deoptless_tables = ctx->deoptless_tables;
+        config.deoptless_table_count = ctx->deoptless_table_count;
+        config.deoptless_table_capacity = ctx->deoptless_table_capacity;
 
         /* Wire the callee lookup so the inliner can actually inline.
          * Without this, callee_lookup=NULL and the GBDT model computes

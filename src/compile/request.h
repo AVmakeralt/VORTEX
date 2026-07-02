@@ -53,6 +53,14 @@ typedef struct {
     struct vtx_versioned_cache   *versioned_cache;  /* N+1 versioning + safe reclamation */
     struct vtx_safepoint_manager *safepoint_mgr;  /* multi-threaded safepoint manager */
 
+    /* Deoptless continuation tables: per-method array indexed by method_id.
+     * Each entry tracks continuation versions for a method. When a guard
+     * fails, the deopt handler checks if a deoptless continuation exists
+     * and jumps to it instead of deoptimizing to the interpreter. */
+    struct vtx_deoptless_table  **deoptless_tables;
+    uint32_t                      deoptless_table_count;
+    uint32_t                      deoptless_table_capacity;
+
     /* Method lookup: given a method_id, returns the method descriptor.
      * This is needed by the threadpool worker to find the method's
      * bytecode when compiling. */
