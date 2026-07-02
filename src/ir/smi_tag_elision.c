@@ -57,11 +57,6 @@ static bool can_produce_raw_int(vtx_node_opcode_t op) {
     case VTX_OP_Or:
     case VTX_OP_Xor:
     case VTX_OP_Neg:
-        /* Phi is NOT here: marking Phi as RAW_INT requires inserting untag
-         * sequences at the Phi's forward-edge phi-copy. The infrastructure
-         * is in place (INSERT_UNTAG in resolve_phis), but the untag
-         * insertion causes incorrect code due to a regalloc or scheduling
-         * interaction. Needs debugging before enabling. */
         return true;
     default:
         return false;

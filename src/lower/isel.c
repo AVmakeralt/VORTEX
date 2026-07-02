@@ -3264,29 +3264,32 @@ static int resolve_phis(vtx_inst_stream_t *stream, const vtx_schedule_t *schedul
                 pred_blk->inst_count++; \
             } while(0)
 
-            /* Helper: insert an SMI untag sequence (MOV + SHL + SAR) for
-             * RAW_INT Phi copies where the source is a tagged SMI. This
-             * converts the tagged initial value to raw int before storing
-             * it in the Phi's vreg, so the first loop iteration sees a
-             * raw int value (matching the back-edge value). */
+            /* Helper: insert an SMI untag sequence for RAW_INT Phi copies.
+             * Uses a fresh temp vreg to avoid corrupting the source if
+             * the regalloc coalesces phi_vreg == src_vreg.
+             * Sequence: tmp ← src; SHL tmp, 13; SAR tmp, 16; phi ← tmp */
             #define INSERT_UNTAG(dst, src, node_id, offset) do { \
-                vtx_inst_t _mov = make_rr_inst(VTX_X86_MOV, (dst), (src), (node_id)); \
-                _mov.flags |= VTX_INST_FLAG_PHI_COPY; \
-                vtx_inst_t _shl = make_ri_inst(VTX_X86_SHL, (dst), 13, (node_id)); \
+                uint32_t _tmp = vtx_isel_alloc_vreg(stream, arena); \
+                vtx_inst_t _mov1 = make_rr_inst(VTX_X86_MOV, _tmp, (src), (node_id)); \
+                _mov1.flags |= VTX_INST_FLAG_PHI_COPY | VTX_INST_FLAG_NO_COALESCE; \
+                vtx_inst_t _shl = make_ri_inst(VTX_X86_SHL, _tmp, 13, (node_id)); \
                 _shl.flags |= VTX_INST_FLAG_PHI_COPY; \
-                vtx_inst_t _sar = make_ri_inst(VTX_X86_SAR, (dst), 16, (node_id)); \
+                vtx_inst_t _sar = make_ri_inst(VTX_X86_SAR, _tmp, 16, (node_id)); \
                 _sar.flags |= VTX_INST_FLAG_PHI_COPY; \
-                if (vtx_isel_block_ensure_capacity(pred_blk, 3, arena) != 0) return -1; \
-                for (int _i = 0; _i < 3; _i++) { \
+                vtx_inst_t _mov2 = make_rr_inst(VTX_X86_MOV, (dst), _tmp, (node_id)); \
+                _mov2.flags |= VTX_INST_FLAG_PHI_COPY; \
+                if (vtx_isel_block_ensure_capacity(pred_blk, 4, arena) != 0) return -1; \
+                for (int _i = 0; _i < 4; _i++) { \
                     if ((offset) + _i < pred_blk->inst_count) { \
                         memmove(&pred_blk->insts[(offset) + _i + 1], &pred_blk->insts[(offset) + _i], \
                                 (pred_blk->inst_count - ((offset) + _i)) * sizeof(vtx_inst_t)); \
                     } \
                 } \
-                pred_blk->insts[(offset)] = _mov; \
+                pred_blk->insts[(offset)] = _mov1; \
                 pred_blk->insts[(offset) + 1] = _shl; \
                 pred_blk->insts[(offset) + 2] = _sar; \
-                pred_blk->inst_count += 3; \
+                pred_blk->insts[(offset) + 3] = _mov2; \
+                pred_blk->inst_count += 4; \
             } while(0)
 
             uint32_t cur_insert = insert_pos;
@@ -3453,9 +3456,11 @@ static int resolve_phis(vtx_inst_stream_t *stream, const vtx_schedule_t *schedul
                     bool is_forward_edge = (pred_idx < b);
 
                     if (sched_blk->is_loop_header && is_forward_edge) {
-                        stream->uses_smi = true;
+                        /* Forward edge: source is tagged SMI → untag.
+                         * Note: we do NOT set stream->uses_smi = true because
+                         * the untag (SHL 13 + SAR 16) doesn't use R10/R11. */
                         INSERT_UNTAG(copy_dst[i], copy_src[i], copy_node[i], cur_insert);
-                        cur_insert += 3;
+                        cur_insert += 4;
                     } else {
                         INSERT_MOV(copy_dst[i], copy_src[i], copy_node[i], cur_insert);
                         cur_insert++;
