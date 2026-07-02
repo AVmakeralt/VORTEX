@@ -3448,20 +3448,52 @@ static int resolve_phis(vtx_inst_stream_t *stream, const vtx_schedule_t *schedul
                 bool phi_is_raw = phi_node && vtx_nf_has(phi_node->flags, VTX_NF_RAW_INT);
 
                 if (phi_is_raw) {
-                    /* The Phi is RAW_INT. The forward-edge (preheader) source
-                     * is a tagged SMI → need untag. The back-edge (latch)
-                     * source is already raw int → plain MOV.
-                     * Forward edge = predecessor before loop header (lower
-                     * block index). Back edge = predecessor after (higher). */
+                    /* The Phi is RAW_INT. Both the forward-edge (preheader)
+                     * and back-edge (latch) sources need to be raw int.
+                     * - Forward edge: source is a tagged SMI (Constant/Parameter)
+                     *   → need untag
+                     * - Back edge: source might be RAW_INT (from elided Add) → plain MOV
+                     *   or tagged SMI (from non-elided Sub that feeds Store) → need untag
+                     *
+                     * We check the source node's RAW_INT flag to decide.
+                     * Forward edge = predecessor before loop header.
+                     * Back edge = predecessor after. */
                     bool is_forward_edge = (pred_idx < b);
 
-                    if (sched_blk->is_loop_header && is_forward_edge) {
-                        /* Forward edge: source is tagged SMI → untag.
-                         * Note: we do NOT set stream->uses_smi = true because
-                         * the untag (SHL 13 + SAR 16) doesn't use R10/R11. */
+                    /* Find the source node to check if it's RAW_INT */
+                    /* The source vreg is copy_src[i]. We need to find which
+                     * IR node produced it. We stored the Phi node ID in
+                     * copy_node[i], but not the source node ID. We need to
+                     * look it up from the Phi's inputs. */
+                    bool src_is_raw = false;
+                    /* For loop headers, re-scan the Phi inputs to find the
+                     * source node for this predecessor. */
+                    if (sched_blk->is_loop_header) {
+                        uint32_t data_idx = 0;
+                        for (uint32_t pi = 0; pi < phi_node->input_count; pi++) {
+                            vtx_nodeid_t inp_id = phi_node->inputs[pi];
+                            if (inp_id == VTX_NODEID_INVALID || inp_id >= graph->node_table.count) continue;
+                            const vtx_node_t *inp_node = vtx_node_get_const(&graph->node_table, inp_id);
+                            if (inp_node && (inp_node->opcode == VTX_OP_Region ||
+                                             inp_node->opcode == VTX_OP_LoopBegin ||
+                                             inp_node->opcode == VTX_OP_Proj)) {
+                                continue;
+                            }
+                            if (data_idx == p) {
+                                src_is_raw = inp_node && vtx_nf_has(inp_node->flags, VTX_NF_RAW_INT);
+                                break;
+                            }
+                            data_idx++;
+                        }
+                    }
+
+                    if ((is_forward_edge && !src_is_raw) ||
+                        (!is_forward_edge && !src_is_raw)) {
+                        /* Source is tagged SMI → need untag */
                         INSERT_UNTAG(copy_dst[i], copy_src[i], copy_node[i], cur_insert);
                         cur_insert += 4;
                     } else {
+                        /* Source is already raw int → plain MOV */
                         INSERT_MOV(copy_dst[i], copy_src[i], copy_node[i], cur_insert);
                         cur_insert++;
                     }
