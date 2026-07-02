@@ -45,6 +45,7 @@
 #include "deopt/deoptless.h"
 #include "deopt/side_table.h"
 #include "deopt/stack_walk.h"
+#include "deopt/coordinator.h"
 #include "baseline/codegen.h"
 #include "baseline/guards.h"
 #include "baseline/frame_layout.h"
@@ -2878,6 +2879,19 @@ int main(int argc, char *argv[])
             compile_ctx.spec_version_mgr = NULL;
         }
 
+        /* Instantiate the deopt coordinator.
+         * This implements rate limiting (poison sites that deopt >100/sec),
+         * batching (coalesce pending deopts into 1ms windows), and a global
+         * budget (suppress T2/T3 if >10000 deopts/sec). Without this, a deopt
+         * storm causes the JIT to thrash. The coordinator is notified from
+         * vtx_deopt_handler_stub on every guard failure. */
+        vtx_deopt_coord_t deopt_coord;
+        if (vtx_deopt_coord_init(&deopt_coord, NULL, NULL) == 0) {
+            compile_ctx.deopt_coord = &deopt_coord;
+        } else {
+            compile_ctx.deopt_coord = NULL;
+        }
+
         /* Create and wire threadpool for background compilation */
         vtx_threadpool_t pool;
         if (vtx_threadpool_init(&pool, 1) == 0) {  /* 1 compile thread */
@@ -3139,6 +3153,9 @@ int main(int argc, char *argv[])
         vtx_compile_context_destroy(&compile_ctx);
         if (compile_ctx.spec_version_mgr != NULL) {
             vtx_spec_version_manager_destroy(&spec_ver_mgr);
+        }
+        if (compile_ctx.deopt_coord != NULL) {
+            vtx_deopt_coord_destroy(&deopt_coord);
         }
         vtx_method_registry_destroy(&registry);
         vtx_code_cache_destroy(&cache);

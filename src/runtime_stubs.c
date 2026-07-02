@@ -22,6 +22,7 @@
 #include "interp/frame.h"
 #include "deopt/side_table.h"
 #include "deopt/deoptless.h"
+#include "deopt/coordinator.h"
 #include "compile/orchestrator.h"
 #include "deopt/frame_state.h"
 #include "deopt/types.h"
@@ -828,6 +829,30 @@ void vtx_deopt_handler_stub(uint32_t frame_state_index, uint32_t native_pc)
                                           ((uint64_t)fs->method_id << 32) |
                                               fs->bytecode_pc,
                                           VTX_GUARD_ID_INVALID);
+            }
+
+            /* Notify the deopt coordinator that a guard failed.
+             *
+             * The coordinator implements rate limiting (poison sites that
+             * deopt >100/sec), batching (coalesce pending deopts into 1ms
+             * windows), and a global budget (suppress T2/T3 if >10000
+             * deopts/sec). Without this call, a deopt storm would cause
+             * the JIT to thrash — recompiling, deopting, recompiling.
+             *
+             * The coordinator returns a decision, but for now we ignore it
+             * and always do a full deopt. A future enhancement can use the
+             * decision to try deoptless continuation or skip recompilation
+             * for poisoned sites. */
+            if (the_interp != NULL && the_interp->compile_ctx != NULL &&
+                the_interp->compile_ctx->deopt_coord != NULL) {
+                struct timespec ts;
+                clock_gettime(CLOCK_MONOTONIC, &ts);
+                uint64_t now_ns = (uint64_t)ts.tv_sec * 1000000000ULL +
+                                  (uint64_t)ts.tv_nsec;
+                vtx_deopt_coord_on_guard_fail(
+                    the_interp->compile_ctx->deopt_coord,
+                    fs->bytecode_pc,  /* site_id */
+                    now_ns);
             }
 
             /*
