@@ -26,6 +26,7 @@
  */
 
 #include "compile/pipeline.h"
+#include "compile/orchestrator.h"
 #include "codecache/install.h"
 #include "ir/strength_reduce.h"
 #include "ir/loop_unroll.h"
@@ -946,6 +947,17 @@ static int run_lowering_pipeline(vtx_graph_t *graph,
     }
 
     memcpy(native_code, vtx_x86_emit_code(&emitter), code_size);
+
+    /* Propagate the relocation table to the result so vtx_install_method()
+     * can call vtx_reloc_apply_external() at install time. Without this,
+     * every external call recorded during emission — write-barrier calls,
+     * GC helper calls, JIT-to-JIT direct calls — would be silently dropped
+     * (reloc_apply_external is a no-op when given NULL).
+     *
+     * The reloc_table is arena-allocated (entries + struct), so it survives
+     * the emitter's destruction and is owned by the result. */
+    result->reloc_table = emitter.relocs;
+
     vtx_x86_emit_destroy(&emitter);
 
     result->native_code = native_code;
@@ -1521,7 +1533,7 @@ int vtx_pipeline_run(vtx_graph_t *graph,
             config->method, method_id,
             result->native_code, result->native_size,
             result->side_table,  /* side_table from lowering pipeline */
-            NULL,   /* reloc_table */
+            result->reloc_table, /* reloc_table — fixes #19: external calls now applied */
             NULL, 0, NULL, 0,  /* dep_type_ids, dep_shape_ids */
             config->install_arena ? config->install_arena : arena,
             NULL, 0  /* poly_ics */
@@ -1533,6 +1545,19 @@ int vtx_pipeline_run(vtx_graph_t *graph,
             result->native_code = NULL;
             result->native_size = 0;
             result->side_table = NULL;  /* ownership transferred to code cache */
+            result->reloc_table = NULL; /* ownership transferred to code cache */
+
+            /* Notify the orchestrator that a compilation finished.
+             * This wakes up the recomp monitor (saves a profile snapshot
+             * for drift detection), FDI (records the new version), and
+             * the phase-reactive version manager. Without this call,
+             * those ~5 SOTA subsystems sit idle — they were implemented
+             * but never received the events they need to act. */
+            if (config->orchestrator != NULL) {
+                vtx_orchestrator_on_compile_done(config->orchestrator,
+                                                  method_id,
+                                                  method_id /* version_id */);
+            }
         }
     }
 
@@ -1595,6 +1620,13 @@ void vtx_compile_result_destroy(vtx_compile_result_t *result)
     result->schedule = NULL;
     result->native_size = 0;
     result->success = false;
+
+    /* reloc_table and side_table are arena-allocated; ownership is
+     * transferred to the code cache on successful install (set to NULL).
+     * If install never happened, the arena reclaims the memory. We just
+     * clear the pointer to avoid stale references. */
+    result->reloc_table = NULL;
+    result->side_table = NULL;
 }
 
 /* ========================================================================== */

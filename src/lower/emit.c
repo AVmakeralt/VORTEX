@@ -342,6 +342,16 @@ void vtx_x86_emit_idiv_r(vtx_x86_emit_t *e, uint8_t src)
     emit_modrm(e, 3, 7, src & 7);
 }
 
+/* One-operand IMUL r/m64: REX.W F7 /5
+ * Computes RDX:RAX = RAX * r/m64 (signed). Used by magic-number division. */
+void vtx_x86_emit_imul_full_r(vtx_x86_emit_t *e, uint8_t src)
+{
+    int b = reg_hi(src);
+    emit_rex(e, 1, 0, 0, b);
+    emit_byte(e, 0xF7);
+    emit_modrm(e, 3, 5, src & 7);
+}
+
 /* SHL r/m64, imm8: REX.W C1 /4 ib */
 void vtx_x86_emit_shl_ri(vtx_x86_emit_t *e, uint8_t dst, uint8_t count)
 {
@@ -2403,6 +2413,8 @@ static uint32_t estimate_inst_size(const vtx_inst_t *inst)
         }
         return 4;  /* REX.W 0F AF + ModR/M */
     case VTX_X86_IDIV:   return 3;  /* REX.W F7 /7 */
+    case VTX_X86_IMUL_FULL: return 3; /* REX.W F7 /5 */
+    case VTX_X86_MUL:    return 3;  /* REX.W F7 /4 */
     case VTX_X86_SHL: case VTX_X86_SHR: case VTX_X86_SAR:
         if (inst->flags & VTX_INST_FLAG_HAS_IMM) return 4; /* REX.W C1 /x + imm8 */
         return 3; /* REX.W D3 /x */
@@ -2854,6 +2866,31 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
                 vtx_x86_emit_idiv_r(e, VTX_SPILL_TMP_REG);
             } else {
                 vtx_x86_emit_idiv_r(e, r0);
+            }
+        }
+        break;
+
+    case VTX_X86_IMUL_FULL:
+        /* One-operand IMUL: RDX:RAX = RAX * src. Same clobber rules as IDIV.
+         * The src is operand[1] (operand[0] is rdx_vreg, the def-only output).
+         * Operand[2] is rax_vreg, kept alive as the multiplicand in RAX. */
+        r0 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+        if (r0 == 0xFF) {
+            uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+            if (slot1 != VTX_NO_SPILL) {
+                emit_spill_load(e, slot1, VTX_SPILL_TMP_REG, ra);
+                vtx_x86_emit_imul_full_r(e, VTX_SPILL_TMP_REG);
+            }
+        } else {
+            if (r0 == 0 || r0 == 2) {
+                /* src in RAX or RDX — would be clobbered. Move to R12 first.
+                 * (In practice this shouldn't happen because magic_vreg is
+                 * a regular vreg and RAX/RDX are excluded from the free pool,
+                 * but this is the same safety net IDIV uses.) */
+                vtx_x86_emit_mov_rr(e, VTX_SPILL_TMP_REG, r0);
+                vtx_x86_emit_imul_full_r(e, VTX_SPILL_TMP_REG);
+            } else {
+                vtx_x86_emit_imul_full_r(e, r0);
             }
         }
         break;
@@ -4459,12 +4496,19 @@ int vtx_x86_emit_function(vtx_x86_emit_t *emit, vtx_inst_stream_t *stream,
         vtx_peephole_optimize(stream, result);
     }
 
-    /* ---- F1 fix: Initialize relocation table and label offset tracking ---- */
+    /* ---- F1 fix: Initialize relocation table and label offset tracking ---- *
+     * The reloc_table struct is arena-allocated (not stack) so its lifetime
+     * extends beyond this function — the pipeline propagates emit->relocs
+     * to vtx_install_method(), which calls vtx_reloc_apply_external() to
+     * fix up calls to runtime helpers (write barriers, GC helpers, JIT-to-JIT
+     * calls) once the final code base address is known. */
     if (!arena) return -1;
 
-    vtx_reloc_table_t reloc_tbl;
-    if (vtx_reloc_table_init(&reloc_tbl, arena) != 0) return -1;
-    emit->relocs = &reloc_tbl;
+    vtx_reloc_table_t *reloc_tbl = (vtx_reloc_table_t *)vtx_arena_alloc(
+        arena, sizeof(vtx_reloc_table_t));
+    if (!reloc_tbl) return -1;
+    if (vtx_reloc_table_init(reloc_tbl, arena) != 0) return -1;
+    emit->relocs = reloc_tbl;
     emit->reloc_arena = arena;
 
     /* Allocate label offset array: label_offsets[block_index] = native offset */

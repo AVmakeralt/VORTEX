@@ -139,8 +139,11 @@ static vtx_live_interval_t *compute_live_intervals(vtx_inst_stream_t *stream,
 
                 /* Use: update end position.
                  * BUGFIX: CQO's operand[0] is a pure definition (CQO writes RDX),
-                 * not a use. Don't update the end position for it. */
-                if (!(op == 0 && inst->opcode == VTX_X86_CQO)) {
+                 * not a use. Don't update the end position for it.
+                 * IMUL_FULL (one-operand signed multiply) is the same: its
+                 * operand[0] is rdx_vreg (the high-64 destination), not a use. */
+                if (!(op == 0 && (inst->opcode == VTX_X86_CQO ||
+                                   inst->opcode == VTX_X86_IMUL_FULL))) {
                     if (pos > intervals[vreg].end) {
                         intervals[vreg].end = pos;
                     }

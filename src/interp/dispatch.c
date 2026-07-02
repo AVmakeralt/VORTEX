@@ -1,5 +1,6 @@
 #include "interp/dispatch.h"
 #include "baseline/codegen.h"
+#include "compile/orchestrator.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -1625,6 +1626,17 @@ dispatch_VT_OP_CALL_STATIC:
 
         /* Record invocation in profiler */
         vtx_profiler_record_invocation(&interp->profiler, target_method);
+
+        /* Notify the orchestrator of the method entry. This feeds the
+         * Markov phase-predictor and the phase detector, which may
+         * trigger proactive compilation of methods predicted to be hot
+         * in the next phase. Without this call, those subsystems sit
+         * idle (dead code). The orchestrator is optional — if no
+         * compile_ctx or no orchestrator is wired, this is a no-op. */
+        if (interp->compile_ctx != NULL && interp->compile_ctx->orchestrator != NULL) {
+            vtx_orchestrator_on_method_entry(interp->compile_ctx->orchestrator,
+                                              target_method->vtable_index);
+        }
 
         /* Record call type in profiler */
         vtx_typeid_t receiver_tid = VTX_TYPE_INVALID;

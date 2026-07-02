@@ -25,6 +25,7 @@
 #include "lower/regalloc.h"
 #include "lower/emit.h"
 #include "lower/guard_emit.h"
+#include "lower/reloc.h"
 #include "deopt/side_table.h"
 #include "runtime/arena.h"
 #include "interp/type_feedback.h"
@@ -89,6 +90,14 @@ typedef struct {
     struct vtx_method_registry  *method_registry;
     const vtx_method_desc_t     *method;           /* the method being compiled */
     vtx_arena_t                 *install_arena;    /* arena for installation allocations */
+
+    /* Runtime orchestrator. If non-NULL, the pipeline notifies it after a
+     * successful compile+install via vtx_orchestrator_on_compile_done().
+     * This wakes up the recomp monitor (profile drift detection), FDI
+     * (feedback-directed inlining), and the phase-reactive version manager
+     * — collectively ~5 SOTA subsystems that were previously dead code
+     * because no one called on_compile_done. */
+    struct vtx_orchestrator     *orchestrator;
 } vtx_pipeline_config_t;
 
 /* Pipeline statistics */
@@ -124,6 +133,7 @@ typedef struct {
     uint8_t        *native_code;   /* emitted x86-64 machine code */
     uint32_t         native_size;  /* size of emitted code */
     vtx_side_table_t *side_table;  /* deoptimization side table (native PC -> FrameState) */
+    vtx_reloc_table_t *reloc_table; /* relocation table (external calls resolved at install) */
 } vtx_compile_result_t;
 
 /* Get default config for each tier */

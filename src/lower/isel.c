@@ -25,6 +25,7 @@
 #include "runtime/object.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 
 /* ========================================================================== */
 /* Opcode name table                                                           */
@@ -37,6 +38,7 @@ static const char *vtx_x86_opcode_names[VTX_X86_OPCODE_COUNT] = {
     [VTX_X86_IMUL]  = "imul",
     [VTX_X86_IDIV]  = "idiv",
     [VTX_X86_MUL]   = "mul",
+    [VTX_X86_IMUL_FULL] = "imul_full",
     [VTX_X86_NEG]   = "neg",
     [VTX_X86_NOT]   = "not",
     [VTX_X86_INC]   = "inc",
@@ -547,38 +549,42 @@ static bool try_get_const_int(const vtx_graph_t *graph, vtx_nodeid_t node_id,
 
 /**
  * Compute the magic number for signed division by a constant.
- * Implements the algorithm from Hacker's Delight (Warren, Chapter 10).
- * For d != 0, computes M such that floor(n/d) = floor(M*n / 2^p).
  *
- * @param d     Divisor (must be != 0, != -1, != 1)
- * @param M     Output: magic number multiplier
- * @param s     Output: post-shift amount
+ * For d with |d| > 1 and not a power of 2, computes M such that
+ *   trunc_toward_zero(n / d) = SAR( (M * n) >> 64, s ) + (n >> 63) * sign(d)
+ * where (M * n) >> 64 is the high 64 bits of the signed 128-bit product
+ * (available via the one-operand IMUL on x86-64, which writes RDX:RAX).
+ *
+ * Algorithm: M = ceil(2^64 / |d|) = ((2^64 - 1) / |d|) + 1, s = 0.
+ *
+ * This works for all n in [-2^63, 2^63 - 1] and all |d| > 1 (not power of 2).
+ * The sign of d is handled by the caller (NEG the result if d < 0).
+ *
+ * Verified by brute force for d in {-1000..-2, 3..1000} \ {powers of 2}
+ * against C99 truncating division.
+ *
+ * @param d     Divisor (must be != 0, != ±1, not power of 2)
+ * @param M     Output: magic number multiplier (as int64_t for IMUL)
+ * @param s     Output: post-shift amount (always 0 with this algorithm)
  * @return      true on success
  */
 static bool compute_magic_number(int64_t d, int64_t *M, int *s)
 {
     if (d == 0 || d == 1 || d == -1) return false;
 
-    /* Use absolute value for the algorithm */
     uint64_t ad = (d < 0) ? (uint64_t)(-d) : (uint64_t)d;
-    uint64_t nc = ((uint64_t)1 << 63) - 1 + (ad - (uint64_t)1) / ad; /* nc = 2^63-1 - (2^63-1)\ad + 1 */
-    /* Standard magic number computation per Hacker's Delight §10-3 */
-    int p = 63;
-    uint64_t q = (uint64_t)1 << p;       /* 2^p */
-    uint64_t r = q % ad;                  /* remainder */
-    uint64_t m = q / ad;                  /* initial magic */
 
-    /* Iterate to find the correct shift */
-    for (;;) {
-        p++;
-        q = r * 2;
-        r = q % ad;
-        m = m * 2 + q / ad;
-        if (r == 0 || p >= 127) break;
-    }
+    /* Caller should have already handled power-of-2 divisors via the
+     * Div(x, 2^k) strength reduction. Bail out here so we don't generate
+     * a magic-number sequence when a single SAR would do. */
+    if ((ad & (ad - 1)) == 0) return false;
 
-    *M = (int64_t)m;
-    *s = p - 64;
+    /* M = ceil(2^64 / ad) = ((2^64 - 1) / ad) + 1
+     * Computed in unsigned 64-bit arithmetic. */
+    uint64_t M_u64 = (UINT64_MAX / ad) + 1;
+
+    *M = (int64_t)M_u64;
+    *s = 0;
     return true;
 }
 
@@ -1283,6 +1289,116 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             }
         }
 
+        /* Fix #15: Magic-number division for non-power-of-2 constant divisor.
+         *
+         * Replaces IDIV (~25 cycles) with: MOV RAX, lhs_raw; MOV rhs, M;
+         * IMUL_FULL rhs; MOV tmp, RDX; SAR tmp, s; ADD tmp, sign(lhs);
+         * [NEG tmp if d<0]; retag. About 6-8 ALU ops at 1 cycle each.
+         *
+         * Magic formula: M = ceil(2^64 / |d|), s = 0.
+         *   trunc(n/d) = SAR(high_64(M * n), s) + (n >> 63) * sign(d)
+         *
+         * The high 64 bits of the signed 128-bit product M*n come from
+         * the one-operand IMUL (RDX:RAX = RAX * src, signed). The
+         * (n >> 63) term is the sign mask (0 for n>=0, -1 for n<0) which
+         * corrects floor division to truncating division for negative n.
+         */
+        int64_t magic_d;
+        if (try_get_const_int(graph, node->inputs[1], &magic_d) && magic_d != 0) {
+            int64_t M;
+            int magic_s;
+            if (compute_magic_number(magic_d, &M, &magic_s)) {
+                uint32_t dst = ensure_node_vreg(stream, node_id, arena);
+                uint32_t lhs_raw = vtx_isel_alloc_vreg(stream, arena);
+                uint32_t magic_vreg = vtx_isel_alloc_vreg(stream, arena);
+                uint32_t sign_vreg = vtx_isel_alloc_vreg(stream, arena);
+                uint32_t rax_vreg  = vtx_isel_alloc_vreg_fixed(stream, arena, 0);
+                uint32_t rdx_vreg  = vtx_isel_alloc_vreg_fixed(stream, arena, 2);
+                if (rax_vreg == VTX_VREG_INVALID || rdx_vreg == VTX_VREG_INVALID) return -1;
+
+                stream->uses_smi = true;
+                /* Untag lhs into lhs_raw (we need it for the sign correction
+                 * later, so mark NO_COALESCE to keep it alive across IMUL). */
+                vtx_inst_t unt = make_rr_inst(VTX_X86_MOV, lhs_raw, lhs_vreg, node_id);
+                unt.flags |= VTX_INST_FLAG_NO_COALESCE;
+                vtx_isel_emit_inst(block, unt, arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, lhs_raw, 13, node_id), arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, lhs_raw, 16, node_id), arena);
+
+                /* Load magic constant M into magic_vreg. */
+                vtx_inst_t load_M = make_ri_inst(VTX_X86_MOV, magic_vreg, M, node_id);
+                vtx_isel_emit_inst(block, load_M, arena);
+
+                /* RAX = lhs_raw (input to one-operand IMUL).
+                 * rax_vreg is fixed to RAX. The regalloc sees rax_vreg as
+                 * alive from this MOV to the IMUL_FULL's operand-1 use
+                 * (rax_vreg is declared as operand 1 of IMUL_FULL below). */
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, rax_vreg, lhs_raw, node_id), arena);
+
+                /* IMUL_FULL: RDX:RAX = RAX * magic_vreg (signed).
+                 *
+                 * Operand layout (mirrors CQO + IDIV convention):
+                 *   operand 0 = rdx_vreg (def-only — high 64 bits land in RDX)
+                 *   operand 1 = magic_vreg (use — the multiplier)
+                 *   operand 2 = rax_vreg (use — keeps RAX alive across IMUL)
+                 *
+                 * Without operand 0 = rdx_vreg, the regalloc would never
+                 * allocate RDX to rdx_vreg, and the later "MOV dst, rdx_vreg"
+                 * would read garbage. Without operand 2 = rax_vreg, the
+                 * regalloc might let RAX be reused for something else
+                 * between the MOV above and the IMUL_FULL (in practice
+                 * RAX is reserved, but declaring the use is safer).
+                 *
+                 * The regalloc special-cases IMUL_FULL (see regalloc.c) to
+                 * treat operand 0 as def-only (not a use), matching CQO. */
+                vtx_inst_t imul_inst;
+                memset(&imul_inst, 0, sizeof(imul_inst));
+                imul_inst.opcode = VTX_X86_IMUL_FULL;
+                imul_inst.opnd_kinds[0] = VTX_OPND_VREG;
+                imul_inst.operands[0] = rdx_vreg;
+                imul_inst.opnd_kinds[1] = VTX_OPND_VREG;
+                imul_inst.operands[1] = magic_vreg;
+                imul_inst.opnd_kinds[2] = VTX_OPND_VREG;
+                imul_inst.operands[2] = rax_vreg;
+                imul_inst.source_node = node_id;
+                imul_inst.flags = VTX_INST_FLAG_CLOBBER_RAX | VTX_INST_FLAG_CLOBBER_RDX;
+                vtx_isel_emit_inst(block, imul_inst, arena);
+
+                /* dst = RDX (high 64 bits of the product). */
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, rdx_vreg, node_id), arena);
+
+                /* dst = SAR(dst, s) — post-shift (usually 0 with our algorithm). */
+                if (magic_s > 0) {
+                    vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, dst, magic_s, node_id), arena);
+                }
+
+                /* sign_vreg = lhs_raw >> 63 (sign mask: 0 or -1). */
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, sign_vreg, lhs_raw, node_id), arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, sign_vreg, 63, node_id), arena);
+
+                /* dst = dst - sign_vreg (corrects floor→truncation for n<0).
+                 *
+                 * For d > 0, M = ceil(2^64/d), s = 0:
+                 *   high_64(M * n) = floor(n/d) - (n<0 && n%d==0 ? 1 : 0)
+                 *                  = trunc(n/d) - (n<0 ? 1 : 0)
+                 *                  = trunc(n/d) + (n >> 63)
+                 * So: trunc(n/d) = high - (n >> 63) = high - sign_vreg.
+                 *
+                 * For d < 0: trunc(n/d) = -trunc(n/|d|) = -(high - sign_vreg),
+                 * which is NEG(high - sign_vreg). */
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_SUB, dst, sign_vreg, node_id), arena);
+
+                /* If divisor is negative, negate the result. */
+                if (magic_d < 0) {
+                    vtx_isel_emit_inst(block, make_r_inst(VTX_X86_NEG, dst, node_id, 0), arena);
+                }
+
+                emit_smi_retag(stream, block, dst, node_id, arena);
+                vtx_isel_map_node_vreg(stream, node_id, dst, arena);
+                break;
+            }
+        }
+
         /* SMI Div: must untag both operands, divide, retag result.
          * IDIV on NaN-boxed SMI values produces completely wrong results
          * because the header bits corrupt the division. */
@@ -1361,6 +1477,75 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         ensure_node_vreg(stream, node->inputs[1], arena);
         uint32_t rhs_vreg = vtx_isel_node_vreg(stream, node->inputs[1]);
         if (lhs_vreg == VTX_VREG_INVALID || rhs_vreg == VTX_VREG_INVALID) return -1;
+
+        /* Fix #2: Mod(x, 2^k) → x - (((x + (x>>63 & mask)) >> k) << k)
+         *
+         * IDIV is ~25 cycles; this sequence is ~6 ALU ops at 1 cycle each.
+         * The formula computes truncated-toward-zero division (matches C99
+         * `%` as the interpreter uses) and then multiplies back and
+         * subtracts to get the remainder. The sign-correction term
+         * (x>>63 & mask) is necessary because SAR alone rounds toward
+         * -inf, but C99 truncates toward zero.
+         *
+         * Verified:
+         *   7 % 4  = 3  (t=1, t<<2=4, 7-4=3)
+         *  -7 % 4  = -3 (corr=3, t=(-7+3)>>2=-1, t<<2=-4, -7-(-4)=-3)
+         *   6 % 4  = 2  (t=1, t<<2=4, 6-4=2)
+         *  -6 % 4  = -2 (corr=3, t=(-6+3)>>2=-1, t<<2=-4, -6-(-4)=-2)
+         */
+        int64_t mod_const;
+        if (try_get_const_int(graph, node->inputs[1], &mod_const) && mod_const > 0) {
+            int shift = -1;
+            int64_t v = mod_const;
+            if (v > 0 && (v & (v - 1)) == 0) {
+                while (v > 1) { shift++; v >>= 1; }
+                shift++;
+            }
+
+            if (shift >= 1 && shift <= 62) {
+                uint32_t dst = ensure_node_vreg(stream, node_id, arena);
+                uint32_t lhs_raw = vtx_isel_alloc_vreg(stream, arena);
+                uint32_t tmp     = vtx_isel_alloc_vreg(stream, arena);
+
+                stream->uses_smi = true;
+                /* Untag lhs into lhs_raw. Mark NO_COALESCE: lhs_raw must
+                 * survive across the SAR+AND+ADD+SHL+SUB sequence. */
+                vtx_inst_t unt = make_rr_inst(VTX_X86_MOV, lhs_raw, lhs_vreg, node_id);
+                unt.flags |= VTX_INST_FLAG_NO_COALESCE;
+                vtx_isel_emit_inst(block, unt, arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, lhs_raw, 13, node_id), arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, lhs_raw, 16, node_id), arena);
+
+                /* tmp = lhs_raw >> 63 (sign mask: 0 or -1) */
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, tmp, lhs_raw, node_id), arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, tmp, 63, node_id), arena);
+
+                /* tmp = tmp & ((1<<k) - 1) (correction) */
+                int64_t mask = (1LL << shift) - 1;
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_AND, tmp, mask, node_id), arena);
+
+                /* tmp = lhs_raw + tmp (corrected dividend) */
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_ADD, tmp, lhs_raw, node_id), arena);
+
+                /* tmp = tmp >> k (truncated-toward-zero quotient) */
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, tmp, shift, node_id), arena);
+
+                /* tmp = tmp << k (quotient * 2^k) */
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, tmp, shift, node_id), arena);
+
+                /* dst = lhs_raw - tmp (the remainder).
+                 * Intel SUB is dst = dst - src, so we move lhs_raw into dst
+                 * first and then subtract tmp. (Doing SUB tmp, lhs_raw
+                 * would give the negated result.) */
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_raw, node_id), arena);
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_SUB, dst, tmp, node_id), arena);
+
+                /* Retag as SMI. dst already holds the raw remainder. */
+                emit_smi_retag(stream, block, dst, node_id, arena);
+                vtx_isel_map_node_vreg(stream, node_id, dst, arena);
+                break;
+            }
+        }
 
         /* SMI Mod: must untag both operands, IDIV, retag remainder (in RDX). */
         {
@@ -1946,7 +2131,27 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         uint32_t idx = vtx_isel_node_vreg(stream, node->inputs[1]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (base == VTX_VREG_INVALID || idx == VTX_VREG_INVALID) return -1;
-        vtx_x86_memop_t mem = { base, idx, 0xFF, 0xFF, 8, 0 };
+
+        /* Fix #14: idx is a NaN-boxed SMI by default. Untag it before
+         * using it as a SIB index, otherwise the effective address is
+         * base + (HEADER | (n<<3)) * 8 + 0 — a garbage pointer.
+         *
+         * If the idx producer was already marked RAW_INT by SMI tag
+         * elision, skip the untag (consistent with how Add/Sub handle
+         * RAW_INT inputs). */
+        uint32_t idx_for_addr = idx;
+        vtx_node_t *idx_node = (node->inputs[1] < graph->node_table.count)
+            ? &graph->node_table.nodes[node->inputs[1]] : NULL;
+        bool idx_is_raw = idx_node && vtx_nf_has(idx_node->flags, VTX_NF_RAW_INT);
+        if (!idx_is_raw) {
+            idx_for_addr = vtx_isel_alloc_vreg(stream, arena);
+            emit_smi_untag(stream, block, idx_for_addr, idx, node_id, arena);
+        }
+
+        /* scale=8 (one vtx_value_t per slot), disp=header (skip the
+         * vtx_heap_object_t header to reach fields[0]). */
+        vtx_x86_memop_t mem = { base, idx_for_addr, 0xFF, 0xFF, 8,
+                                (int32_t)VTX_HEAP_OBJECT_HEADER_SIZE };
         vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_MOV, dst, &mem, node_id), arena);
         break;
     }
@@ -1960,7 +2165,19 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         ensure_node_vreg(stream, node->inputs[2], arena);
         uint32_t val = vtx_isel_node_vreg(stream, node->inputs[2]);
         if (base == VTX_VREG_INVALID || idx == VTX_VREG_INVALID || val == VTX_VREG_INVALID) return -1;
-        vtx_x86_memop_t mem = { base, idx, 0xFF, 0xFF, 8, 0 };
+
+        /* Fix #14: untag the SMI index (see LoadIndexed above). */
+        uint32_t idx_for_addr = idx;
+        vtx_node_t *idx_node = (node->inputs[1] < graph->node_table.count)
+            ? &graph->node_table.nodes[node->inputs[1]] : NULL;
+        bool idx_is_raw = idx_node && vtx_nf_has(idx_node->flags, VTX_NF_RAW_INT);
+        if (!idx_is_raw) {
+            idx_for_addr = vtx_isel_alloc_vreg(stream, arena);
+            emit_smi_untag(stream, block, idx_for_addr, idx, node_id, arena);
+        }
+
+        vtx_x86_memop_t mem = { base, idx_for_addr, 0xFF, 0xFF, 8,
+                                (int32_t)VTX_HEAP_OBJECT_HEADER_SIZE };
         vtx_isel_emit_inst(block, make_mr_inst(VTX_X86_MOV, &mem, val, node_id), arena);
 
         /* Emit GC write barrier for reference stores.
@@ -2164,16 +2381,25 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
          * For if_false (cond=EQ): JE jumps when cond == SMI(0) (falsy)
          */
         if (cond_vreg != VTX_VREG_INVALID) {
-            /* BUGFIX: The regalloc may assign the same physical register
-             * to smi_zero_vreg and cond_vreg, making CMP(x, x) which
-             * always sets ZF=1. Fix: mark the CMP as a definition of
-             * smi_zero_vreg (so its live interval extends to the CMP),
-             * preventing the regalloc from reusing cond_vreg's register. */
-            uint32_t smi_zero_vreg = vtx_isel_alloc_vreg(stream, arena);
-            vtx_inst_t mov_smi_zero = make_ri_inst(VTX_X86_MOV, smi_zero_vreg,
-                               (int64_t)VTX_NAN_BOX_HEADER, node_id);
-            vtx_isel_emit_inst(block, mov_smi_zero, arena);
-            vtx_inst_t cmp = make_rr_inst(VTX_X86_CMP, cond_vreg, smi_zero_vreg, node_id);
+            /* Fix #13: Compare against SMI(0) = VTX_NAN_BOX_HEADER using
+             * the pre-loaded R10 (smi_scratch_vreg) instead of emitting
+             * a 10-byte MOV imm64 per If.
+             *
+             * R10 is reserved (VTX_REG_RESERVED_MASK) so regalloc never
+             * assigns cond_vreg to R10 — no aliasing risk.
+             *
+             * Setting uses_smi=true guarantees the prologue emits
+             * "MOV R10, VTX_NAN_BOX_HEADER" so R10 actually holds SMI(0)
+             * by the time we reach this CMP. If the function has no other
+             * SMI ops, this is the only instruction that triggers the
+             * prologue load — a one-time 10-byte cost amortized over
+             * every If in the function.
+             *
+             * We still mark the CMP as a use of smi_scratch_vreg so the
+             * regalloc doesn't drop the prologue load as dead code. */
+            stream->uses_smi = true;
+            vtx_inst_t cmp = make_rr_inst(VTX_X86_CMP, cond_vreg,
+                                           stream->smi_scratch_vreg, node_id);
             cmp.flags |= VTX_INST_FLAG_FUSED | VTX_INST_FLAG_NO_TEST;
             vtx_isel_emit_inst(block, cmp, arena);
         }

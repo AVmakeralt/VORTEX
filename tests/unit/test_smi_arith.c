@@ -1006,6 +1006,163 @@ VTX_TEST(t2_div_truncation)
     VTX_ASSERT_TRUE(match);
 }
 
+/* ---- Magic-number Div tests (Fix #15) ----
+ * Divisor is a non-power-of-2 constant loaded via LOAD_CONST_INT.
+ * The isel fast path uses compute_magic_number + one-operand IMUL
+ * instead of IDIV. The result must match C99 truncating division
+ * for both positive and negative dividends. */
+
+VTX_TEST(t2_div_magic_3_positive)
+{
+    /* 100 / 3 = 33 */
+    static const uint8_t code[] = {
+        VT_OP_LOAD_LOCAL, 0x00, 0x00,
+        VT_OP_LOAD_CONST_INT, 0x00, 0x00,
+        VT_OP_IDIV,
+        VT_OP_RETURN_VALUE
+    };
+    vtx_value_t consts[] = { vtx_make_smi(3) };
+    vtx_value_t args[1] = { vtx_make_smi(100) };
+    vtx_value_t jit_result;
+    bool match = run_t2_and_compare(code, sizeof(code), consts, 1, 1, 2, 1, args, &jit_result);
+    VTX_ASSERT_TRUE(match);
+}
+
+VTX_TEST(t2_div_magic_3_negative)
+{
+    /* -100 / 3 = -33 (C99 truncation) */
+    static const uint8_t code[] = {
+        VT_OP_LOAD_LOCAL, 0x00, 0x00,
+        VT_OP_LOAD_CONST_INT, 0x00, 0x00,
+        VT_OP_IDIV,
+        VT_OP_RETURN_VALUE
+    };
+    vtx_value_t consts[] = { vtx_make_smi(3) };
+    vtx_value_t args[1] = { vtx_make_smi(-100) };
+    vtx_value_t jit_result;
+    bool match = run_t2_and_compare(code, sizeof(code), consts, 1, 1, 2, 1, args, &jit_result);
+    VTX_ASSERT_TRUE(match);
+}
+
+VTX_TEST(t2_div_magic_7_various)
+{
+    /* Multiple cases for divisor 7 — exercises M = ceil(2^64/7). */
+    static const uint8_t code[] = {
+        VT_OP_LOAD_LOCAL, 0x00, 0x00,
+        VT_OP_LOAD_CONST_INT, 0x00, 0x00,
+        VT_OP_IDIV,
+        VT_OP_RETURN_VALUE
+    };
+    vtx_value_t consts[] = { vtx_make_smi(7) };
+    int64_t cases[] = { 0, 1, 6, 7, 8, 14, 100, -1, -6, -7, -8, -14, -100 };
+    for (size_t i = 0; i < sizeof(cases)/sizeof(cases[0]); i++) {
+        vtx_value_t args[1] = { vtx_make_smi(cases[i]) };
+        vtx_value_t jit_result;
+        bool match = run_t2_and_compare(code, sizeof(code), consts, 1, 1, 2, 1, args, &jit_result);
+        if (!match) {
+            fprintf(stderr, "FAIL: t2_div_magic_7_various case %zu (n=%lld)\n",
+                    i, (long long)cases[i]);
+        }
+        VTX_ASSERT_TRUE(match);
+    }
+}
+
+VTX_TEST(t2_div_magic_10)
+{
+    /* 12345 / 10 = 1234 — divisor 10 = 2 * 5, not power of 2 */
+    static const uint8_t code[] = {
+        VT_OP_LOAD_LOCAL, 0x00, 0x00,
+        VT_OP_LOAD_CONST_INT, 0x00, 0x00,
+        VT_OP_IDIV,
+        VT_OP_RETURN_VALUE
+    };
+    vtx_value_t consts[] = { vtx_make_smi(10) };
+    vtx_value_t args[1] = { vtx_make_smi(12345) };
+    vtx_value_t jit_result;
+    bool match = run_t2_and_compare(code, sizeof(code), consts, 1, 1, 2, 1, args, &jit_result);
+    VTX_ASSERT_TRUE(match);
+}
+
+VTX_TEST(t2_div_magic_10_negative)
+{
+    /* -12345 / 10 = -1234 (C99 truncation) */
+    static const uint8_t code[] = {
+        VT_OP_LOAD_LOCAL, 0x00, 0x00,
+        VT_OP_LOAD_CONST_INT, 0x00, 0x00,
+        VT_OP_IDIV,
+        VT_OP_RETURN_VALUE
+    };
+    vtx_value_t consts[] = { vtx_make_smi(10) };
+    vtx_value_t args[1] = { vtx_make_smi(-12345) };
+    vtx_value_t jit_result;
+    bool match = run_t2_and_compare(code, sizeof(code), consts, 1, 1, 2, 1, args, &jit_result);
+    VTX_ASSERT_TRUE(match);
+}
+
+VTX_TEST(t2_div_magic_negative_divisor)
+{
+    /* 100 / -3 = -33 (negative divisor triggers the NEG correction) */
+    static const uint8_t code[] = {
+        VT_OP_LOAD_LOCAL, 0x00, 0x00,
+        VT_OP_LOAD_CONST_INT, 0x00, 0x00,
+        VT_OP_IDIV,
+        VT_OP_RETURN_VALUE
+    };
+    vtx_value_t consts[] = { vtx_make_smi(-3) };
+    vtx_value_t args[1] = { vtx_make_smi(100) };
+    vtx_value_t jit_result;
+    bool match = run_t2_and_compare(code, sizeof(code), consts, 1, 1, 2, 1, args, &jit_result);
+    VTX_ASSERT_TRUE(match);
+}
+
+VTX_TEST(t2_div_magic_negative_divisor_negative_dividend)
+{
+    /* -100 / -3 = 33 */
+    static const uint8_t code[] = {
+        VT_OP_LOAD_LOCAL, 0x00, 0x00,
+        VT_OP_LOAD_CONST_INT, 0x00, 0x00,
+        VT_OP_IDIV,
+        VT_OP_RETURN_VALUE
+    };
+    vtx_value_t consts[] = { vtx_make_smi(-3) };
+    vtx_value_t args[1] = { vtx_make_smi(-100) };
+    vtx_value_t jit_result;
+    bool match = run_t2_and_compare(code, sizeof(code), consts, 1, 1, 2, 1, args, &jit_result);
+    VTX_ASSERT_TRUE(match);
+}
+
+VTX_TEST(t2_div_magic_large_divisor)
+{
+    /* 1000000 / 999 = 1001 — large non-power-of-2 divisor */
+    static const uint8_t code[] = {
+        VT_OP_LOAD_LOCAL, 0x00, 0x00,
+        VT_OP_LOAD_CONST_INT, 0x00, 0x00,
+        VT_OP_IDIV,
+        VT_OP_RETURN_VALUE
+    };
+    vtx_value_t consts[] = { vtx_make_smi(999) };
+    vtx_value_t args[1] = { vtx_make_smi(1000000) };
+    vtx_value_t jit_result;
+    bool match = run_t2_and_compare(code, sizeof(code), consts, 1, 1, 2, 1, args, &jit_result);
+    VTX_ASSERT_TRUE(match);
+}
+
+VTX_TEST(t2_div_magic_small_dividend)
+{
+    /* 5 / 1000 = 0 (dividend smaller than divisor) */
+    static const uint8_t code[] = {
+        VT_OP_LOAD_LOCAL, 0x00, 0x00,
+        VT_OP_LOAD_CONST_INT, 0x00, 0x00,
+        VT_OP_IDIV,
+        VT_OP_RETURN_VALUE
+    };
+    vtx_value_t consts[] = { vtx_make_smi(1000) };
+    vtx_value_t args[1] = { vtx_make_smi(5) };
+    vtx_value_t jit_result;
+    bool match = run_t2_and_compare(code, sizeof(code), consts, 1, 1, 2, 1, args, &jit_result);
+    VTX_ASSERT_TRUE(match);
+}
+
 VTX_TEST(t2_mod_basic)
 {
     static const uint8_t code[] = {
@@ -1258,6 +1415,135 @@ VTX_TEST(t2_mod_negative)
     vtx_value_t args[2] = { vtx_make_smi(-17), vtx_make_smi(5) };
     vtx_value_t jit_result;
     bool match = run_t2_and_compare(code, sizeof(code), NULL, 0, 2, 2, 2, args, &jit_result);
+    VTX_ASSERT_TRUE(match);
+}
+
+/* ---- Mod(x, 2^k) strength reduction tests (Fix #2) ----
+ * These exercise the isel fast path that replaces IDIV (~25 cycles)
+ * with a SAR+AND+ADD+SAR+SHL+SUB sequence (~6 cycles). The formula
+ * must match C99 % truncation-toward-zero semantics exactly.
+ * Note: the bytecode uses a runtime variable as the divisor so SCCP
+ * can't fold it — but the *IR Constant node* for the divisor (created
+ * by LOAD_CONST_INT) is what try_get_const_int() looks at, so the
+ * isel fast path still fires. */
+
+VTX_TEST(t2_mod_power_of_2_positive)
+{
+    /* 17 % 4 = 1 (4 = 2^2, exercises k=2 path) */
+    static const uint8_t code[] = {
+        VT_OP_LOAD_LOCAL, 0x00, 0x00,
+        VT_OP_LOAD_CONST_INT, 0x00, 0x00,
+        VT_OP_IMOD,
+        VT_OP_RETURN_VALUE
+    };
+    vtx_value_t consts[] = { vtx_make_smi(4) };
+    vtx_value_t args[1] = { vtx_make_smi(17) };
+    vtx_value_t jit_result;
+    bool match = run_t2_and_compare(code, sizeof(code), consts, 1, 1, 2, 1, args, &jit_result);
+    VTX_ASSERT_TRUE(match);
+}
+
+VTX_TEST(t2_mod_power_of_2_negative_dividend)
+{
+    /* -7 % 4 = -3 (C99 truncation; bitwise AND would give 1) */
+    static const uint8_t code[] = {
+        VT_OP_LOAD_LOCAL, 0x00, 0x00,
+        VT_OP_LOAD_CONST_INT, 0x00, 0x00,
+        VT_OP_IMOD,
+        VT_OP_RETURN_VALUE
+    };
+    vtx_value_t consts[] = { vtx_make_smi(4) };
+    vtx_value_t args[1] = { vtx_make_smi(-7) };
+    vtx_value_t jit_result;
+    bool match = run_t2_and_compare(code, sizeof(code), consts, 1, 1, 2, 1, args, &jit_result);
+    VTX_ASSERT_TRUE(match);
+}
+
+VTX_TEST(t2_mod_power_of_2_k1)
+{
+    /* n % 2 = 0 if even, ±1 if odd — the collatz hot path.
+     * Tests k=1 specifically (mask=1). */
+    static const uint8_t code[] = {
+        VT_OP_LOAD_LOCAL, 0x00, 0x00,
+        VT_OP_LOAD_CONST_INT, 0x00, 0x00,
+        VT_OP_IMOD,
+        VT_OP_RETURN_VALUE
+    };
+    vtx_value_t consts[] = { vtx_make_smi(2) };
+    int64_t cases[] = { 0, 1, -1, 2, -2, 7, -7, 100, -100 };
+    for (size_t i = 0; i < sizeof(cases)/sizeof(cases[0]); i++) {
+        vtx_value_t args[1] = { vtx_make_smi(cases[i]) };
+        vtx_value_t jit_result;
+        bool match = run_t2_and_compare(code, sizeof(code), consts, 1, 1, 2, 1, args, &jit_result);
+        if (!match) {
+            fprintf(stderr, "FAIL: t2_mod_power_of_2_k1 case %zu (n=%lld)\n",
+                    i, (long long)cases[i]);
+        }
+        VTX_ASSERT_TRUE(match);
+    }
+}
+
+VTX_TEST(t2_mod_power_of_2_k3)
+{
+    /* 100 % 8 = 4 (k=3) */
+    static const uint8_t code[] = {
+        VT_OP_LOAD_LOCAL, 0x00, 0x00,
+        VT_OP_LOAD_CONST_INT, 0x00, 0x00,
+        VT_OP_IMOD,
+        VT_OP_RETURN_VALUE
+    };
+    vtx_value_t consts[] = { vtx_make_smi(8) };
+    vtx_value_t args[1] = { vtx_make_smi(100) };
+    vtx_value_t jit_result;
+    bool match = run_t2_and_compare(code, sizeof(code), consts, 1, 1, 2, 1, args, &jit_result);
+    VTX_ASSERT_TRUE(match);
+}
+
+VTX_TEST(t2_mod_power_of_2_negative_k3)
+{
+    /* -100 % 8 = -4 (C99: sign of dividend) */
+    static const uint8_t code[] = {
+        VT_OP_LOAD_LOCAL, 0x00, 0x00,
+        VT_OP_LOAD_CONST_INT, 0x00, 0x00,
+        VT_OP_IMOD,
+        VT_OP_RETURN_VALUE
+    };
+    vtx_value_t consts[] = { vtx_make_smi(8) };
+    vtx_value_t args[1] = { vtx_make_smi(-100) };
+    vtx_value_t jit_result;
+    bool match = run_t2_and_compare(code, sizeof(code), consts, 1, 1, 2, 1, args, &jit_result);
+    VTX_ASSERT_TRUE(match);
+}
+
+VTX_TEST(t2_mod_power_of_2_exact_divisor)
+{
+    /* 16 % 8 = 0 (no remainder) */
+    static const uint8_t code[] = {
+        VT_OP_LOAD_LOCAL, 0x00, 0x00,
+        VT_OP_LOAD_CONST_INT, 0x00, 0x00,
+        VT_OP_IMOD,
+        VT_OP_RETURN_VALUE
+    };
+    vtx_value_t consts[] = { vtx_make_smi(8) };
+    vtx_value_t args[1] = { vtx_make_smi(16) };
+    vtx_value_t jit_result;
+    bool match = run_t2_and_compare(code, sizeof(code), consts, 1, 1, 2, 1, args, &jit_result);
+    VTX_ASSERT_TRUE(match);
+}
+
+VTX_TEST(t2_mod_power_of_2_negative_exact_divisor)
+{
+    /* -16 % 8 = 0 (still zero remainder) */
+    static const uint8_t code[] = {
+        VT_OP_LOAD_LOCAL, 0x00, 0x00,
+        VT_OP_LOAD_CONST_INT, 0x00, 0x00,
+        VT_OP_IMOD,
+        VT_OP_RETURN_VALUE
+    };
+    vtx_value_t consts[] = { vtx_make_smi(8) };
+    vtx_value_t args[1] = { vtx_make_smi(-16) };
+    vtx_value_t jit_result;
+    bool match = run_t2_and_compare(code, sizeof(code), consts, 1, 1, 2, 1, args, &jit_result);
     VTX_ASSERT_TRUE(match);
 }
 

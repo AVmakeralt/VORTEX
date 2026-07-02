@@ -258,6 +258,7 @@ void vtx_x86_emit_sub_ri(vtx_x86_emit_t *e, uint8_t dst, int32_t imm);
 void vtx_x86_emit_imul_rr(vtx_x86_emit_t *e, uint8_t dst, uint8_t src);
 void vtx_x86_emit_imul_ri(vtx_x86_emit_t *e, uint8_t dst, int32_t imm);
 void vtx_x86_emit_idiv_r(vtx_x86_emit_t *e, uint8_t src);
+void vtx_x86_emit_imul_full_r(vtx_x86_emit_t *e, uint8_t src);  /* one-operand IMUL, RDX:RAX = RAX * src */
 void vtx_x86_emit_shl_ri(vtx_x86_emit_t *e, uint8_t dst, uint8_t count);
 void vtx_x86_emit_shl_cl(vtx_x86_emit_t *e, uint8_t dst);
 void vtx_x86_emit_shr_ri(vtx_x86_emit_t *e, uint8_t dst, uint8_t count);

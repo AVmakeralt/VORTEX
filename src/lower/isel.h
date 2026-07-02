@@ -49,6 +49,7 @@ typedef enum {
     VTX_X86_IMUL,       /* imul r64, r/m64 */
     VTX_X86_IDIV,       /* idiv r/m64  (RDX:RAX / r/m64) */
     VTX_X86_MUL,        /* mul r/m64  (RDX:RAX * r/m64, unsigned) */
+    VTX_X86_IMUL_FULL,  /* imul r/m64  (RDX:RAX = RAX * r/m64, signed) — for magic-number division */
     VTX_X86_NEG,        /* neg r/m64 */
     VTX_X86_NOT,        /* not r/m64 */
     VTX_X86_INC,        /* inc r/m64 */
