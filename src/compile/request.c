@@ -264,6 +264,11 @@ static void compile_callback(uint32_t method_id, vtx_compile_tier_t tier, void *
          * one passed the orchestrator to the pipeline. */
         config.orchestrator = ctx->orchestrator;
 
+        /* Wire the versioned cache so the pipeline can register new
+         * versions. This enables N+1 versioning and safe reclamation
+         * of old compiled code. */
+        config.versioned_cache = ctx->versioned_cache;
+
         /* Wire the callee lookup so the inliner can actually inline.
          * Without this, callee_lookup=NULL and the GBDT model computes
          * scores but never inlines anything.

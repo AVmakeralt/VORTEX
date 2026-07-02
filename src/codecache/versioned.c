@@ -28,9 +28,9 @@ void vtx_versioned_cache_destroy(vtx_versioned_cache_t *vc)
 {
     if (vc == NULL) return;
     for (uint32_t i = 0; i < VTX_VERSIONED_CACHE_MAX_METHODS; i++) {
-        vtx_code_version_t *v = vc->versions[i];
+        vtx_versioned_code_version_t *v = vc->versions[i];
         while (v != NULL) {
-            vtx_code_version_t *next = v->next;
+            vtx_versioned_code_version_t *next = v->next;
             /* Note: we don't free code_ptr here — the underlying cache
              * owns the memory and will free it on its own destroy. */
             free(v);
@@ -41,7 +41,7 @@ void vtx_versioned_cache_destroy(vtx_versioned_cache_t *vc)
 }
 
 /* Find the version list for a method. Returns the head, or NULL if none. */
-static vtx_code_version_t *find_version_list(vtx_versioned_cache_t *vc, uint32_t method_id)
+static vtx_versioned_code_version_t *find_version_list(vtx_versioned_cache_t *vc, uint32_t method_id)
 {
     return vc->versions[METHOD_INDEX(method_id)];
 }
@@ -51,10 +51,10 @@ static vtx_code_version_t *find_version_list(vtx_versioned_cache_t *vc, uint32_t
 static void force_free_oldest_retired(vtx_versioned_cache_t *vc, uint32_t method_id)
 {
     uint32_t idx = METHOD_INDEX(method_id);
-    vtx_code_version_t *oldest = NULL;
-    vtx_code_version_t **oldest_ptr = NULL;
-    vtx_code_version_t **prev_ptr = &vc->versions[idx];
-    vtx_code_version_t *v = vc->versions[idx];
+    vtx_versioned_code_version_t *oldest = NULL;
+    vtx_versioned_code_version_t **oldest_ptr = NULL;
+    vtx_versioned_code_version_t **prev_ptr = &vc->versions[idx];
+    vtx_versioned_code_version_t *v = vc->versions[idx];
     while (v != NULL) {
         if (v->is_retired) {
             if (oldest == NULL || v->retire_time_ns < oldest->retire_time_ns) {
@@ -87,8 +87,8 @@ uint32_t vtx_versioned_cache_install(vtx_versioned_cache_t *vc,
     uint32_t idx = METHOD_INDEX(method_id);
 
     /* Retire the current active version (if any). */
-    vtx_code_version_t *old_active = NULL;
-    for (vtx_code_version_t *v = vc->versions[idx]; v != NULL; v = v->next) {
+    vtx_versioned_code_version_t *old_active = NULL;
+    for (vtx_versioned_code_version_t *v = vc->versions[idx]; v != NULL; v = v->next) {
         if (v->is_active) {
             old_active = v;
             break;
@@ -106,7 +106,7 @@ uint32_t vtx_versioned_cache_install(vtx_versioned_cache_t *vc,
 
     /* Count retired versions; if too many, force-free the oldest. */
     uint32_t retired_count = 0;
-    for (vtx_code_version_t *v = vc->versions[idx]; v != NULL; v = v->next) {
+    for (vtx_versioned_code_version_t *v = vc->versions[idx]; v != NULL; v = v->next) {
         if (v->is_retired) retired_count++;
     }
     while (retired_count > VTX_VERSIONED_CACHE_MAX_RETIRED) {
@@ -115,7 +115,7 @@ uint32_t vtx_versioned_cache_install(vtx_versioned_cache_t *vc,
     }
 
     /* Create the new active version. */
-    vtx_code_version_t *new_v = (vtx_code_version_t *)calloc(1, sizeof(vtx_code_version_t));
+    vtx_versioned_code_version_t *new_v = (vtx_versioned_code_version_t *)calloc(1, sizeof(vtx_versioned_code_version_t));
     if (new_v == NULL) return 0;
     new_v->method_id = method_id;
     new_v->version_number = ++vc->next_version_number[idx];
@@ -132,12 +132,12 @@ uint32_t vtx_versioned_cache_install(vtx_versioned_cache_t *vc,
     return new_v->version_number;
 }
 
-vtx_code_version_t *vtx_versioned_cache_get_active(
+vtx_versioned_code_version_t *vtx_versioned_cache_get_active(
     const vtx_versioned_cache_t *vc, uint32_t method_id)
 {
     if (vc == NULL) return NULL;
     uint32_t idx = METHOD_INDEX(method_id);
-    for (vtx_code_version_t *v = vc->versions[idx]; v != NULL; v = v->next) {
+    for (vtx_versioned_code_version_t *v = vc->versions[idx]; v != NULL; v = v->next) {
         if (v->is_active) return v;
     }
     return NULL;
@@ -146,7 +146,7 @@ vtx_code_version_t *vtx_versioned_cache_get_active(
 void vtx_versioned_cache_on_enter(vtx_versioned_cache_t *vc, uint32_t method_id)
 {
     if (vc == NULL) return;
-    vtx_code_version_t *active = vtx_versioned_cache_get_active(vc, method_id);
+    vtx_versioned_code_version_t *active = vtx_versioned_cache_get_active(vc, method_id);
     if (active != NULL) {
         active->on_stack_count++;
     }
@@ -160,7 +160,7 @@ void vtx_versioned_cache_on_exit(vtx_versioned_cache_t *vc, uint32_t method_id)
      * a positive count. In practice, only one version should have a
      * positive count (the one being exited), but if there's a race,
      * decrementing all positive ones is safe. */
-    for (vtx_code_version_t *v = vc->versions[idx]; v != NULL; v = v->next) {
+    for (vtx_versioned_code_version_t *v = vc->versions[idx]; v != NULL; v = v->next) {
         if (v->on_stack_count > 0) {
             v->on_stack_count--;
         }
@@ -172,7 +172,7 @@ int vtx_versioned_cache_patch(vtx_versioned_cache_t *vc, uint32_t method_id,
                                uint32_t len)
 {
     if (vc == NULL || new_bytes == NULL) return -1;
-    vtx_code_version_t *active = vtx_versioned_cache_get_active(vc, method_id);
+    vtx_versioned_code_version_t *active = vtx_versioned_cache_get_active(vc, method_id);
     if (active == NULL || active->code_ptr == NULL) return -1;
     if (patch_offset + len > active->code_size) return -1;
 
@@ -195,8 +195,8 @@ uint32_t vtx_versioned_cache_reclaim(vtx_versioned_cache_t *vc)
     if (vc == NULL) return 0;
     uint32_t reclaimed = 0;
     for (uint32_t i = 0; i < VTX_VERSIONED_CACHE_MAX_METHODS; i++) {
-        vtx_code_version_t **prev_ptr = &vc->versions[i];
-        vtx_code_version_t *v = vc->versions[i];
+        vtx_versioned_code_version_t **prev_ptr = &vc->versions[i];
+        vtx_versioned_code_version_t *v = vc->versions[i];
         while (v != NULL) {
             if (v->is_retired && v->on_stack_count == 0) {
                 /* Safe to reclaim. */

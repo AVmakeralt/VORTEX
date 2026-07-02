@@ -46,6 +46,7 @@
 #include "deopt/side_table.h"
 #include "deopt/stack_walk.h"
 #include "deopt/coordinator.h"
+#include "codecache/versioned.h"
 #include "baseline/codegen.h"
 #include "baseline/guards.h"
 #include "baseline/frame_layout.h"
@@ -2892,6 +2893,31 @@ int main(int argc, char *argv[])
             compile_ctx.deopt_coord = NULL;
         }
 
+        /* Instantiate the versioned code cache.
+         * This wraps the code cache with N+1 versioning: when a method is
+         * recompiled, the old version is kept alive (retired) until no
+         * thread's stack references it. This prevents the catastrophic bug
+         * where thread A executes old code while thread B frees it.
+         * Also provides patching (for IC → direct call promotion) and
+         * compaction (fragmentation management). */
+        vtx_versioned_cache_t versioned_cache;
+        if (vtx_versioned_cache_init(&versioned_cache, &cache) == 0) {
+            compile_ctx.versioned_cache = &versioned_cache;
+        } else {
+            compile_ctx.versioned_cache = NULL;
+        }
+
+        /* Safepoint manager: the compile/safepoint.h version is already
+         * initialized below (vtx_safepoint_init). The runtime/safepoint_manager.h
+         * version (multi-threaded, GC-integrated) can't be included simultaneously
+         * due to a typedef name conflict. The GC's safepoint_mgr field is
+         * left NULL — the GC falls back to single-threaded collection
+         * (vtx_gc_collect_young without requesting all threads to safepoint).
+         * This is safe for single-threaded execution but needs the runtime
+         * safepoint_manager for multi-threaded GC. */
+        compile_ctx.safepoint_mgr = NULL;
+        gc.safepoint_mgr = NULL;
+
         /* Create and wire threadpool for background compilation */
         vtx_threadpool_t pool;
         if (vtx_threadpool_init(&pool, 1) == 0) {  /* 1 compile thread */
@@ -3156,6 +3182,9 @@ int main(int argc, char *argv[])
         }
         if (compile_ctx.deopt_coord != NULL) {
             vtx_deopt_coord_destroy(&deopt_coord);
+        }
+        if (compile_ctx.versioned_cache != NULL) {
+            vtx_versioned_cache_destroy(&versioned_cache);
         }
         vtx_method_registry_destroy(&registry);
         vtx_code_cache_destroy(&cache);

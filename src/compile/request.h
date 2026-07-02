@@ -16,6 +16,9 @@ struct vtx_arena;
 struct vtx_orchestrator;
 struct vtx_spec_version_manager;
 struct vtx_deopt_coord;
+struct vtx_versioned_cache;
+struct vtx_safepoint_manager;
+struct vtx_deoptless_table;
 
 /**
  * VORTEX Compilation Request
@@ -47,6 +50,8 @@ typedef struct {
     struct vtx_orchestrator      *orchestrator;
     struct vtx_spec_version_manager *spec_version_mgr;  /* argument-type specialization */
     struct vtx_deopt_coord       *deopt_coord;  /* deopt rate limiting / batching */
+    struct vtx_versioned_cache   *versioned_cache;  /* N+1 versioning + safe reclamation */
+    struct vtx_safepoint_manager *safepoint_mgr;  /* multi-threaded safepoint manager */
 
     /* Method lookup: given a method_id, returns the method descriptor.
      * This is needed by the threadpool worker to find the method's

@@ -84,7 +84,7 @@ void vtx_safepoint_thread_unregister(vtx_safepoint_manager_t *mgr)
     pthread_mutex_unlock(&mgr->mutex);
 }
 
-void vtx_safepoint_check(vtx_safepoint_manager_t *mgr)
+void vtx_safepoint_mgr_check(vtx_safepoint_manager_t *mgr)
 {
     if (mgr == NULL) return;
     pthread_mutex_lock(&mgr->mutex);

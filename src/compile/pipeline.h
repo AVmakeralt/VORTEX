@@ -36,6 +36,10 @@
  * or NULL if the callee is not available for inlining. */
 typedef const vtx_graph_t *(*vtx_callee_lookup_fn)(uint32_t method_index, void *context);
 
+/* Forward declarations */
+struct vtx_orchestrator;
+struct vtx_versioned_cache;
+
 /* Pipeline configuration */
 typedef struct {
     bool run_gvn;               /* Global Value Numbering */
@@ -98,6 +102,12 @@ typedef struct {
      * — collectively ~5 SOTA subsystems that were previously dead code
      * because no one called on_compile_done. */
     struct vtx_orchestrator     *orchestrator;
+
+    /* Versioned code cache. If non-NULL, the pipeline registers each
+     * installed method version with the versioned cache after install.
+     * This enables N+1 versioning (old versions kept alive until no
+     * thread references them) and safe hot-swap recompilation. */
+    struct vtx_versioned_cache  *versioned_cache;
 } vtx_pipeline_config_t;
 
 /* Pipeline statistics */

@@ -28,7 +28,7 @@
  * Usage:
  *   - Main thread: vtx_safepoint_manager_init(&mgr, &gc)
  *   - Each mutator thread: vtx_safepoint_thread_register(&mgr)
- *   - At safepoint check sites: vtx_safepoint_check(&mgr)
+ *   - At safepoint check sites: vtx_safepoint_mgr_check(&mgr)
  *   - GC thread: vtx_safepoint_request_all(&mgr) → blocks until all threads
  *     are safepointed → do GC → vtx_safepoint_release_all(&mgr)
  *   - Thread exit: vtx_safepoint_thread_unregister(&mgr)
@@ -95,7 +95,7 @@ void vtx_safepoint_thread_unregister(vtx_safepoint_manager_t *mgr);
  * This function is FAST when no safepoint is requested: it just checks
  * the atomic flag. When a safepoint IS requested, it blocks until the
  * GC releases all threads. */
-void vtx_safepoint_check(vtx_safepoint_manager_t *mgr);
+void vtx_safepoint_mgr_check(vtx_safepoint_manager_t *mgr);
 
 /* Request all mutator threads to reach a safepoint. Blocks until all
  * active threads have reached the safepoint. Called by the GC thread

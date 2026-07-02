@@ -1,4 +1,5 @@
 #include "runtime/gc.h"
+#include "runtime/safepoint_manager.h"
 
 #include <sys/mman.h>
 #include <string.h>
@@ -547,7 +548,23 @@ void vtx_gc_safepoint(vtx_gc_t *gc)
 
     if (gc->collection_requested) {
         gc->collection_requested = false;
+
+        /* If a safepoint manager is wired, request all threads to safepoint
+         * before collecting. This ensures JIT-compiled code is not modifying
+         * the heap during collection. After collection, release all threads. */
+        if (gc->safepoint_mgr != NULL) {
+            vtx_safepoint_manager_t *mgr =
+                (vtx_safepoint_manager_t *)gc->safepoint_mgr;
+            vtx_safepoint_request_all(mgr);
+        }
+
         vtx_gc_collect_young(gc);
+
+        if (gc->safepoint_mgr != NULL) {
+            vtx_safepoint_manager_t *mgr =
+                (vtx_safepoint_manager_t *)gc->safepoint_mgr;
+            vtx_safepoint_release_all(mgr);
+        }
     }
 }
 

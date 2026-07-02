@@ -31,7 +31,7 @@ VTX_TEST(versioned_install_and_get_active) {
     uint32_t v1 = vtx_versioned_cache_install(&vc, 42, code1, 64);
     VTX_ASSERT_TRUE(v1 == 1);
 
-    vtx_code_version_t *active = vtx_versioned_cache_get_active(&vc, 42);
+    vtx_versioned_code_version_t *active = vtx_versioned_cache_get_active(&vc, 42);
     VTX_ASSERT_TRUE(active != NULL);
     VTX_ASSERT_TRUE(active->version_number == 1);
     VTX_ASSERT_TRUE(active->is_active);
@@ -57,7 +57,7 @@ VTX_TEST(versioned_install_retires_old) {
     vtx_versioned_cache_install(&vc, 7, code1, 64);
     vtx_versioned_cache_install(&vc, 7, code2, 64);
 
-    vtx_code_version_t *active = vtx_versioned_cache_get_active(&vc, 7);
+    vtx_versioned_code_version_t *active = vtx_versioned_cache_get_active(&vc, 7);
     VTX_ASSERT_TRUE(active != NULL);
     VTX_ASSERT_TRUE(active->code_ptr == code2);
     VTX_ASSERT_TRUE(active->version_number == 2);
@@ -65,7 +65,7 @@ VTX_TEST(versioned_install_retires_old) {
     /* v1 should be retired but still in the list (N+1 versioning). */
     bool found_retired = false;
     uint32_t idx = 7 % VTX_VERSIONED_CACHE_MAX_METHODS;
-    for (vtx_code_version_t *v = vc.versions[idx]; v != NULL; v = v->next) {
+    for (vtx_versioned_code_version_t *v = vc.versions[idx]; v != NULL; v = v->next) {
         if (v->is_retired && v->code_ptr == code1) {
             found_retired = true;
             break;
@@ -88,7 +88,7 @@ VTX_TEST(versioned_on_enter_exit_tracks_stack) {
     vtx_code_cache_finalize(&cache);
     vtx_versioned_cache_install(&vc, 5, code, 64);
 
-    vtx_code_version_t *active = vtx_versioned_cache_get_active(&vc, 5);
+    vtx_versioned_code_version_t *active = vtx_versioned_cache_get_active(&vc, 5);
     VTX_ASSERT_TRUE(active->on_stack_count == 0);
 
     vtx_versioned_cache_on_enter(&vc, 5);
@@ -255,8 +255,8 @@ VTX_TEST(versioned_distinct_methods_dont_interfere) {
     vtx_versioned_cache_install(&vc, 100, code1, 32);
     vtx_versioned_cache_install(&vc, 200, code2, 32);
 
-    vtx_code_version_t *a1 = vtx_versioned_cache_get_active(&vc, 100);
-    vtx_code_version_t *a2 = vtx_versioned_cache_get_active(&vc, 200);
+    vtx_versioned_code_version_t *a1 = vtx_versioned_cache_get_active(&vc, 100);
+    vtx_versioned_code_version_t *a2 = vtx_versioned_cache_get_active(&vc, 200);
     VTX_ASSERT_TRUE(a1 != NULL && a2 != NULL);
     VTX_ASSERT_TRUE(a1->code_ptr == code1);
     VTX_ASSERT_TRUE(a2->code_ptr == code2);

@@ -8,6 +8,9 @@
 #include "runtime/object.h"
 #include "runtime/type_system.h"
 
+/* Forward declaration for safepoint manager */
+struct vtx_safepoint_manager;
+
 /**
  * VORTEX Generational Garbage Collector
  *
@@ -179,6 +182,14 @@ typedef struct vtx_gc_t {
     size_t            card_table_size;   /* number of card entries */
     uint8_t          *heap_base;        /* base address of the heap (for card index computation) */
     size_t            heap_size;         /* total heap size covered by the card table */
+
+    /* Safepoint manager for multi-threaded GC coordination.
+     * When non-NULL, vtx_gc_safepoint calls vtx_safepoint_request_all
+     * before collecting, and vtx_safepoint_release_all after.
+     * This is a void* to avoid a header conflict between compile/safepoint.h
+     * and runtime/safepoint_manager.h (both define vtx_safepoint_manager_t).
+     * The GC casts it to vtx_safepoint_manager_t* from safepoint_manager.h. */
+    void *safepoint_mgr;
 } vtx_gc_t;
 
 /* ========================================================================== */

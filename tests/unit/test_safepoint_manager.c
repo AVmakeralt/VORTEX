@@ -49,7 +49,7 @@ static void *mutator_thread_fn(void *arg)
         was_requested = ctx->mgr->safepoint_requested;
         pthread_mutex_unlock(&ctx->mgr->mutex);
         if (was_requested) ctx->safepoints_hit++;
-        vtx_safepoint_check(ctx->mgr);
+        vtx_safepoint_mgr_check(ctx->mgr);
     }
 
     vtx_safepoint_thread_unregister(ctx->mgr);
@@ -76,7 +76,7 @@ VTX_TEST(safepoint_check_noop_when_not_requested) {
     vtx_safepoint_thread_register(&mgr);
 
     /* No safepoint requested — check should be instant (no-op). */
-    vtx_safepoint_check(&mgr);
+    vtx_safepoint_mgr_check(&mgr);
     VTX_ASSERT_TRUE(mgr.total_safepoints == 0);
 
     vtx_safepoint_thread_unregister(&mgr);

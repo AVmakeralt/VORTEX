@@ -29,6 +29,13 @@
 #include "compile/orchestrator.h"
 #include "codecache/install.h"
 #include "ir/strength_reduce.h"
+
+/* Forward declarations from codecache/versioned.h (can't include directly
+ * due to vtx_code_version_t struct conflict with compile/version.h) */
+struct vtx_versioned_cache;
+uint32_t vtx_versioned_cache_install(struct vtx_versioned_cache *vc,
+                                      uint32_t method_id,
+                                      void *code_ptr, uint32_t code_size);
 #include "ir/loop_unroll.h"
 #include "ir/smi_tag_elision.h"
 #include "guard/hoist.h"
@@ -1559,6 +1566,18 @@ int vtx_pipeline_run(vtx_graph_t *graph,
                 vtx_orchestrator_on_compile_done(config->orchestrator,
                                                   method_id,
                                                   method_id /* version_id */);
+            }
+
+            /* Register the new version with the versioned code cache.
+             * This enables N+1 versioning: the old version (if any) is
+             * marked retired but kept alive until no thread references it.
+             * This prevents use-after-free when thread A is executing old
+             * code while thread B installs a new version. */
+            if (config->versioned_cache != NULL) {
+                vtx_versioned_cache_install(config->versioned_cache,
+                                             method_id,
+                                             config->method->compiled_code,
+                                             result->native_size);
             }
         }
     }

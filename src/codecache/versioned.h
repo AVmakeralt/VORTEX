@@ -45,9 +45,9 @@
  * unsafe if a thread is still on its stack). */
 #define VTX_VERSIONED_CACHE_MAX_RETIRED 8
 
-typedef struct vtx_code_version vtx_code_version_t;
+typedef struct vtx_versioned_code_version vtx_versioned_code_version_t;
 
-struct vtx_code_version {
+struct vtx_versioned_code_version {
     uint32_t              method_id;       /* which method this is a version of */
     uint32_t              version_number;  /* monotonically increasing per method */
     void                 *code_ptr;        /* pointer into the code cache */
@@ -56,12 +56,12 @@ struct vtx_code_version {
     bool                  is_retired;      /* true if retired (waiting for reclamation) */
     int32_t               on_stack_count;  /* number of threads currently executing this version */
     uint64_t              retire_time_ns;  /* when this version was retired */
-    vtx_code_version_t   *next;            /* linked list of versions for the same method */
+    vtx_versioned_code_version_t   *next;            /* linked list of versions for the same method */
 };
 
 typedef struct {
     vtx_code_cache_t            *cache;             /* underlying code cache (owned by caller) */
-    vtx_code_version_t          *versions[VTX_VERSIONED_CACHE_MAX_METHODS];  /* per-method version list */
+    vtx_versioned_code_version_t          *versions[VTX_VERSIONED_CACHE_MAX_METHODS];  /* per-method version list */
     uint32_t                     next_version_number[VTX_VERSIONED_CACHE_MAX_METHODS];
     uint32_t                     total_active;
     uint32_t                     total_retired;
@@ -86,7 +86,7 @@ uint32_t vtx_versioned_cache_install(vtx_versioned_cache_t *vc,
                                       void *code_ptr, uint32_t code_size);
 
 /* Get the active version of a method, or NULL if no version is installed. */
-vtx_code_version_t *vtx_versioned_cache_get_active(
+vtx_versioned_code_version_t *vtx_versioned_cache_get_active(
     const vtx_versioned_cache_t *vc, uint32_t method_id);
 
 /* Called when a thread ENTERS a method's code (i.e. the method's frame
