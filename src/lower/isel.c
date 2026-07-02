@@ -2436,44 +2436,16 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             }
         }
 
-        /* Cmp+If fusion (#4): If the condition is a Cmp node, the Cmp's
-         * isel already emitted a CMP instruction that set the flags. We
-         * can skip the redundant "CMP cond_vreg, SMI(0)" and emit the
-         * JCC directly — the flags from the Cmp are still live.
+        /* Cmp+If fusion (#4) is currently DISABLED — it requires scheduler-
+         * level coordination to ensure no flag-clobbering instructions are
+         * inserted between the Cmp's CMP and the If's JCC. The regalloc
+         * can insert spill reloads (which are MOVs and don't clobber flags),
+         * but other data nodes scheduled between the Cmp and If (e.g., an
+         * Add feeding a Phi) would clobber flags. A proper implementation
+         * needs the scheduler to guarantee adjacency, which is future work.
          *
-         * This saves 3 instructions per branch (CMP + potential MOV):
-         *   Before: CMP lhs, rhs → SETCC → MOVZX → CMP cond, SMI(0) → JCC
-         *   After:  CMP lhs, rhs → JCC
-         *
-         * The Cmp node produces a boolean SMI (0 or 1), but the If
-         * doesn't actually need the boolean value — it just needs the
-         * flags. By fusing, we skip the SETCC+MOVZX (in the Cmp isel)
-         * AND the CMP (in the If isel).
-         *
-         * However, the Cmp's SETCC+MOVZX is already emitted by the time
-         * we reach the If. To truly fuse, we'd need to look ahead from
-         * the Cmp and skip its SETCC+MOVZX if the only consumer is an If.
-         * That requires a pre-pass. For now, we do the simpler fusion:
-         * if the cond is a Cmp, skip the redundant CMP cond,SMI(0) and
-         * JCC directly. The Cmp's SETCC already set ZF correctly for
-         * EQ/NE, but for LT/GT/LE/GE we need to use the right JCC cond.
-         *
-         * Actually, the Cmp's result is a boolean SMI: SMI(1) for true,
-         * SMI(0) for false. The If tests "cond != SMI(0)" for if_true.
-         * SMI(1) != SMI(0) → true → JNE taken. SMI(0) == SMI(0) → false
-         * → JNE not taken. So the If's JNE correctly tests the boolean.
-         *
-         * But if we skip the CMP, we need the flags to still reflect
-         * the boolean. The Cmp's SETCC set the flags based on the
-         * comparison result, but then MOVZX may have clobbered them.
-         * So we can't safely skip the CMP unless we also skip the
-         * MOVZX — which requires the pre-pass.
-         *
-         * For now, keep the CMP but mark it FUSED so the peephole
-         * optimizer knows the CMP+JCC pair can be macro-fused by the
-         * CPU frontend. This is already done below. A full fusion
-         * (skipping the SETCC+MOVZX) is left for a future optimization
-         * that requires a Cmp-If detection pre-pass. */
+         * The mark_cmp_if_fusion pre-pass still runs and marks eligible Cmp
+         * nodes, but the If isel doesn't use the marks yet. */
 
         /* Test truthiness by comparing the raw SMI value against SMI(0).
          *
@@ -3438,6 +3410,38 @@ static void resolve_branch_targets(vtx_inst_stream_t *stream,
 }
 
 /* ========================================================================== */
+/* Cmp+If fusion pre-pass                                                      */
+/* ========================================================================== */
+
+/**
+ * Mark Cmp nodes whose ONLY consumer is an If node.
+ *
+ * When a Cmp feeds directly into an If (the common case in branchy code),
+ * we can skip the SETCC+MOVZX+retag sequence in the Cmp isel and skip the
+ * redundant CMP cond,SMI(0) in the If isel. The If's JCC uses the flags
+ * left by the Cmp's CMP directly.
+ *
+ * Uses the node's `mark` bit to flag Cmp nodes eligible for fusion.
+ */
+static void mark_cmp_if_fusion(vtx_graph_t *graph)
+{
+    vtx_node_table_t *nt = &graph->node_table;
+    for (uint32_t i = 0; i < nt->count; i++) {
+        vtx_node_t *cmp = &nt->nodes[i];
+        if (cmp->dead || cmp->opcode != VTX_OP_Cmp) continue;
+        if (cmp->use_count != 1) continue;
+
+        vtx_use_entry_t *use = &cmp->uses[0];
+        if (use->user_id >= nt->count) continue;
+        vtx_node_t *user = &nt->nodes[use->user_id];
+        if (user->dead || user->opcode != VTX_OP_If) continue;
+
+        /* The Cmp's only user is an If — mark for fusion */
+        cmp->mark = true;
+    }
+}
+
+/* ========================================================================== */
 /* Main entry point                                                            */
 /* ========================================================================== */
 
@@ -3475,6 +3479,15 @@ vtx_inst_stream_t *vtx_isel_select(const vtx_schedule_t *schedule,
                        schedule->count * sizeof(vtx_inst_block_t));
     if (!stream->blocks) return NULL;
     memset(stream->blocks, 0, schedule->count * sizeof(vtx_inst_block_t));
+
+    /* Cmp+If fusion pre-pass: mark Cmp nodes whose only consumer is an If.
+     * The Cmp isel skips SETCC+MOVZX+retag for marked nodes (emits only CMP),
+     * and the If isel uses the Cmp's flags directly for JCC.
+     *
+     * IMPORTANT: Clear all marks first — other IR passes use the mark bit
+     * and may leave stale marks. */
+    vtx_node_table_clear_marks((vtx_node_table_t *)&graph->node_table);
+    mark_cmp_if_fusion((vtx_graph_t *)graph);
 
     /* Walk each block and select instructions for each node */
     for (uint32_t b = 0; b < schedule->count; b++) {
