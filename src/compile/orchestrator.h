@@ -12,6 +12,9 @@
 #include "profile/data.h"
 #include "inliner/feedback.h"
 
+/* Forward declaration */
+struct vtx_deoptless_table;
+
 #ifdef VORTEX_ENABLE_SOTA
 #include "sota/markov.h"
 #include "sota/phase.h"
@@ -100,6 +103,13 @@ typedef struct {
     vtx_type_feedback_t       *type_feedback;     /* runtime type feedback data */
     vtx_profile_global_t      *profile;          /* global profile data */
     vtx_inline_feedback_t     *inline_feedback;  /* inline feedback tracker */
+
+    /* Deoptless continuation tables (array indexed by method_id).
+     * The orchestrator checks these periodically for methods that
+     * have accumulated enough failed guards to warrant continuation
+     * compilation. */
+    struct vtx_deoptless_table **deoptless_tables;
+    uint32_t                     deoptless_table_count;
 
     /* Background thread state */
     pthread_t                  orchestrator_thread;

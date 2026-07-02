@@ -3156,6 +3156,12 @@ int main(int argc, char *argv[])
         vtx_orchestrator_start(&orchestrator);
         compile_ctx.orchestrator = &orchestrator;
 
+        /* Wire deoptless tables into the orchestrator so it can check
+         * for methods with accumulated failed guards and trigger
+         * deoptless continuation compilation. */
+        orchestrator.deoptless_tables = compile_ctx.deoptless_tables;
+        orchestrator.deoptless_table_count = compile_ctx.deoptless_table_count;
+
         /* Wire type_feedback and markov into the compile context so the
          * runtime compilation path (request.c) can forward them to the
          * pipeline config. Without this:

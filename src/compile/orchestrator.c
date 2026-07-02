@@ -145,11 +145,29 @@ static void check_recomp_drift(vtx_orchestrator_t *orch)
 {
     if (orch->recomp == NULL || orch->profile == NULL) return;
 
-    /* Check if the recomp monitor has pending recompilation entries
-     * (these were queued by vtx_sota_recomp_queue() which is called
-     * when profile divergence exceeds the threshold).
+    /* Phase 1: Check each method in the profile for profile drift.
+     * If the KL divergence between the compile-time snapshot and the
+     * current profile exceeds the threshold, queue the method for
+     * recompilation. This is the "close the loop" step — without this,
+     * snapshots are saved but never compared.
      *
-     * Dequeue and submit each to the threadpool. */
+     * We iterate over the profile's methods (not the recomp snapshots)
+     * because the snapshot struct is opaque (defined in recomp.c). */
+    if (orch->profile != NULL) {
+        for (uint32_t i = 0; i < orch->profile->method_count &&
+                             i < VTX_ORCHESTRATOR_PROACTIVE_COMPILE_LIMIT; i++) {
+            uint32_t method_id = orch->profile->methods[i].method_id;
+
+            vtx_recomp_check_t result = vtx_sota_recomp_check(orch->recomp,
+                                                                orch->profile,
+                                                                method_id);
+            if (result.should_recompile) {
+                vtx_sota_recomp_queue(orch->recomp, method_id, orch->profile);
+            }
+        }
+    }
+
+    /* Phase 2: Dequeue pending recompiles and submit to threadpool. */
     while (vtx_sota_recomp_has_pending(orch->recomp)) {
         uint32_t method_id = vtx_sota_recomp_dequeue(orch->recomp);
         if (method_id == VTX_PHASE_NONE) break;
@@ -217,6 +235,56 @@ static void check_fdi_feedback(vtx_orchestrator_t *orch)
 }
 
 /* ========================================================================== */
+/* Internal: deoptless → compile continuations for failing guards               */
+/* ========================================================================== */
+
+/**
+ * Check deoptless tables for methods that have accumulated enough failed
+ * guards to warrant continuation compilation. When a guard fails 3+ times,
+ * submit a recompilation task for that method so the pipeline can create
+ * a deoptless continuation (a version with the guard removed).
+ *
+ * The continuation is compiled by the threadpool and installed via the
+ * versioned code cache. The guard site is then patched to jump to the
+ * continuation instead of the deopt stub.
+ */
+#define VTX_DEOPTLESS_CONTINUATION_THRESHOLD 3
+
+static void check_deoptless_continuations(vtx_orchestrator_t *orch)
+{
+    if (orch->deoptless_tables == NULL || orch->threadpool == NULL) return;
+
+    /* Include the deoptless header for the table struct */
+    #include "deopt/deoptless.h"
+
+    for (uint32_t i = 0; i < orch->deoptless_table_count &&
+                         i < VTX_ORCHESTRATOR_PROACTIVE_COMPILE_LIMIT; i++) {
+        if (orch->deoptless_tables[i] == NULL) continue;
+
+        vtx_deoptless_table_t *table = (vtx_deoptless_table_t *)orch->deoptless_tables[i];
+
+        /* If the table has accumulated enough failed guards, trigger
+         * recompilation. The pipeline will create a deoptless continuation
+         * with those guards removed. */
+        if (table->failed_guard_count >= VTX_DEOPTLESS_CONTINUATION_THRESHOLD) {
+            /* Submit recompilation task */
+            vtx_compile_task_t task;
+            memset(&task, 0, sizeof(task));
+            task.method_id = table->method_id;
+            task.tier = VTX_TIER_T2;
+            task.priority = VTX_COMPILE_PRIORITY_NORMAL;
+
+            if (vtx_threadpool_submit_task(orch->threadpool, &task) == 0) {
+                /* Reset the failed guard count so we don't re-trigger
+                 * on every orchestrator check. The recompilation will
+                 * create a continuation that handles these guards. */
+                table->failed_guard_count = 0;
+            }
+        }
+    }
+}
+
+/* ========================================================================== */
 /* Background thread                                                           */
 /* ========================================================================== */
 
@@ -278,6 +346,9 @@ static void *orchestrator_thread_fn(void *arg)
 
         /* 4. FDI → inline feedback loop */
         check_fdi_feedback(orch);
+
+        /* 5. Deoptless → compile continuations for repeatedly failing guards */
+        check_deoptless_continuations(orch);
     }
 
     return NULL;
