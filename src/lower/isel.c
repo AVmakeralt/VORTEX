@@ -1194,18 +1194,25 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         }
 
         /* Variable * Variable: untag both, IMUL, retag.
-         * SMI(a) * SMI(b) → need to compute a*b and re-tag as SMI(a*b). */
+         * SMI(a) * SMI(b) → need to compute a*b and re-tag as SMI(a*b).
+         * SMI tag elision: skip untag/retag for RAW_INT chains. */
         {
-            uint32_t lhs_untagged = vtx_isel_alloc_vreg(stream, arena);
-            uint32_t rhs_untagged = vtx_isel_alloc_vreg(stream, arena);
+            bool is_raw = vtx_nf_has(node->flags, VTX_NF_RAW_INT);
+            const vtx_node_t *lhs_node = vtx_node_get_const(&graph->node_table, node->inputs[0]);
+            const vtx_node_t *rhs_node = vtx_node_get_const(&graph->node_table, node->inputs[1]);
+            bool lhs_is_raw = lhs_node && vtx_nf_has(lhs_node->flags, VTX_NF_RAW_INT);
+            bool rhs_is_raw = rhs_node && vtx_nf_has(rhs_node->flags, VTX_NF_RAW_INT);
 
-            emit_smi_untag(stream, block, lhs_untagged, lhs_vreg, node_id, arena);
-            emit_smi_untag(stream, block, rhs_untagged, rhs_vreg, node_id, arena);
+            uint32_t lhs_untagged, rhs_untagged;
+            if (lhs_is_raw) { lhs_untagged = lhs_vreg; }
+            else { lhs_untagged = vtx_isel_alloc_vreg(stream, arena); emit_smi_untag(stream, block, lhs_untagged, lhs_vreg, node_id, arena); }
+            if (rhs_is_raw) { rhs_untagged = rhs_vreg; }
+            else { rhs_untagged = vtx_isel_alloc_vreg(stream, arena); emit_smi_untag(stream, block, rhs_untagged, rhs_vreg, node_id, arena); }
 
             vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_IMUL, lhs_untagged, rhs_untagged, node_id), arena);
 
             vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_untagged, node_id), arena);
-            emit_smi_retag(stream, block, dst, node_id, arena);
+            if (!is_raw) emit_smi_retag(stream, block, dst, node_id, arena);
         }
         break;
     }
@@ -1776,13 +1783,21 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         uint32_t rhs = vtx_isel_node_vreg(stream, node->inputs[1]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (lhs == VTX_VREG_INVALID || rhs == VTX_VREG_INVALID) return -1;
-        uint32_t lhs_u = vtx_isel_alloc_vreg(stream, arena);
-        uint32_t rhs_u = vtx_isel_alloc_vreg(stream, arena);
-        emit_smi_untag(stream, block, lhs_u, lhs, node_id, arena);
-        emit_smi_untag(stream, block, rhs_u, rhs, node_id, arena);
+
+        /* SMI tag elision: skip untag/retag for RAW_INT chains. */
+        bool is_raw = vtx_nf_has(node->flags, VTX_NF_RAW_INT);
+        const vtx_node_t *lhs_node = vtx_node_get_const(&graph->node_table, node->inputs[0]);
+        const vtx_node_t *rhs_node = vtx_node_get_const(&graph->node_table, node->inputs[1]);
+        bool lhs_is_raw = lhs_node && vtx_nf_has(lhs_node->flags, VTX_NF_RAW_INT);
+        bool rhs_is_raw = rhs_node && vtx_nf_has(rhs_node->flags, VTX_NF_RAW_INT);
+        uint32_t lhs_u, rhs_u;
+        if (lhs_is_raw) { lhs_u = lhs; }
+        else { lhs_u = vtx_isel_alloc_vreg(stream, arena); emit_smi_untag(stream, block, lhs_u, lhs, node_id, arena); }
+        if (rhs_is_raw) { rhs_u = rhs; }
+        else { rhs_u = vtx_isel_alloc_vreg(stream, arena); emit_smi_untag(stream, block, rhs_u, rhs, node_id, arena); }
         vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_u, node_id), arena);
         vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_AND, dst, rhs_u, node_id), arena);
-        emit_smi_retag(stream, block, dst, node_id, arena);
+        if (!is_raw) emit_smi_retag(stream, block, dst, node_id, arena);
         break;
     }
 
@@ -1794,13 +1809,20 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         uint32_t rhs = vtx_isel_node_vreg(stream, node->inputs[1]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (lhs == VTX_VREG_INVALID || rhs == VTX_VREG_INVALID) return -1;
-        uint32_t lhs_u = vtx_isel_alloc_vreg(stream, arena);
-        uint32_t rhs_u = vtx_isel_alloc_vreg(stream, arena);
-        emit_smi_untag(stream, block, lhs_u, lhs, node_id, arena);
-        emit_smi_untag(stream, block, rhs_u, rhs, node_id, arena);
+
+        bool is_raw = vtx_nf_has(node->flags, VTX_NF_RAW_INT);
+        const vtx_node_t *lhs_node = vtx_node_get_const(&graph->node_table, node->inputs[0]);
+        const vtx_node_t *rhs_node = vtx_node_get_const(&graph->node_table, node->inputs[1]);
+        bool lhs_is_raw = lhs_node && vtx_nf_has(lhs_node->flags, VTX_NF_RAW_INT);
+        bool rhs_is_raw = rhs_node && vtx_nf_has(rhs_node->flags, VTX_NF_RAW_INT);
+        uint32_t lhs_u, rhs_u;
+        if (lhs_is_raw) { lhs_u = lhs; }
+        else { lhs_u = vtx_isel_alloc_vreg(stream, arena); emit_smi_untag(stream, block, lhs_u, lhs, node_id, arena); }
+        if (rhs_is_raw) { rhs_u = rhs; }
+        else { rhs_u = vtx_isel_alloc_vreg(stream, arena); emit_smi_untag(stream, block, rhs_u, rhs, node_id, arena); }
         vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_u, node_id), arena);
         vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_OR, dst, rhs_u, node_id), arena);
-        emit_smi_retag(stream, block, dst, node_id, arena);
+        if (!is_raw) emit_smi_retag(stream, block, dst, node_id, arena);
         break;
     }
 
@@ -1812,13 +1834,20 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         uint32_t rhs = vtx_isel_node_vreg(stream, node->inputs[1]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (lhs == VTX_VREG_INVALID || rhs == VTX_VREG_INVALID) return -1;
-        uint32_t lhs_u = vtx_isel_alloc_vreg(stream, arena);
-        uint32_t rhs_u = vtx_isel_alloc_vreg(stream, arena);
-        emit_smi_untag(stream, block, lhs_u, lhs, node_id, arena);
-        emit_smi_untag(stream, block, rhs_u, rhs, node_id, arena);
+
+        bool is_raw = vtx_nf_has(node->flags, VTX_NF_RAW_INT);
+        const vtx_node_t *lhs_node = vtx_node_get_const(&graph->node_table, node->inputs[0]);
+        const vtx_node_t *rhs_node = vtx_node_get_const(&graph->node_table, node->inputs[1]);
+        bool lhs_is_raw = lhs_node && vtx_nf_has(lhs_node->flags, VTX_NF_RAW_INT);
+        bool rhs_is_raw = rhs_node && vtx_nf_has(rhs_node->flags, VTX_NF_RAW_INT);
+        uint32_t lhs_u, rhs_u;
+        if (lhs_is_raw) { lhs_u = lhs; }
+        else { lhs_u = vtx_isel_alloc_vreg(stream, arena); emit_smi_untag(stream, block, lhs_u, lhs, node_id, arena); }
+        if (rhs_is_raw) { rhs_u = rhs; }
+        else { rhs_u = vtx_isel_alloc_vreg(stream, arena); emit_smi_untag(stream, block, rhs_u, rhs, node_id, arena); }
         vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_u, node_id), arena);
         vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_XOR, dst, rhs_u, node_id), arena);
-        emit_smi_retag(stream, block, dst, node_id, arena);
+        if (!is_raw) emit_smi_retag(stream, block, dst, node_id, arena);
         break;
     }
 
@@ -1857,13 +1886,19 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
         /* SMI Neg: untag, negate, retag.
          * NEG on a NaN-boxed SMI value gives -SMI(a) ≠ SMI(-a).
-         * We must untag first, then negate, then retag. */
+         * We must untag first, then negate, then retag.
+         * SMI tag elision: skip untag/retag for RAW_INT chains. */
         {
-            uint32_t untagged = vtx_isel_alloc_vreg(stream, arena);
-            emit_smi_untag(stream, block, untagged, src, node_id, arena);
+            bool is_raw = vtx_nf_has(node->flags, VTX_NF_RAW_INT);
+            const vtx_node_t *src_node = vtx_node_get_const(&graph->node_table, node->inputs[0]);
+            bool src_is_raw = src_node && vtx_nf_has(src_node->flags, VTX_NF_RAW_INT);
+
+            uint32_t untagged;
+            if (src_is_raw) { untagged = src; }
+            else { untagged = vtx_isel_alloc_vreg(stream, arena); emit_smi_untag(stream, block, untagged, src, node_id, arena); }
             vtx_isel_emit_inst(block, make_r_inst(VTX_X86_NEG, untagged, node_id, 0), arena);
             vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, untagged, node_id), arena);
-            emit_smi_retag(stream, block, dst, node_id, arena);
+            if (!is_raw) emit_smi_retag(stream, block, dst, node_id, arena);
         }
         break;
     }
@@ -1981,20 +2016,31 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
          * After untagging, both values are sign-extended integers that can
          * be compared with a normal signed CMP.
          *
-         * We use temporary vregs for the untagged values to avoid modifying
-         * the original SMI values (which may be used by other nodes). */
-        uint32_t lhs_untagged = vtx_isel_alloc_vreg(stream, arena);
-        uint32_t rhs_untagged = vtx_isel_alloc_vreg(stream, arena);
+         * SMI tag elision: if an input is already RAW_INT (from an elided
+         * arithmetic chain), skip the untag — the value is already a raw
+         * int64. Using SHL+SAR on an already-raw int would corrupt it. */
+        const vtx_node_t *lhs_node = vtx_node_get_const(&graph->node_table, node->inputs[0]);
+        const vtx_node_t *rhs_node = vtx_node_get_const(&graph->node_table, node->inputs[1]);
+        bool lhs_is_raw = lhs_node && vtx_nf_has(lhs_node->flags, VTX_NF_RAW_INT);
+        bool rhs_is_raw = rhs_node && vtx_nf_has(rhs_node->flags, VTX_NF_RAW_INT);
 
-        /* lhs_untagged = untag(lhs) — SHL 13 + SAR 16 */
-        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, lhs_untagged, lhs, node_id), arena);
-        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, lhs_untagged, 13, node_id), arena);
-        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, lhs_untagged, 16, node_id), arena);
-
-        /* rhs_untagged = untag(rhs) */
-        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, rhs_untagged, rhs, node_id), arena);
-        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, rhs_untagged, 13, node_id), arena);
-        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, rhs_untagged, 16, node_id), arena);
+        uint32_t lhs_untagged, rhs_untagged;
+        if (lhs_is_raw) {
+            lhs_untagged = lhs;
+        } else {
+            lhs_untagged = vtx_isel_alloc_vreg(stream, arena);
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, lhs_untagged, lhs, node_id), arena);
+            vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, lhs_untagged, 13, node_id), arena);
+            vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, lhs_untagged, 16, node_id), arena);
+        }
+        if (rhs_is_raw) {
+            rhs_untagged = rhs;
+        } else {
+            rhs_untagged = vtx_isel_alloc_vreg(stream, arena);
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, rhs_untagged, rhs, node_id), arena);
+            vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, rhs_untagged, 13, node_id), arena);
+            vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, rhs_untagged, 16, node_id), arena);
+        }
 
         vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_CMP, lhs_untagged, rhs_untagged, node_id), arena);
 
@@ -2364,14 +2410,57 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
     /* ---- Control flow ---- */
     case VTX_OP_If: {
         uint32_t cond_vreg = VTX_VREG_INVALID;
+        vtx_nodeid_t cond_node_id = VTX_NODEID_INVALID;
+        const vtx_node_t *cond_node = NULL;
         for (uint32_t i = 0; i < node->input_count; i++) {
-            const vtx_node_t *inp = vtx_node_get_const(&graph->node_table, node->inputs[i]);
-            if (inp && vtx_nf_has(inp->flags, VTX_NF_DATA)) {
-                ensure_node_vreg(stream, node->inputs[i], arena);
-                cond_vreg = vtx_isel_node_vreg(stream, node->inputs[i]);
+            cond_node_id = node->inputs[i];
+            cond_node = vtx_node_get_const(&graph->node_table, cond_node_id);
+            if (cond_node && vtx_nf_has(cond_node->flags, VTX_NF_DATA)) {
+                ensure_node_vreg(stream, cond_node_id, arena);
+                cond_vreg = vtx_isel_node_vreg(stream, cond_node_id);
                 break;
             }
         }
+
+        /* Cmp+If fusion (#4): If the condition is a Cmp node, the Cmp's
+         * isel already emitted a CMP instruction that set the flags. We
+         * can skip the redundant "CMP cond_vreg, SMI(0)" and emit the
+         * JCC directly — the flags from the Cmp are still live.
+         *
+         * This saves 3 instructions per branch (CMP + potential MOV):
+         *   Before: CMP lhs, rhs → SETCC → MOVZX → CMP cond, SMI(0) → JCC
+         *   After:  CMP lhs, rhs → JCC
+         *
+         * The Cmp node produces a boolean SMI (0 or 1), but the If
+         * doesn't actually need the boolean value — it just needs the
+         * flags. By fusing, we skip the SETCC+MOVZX (in the Cmp isel)
+         * AND the CMP (in the If isel).
+         *
+         * However, the Cmp's SETCC+MOVZX is already emitted by the time
+         * we reach the If. To truly fuse, we'd need to look ahead from
+         * the Cmp and skip its SETCC+MOVZX if the only consumer is an If.
+         * That requires a pre-pass. For now, we do the simpler fusion:
+         * if the cond is a Cmp, skip the redundant CMP cond,SMI(0) and
+         * JCC directly. The Cmp's SETCC already set ZF correctly for
+         * EQ/NE, but for LT/GT/LE/GE we need to use the right JCC cond.
+         *
+         * Actually, the Cmp's result is a boolean SMI: SMI(1) for true,
+         * SMI(0) for false. The If tests "cond != SMI(0)" for if_true.
+         * SMI(1) != SMI(0) → true → JNE taken. SMI(0) == SMI(0) → false
+         * → JNE not taken. So the If's JNE correctly tests the boolean.
+         *
+         * But if we skip the CMP, we need the flags to still reflect
+         * the boolean. The Cmp's SETCC set the flags based on the
+         * comparison result, but then MOVZX may have clobbered them.
+         * So we can't safely skip the CMP unless we also skip the
+         * MOVZX — which requires the pre-pass.
+         *
+         * For now, keep the CMP but mark it FUSED so the peephole
+         * optimizer knows the CMP+JCC pair can be macro-fused by the
+         * CPU frontend. This is already done below. A full fusion
+         * (skipping the SETCC+MOVZX) is left for a future optimization
+         * that requires a Cmp-If detection pre-pass. */
+
         /* Test truthiness by comparing the raw SMI value against SMI(0).
          *
          * The interpreter's is_truthy() returns false for SMI(0) and true
@@ -2383,20 +2472,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         if (cond_vreg != VTX_VREG_INVALID) {
             /* Fix #13: Compare against SMI(0) = VTX_NAN_BOX_HEADER using
              * the pre-loaded R10 (smi_scratch_vreg) instead of emitting
-             * a 10-byte MOV imm64 per If.
-             *
-             * R10 is reserved (VTX_REG_RESERVED_MASK) so regalloc never
-             * assigns cond_vreg to R10 — no aliasing risk.
-             *
-             * Setting uses_smi=true guarantees the prologue emits
-             * "MOV R10, VTX_NAN_BOX_HEADER" so R10 actually holds SMI(0)
-             * by the time we reach this CMP. If the function has no other
-             * SMI ops, this is the only instruction that triggers the
-             * prologue load — a one-time 10-byte cost amortized over
-             * every If in the function.
-             *
-             * We still mark the CMP as a use of smi_scratch_vreg so the
-             * regalloc doesn't drop the prologue load as dead code. */
+             * a 10-byte MOV imm64 per If. */
             stream->uses_smi = true;
             vtx_inst_t cmp = make_rr_inst(VTX_X86_CMP, cond_vreg,
                                            stream->smi_scratch_vreg, node_id);

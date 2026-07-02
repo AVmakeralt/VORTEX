@@ -1,6 +1,7 @@
 #include "interp/dispatch.h"
 #include "baseline/codegen.h"
 #include "compile/orchestrator.h"
+#include "compile/spec_versioning.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -1645,6 +1646,47 @@ dispatch_VT_OP_CALL_STATIC:
         }
         vtx_profiler_record_call_type(&interp->profiler, frame->method,
                                        (uint32_t)pc, receiver_tid);
+
+        /* Speculative versioning: record the argument type signature for
+         * this call site. The spec_version manager tracks which type
+         * combinations are hot and decides whether to specialize. When
+         * a bimorphic call site is detected, the orchestrator can trigger
+         * compilation of type-specialized versions (e.g., process_Dog,
+         * process_Cat) with devirtualized calls.
+         *
+         * We sample up to VTX_SPEC_VERSION_MAX_ARGS argument types from
+         * the top of the stack (receiver first, then remaining args).
+         * If the spec_version_mgr is NULL or no compile_ctx, this is a no-op. */
+        if (interp->compile_ctx != NULL &&
+            interp->compile_ctx->spec_version_mgr != NULL) {
+            vtx_spec_type_sig_t sig;
+            memset(&sig, 0, sizeof(sig));
+            uint32_t arg_n = target_method->arg_count;
+            if (arg_n > VTX_SPEC_VERSION_MAX_ARGS)
+                arg_n = VTX_SPEC_VERSION_MAX_ARGS;
+            sig.arg_count = arg_n;
+            /* Arguments are on the stack with the last arg on top.
+             * sp[-1] = last arg, sp[-2] = second-to-last, etc.
+             * For arg_types[0] we want the FIRST arg (receiver), which
+             * is at sp[-arg_count]. */
+            int32_t avail = (int32_t)(sp - frame->operand_stack);
+            if ((int32_t)arg_n <= avail) {
+                for (uint32_t ai = 0; ai < arg_n; ai++) {
+                    vtx_value_t arg_val = sp[-(int32_t)arg_n + (int32_t)ai];
+                    sig.arg_types[ai] = value_typeid(arg_val);
+                }
+                sig.signature_hash = vtx_spec_type_sig_hash(&sig);
+
+                vtx_spec_version_registry_t *reg =
+                    vtx_spec_version_get_registry(
+                        (vtx_spec_version_manager_t *)
+                            interp->compile_ctx->spec_version_mgr,
+                        target_method->vtable_index);
+                if (reg != NULL) {
+                    vtx_spec_version_record_dispatch(reg, &sig);
+                }
+            }
+        }
 
         /* JIT dispatch: if the target method has been compiled, call it
          * directly instead of creating an interpreter frame. This is the

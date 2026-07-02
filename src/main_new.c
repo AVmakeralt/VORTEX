@@ -80,6 +80,7 @@
 #include "compile/version.h"
 #include "compile/pipeline.h"
 #include "compile/orchestrator.h"
+#include "compile/spec_versioning.h"
 #include "ir/licm.h"
 #include "ir/bounds_check.h"
 #include "guard/metadata.h"
@@ -2865,6 +2866,18 @@ int main(int argc, char *argv[])
         compile_ctx.code_cache = &cache;
         compile_ctx.method_registry = &registry;
 
+        /* Instantiate the speculative versioning manager.
+         * This tracks per-method argument type signatures and decides
+         * when to compile type-specialized versions (e.g., process_Dog
+         * vs process_Cat). Without instantiating it here, the 883-line
+         * spec_versioning.c module is dead code. */
+        vtx_spec_version_manager_t spec_ver_mgr;
+        if (vtx_spec_version_manager_init(&spec_ver_mgr) == 0) {
+            compile_ctx.spec_version_mgr = &spec_ver_mgr;
+        } else {
+            compile_ctx.spec_version_mgr = NULL;
+        }
+
         /* Create and wire threadpool for background compilation */
         vtx_threadpool_t pool;
         if (vtx_threadpool_init(&pool, 1) == 0) {  /* 1 compile thread */
@@ -3124,6 +3137,9 @@ int main(int argc, char *argv[])
         vtx_orchestrator_destroy(&orchestrator);
         vtx_threadpool_shutdown(&pool);
         vtx_compile_context_destroy(&compile_ctx);
+        if (compile_ctx.spec_version_mgr != NULL) {
+            vtx_spec_version_manager_destroy(&spec_ver_mgr);
+        }
         vtx_method_registry_destroy(&registry);
         vtx_code_cache_destroy(&cache);
 

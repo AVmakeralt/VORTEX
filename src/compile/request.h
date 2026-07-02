@@ -14,6 +14,7 @@ struct vtx_code_cache;
 struct vtx_method_registry;
 struct vtx_arena;
 struct vtx_orchestrator;
+struct vtx_spec_version_manager;
 
 /**
  * VORTEX Compilation Request
@@ -43,6 +44,7 @@ typedef struct {
     struct vtx_method_registry   *method_registry;
     struct vtx_arena             *global_arena;
     struct vtx_orchestrator      *orchestrator;
+    struct vtx_spec_version_manager *spec_version_mgr;  /* argument-type specialization */
 
     /* Method lookup: given a method_id, returns the method descriptor.
      * This is needed by the threadpool worker to find the method's

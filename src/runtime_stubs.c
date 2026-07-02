@@ -21,6 +21,8 @@
 #include "interp/dispatch.h"
 #include "interp/frame.h"
 #include "deopt/side_table.h"
+#include "deopt/deoptless.h"
+#include "compile/orchestrator.h"
 #include "deopt/frame_state.h"
 #include "deopt/types.h"
 
@@ -807,6 +809,27 @@ void vtx_deopt_handler_stub(uint32_t frame_state_index, uint32_t native_pc)
             vtx_side_table_get_frame_state(active_side_table, frame_state_index);
 
         if (fs != NULL) {
+            /*
+             * Notify the orchestrator that a deopt occurred.
+             *
+             * This feeds FDI (feedback-directed inlining), which tracks
+             * unprofitable inlines and may recommend recompilation with
+             * different inlining decisions. Without this call, FDI sits
+             * idle — it was implemented but never received deopt events.
+             *
+             * The orchestrator is reached via the_interp->compile_ctx
+             * (the same path used for on_method_entry in dispatch.c).
+             * If no orchestrator is wired, this is a no-op.
+             */
+            if (the_interp != NULL && the_interp->compile_ctx != NULL &&
+                the_interp->compile_ctx->orchestrator != NULL) {
+                vtx_orchestrator_on_deopt(the_interp->compile_ctx->orchestrator,
+                                          fs->method_id,
+                                          ((uint64_t)fs->method_id << 32) |
+                                              fs->bytecode_pc,
+                                          VTX_GUARD_ID_INVALID);
+            }
+
             /*
              * We have the frame state.  Now we need to reconstruct
              * the interpreter frame and transfer control.

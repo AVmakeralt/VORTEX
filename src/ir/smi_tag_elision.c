@@ -37,22 +37,61 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Check if a node opcode is SMI arithmetic that can be tag-elided */
-static bool is_eligible_arith(vtx_node_opcode_t op) {
-    /* Only mark ops whose isel has been updated to respect RAW_INT.
-     * Adding more ops here without updating their isel cases will
-     * produce wrong code (tagged SMI treated as raw int). */
+/* Check if a node opcode can PRODUCE a raw int value when marked RAW_INT.
+ * These are pure integer arithmetic/bitwise ops whose result is a 64-bit int.
+ * When marked RAW_INT, their isel MUST skip the SMI retag on the output.
+ *
+ * NOTE: Only opcodes whose isel has been updated to respect VTX_NF_RAW_INT
+ * should be listed here. Adding an opcode without updating its isel will
+ * produce wrong code (the isel retags the output, but consumers expect raw).
+ *
+ * Shl/Shr/Sar/Not are NOT here because their isel always retags. They can
+ * still CONSUME raw int inputs (listed in can_consume_raw_int via the
+ * producer list), but they produce tagged SMI outputs. */
+static bool can_produce_raw_int(vtx_node_opcode_t op) {
     switch (op) {
     case VTX_OP_Add:
     case VTX_OP_Sub:
+    case VTX_OP_Mul:
+    case VTX_OP_And:
+    case VTX_OP_Or:
+    case VTX_OP_Xor:
+    case VTX_OP_Neg:
+    case VTX_OP_Phi:
         return true;
     default:
         return false;
     }
 }
 
+/* Check if a node opcode can CONSUME raw int values without needing retag.
+ * This includes all raw-int producers PLUS Cmp (which consumes ints but
+ * produces a condition code, not an int) PLUS the shift ops (which untag
+ * their inputs but retag their outputs — they can accept raw int inputs
+ * because emit_smi_untag on a raw int is a no-op in terms of correctness...
+ *
+ * Actually NO — emit_smi_untag does SHL 13 + SAR 16 which CORRUPTS a raw
+ * int. So shift ops can NOT consume raw int inputs unless their isel is
+ * updated to skip the untag. Since we haven't done that, shifts are NOT
+ * valid raw-int consumers. They act as chain terminators. */
+static bool can_consume_raw_int(vtx_node_opcode_t op) {
+    if (can_produce_raw_int(op)) return true;
+    /* Cmp takes raw int inputs and produces a cond code — no retag needed
+     * on inputs if they're already raw. The Cmp isel has been updated to
+     * skip untag when inputs are RAW_INT. */
+    if (op == VTX_OP_Cmp || op == VTX_OP_CmpP) return true;
+    return false;
+}
+
+/* Backward-compatible alias for the consumer check used in the main loop.
+ * A node is a "valid raw-int consumer" if it can accept raw int inputs. */
+static bool is_eligible_arith(vtx_node_opcode_t op) {
+    return can_consume_raw_int(op);
+}
+
 /* Check if a node is a "chain terminator" — its input must be retagged
- * because the consumer expects a NaN-boxed SMI, not a raw int. */
+ * because the consumer expects a NaN-boxed SMI, not a raw int.
+ * Note: Cmp/Phi are NOT terminators — they can consume raw int directly. */
 static bool is_chain_terminator(vtx_node_opcode_t op) {
     switch (op) {
     case VTX_OP_Return:
@@ -66,22 +105,22 @@ static bool is_chain_terminator(vtx_node_opcode_t op) {
     case VTX_OP_Guard:
     case VTX_OP_DeoptGuard:
     case VTX_OP_If:
-    case VTX_OP_Cmp:
-    case VTX_OP_CmpP:
     case VTX_OP_CmpF:
     case VTX_OP_CmpD:
     case VTX_OP_Switch:
     case VTX_OP_CheckCast:
     case VTX_OP_InstanceOf:
     case VTX_OP_FrameState:
-    case VTX_OP_Phi:
         return true;
     default:
         return false;
     }
 }
 
-/* Check if a node produces a value that is definitely an SMI (NaN-boxed) */
+/* Check if a node produces a value that is definitely an SMI (NaN-boxed)
+ * or can be treated as a raw int source for tag elision chains.
+ * Shift ops (Shl/Shr/Sar) and Not produce tagged SMIs (their isel retags),
+ * so they break RAW_INT chains — they're valid SMI producers but NOT raw. */
 static bool is_smi_producer(vtx_node_t *node) {
     if (!node) return false;
     switch (node->opcode) {
@@ -90,6 +129,9 @@ static bool is_smi_producer(vtx_node_t *node) {
     case VTX_OP_Phi:
         return true;
     case VTX_OP_Add: case VTX_OP_Sub:
+    case VTX_OP_Mul:
+    case VTX_OP_And: case VTX_OP_Or: case VTX_OP_Xor:
+    case VTX_OP_Neg:
         return true;
     default:
         return false;
@@ -114,14 +156,37 @@ uint32_t vtx_smi_tag_elision_run(vtx_graph_t *graph)
             if (node->dead) continue;
             if (vtx_nf_has(node->flags, VTX_NF_RAW_INT)) continue; /* already marked */
 
-            /* Only eligible arithmetic ops */
-            if (!is_eligible_arith(node->opcode)) continue;
+            /* Only nodes that can PRODUCE raw int (not just consume it).
+             * Cmp can consume raw int but its output is a cond code,
+             * not an int — so it's never marked RAW_INT. */
+            if (!can_produce_raw_int(node->opcode)) continue;
 
             /* Skip float-typed ops (they use XMM, not SMI) */
             if (node->type == VTX_TYPE_Float) continue;
 
             /* Skip Div/Mod (they use IDIV with special register constraints) */
             if (node->opcode == VTX_OP_Div || node->opcode == VTX_OP_Mod) continue;
+
+            /* For Phi nodes: only elide if ALL data inputs are either
+             * RAW_INT or SMI producers. A Phi merges values from multiple
+             * paths — if any path brings in a tagged SMI, the Phi output
+             * must be tagged (otherwise the raw-int consumer would get
+             * a tagged value on that path). */
+            if (node->opcode == VTX_OP_Phi) {
+                bool phi_inputs_ok = true;
+                for (uint32_t j = 0; j < node->input_count; j++) {
+                    vtx_nodeid_t inp_id = node->inputs[j];
+                    if (inp_id == VTX_NODEID_INVALID || inp_id >= nt->count) continue;
+                    vtx_node_t *inp = &nt->nodes[inp_id];
+                    if (vtx_nf_has(inp->flags, VTX_NF_CONTROL)) continue;
+                    if (vtx_nf_has(inp->flags, VTX_NF_MEMORY)) continue;
+                    if (vtx_nf_has(inp->flags, VTX_NF_RAW_INT)) continue;
+                    if (is_smi_producer(inp)) continue;
+                    phi_inputs_ok = false;
+                    break;
+                }
+                if (!phi_inputs_ok) continue;
+            }
 
             /* Check: are ALL data inputs either RAW_INT or SMI producers?
              * And does the output feed into another arithmetic node (not
