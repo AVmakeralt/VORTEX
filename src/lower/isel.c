@@ -3264,6 +3264,31 @@ static int resolve_phis(vtx_inst_stream_t *stream, const vtx_schedule_t *schedul
                 pred_blk->inst_count++; \
             } while(0)
 
+            /* Helper: insert an SMI untag sequence (MOV + SHL + SAR) for
+             * RAW_INT Phi copies where the source is a tagged SMI. This
+             * converts the tagged initial value to raw int before storing
+             * it in the Phi's vreg, so the first loop iteration sees a
+             * raw int value (matching the back-edge value). */
+            #define INSERT_UNTAG(dst, src, node_id, offset) do { \
+                vtx_inst_t _mov = make_rr_inst(VTX_X86_MOV, (dst), (src), (node_id)); \
+                _mov.flags |= VTX_INST_FLAG_PHI_COPY; \
+                vtx_inst_t _shl = make_ri_inst(VTX_X86_SHL, (dst), 13, (node_id)); \
+                _shl.flags |= VTX_INST_FLAG_PHI_COPY; \
+                vtx_inst_t _sar = make_ri_inst(VTX_X86_SAR, (dst), 16, (node_id)); \
+                _sar.flags |= VTX_INST_FLAG_PHI_COPY; \
+                if (vtx_isel_block_ensure_capacity(pred_blk, 3, arena) != 0) return -1; \
+                for (int _i = 0; _i < 3; _i++) { \
+                    if ((offset) + _i < pred_blk->inst_count) { \
+                        memmove(&pred_blk->insts[(offset) + _i + 1], &pred_blk->insts[(offset) + _i], \
+                                (pred_blk->inst_count - ((offset) + _i)) * sizeof(vtx_inst_t)); \
+                    } \
+                } \
+                pred_blk->insts[(offset)] = _mov; \
+                pred_blk->insts[(offset) + 1] = _shl; \
+                pred_blk->insts[(offset) + 2] = _sar; \
+                pred_blk->inst_count += 3; \
+            } while(0)
+
             uint32_t cur_insert = insert_pos;
 
             /* ---- Parallel copy algorithm (correct for multiple cycles) ----
@@ -3406,14 +3431,44 @@ static int resolve_phis(vtx_inst_stream_t *stream, const vtx_schedule_t *schedul
                 cur_insert++;
             }
 
-            /* Phase 2: Emit all non-cycle copies (acyclic, safe to emit directly) */
+            /* Phase 2: Emit all non-cycle copies (acyclic, safe to emit directly).
+             * For RAW_INT Phis where the source is a tagged SMI (not RAW_INT),
+             * insert an untag sequence (MOV + SHL + SAR) instead of a plain MOV.
+             * This converts the tagged initial value to raw int at the loop
+             * preheader, so the first iteration sees raw int (matching the
+             * back-edge value from the elided Add). */
             for (uint32_t i = 0; i < copy_count; i++) {
                 if (processed[i]) continue; /* already handled as part of a cycle */
-                INSERT_MOV(copy_dst[i], copy_src[i], copy_node[i], cur_insert);
-                cur_insert++;
+
+                /* Check if this Phi is RAW_INT and the source is tagged */
+                const vtx_node_t *phi_node = vtx_node_get_const(&graph->node_table, copy_node[i]);
+                bool phi_is_raw = phi_node && vtx_nf_has(phi_node->flags, VTX_NF_RAW_INT);
+
+                if (phi_is_raw) {
+                    /* The Phi is RAW_INT. The forward-edge (preheader) source
+                     * is a tagged SMI → need untag. The back-edge (latch)
+                     * source is already raw int → plain MOV.
+                     * Forward edge = predecessor before loop header (lower
+                     * block index). Back edge = predecessor after (higher). */
+                    bool is_forward_edge = (pred_idx < b);
+
+                    if (sched_blk->is_loop_header && is_forward_edge) {
+                        stream->uses_smi = true;
+                        INSERT_UNTAG(copy_dst[i], copy_src[i], copy_node[i], cur_insert);
+                        cur_insert += 3;
+                    } else {
+                        INSERT_MOV(copy_dst[i], copy_src[i], copy_node[i], cur_insert);
+                        cur_insert++;
+                    }
+                } else {
+                    /* Normal Phi: plain MOV */
+                    INSERT_MOV(copy_dst[i], copy_src[i], copy_node[i], cur_insert);
+                    cur_insert++;
+                }
             }
 
             #undef INSERT_MOV
+            #undef INSERT_UNTAG
             #undef MAX_PHI_COPIES
         }
     }
