@@ -908,7 +908,11 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
          * already untagged (by a previous op in the chain) and the output
          * will be consumed by another RAW_INT op. Skip untag and retag.
          * The chain entry untag and chain exit retag are handled by the
-         * boundary nodes (non-RAW_INT ops that need tagged SMIs). */
+         * boundary nodes (non-RAW_INT ops that need tagged SMIs).
+         *
+         * Constant folding: if rhs is a Constant(Int), use ADD reg, imm32
+         * with the raw integer value instead of loading+untagging the SMI.
+         * This saves 3 instructions (MOV+SHL+SAR) per constant operand. */
         {
             bool is_raw = vtx_nf_has(node->flags, VTX_NF_RAW_INT);
 
@@ -918,36 +922,37 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             bool lhs_is_raw = lhs_node && vtx_nf_has(lhs_node->flags, VTX_NF_RAW_INT);
             bool rhs_is_raw = rhs_node && vtx_nf_has(rhs_node->flags, VTX_NF_RAW_INT);
 
-            uint32_t lhs_untagged, rhs_untagged;
+            uint32_t lhs_untagged;
 
             if (lhs_is_raw) {
-                /* Input is already raw int — use it directly */
                 lhs_untagged = lhs_vreg;
             } else {
-                /* Input needs untagging */
                 lhs_untagged = vtx_isel_alloc_vreg(stream, arena);
                 emit_smi_untag(stream, block, lhs_untagged, lhs_vreg, node_id, arena);
             }
 
-            if (rhs_is_raw) {
-                rhs_untagged = rhs_vreg;
+            /* Constant folding: if rhs is a constant, use ADD reg, imm32 */
+            int64_t rhs_const_val;
+            bool rhs_is_const = try_get_const_int(graph, node->inputs[1], &rhs_const_val);
+
+            if (rhs_is_const && !rhs_is_raw &&
+                rhs_const_val >= INT32_MIN && rhs_const_val <= INT32_MAX) {
+                /* ADD lhs_untagged, imm32 — saves MOV+SHL+SAR for the constant */
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_ADD, lhs_untagged,
+                                   (int32_t)rhs_const_val, node_id), arena);
+            } else if (rhs_is_raw) {
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_ADD, lhs_untagged, rhs_vreg, node_id), arena);
             } else {
-                rhs_untagged = vtx_isel_alloc_vreg(stream, arena);
+                uint32_t rhs_untagged = vtx_isel_alloc_vreg(stream, arena);
                 emit_smi_untag(stream, block, rhs_untagged, rhs_vreg, node_id, arena);
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_ADD, lhs_untagged, rhs_untagged, node_id), arena);
             }
 
-            /* The actual operation */
-            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_ADD, lhs_untagged, rhs_untagged, node_id), arena);
-
             if (is_raw) {
-                /* Output is raw int — no retag needed. The consumer will
-                 * either use it directly (another RAW_INT op) or retag it
-                 * at chain exit. Just move to dst. */
                 if (dst != lhs_untagged) {
                     vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_untagged, node_id), arena);
                 }
             } else {
-                /* Output needs retagging (chain exit or single op) */
                 vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_untagged, node_id), arena);
                 emit_smi_retag(stream, block, dst, node_id, arena);
             }
@@ -993,7 +998,8 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         }
 
         /* Variable - Variable (or Variable - Const): untag both, sub, retag.
-         * SMI tag elision: skip untag/retag for RAW_INT chains. */
+         * SMI tag elision: skip untag/retag for RAW_INT chains.
+         * Constant folding: if rhs is a constant, use SUB reg, imm32. */
         {
             bool is_raw = vtx_nf_has(node->flags, VTX_NF_RAW_INT);
             const vtx_node_t *lhs_node = vtx_node_get_const(&graph->node_table, node->inputs[0]);
@@ -1001,7 +1007,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             bool lhs_is_raw = lhs_node && vtx_nf_has(lhs_node->flags, VTX_NF_RAW_INT);
             bool rhs_is_raw = rhs_node && vtx_nf_has(rhs_node->flags, VTX_NF_RAW_INT);
 
-            uint32_t lhs_untagged, rhs_untagged;
+            uint32_t lhs_untagged;
 
             if (lhs_is_raw) {
                 lhs_untagged = lhs_vreg;
@@ -1009,14 +1015,22 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
                 lhs_untagged = vtx_isel_alloc_vreg(stream, arena);
                 emit_smi_untag(stream, block, lhs_untagged, lhs_vreg, node_id, arena);
             }
-            if (rhs_is_raw) {
-                rhs_untagged = rhs_vreg;
-            } else {
-                rhs_untagged = vtx_isel_alloc_vreg(stream, arena);
-                emit_smi_untag(stream, block, rhs_untagged, rhs_vreg, node_id, arena);
-            }
 
-            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_SUB, lhs_untagged, rhs_untagged, node_id), arena);
+            /* Constant folding: if rhs is a constant, use SUB reg, imm32 */
+            int64_t rhs_const_val;
+            bool rhs_is_const = try_get_const_int(graph, node->inputs[1], &rhs_const_val);
+
+            if (rhs_is_const && !rhs_is_raw &&
+                rhs_const_val >= INT32_MIN && rhs_const_val <= INT32_MAX) {
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SUB, lhs_untagged,
+                                   (int32_t)rhs_const_val, node_id), arena);
+            } else if (rhs_is_raw) {
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_SUB, lhs_untagged, rhs_vreg, node_id), arena);
+            } else {
+                uint32_t rhs_untagged = vtx_isel_alloc_vreg(stream, arena);
+                emit_smi_untag(stream, block, rhs_untagged, rhs_vreg, node_id, arena);
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_SUB, lhs_untagged, rhs_untagged, node_id), arena);
+            }
 
             if (is_raw) {
                 if (dst != lhs_untagged) {
@@ -2002,13 +2016,23 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
          *
          * SMI tag elision: if an input is already RAW_INT (from an elided
          * arithmetic chain), skip the untag — the value is already a raw
-         * int64. Using SHL+SAR on an already-raw int would corrupt it. */
+         * int64. Using SHL+SAR on an already-raw int would corrupt it.
+         *
+         * Constant folding: if an operand is a Constant(Int), we can use
+         * the raw integer value directly as a CMP immediate, saving the
+         * MOV+SHL+SAR untag sequence (3 instructions → 0). */
         const vtx_node_t *lhs_node = vtx_node_get_const(&graph->node_table, node->inputs[0]);
         const vtx_node_t *rhs_node = vtx_node_get_const(&graph->node_table, node->inputs[1]);
         bool lhs_is_raw = lhs_node && vtx_nf_has(lhs_node->flags, VTX_NF_RAW_INT);
         bool rhs_is_raw = rhs_node && vtx_nf_has(rhs_node->flags, VTX_NF_RAW_INT);
 
-        uint32_t lhs_untagged, rhs_untagged;
+        /* Check for constant operands — we can use CMP reg, imm32 */
+        int64_t rhs_const_val;
+        bool rhs_is_const = try_get_const_int(graph, node->inputs[1], &rhs_const_val);
+        int64_t lhs_const_val;
+        bool lhs_is_const = try_get_const_int(graph, node->inputs[0], &lhs_const_val);
+
+        uint32_t lhs_untagged;
         if (lhs_is_raw) {
             lhs_untagged = lhs;
         } else {
@@ -2017,16 +2041,22 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, lhs_untagged, 13, node_id), arena);
             vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, lhs_untagged, 16, node_id), arena);
         }
-        if (rhs_is_raw) {
-            rhs_untagged = rhs;
+
+        /* If rhs is a constant that fits in imm32, use CMP reg, imm32.
+         * This saves the MOV+SHL+SAR untag sequence for the constant. */
+        if (rhs_is_const && !rhs_is_raw &&
+            rhs_const_val >= INT32_MIN && rhs_const_val <= INT32_MAX) {
+            vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_CMP, lhs_untagged,
+                               (int32_t)rhs_const_val, node_id), arena);
+        } else if (rhs_is_raw) {
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_CMP, lhs_untagged, rhs, node_id), arena);
         } else {
-            rhs_untagged = vtx_isel_alloc_vreg(stream, arena);
+            uint32_t rhs_untagged = vtx_isel_alloc_vreg(stream, arena);
             vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, rhs_untagged, rhs, node_id), arena);
             vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, rhs_untagged, 13, node_id), arena);
             vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, rhs_untagged, 16, node_id), arena);
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_CMP, lhs_untagged, rhs_untagged, node_id), arena);
         }
-
-        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_CMP, lhs_untagged, rhs_untagged, node_id), arena);
 
         /* P1 isel: SETCC + MOVZX for boolean result.
          *
