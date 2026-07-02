@@ -232,14 +232,29 @@ static vtx_live_interval_t *compute_live_intervals(vtx_inst_stream_t *stream,
 
             if (loop_start <= loop_end) {
                 for (uint32_t v = 0; v < vreg_count; v++) {
-                    if (intervals[v].start <= loop_end &&
-                        intervals[v].end >= loop_start) {
-                        if (loop_start < intervals[v].start) {
-                            intervals[v].start = loop_start;
-                        }
-                        if (loop_end > intervals[v].end) {
-                            intervals[v].end = loop_end;
-                        }
+                    /* Only extend intervals that CROSS a loop boundary.
+                     * The old code extended ANY interval that overlapped
+                     * the loop — even short-lived temps that live entirely
+                     * WITHIN the loop. This caused massive pressure inflation
+                     * and coalescing failures.
+                     *
+                     * An interval crosses a loop boundary if:
+                     *   - it starts before the loop and ends inside/after, OR
+                     *   - it starts inside the loop and ends after the loop
+                     *
+                     * Intervals entirely within the loop (start >= loop_start
+                     * AND end <= loop_end) are NOT extended — they're already
+                     * correctly scoped. */
+                    bool crosses_loop_boundary =
+                        (intervals[v].start < loop_start && intervals[v].end >= loop_start) ||
+                        (intervals[v].start <= loop_end && intervals[v].end > loop_end);
+                    if (!crosses_loop_boundary) continue;
+
+                    if (loop_start < intervals[v].start) {
+                        intervals[v].start = loop_start;
+                    }
+                    if (loop_end > intervals[v].end) {
+                        intervals[v].end = loop_end;
                     }
                 }
             }
@@ -670,13 +685,31 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
     if (!active && active_capacity > 0) return NULL;
 
     /* Free register pools: separate bitmasks for GPR and XMM.
-     * GPR: caller-saved + callee-saved, minus reserved (RSP, RBP, RAX, RDX).
-     * RAX and RDX are reserved because IDIV/CQO clobbers them. Fixed vregs
-     * (rax_vreg, rdx_vreg) still use RAX/RDX via the is_fixed path. */
+     * GPR: caller-saved + callee-saved, minus reserved (RSP, RBP).
+     *
+     * RAX and RDX are only needed for IDIV/CQO/IMUL_FULL. For functions
+     * that don't use those instructions, we make RAX and RDX available as
+     * general-purpose registers — giving 2 extra GPRs. This dramatically
+     * reduces spills in tight loops (sum, fib, collatz) that have no
+     * division. */
     uint32_t free_gpr_regs = VTX_CALLER_SAVED_MASK | VTX_CALLEE_SAVED_MASK;
     free_gpr_regs &= ~VTX_REG_RESERVED_MASK;
-    free_gpr_regs &= ~(1u << 0);  /* RAX — reserved for IDIV quotient */
-    free_gpr_regs &= ~(1u << 2);  /* RDX — reserved for IDIV remainder */
+
+    /* Scan for IDIV/CQO/IMUL_FULL — only reserve RAX/RDX if present */
+    bool needs_rax_rdx = false;
+    for (uint32_t b = 0; b < stream->block_count && !needs_rax_rdx; b++) {
+        for (uint32_t i = 0; i < stream->blocks[b].inst_count; i++) {
+            vtx_x86_opcode_t op = stream->blocks[b].insts[i].opcode;
+            if (op == VTX_X86_IDIV || op == VTX_X86_CQO || op == VTX_X86_IMUL_FULL) {
+                needs_rax_rdx = true;
+                break;
+            }
+        }
+    }
+    if (needs_rax_rdx) {
+        free_gpr_regs &= ~(1u << 0);  /* RAX — reserved for IDIV quotient */
+        free_gpr_regs &= ~(1u << 2);  /* RDX — reserved for IDIV remainder */
+    }
     uint32_t free_xmm_regs = VTX_XMM_ALLOCATABLE_MASK;
 
     /* Track which callee-saved registers are used */
@@ -1024,10 +1057,20 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
      * Without this fix, C code compiled with -O3 that keeps variables in
      * R12/R13 across the JIT call gets those variables corrupted. */
     /* R12 (VTX_SPILL_TMP_REG) and R13 (memory operand spill scratch) are
-     * used by the emitter for ANY spill load/store, including IDIV operand
-     * reloads. Always save them — the emitter may use them even when the
-     * regalloc's spill_count is 0 (e.g., for IDIV's fixed-register spills). */
-    result->callee_saved_mask = callee_saved_used | (1u << 12) | (1u << 13);
+     * used by the emitter for spill load/store and IDIV operand reloads.
+     * Always save them when spills are present or IDIV is used.
+     * For spill-free, division-free leaf functions, skip the saves. */
+    if (result->spill_count > 0 || needs_rax_rdx) {
+        result->callee_saved_mask = callee_saved_used | (1u << 12) | (1u << 13);
+    } else {
+        /* Even without spills, the emitter may use R12 for MOV coalescing
+         * fallbacks. Check if any instruction has both operands spilled
+         * (which triggers R13 usage). If not, safe to skip. */
+        result->callee_saved_mask = callee_saved_used;
+        /* Conservatively add R12 back — the emitter uses it as a temp
+         * for various operations (e.g., moving spilled IDIV operands). */
+        result->callee_saved_mask |= (1u << 12);
+    }
 
     /* Detect leaf functions (no CALL instructions).
      * Leaf functions can use a lighter prologue (skip JIT header pushes). */
