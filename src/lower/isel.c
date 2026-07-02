@@ -1047,171 +1047,157 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             break;
         }
 
-        /* Strength reduction for SMI multiplication.
+        /* SMI tag elision: if this node is RAW_INT, inputs are already
+         * untagged (by a previous op in the chain) and the output will be
+         * consumed by another RAW_INT op. Skip untag and retag.
          *
-         * SMI values are NaN-boxed: SMI(a) = HEADER | (a << 3).
-         * The LEA/shift strength reduction shortcuts (x*3 → LEA, x*4 → SHL)
-         * operate on the NaN-boxed representation, which gives wrong results.
-         * For example: SMI(a)*3 = 3*HEADER | (a<<3)*3 ≠ SMI(a*3).
-         *
-         * To multiply SMI values correctly, we must:
-         *   1. Untag both operands (remove header, shift right by 3)
-         *   2. Multiply the raw integers
-         *   3. Re-tag the result (shift left by 3, OR header)
-         *
-         * However, for SMI(a) * SMI(b), there's a useful algebraic identity:
-         *   SMI(a) * SMI(b) = (HEADER|(a<<3)) * (HEADER|(b<<3))
-         * This doesn't simplify nicely. But IMUL on the NaN-boxed values
-         * gives a completely wrong result.
-         *
-         * Correct approach: untag lhs by subtracting HEADER and SAR by 3,
-         * then IMUL with untagged rhs, then re-tag.
-         *
-         * For the common case of Mul by a constant, we can use a simpler
-         * sequence: IMUL SMI(a), SMI(b) is wrong, but:
-         *   raw_result = (SMI(a) >> 3) * (SMI(b) - HEADER) >> 3
-         * is overly complex. Instead, just untag one operand:
-         *   SAR SMI(a), 3        ; gives a (raw integer) with sign extension
-         *   IMUL a, SMI(b)       ; a * SMI(b) = a * (HEADER|(b<<3))
-         * But this is also wrong because IMUL multiplies the full 64-bit values.
-         *
-         * The simplest correct approach for now: just use IMUL on the raw
-         * SMI-tagged operands and then fix up. But IMUL of two NaN-boxed
-         * values produces garbage. We MUST untag first.
-         *
-         * Strategy: Untag lhs (SAR 3 + mask), untag rhs or use constant,
-         * IMUL, re-tag (SHL 3 + OR HEADER).
-         *
-         * For Mul(x, small_const) we can optimize:
-         *   SMI(a) * c = (HEADER|(a<<3)) * c  ← WRONG, this multiplies header too
-         *   Instead: result = SMI(a*c) = HEADER | (a*c)<<3
-         *   Compute: (SMI(a) - HEADER) * c + HEADER
-         *          = (a<<3) * c + HEADER
-         *          = (a*c)<<3 + HEADER  (if c is power of 2, this is just SHL)
-         *          = SMI(a*c) ✓
-         *   So: SUB lhs, HEADER; then multiply by c; then ADD HEADER.
-         *   For power-of-2 c: SUB lhs, HEADER; SHL lhs, log2(c)+3; ADD HEADER.
-         *   Wait: (a<<3) * c = a*c*8 = (a*c)<<3 only if no overflow in a*c.
-         *   And SHL by (log2(c)+3) is the same as (a<<3) * c when c is power of 2.
-         *   But we need (a*c)<<3, and (a<<3)*c = (a*c)<<3 only when c is a power of 2.
-         *   For general c: IMUL is needed.
-         *
-         * Simplest correct implementation for integer SMI Mul:
-         *   1. Untag lhs: sub HEADER, sar 3 → gives raw a
-         *   2. If rhs is constant: imul raw_a, c
-         *      If rhs is variable: untag rhs too: sub HEADER, sar 3 → raw b, imul
-         *   3. Re-tag: shl 3, add HEADER
-         */
+         * We check BOTH the node itself (is_raw) and its inputs (lhs_is_raw,
+         * rhs_is_raw). If an input is RAW_INT, use it directly; otherwise
+         * untag it. If THIS node is RAW_INT, skip the retag on output. */
+        bool is_raw = vtx_nf_has(node->flags, VTX_NF_RAW_INT);
+        const vtx_node_t *lhs_node = vtx_node_get_const(&graph->node_table, node->inputs[0]);
+        const vtx_node_t *rhs_node = vtx_node_get_const(&graph->node_table, node->inputs[1]);
+        bool lhs_is_raw = lhs_node && vtx_nf_has(lhs_node->flags, VTX_NF_RAW_INT);
+        bool rhs_is_raw = rhs_node && vtx_nf_has(rhs_node->flags, VTX_NF_RAW_INT);
 
+        /* Helper: get the untagged lhs value.
+         * If lhs is already RAW_INT, use it directly.
+         * Otherwise, untag it into a new vreg. */
+        uint32_t lhs_untagged;
+        if (lhs_is_raw) {
+            lhs_untagged = lhs_vreg;
+        } else {
+            lhs_untagged = vtx_isel_alloc_vreg(stream, arena);
+            emit_smi_untag(stream, block, lhs_untagged, lhs_vreg, node_id, arena);
+        }
+
+        /* Helper: get the untagged rhs value (same logic). */
+        uint32_t rhs_untagged;
+        if (rhs_is_raw) {
+            rhs_untagged = rhs_vreg;
+        } else {
+            rhs_untagged = vtx_isel_alloc_vreg(stream, arena);
+            emit_smi_untag(stream, block, rhs_untagged, rhs_vreg, node_id, arena);
+        }
+
+        /* Try constant multiply shortcuts. These operate on the UNTAGGED
+         * lhs_untagged value (already extracted above). */
         int64_t rhs_const;
         if (try_get_const_int(graph, node->inputs[1], &rhs_const)) {
-            /* Mul(x, const): untag x, multiply by const, re-tag */
-
-            /* Special case: Mul(x, 0) → SMI(0) = HEADER */
+            /* Mul(x, 0) → 0 (raw) or SMI(0) = HEADER (tagged) */
             if (rhs_const == 0) {
-                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, dst,
-                                    (int64_t)VTX_NAN_BOX_HEADER, node_id), arena);
+                if (is_raw)
+                    vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, dst, 0, node_id), arena);
+                else
+                    vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, dst,
+                                        (int64_t)VTX_NAN_BOX_HEADER, node_id), arena);
                 break;
             }
 
-            /* Special case: Mul(x, 1) → just move (or nop if dst == lhs) */
+            /* Mul(x, 1) → x (already untagged in lhs_untagged) */
             if (rhs_const == 1) {
-                if (dst != lhs_vreg)
-                    vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_vreg, node_id), arena);
+                if (is_raw) {
+                    if (dst != lhs_untagged)
+                        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_untagged, node_id), arena);
+                } else {
+                    vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_untagged, node_id), arena);
+                    emit_smi_retag(stream, block, dst, node_id, arena);
+                }
                 break;
             }
 
-            /* Special case: Mul(x, -1) → untag, neg, retag */
+            /* Mul(x, -1) → NEG(x) */
             if (rhs_const == -1) {
-                uint32_t untagged = vtx_isel_alloc_vreg(stream, arena);
-                emit_smi_untag(stream, block, untagged, lhs_vreg, node_id, arena);
-                vtx_isel_emit_inst(block, make_r_inst(VTX_X86_NEG, untagged, node_id, 0), arena);
-                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, untagged, node_id), arena);
-                emit_smi_retag(stream, block, dst, node_id, arena);
+                uint32_t neg_dst = (dst != lhs_untagged) ? dst : vtx_isel_alloc_vreg(stream, arena);
+                if (neg_dst != lhs_untagged)
+                    vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, neg_dst, lhs_untagged, node_id), arena);
+                vtx_isel_emit_inst(block, make_r_inst(VTX_X86_NEG, neg_dst, node_id, 0), arena);
+                if (dst != neg_dst)
+                    vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, neg_dst, node_id), arena);
+                if (!is_raw) emit_smi_retag(stream, block, dst, node_id, arena);
                 break;
             }
 
-            /* Power of 2: Mul(x, 2^n) → untag, SHL by n, retag */
+            /* Power of 2: Mul(x, 2^n) → SHL(x, n) */
             int shift = is_power_of_2(rhs_const);
             if (shift >= 0) {
-                uint32_t untagged = vtx_isel_alloc_vreg(stream, arena);
-                emit_smi_untag(stream, block, untagged, lhs_vreg, node_id, arena);
-                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, untagged, shift, node_id), arena);
-                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, untagged, node_id), arena);
-                emit_smi_retag(stream, block, dst, node_id, arena);
+                uint32_t shl_dst = (dst != lhs_untagged) ? dst : vtx_isel_alloc_vreg(stream, arena);
+                if (shl_dst != lhs_untagged)
+                    vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, shl_dst, lhs_untagged, node_id), arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, shl_dst, shift, node_id), arena);
+                if (dst != shl_dst)
+                    vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, shl_dst, node_id), arena);
+                if (!is_raw) emit_smi_retag(stream, block, dst, node_id, arena);
                 break;
             }
 
-            /* General constant: untag lhs, IMUL by const, retag */
+            /* General constant: IMUL(lhs_untagged, const) */
             {
-                uint32_t untagged = vtx_isel_alloc_vreg(stream, arena);
-                uint32_t dst = ensure_node_vreg(stream, node_id, arena);
-                emit_smi_untag(stream, block, untagged, lhs_vreg, node_id, arena);
+                uint32_t imul_dst = (dst != lhs_untagged) ? dst : vtx_isel_alloc_vreg(stream, arena);
+                if (imul_dst != lhs_untagged)
+                    vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, imul_dst, lhs_untagged, node_id), arena);
                 if (rhs_const >= INT32_MIN && rhs_const <= INT32_MAX) {
-                    vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_IMUL, untagged, (int32_t)rhs_const, node_id), arena);
+                    vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_IMUL, imul_dst, (int32_t)rhs_const, node_id), arena);
                 } else {
                     uint32_t const_vreg = vtx_isel_alloc_vreg(stream, arena);
                     vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, const_vreg, rhs_const, node_id), arena);
-                    vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_IMUL, untagged, const_vreg, node_id), arena);
+                    vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_IMUL, imul_dst, const_vreg, node_id), arena);
                 }
-                /* Copy IMUL result to dst, then retag dst. Using separate
-                 * vregs ensures the regalloc assigns different registers,
-                 * preventing the retag from clobbering the IMUL result. */
-                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, untagged, node_id), arena);
-                emit_smi_retag(stream, block, dst, node_id, arena);
+                if (dst != imul_dst)
+                    vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, imul_dst, node_id), arena);
+                if (!is_raw) emit_smi_retag(stream, block, dst, node_id, arena);
             }
             break;
         }
 
+        /* Try Mul(const, x) — mirror of above, using rhs_untagged */
         int64_t lhs_const;
         if (try_get_const_int(graph, node->inputs[0], &lhs_const)) {
-            /* Mul(c, x) = Mul(x, c) — same sequence with rhs as variable */
             if (lhs_const == 0) {
-                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, dst,
-                                    (int64_t)VTX_NAN_BOX_HEADER, node_id), arena);
+                if (is_raw)
+                    vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, dst, 0, node_id), arena);
+                else
+                    vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, dst,
+                                        (int64_t)VTX_NAN_BOX_HEADER, node_id), arena);
                 break;
             }
             if (lhs_const == 1) {
-                if (dst != rhs_vreg)
-                    vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, rhs_vreg, node_id), arena);
+                if (is_raw) {
+                    if (dst != rhs_untagged)
+                        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, rhs_untagged, node_id), arena);
+                } else {
+                    vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, rhs_untagged, node_id), arena);
+                    emit_smi_retag(stream, block, dst, node_id, arena);
+                }
                 break;
             }
-            /* Untag rhs, multiply by c, retag */
+            /* General: IMUL(rhs_untagged, lhs_const) */
             {
-                uint32_t untagged = vtx_isel_alloc_vreg(stream, arena);
-                emit_smi_untag(stream, block, untagged, rhs_vreg, node_id, arena);
+                uint32_t imul_dst = (dst != rhs_untagged) ? dst : vtx_isel_alloc_vreg(stream, arena);
+                if (imul_dst != rhs_untagged)
+                    vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, imul_dst, rhs_untagged, node_id), arena);
                 if (lhs_const >= INT32_MIN && lhs_const <= INT32_MAX) {
-                    vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_IMUL, untagged, (int32_t)lhs_const, node_id), arena);
+                    vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_IMUL, imul_dst, (int32_t)lhs_const, node_id), arena);
                 } else {
                     uint32_t const_vreg = vtx_isel_alloc_vreg(stream, arena);
                     vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, const_vreg, lhs_const, node_id), arena);
-                    vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_IMUL, untagged, const_vreg, node_id), arena);
+                    vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_IMUL, imul_dst, const_vreg, node_id), arena);
                 }
-                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, untagged, node_id), arena);
-                emit_smi_retag(stream, block, dst, node_id, arena);
+                if (dst != imul_dst)
+                    vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, imul_dst, node_id), arena);
+                if (!is_raw) emit_smi_retag(stream, block, dst, node_id, arena);
             }
             break;
         }
 
-        /* Variable * Variable: untag both, IMUL, retag.
-         * SMI(a) * SMI(b) → need to compute a*b and re-tag as SMI(a*b).
-         * SMI tag elision: skip untag/retag for RAW_INT chains. */
+        /* Variable * Variable: IMUL(lhs_untagged, rhs_untagged) */
         {
-            bool is_raw = vtx_nf_has(node->flags, VTX_NF_RAW_INT);
-            const vtx_node_t *lhs_node = vtx_node_get_const(&graph->node_table, node->inputs[0]);
-            const vtx_node_t *rhs_node = vtx_node_get_const(&graph->node_table, node->inputs[1]);
-            bool lhs_is_raw = lhs_node && vtx_nf_has(lhs_node->flags, VTX_NF_RAW_INT);
-            bool rhs_is_raw = rhs_node && vtx_nf_has(rhs_node->flags, VTX_NF_RAW_INT);
-
-            uint32_t lhs_untagged, rhs_untagged;
-            if (lhs_is_raw) { lhs_untagged = lhs_vreg; }
-            else { lhs_untagged = vtx_isel_alloc_vreg(stream, arena); emit_smi_untag(stream, block, lhs_untagged, lhs_vreg, node_id, arena); }
-            if (rhs_is_raw) { rhs_untagged = rhs_vreg; }
-            else { rhs_untagged = vtx_isel_alloc_vreg(stream, arena); emit_smi_untag(stream, block, rhs_untagged, rhs_vreg, node_id, arena); }
-
-            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_IMUL, lhs_untagged, rhs_untagged, node_id), arena);
-
-            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_untagged, node_id), arena);
+            uint32_t imul_dst = (dst != lhs_untagged) ? dst : vtx_isel_alloc_vreg(stream, arena);
+            if (imul_dst != lhs_untagged)
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, imul_dst, lhs_untagged, node_id), arena);
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_IMUL, imul_dst, rhs_untagged, node_id), arena);
+            if (dst != imul_dst)
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, imul_dst, node_id), arena);
             if (!is_raw) emit_smi_retag(stream, block, dst, node_id, arena);
         }
         break;
@@ -1487,10 +1473,6 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
         /* Fix #2: Mod(x, 2^k) → x - (((x + (x>>63 & mask)) >> k) << k)
          *
-         * TEMPORARILY DISABLED: causes infinite loop in collatz. Needs
-         * debugging — likely a regalloc or codegen issue in the sequence
-         * when used inside a loop. Fall through to the IDIV path.
-         *
          * IDIV is ~25 cycles; this sequence is ~6 ALU ops at 1 cycle each.
          * The formula computes truncated-toward-zero division (matches C99
          * `%` as the interpreter uses) and then multiplies back and
@@ -1504,7 +1486,6 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
          *   6 % 4  = 2  (t=1, t<<2=4, 6-4=2)
          *  -6 % 4  = -2 (corr=3, t=(-6+3)>>2=-1, t<<2=-4, -6-(-4)=-2)
          */
-#if 0
         int64_t mod_const;
         if (try_get_const_int(graph, node->inputs[1], &mod_const) && mod_const > 0) {
             int shift = -1;
@@ -1516,28 +1497,28 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
             if (shift >= 1 && shift <= 62) {
                 uint32_t dst = ensure_node_vreg(stream, node_id, arena);
-                uint32_t lhs_raw = vtx_isel_alloc_vreg(stream, arena);
+                /* Use lhs_vreg directly as the source for untagging into
+                 * dst, then use a single tmp vreg. This avoids the long
+                 * live range of lhs_raw that caused regalloc issues in
+                 * loops. We re-read lhs_raw from dst when needed. */
                 uint32_t tmp     = vtx_isel_alloc_vreg(stream, arena);
 
                 stream->uses_smi = true;
-                /* Untag lhs into lhs_raw. Mark NO_COALESCE: lhs_raw must
-                 * survive across the SAR+AND+ADD+SHL+SUB sequence. */
-                vtx_inst_t unt = make_rr_inst(VTX_X86_MOV, lhs_raw, lhs_vreg, node_id);
-                unt.flags |= VTX_INST_FLAG_NO_COALESCE;
-                vtx_isel_emit_inst(block, unt, arena);
-                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, lhs_raw, 13, node_id), arena);
-                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, lhs_raw, 16, node_id), arena);
+                /* dst = untag(lhs_vreg) — SHL 13 + SAR 16 */
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_vreg, node_id), arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, dst, 13, node_id), arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, dst, 16, node_id), arena);
 
-                /* tmp = lhs_raw >> 63 (sign mask: 0 or -1) */
-                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, tmp, lhs_raw, node_id), arena);
+                /* tmp = dst >> 63 (sign mask: 0 or -1) */
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, tmp, dst, node_id), arena);
                 vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, tmp, 63, node_id), arena);
 
                 /* tmp = tmp & ((1<<k) - 1) (correction) */
                 int64_t mask = (1LL << shift) - 1;
                 vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_AND, tmp, mask, node_id), arena);
 
-                /* tmp = lhs_raw + tmp (corrected dividend) */
-                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_ADD, tmp, lhs_raw, node_id), arena);
+                /* tmp = dst + tmp (corrected dividend) */
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_ADD, tmp, dst, node_id), arena);
 
                 /* tmp = tmp >> k (truncated-toward-zero quotient) */
                 vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, tmp, shift, node_id), arena);
@@ -1545,20 +1526,17 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
                 /* tmp = tmp << k (quotient * 2^k) */
                 vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, tmp, shift, node_id), arena);
 
-                /* dst = lhs_raw - tmp (the remainder).
-                 * Intel SUB is dst = dst - src, so we move lhs_raw into dst
-                 * first and then subtract tmp. (Doing SUB tmp, lhs_raw
-                 * would give the negated result.) */
-                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_raw, node_id), arena);
+                /* dst = dst - tmp (the remainder).
+                 * dst still holds the original untagged lhs value because
+                 * we only modified tmp after the initial untag. */
                 vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_SUB, dst, tmp, node_id), arena);
 
-                /* Retag as SMI. dst already holds the raw remainder. */
+                /* Retag as SMI. dst holds the raw remainder. */
                 emit_smi_retag(stream, block, dst, node_id, arena);
                 vtx_isel_map_node_vreg(stream, node_id, dst, arena);
                 break;
             }
         }
-#endif
 
         /* SMI Mod: must untag both operands, IDIV, retag remainder (in RDX). */
         {

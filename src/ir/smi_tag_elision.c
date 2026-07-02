@@ -52,6 +52,11 @@ static bool can_produce_raw_int(vtx_node_opcode_t op) {
     switch (op) {
     case VTX_OP_Add:
     case VTX_OP_Sub:
+    case VTX_OP_Mul:
+    case VTX_OP_And:
+    case VTX_OP_Or:
+    case VTX_OP_Xor:
+    case VTX_OP_Neg:
         return true;
     default:
         return false;
