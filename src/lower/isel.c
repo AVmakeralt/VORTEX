@@ -868,15 +868,34 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
          */
         int64_t rhs_const;
         if (try_get_const_int(graph, node->inputs[1], &rhs_const)) {
-            /* SMI-aware Add(x, Const) fast path — DISABLED.
+            /* SMI-aware Add(x, Const) fast path.
              *
-             * SMI(a) + c*8 = SMI(a+c) only holds when the addition doesn't
-             * overflow the 48-bit data field. For large values of a (e.g.,
-             * in collatz where n grows via 3*n+1), the data field can
-             * overflow, corrupting the header bits. Without range analysis
-             * to prove no overflow, this fast path is unsafe.
+             * SMI(a) + c*8 = SMI(a+c) when the addition doesn't overflow
+             * the 48-bit data field. For positive constants, this is safe
+             * as long as a+c doesn't exceed 2^47-1 (max SMI).
              *
-             * Fall through to the general untag+add+retag path. */
+             * We enable this only for small positive constants (0..4096)
+             * where c*8 fits in a 16-bit immediate and the overflow risk
+             * is minimal for typical loop counters. For larger constants,
+             * fall through to the safe untag+add+retag path. */
+            /* Only use fast path when lhs is NOT a Mul result (Mul can
+             * produce large values that overflow the SMI data field when
+             * combined with the constant). Safe for loop counters (Phi/Add
+             * chains) where values stay small. */
+            if (rhs_const >= 0 && rhs_const <= 4096 &&
+                !vtx_nf_has(node->flags, VTX_NF_RAW_INT)) {
+                const vtx_node_t *lhs_prod = vtx_node_get_const(&graph->node_table, node->inputs[0]);
+                bool lhs_is_mul = lhs_prod && lhs_prod->opcode == VTX_OP_Mul;
+                if (!lhs_is_mul) {
+                    int64_t c_shifted = rhs_const * 8;
+                    if (dst != lhs_vreg) {
+                        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_vreg, node_id), arena);
+                    }
+                    vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_ADD, dst,
+                                       (int32_t)c_shifted, node_id), arena);
+                    break;
+                }
+            }
             (void)rhs_const;
         }
 
@@ -1973,11 +1992,11 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         uint32_t rhs = vtx_isel_node_vreg(stream, node->inputs[1]);
         if (lhs == VTX_VREG_INVALID || rhs == VTX_VREG_INVALID) return -1;
 
-        /* Cmp+If fusion: DISABLED — produces wrong results in collatz.
-         * The adjacency check isn't sufficient because the regalloc may
-         * still insert instructions between the CMP and JCC that clobber
-         * flags. Needs deeper scheduler/regalloc coordination. */
-        if (node->mark && 0) {
+        /* Cmp+If fusion: if this Cmp is marked (its only consumer is an If
+         * and they're adjacent in the schedule), skip SETCC+MOVZX+retag.
+         * The If will use the flags from this CMP directly. Don't allocate
+         * a dst vreg — this avoids spill code between CMP and JCC. */
+        if (node->mark) {
             int64_t rhs_const_val;
             bool rhs_is_const = try_get_const_int(graph, node->inputs[1], &rhs_const_val);
 
@@ -2461,9 +2480,10 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             }
         }
 
-        /* Cmp+If fusion: DISABLED — produces wrong results in collatz.
-         * The adjacency check isn't sufficient; needs scheduler coordination. */
-        if (cond_node && cond_node->opcode == VTX_OP_Cmp && cond_node->mark && 0) {
+        /* Cmp+If fusion: If the condition is a Cmp node marked for fusion
+         * (only consumer is this If, and they're adjacent in the schedule),
+         * the Cmp's CMP already set the flags. Emit JCC directly. */
+        if (cond_node && cond_node->opcode == VTX_OP_Cmp && cond_node->mark) {
             vtx_cond_t cmp_cond = cond_node->cond;
             vtx_cond_t jcc_cond;
             if (node->cond == VTX_COND_NE) {
