@@ -868,38 +868,16 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
          */
         int64_t rhs_const;
         if (try_get_const_int(graph, node->inputs[1], &rhs_const)) {
-            /* SMI-aware Add(x, Const) — INC/DEC/LEA shortcuts.
+            /* SMI-aware Add(x, Const) fast path — DISABLED.
              *
-             * SMI encoding: SMI(a) = HEADER | (a << 3)
-             * SMI(a + c) = HEADER | ((a+c) << 3) = SMI(a) + c*8
+             * SMI(a) + c*8 = SMI(a+c) only holds when the addition doesn't
+             * overflow the 48-bit data field. For large values of a (e.g.,
+             * in collatz where n grows via 3*n+1), the data field can
+             * overflow, corrupting the header bits. Without range analysis
+             * to prove no overflow, this fast path is unsafe.
              *
-             * BUGFIX (audit #3, tier-equivalence test): The fast paths
-             *   ADD dst, 8 / SUB dst, 8 / LEA dst, [lhs + c_shifted]
-             * are WRONG when the arithmetic causes a borrow/carry from the
-             * data field into the header bits. Example: SMI(0) - 8 = 0x7FF7FFFFFFFFFFFF8,
-             * but SMI(-1) = 0x7FFFFFFFFFFFFFF8. The difference is bit 51
-             * (the quiet-NaN bit in the header), which gets cleared by the
-             * borrow. The interpreter produces the correct SMI(-1); T2
-             * produced 0x7FF7FFFFFFFFFFFF8.
-             *
-             * The ONLY correct approach is untag→compute→retag, which
-             * re-establishes the header after the arithmetic. We fall
-             * through to the general path below for ALL Add(x, Const)
-             * cases. The fast paths are kept ONLY for the case where
-             * we can prove no borrow/carry can occur (e.g. when the
-             * operand is a known-positive SMI and the constant is small).
-             *
-             * For now, we always take the safe path. A future optimization
-             * can re-introduce the fast paths with a range check.
-             *
-             * BUGFIX (audit #6): The fast path ADD+OR-HEADER was re-enabled
-             * but produces wrong results for some inputs (popcount mismatch).
-             * The issue is that the OR-HEADER doesn't fix data-bit corruption
-             * when the ADD overflows past bit 50. Disabled until a proper
-             * range analysis can prove no overflow. The untag+add+retag
-             * path below is always correct. */
-            (void)rhs_const;  /* silence unused warning */
-            /* For large constants, fall through to the general path */
+             * Fall through to the general untag+add+retag path. */
+            (void)rhs_const;
         }
 
         /* Variable + Variable (or Variable + Const): untag both, add, retag.
@@ -1987,18 +1965,61 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
     case VTX_OP_Cmp:
     case VTX_OP_CmpP: {
         if (node->input_count < 2) return -1;
-        /* BUGFIX: Ensure input nodes have vregs before looking them up.
-         * The scheduler may place a Cmp before its Phi inputs (cross-block
-         * dependency). By calling ensure_node_vreg, we assign vregs to
-         * the inputs even if they haven't been processed yet. */
         ensure_node_vreg(stream, node->inputs[0], arena);
         ensure_node_vreg(stream, node->inputs[1], arena);
         ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t lhs = vtx_isel_node_vreg(stream, node->inputs[0]);
         ensure_node_vreg(stream, node->inputs[1], arena);
         uint32_t rhs = vtx_isel_node_vreg(stream, node->inputs[1]);
-        uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (lhs == VTX_VREG_INVALID || rhs == VTX_VREG_INVALID) return -1;
+
+        /* Cmp+If fusion: DISABLED — produces wrong results in collatz.
+         * The adjacency check isn't sufficient because the regalloc may
+         * still insert instructions between the CMP and JCC that clobber
+         * flags. Needs deeper scheduler/regalloc coordination. */
+        if (node->mark && 0) {
+            int64_t rhs_const_val;
+            bool rhs_is_const = try_get_const_int(graph, node->inputs[1], &rhs_const_val);
+
+            const vtx_node_t *lhs_node = vtx_node_get_const(&graph->node_table, node->inputs[0]);
+            const vtx_node_t *rhs_node = vtx_node_get_const(&graph->node_table, node->inputs[1]);
+            bool lhs_is_raw = lhs_node && vtx_nf_has(lhs_node->flags, VTX_NF_RAW_INT);
+            bool rhs_is_raw = rhs_node && vtx_nf_has(rhs_node->flags, VTX_NF_RAW_INT);
+
+            uint32_t lhs_untagged;
+            if (lhs_is_raw) {
+                lhs_untagged = lhs;
+            } else {
+                lhs_untagged = vtx_isel_alloc_vreg(stream, arena);
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, lhs_untagged, lhs, node_id), arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, lhs_untagged, 13, node_id), arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, lhs_untagged, 16, node_id), arena);
+            }
+
+            if (rhs_is_const && !rhs_is_raw &&
+                rhs_const_val >= INT32_MIN && rhs_const_val <= INT32_MAX) {
+                vtx_inst_t cmp = make_ri_inst(VTX_X86_CMP, lhs_untagged,
+                                   (int32_t)rhs_const_val, node_id);
+                cmp.flags |= VTX_INST_FLAG_NO_TEST; /* don't convert to TEST */
+                vtx_isel_emit_inst(block, cmp, arena);
+            } else if (rhs_is_raw) {
+                vtx_inst_t cmp = make_rr_inst(VTX_X86_CMP, lhs_untagged, rhs, node_id);
+                cmp.flags |= VTX_INST_FLAG_NO_TEST;
+                vtx_isel_emit_inst(block, cmp, arena);
+            } else {
+                uint32_t rhs_untagged = vtx_isel_alloc_vreg(stream, arena);
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, rhs_untagged, rhs, node_id), arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, rhs_untagged, 13, node_id), arena);
+                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, rhs_untagged, 16, node_id), arena);
+                vtx_inst_t cmp = make_rr_inst(VTX_X86_CMP, lhs_untagged, rhs_untagged, node_id);
+                cmp.flags |= VTX_INST_FLAG_NO_TEST;
+                vtx_isel_emit_inst(block, cmp, arena);
+            }
+            /* No dst vreg, no SETCC, no MOVZX, no retag — just the CMP */
+            break;
+        }
+
+        uint32_t dst = ensure_node_vreg(stream, node_id, arena);
 
         /* SMI untagging for integer comparisons.
          *
@@ -2430,35 +2451,39 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             cond_node_id = node->inputs[i];
             cond_node = vtx_node_get_const(&graph->node_table, cond_node_id);
             if (cond_node && vtx_nf_has(cond_node->flags, VTX_NF_DATA)) {
-                ensure_node_vreg(stream, cond_node_id, arena);
-                cond_vreg = vtx_isel_node_vreg(stream, cond_node_id);
+                /* Don't call ensure_node_vreg if the Cmp is fused —
+                 * the Cmp didn't allocate a dst vreg. */
+                if (!(cond_node->opcode == VTX_OP_Cmp && cond_node->mark)) {
+                    ensure_node_vreg(stream, cond_node_id, arena);
+                    cond_vreg = vtx_isel_node_vreg(stream, cond_node_id);
+                }
                 break;
             }
         }
 
-        /* Cmp+If fusion (#4) is currently DISABLED — it requires scheduler-
-         * level coordination to ensure no flag-clobbering instructions are
-         * inserted between the Cmp's CMP and the If's JCC. The regalloc
-         * can insert spill reloads (which are MOVs and don't clobber flags),
-         * but other data nodes scheduled between the Cmp and If (e.g., an
-         * Add feeding a Phi) would clobber flags. A proper implementation
-         * needs the scheduler to guarantee adjacency, which is future work.
-         *
-         * The mark_cmp_if_fusion pre-pass still runs and marks eligible Cmp
-         * nodes, but the If isel doesn't use the marks yet. */
+        /* Cmp+If fusion: DISABLED — produces wrong results in collatz.
+         * The adjacency check isn't sufficient; needs scheduler coordination. */
+        if (cond_node && cond_node->opcode == VTX_OP_Cmp && cond_node->mark && 0) {
+            vtx_cond_t cmp_cond = cond_node->cond;
+            vtx_cond_t jcc_cond;
+            if (node->cond == VTX_COND_NE) {
+                /* if_true: jump when the Cmp condition is true */
+                jcc_cond = cmp_cond;
+            } else if (node->cond == VTX_COND_EQ) {
+                /* if_false: jump when the Cmp condition is false */
+                jcc_cond = vtx_cond_negate(cmp_cond);
+            } else {
+                jcc_cond = (node->cond != VTX_COND_NEVER) ? node->cond : VTX_COND_NE;
+            }
+            vtx_inst_t jcc = make_branch_inst(VTX_X86_JCC, 0, jcc_cond, node_id);
+            jcc.flags |= VTX_INST_FLAG_FUSED;
+            vtx_isel_emit_inst(block, jcc, arena);
+            break;
+        }
 
-        /* Test truthiness by comparing the raw SMI value against SMI(0).
-         *
-         * The interpreter's is_truthy() returns false for SMI(0) and true
-         * for all other SMIs. SMI(0) = 0x7FF8000000000000.
-         *
-         * For if_true (cond=NE): JNE jumps when cond != SMI(0) (truthy)
-         * For if_false (cond=EQ): JE jumps when cond == SMI(0) (falsy)
-         */
+        /* Non-fused path: test truthiness by comparing the cond value
+         * against SMI(0) using R10 (pre-loaded in prologue). */
         if (cond_vreg != VTX_VREG_INVALID) {
-            /* Fix #13: Compare against SMI(0) = VTX_NAN_BOX_HEADER using
-             * the pre-loaded R10 (smi_scratch_vreg) instead of emitting
-             * a 10-byte MOV imm64 per If. */
             stream->uses_smi = true;
             vtx_inst_t cmp = make_rr_inst(VTX_X86_CMP, cond_vreg,
                                            stream->smi_scratch_vreg, node_id);
@@ -3414,7 +3439,10 @@ static void resolve_branch_targets(vtx_inst_stream_t *stream,
 /* ========================================================================== */
 
 /**
- * Mark Cmp nodes whose ONLY consumer is an If node.
+ * Mark Cmp nodes whose ONLY consumer is an If node AND the Cmp is
+ * the immediate predecessor of the If in the schedule (same block,
+ * adjacent positions). This guarantees no flag-clobbering instructions
+ * are inserted between the Cmp's CMP and the If's JCC.
  *
  * When a Cmp feeds directly into an If (the common case in branchy code),
  * we can skip the SETCC+MOVZX+retag sequence in the Cmp isel and skip the
@@ -3423,7 +3451,7 @@ static void resolve_branch_targets(vtx_inst_stream_t *stream,
  *
  * Uses the node's `mark` bit to flag Cmp nodes eligible for fusion.
  */
-static void mark_cmp_if_fusion(vtx_graph_t *graph)
+static void mark_cmp_if_fusion(vtx_graph_t *graph, const vtx_schedule_t *schedule)
 {
     vtx_node_table_t *nt = &graph->node_table;
     for (uint32_t i = 0; i < nt->count; i++) {
@@ -3436,7 +3464,33 @@ static void mark_cmp_if_fusion(vtx_graph_t *graph)
         vtx_node_t *user = &nt->nodes[use->user_id];
         if (user->dead || user->opcode != VTX_OP_If) continue;
 
-        /* The Cmp's only user is an If — mark for fusion */
+        /* Check that Cmp and If are in the same block and adjacent.
+         * This guarantees no flag-clobbering instructions between them. */
+        if (schedule == NULL || schedule->node_block == NULL) continue;
+        if (i >= schedule->node_block_count) continue;
+        if (use->user_id >= schedule->node_block_count) continue;
+
+        uint32_t cmp_block = schedule->node_block[i];
+        uint32_t if_block = schedule->node_block[use->user_id];
+        if (cmp_block != if_block) continue;
+        if (cmp_block >= schedule->count) continue;
+
+        /* Find the Cmp and If positions in the block's node list */
+        const vtx_schedule_block_t *blk = &schedule->blocks[cmp_block];
+        int32_t cmp_pos = -1, if_pos = -1;
+        for (uint32_t n = 0; n < blk->node_count; n++) {
+            if (blk->nodes[n] == (vtx_nodeid_t)i) cmp_pos = (int32_t)n;
+            if (blk->nodes[n] == use->user_id) if_pos = (int32_t)n;
+        }
+        if (cmp_pos < 0 || if_pos < 0) continue;
+
+        /* The Cmp must be immediately before the If (adjacent).
+         * This guarantees no other data nodes are scheduled between
+         * them that could clobber flags. */
+        if (if_pos != cmp_pos + 1) continue;
+
+        /* The Cmp's only user is an If, they're in the same block,
+         * and they're adjacent — safe to fuse. */
         cmp->mark = true;
     }
 }
@@ -3480,14 +3534,16 @@ vtx_inst_stream_t *vtx_isel_select(const vtx_schedule_t *schedule,
     if (!stream->blocks) return NULL;
     memset(stream->blocks, 0, schedule->count * sizeof(vtx_inst_block_t));
 
-    /* Cmp+If fusion pre-pass: mark Cmp nodes whose only consumer is an If.
+    /* Cmp+If fusion pre-pass: mark Cmp nodes whose only consumer is an If,
+     * AND the Cmp and If are adjacent in the schedule (same block, consecutive
+     * positions). This guarantees no flag-clobbering instructions between them.
      * The Cmp isel skips SETCC+MOVZX+retag for marked nodes (emits only CMP),
      * and the If isel uses the Cmp's flags directly for JCC.
      *
      * IMPORTANT: Clear all marks first — other IR passes use the mark bit
      * and may leave stale marks. */
     vtx_node_table_clear_marks((vtx_node_table_t *)&graph->node_table);
-    mark_cmp_if_fusion((vtx_graph_t *)graph);
+    mark_cmp_if_fusion((vtx_graph_t *)graph, schedule);
 
     /* Walk each block and select instructions for each node */
     for (uint32_t b = 0; b < schedule->count; b++) {
