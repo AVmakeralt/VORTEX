@@ -234,20 +234,28 @@ static const char *PROG_COLLATZ =
     "goto loop\n"
     "done:\nload_local 1\nreturn_value\n";
 
-/* ----- JIT caller wrappers ----- */
+/* ----- JIT caller wrappers -----
+ * The method_desc is hoisted to a global to avoid per-call memset overhead.
+ * memset of a 48-byte struct per call dominates the measured time for
+ * short benchmarks (gcd, collatz). */
+static vtx_method_desc_t g_jit_method;
+
+static void init_jit_method(void) {
+    memset(&g_jit_method, 0, sizeof(g_jit_method));
+    g_jit_method.name = "f";
+}
+
 typedef struct { jit_entry_t entry; vtx_value_t arg; } jit1_ctx_t;
 typedef struct { jit_entry_t entry; vtx_value_t a, b; } jit2_ctx_t;
 
 static int64_t call_jit1(void *c) {
     jit1_ctx_t *ctx = (jit1_ctx_t *)c;
-    vtx_method_desc_t m; memset(&m, 0, sizeof(m)); m.name = "f";
-    return vtx_smi_value(ctx->entry(&m, NULL, (void*)1, &ctx->arg, 1));
+    return vtx_smi_value(ctx->entry(&g_jit_method, NULL, (void*)1, &ctx->arg, 1));
 }
 static int64_t call_jit2(void *c) {
     jit2_ctx_t *ctx = (jit2_ctx_t *)c;
-    vtx_method_desc_t m; memset(&m, 0, sizeof(m)); m.name = "f";
     vtx_value_t args[2] = { ctx->a, ctx->b };
-    return vtx_smi_value(ctx->entry(&m, NULL, (void*)1, args, 2));
+    return vtx_smi_value(ctx->entry(&g_jit_method, NULL, (void*)1, args, 2));
 }
 
 /* ----- Native caller wrappers -----
@@ -293,6 +301,9 @@ int main(void) {
     /* Disable SIGALRM — benchmarks manage their own timing */
     signal(SIGALRM, SIG_IGN);
     setvbuf(stdout, NULL, _IONBF, 0);
+
+    /* Initialize the hoisted method descriptor once */
+    init_jit_method();
 
     printf("=== VORTEX T2 JIT Pipeline Benchmark ===\n\n");
     printf("Methodology: %d warmup + %d samples, sorted for median/p95\n", WARMUP, SAMPLES);

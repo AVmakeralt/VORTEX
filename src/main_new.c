@@ -3000,7 +3000,7 @@ int main(int argc, char *argv[])
 
         /* Create and wire threadpool for background compilation */
         vtx_threadpool_t pool;
-        if (vtx_threadpool_init(&pool, 1) == 0) {  /* 1 compile thread */
+        if (vtx_threadpool_init(&pool, 0) == 0) {  /* 0 = auto-detect cores */
             compile_ctx.threadpool = &pool;
             vtx_compile_context_wire_threadpool(&compile_ctx);
         }
@@ -3023,6 +3023,12 @@ int main(int argc, char *argv[])
          * stays 0 and the isel emits expensive compare-and-branch guards. */
         vtx_type_guard_page_registry_t guard_page_registry;
         vtx_type_guard_page_registry_init(&guard_page_registry);
+
+        /* Initialize the guard page for zero-cost safepoint polling.
+         * Without this, vtx_guard_page_available_flag stays 0 and the
+         * isel emits 14-byte CMP+JCC safepoint polls instead of 7-byte
+         * MOV-to-guard-page polls. This affects every loop back-edge. */
+        vtx_guard_page_init();
 
         /* Initialize the safepoint manager. This enables safepoint
          * polling for GC suspension in JIT-compiled code. Without this,

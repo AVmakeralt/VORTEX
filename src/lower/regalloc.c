@@ -1046,9 +1046,34 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
      * R12/R13 across the JIT call gets those variables corrupted. */
     /* R12 (VTX_SPILL_TMP_REG) and R13 (memory operand spill scratch) are
      * used by the emitter for spill load/store and IDIV operand reloads.
-     * Always save them — the emitter may use them even when the regalloc's
-     * spill_count is 0 (e.g., for IDIV's fixed-register spills). */
-    result->callee_saved_mask = callee_saved_used | (1u << 12) | (1u << 13);
+     * Only save them when actually needed:
+     *   - R12 is used for IDIV operand moves and as a general spill temp.
+     *     Save when spill_count > 0 OR when IDIV/CQO/IMUL_FULL is present.
+     *   - R13 is used only when BOTH operands of an instruction are spilled
+     *     (as a second spill temp). Save only when spill_count > 0.
+     * For spill-free, division-free leaf functions, skip both saves —
+     * this saves 4 instructions per call (2 push + 2 pop). */
+    {
+        bool needs_r12 = (result->spill_count > 0);
+        bool needs_r13 = (result->spill_count > 0);
+
+        /* Check for IDIV/CQO/IMUL_FULL — these use R12 as a temp */
+        if (!needs_r12) {
+            for (uint32_t b = 0; b < stream->block_count && !needs_r12; b++) {
+                for (uint32_t i = 0; i < stream->blocks[b].inst_count; i++) {
+                    vtx_x86_opcode_t op = stream->blocks[b].insts[i].opcode;
+                    if (op == VTX_X86_IDIV || op == VTX_X86_CQO || op == VTX_X86_IMUL_FULL) {
+                        needs_r12 = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        result->callee_saved_mask = callee_saved_used;
+        if (needs_r12) result->callee_saved_mask |= (1u << 12);
+        if (needs_r13) result->callee_saved_mask |= (1u << 13);
+    }
 
     /* Detect leaf functions (no CALL instructions).
      * Leaf functions can use a lighter prologue (skip JIT header pushes). */

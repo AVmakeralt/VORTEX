@@ -988,10 +988,39 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
          */
         int64_t rhs_const;
         if (try_get_const_int(graph, node->inputs[1], &rhs_const)) {
-            /* Sub(x, Const) fast path disabled — same overflow issue as Add.
-             * See Add(x, Const) for details. */
+            /* SMI-aware Sub(x, negative_const) fast path.
+             *
+             * Sub(x, c) where c < 0 is equivalent to Add(x, |c|).
+             * SMI(a) + |c|*8 = SMI(a + |c|) when |c| >= 0 — no borrow.
+             * This is safe because addition only carries UP within the
+             * data field, never borrowing from the header bits.
+             *
+             * For c > 0, the subtraction can borrow from bit 51 when the
+             * data field is 0. So we only use the fast path for c < 0
+             * (equivalent to addition) and for c == 0 (identity).
+             *
+             * Also respect RAW_INT: skip if the Sub is in a RAW_INT chain.
+             * Also skip if lhs is a Mul result (can produce large values
+             * that overflow the SMI data field). */
+            if (rhs_const <= 0 && !vtx_nf_has(node->flags, VTX_NF_RAW_INT) &&
+                rhs_const >= -4096) {
+                int64_t add_val = (-rhs_const) * 8;  /* |c| * 8 */
+                if (add_val >= 0 && add_val <= INT32_MAX) {
+                    const vtx_node_t *lhs_prod = vtx_node_get_const(&graph->node_table, node->inputs[0]);
+                    bool lhs_is_mul = lhs_prod && lhs_prod->opcode == VTX_OP_Mul;
+                    if (!lhs_is_mul) {
+                        if (dst != lhs_vreg) {
+                            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_vreg, node_id), arena);
+                        }
+                        if (add_val > 0) {
+                            vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_ADD, dst,
+                                               (int32_t)add_val, node_id), arena);
+                        }
+                        break;
+                    }
+                }
+            }
             (void)rhs_const;
-            /* fall through to untag+sub+retag */
         }
 
         /* Variable - Variable (or Variable - Const): untag both, sub, retag.
@@ -1138,6 +1167,18 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
                 vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, shl_dst, shift, node_id), arena);
                 if (dst != shl_dst)
                     vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, shl_dst, node_id), arena);
+                if (!is_raw) emit_smi_retag(stream, block, dst, node_id, arena);
+                break;
+            }
+
+            /* LEA patterns for small constants (3, 5, 6, 9, 10, etc.).
+             * emit_mul_by_constant uses LEA which is 1-2 cycles vs IMUL's
+             * 3-5 cycles. This is especially important for collatz's 3*n+1
+             * path where Mul(x, 3) is the dominant operation.
+             * The LEA operates on the UNTAGGED value, producing raw result.
+             * We then retag if the node is not RAW_INT. */
+            if (emit_mul_by_constant(stream, block, dst, lhs_untagged,
+                                      rhs_const, node_id, arena)) {
                 if (!is_raw) emit_smi_retag(stream, block, dst, node_id, arena);
                 break;
             }
