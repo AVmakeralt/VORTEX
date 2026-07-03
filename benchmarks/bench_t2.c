@@ -37,8 +37,8 @@
 #include "interp/dispatch.h"
 #include "assembler.h"
 
-#define WARMUP 20
-#define SAMPLES 50
+#define WARMUP 5
+#define SAMPLES 20
 
 static inline uint64_t now_ns(void) {
     struct timespec ts;
@@ -364,9 +364,9 @@ int main(void) {
     printf("--- sum(100) ---\n");
     jit1_ctx_t jc = { j_sum, vtx_make_smi(100) };
     int64_t narg = 100;
-    stats_t s_native = bench_run(call_native_sum, (void*)narg, 10000);
-    stats_t s_jit = bench_run(call_jit1, &jc, 10000);
-    stats_t s_t0 = bench_run(call_t0_sum, (void*)narg, 100);
+    stats_t s_native = bench_run(call_native_sum, (void*)narg, 2000);
+    stats_t s_jit = bench_run(call_jit1, &jc, 2000);
+    stats_t s_t0 = bench_run(call_t0_sum, (void*)narg, 20);
     print_stats("Native C", s_native);
     print_stats("VORTEX T2 JIT", s_jit);
     print_stats("VORTEX T0 Interpreter", s_t0);
@@ -377,9 +377,9 @@ int main(void) {
     printf("--- fib(20) ---\n");
     jc.entry = j_fib; jc.arg = vtx_make_smi(20);
     narg = 20;
-    s_native = bench_run(call_native_fib, (void*)narg, 10000);
-    s_jit = bench_run(call_jit1, &jc, 10000);
-    s_t0 = bench_run(call_t0_fib, (void*)narg, 100);
+    s_native = bench_run(call_native_fib, (void*)narg, 2000);
+    s_jit = bench_run(call_jit1, &jc, 2000);
+    s_t0 = bench_run(call_t0_fib, (void*)narg, 20);
     print_stats("Native C", s_native);
     print_stats("VORTEX T2 JIT", s_jit);
     print_stats("VORTEX T0 Interpreter", s_t0);
@@ -390,9 +390,9 @@ int main(void) {
     printf("--- gcd(123456, 7890) ---\n");
     int64_t gargs[2] = { 123456, 7890 };
     jit2_ctx_t jc2 = { j_gcd, vtx_make_smi(123456), vtx_make_smi(7890) };
-    s_native = bench_run(call_native_gcd, gargs, 10000);
-    s_jit = bench_run(call_jit2, &jc2, 10000);
-    s_t0 = bench_run(call_t0_gcd, gargs, 100);
+    s_native = bench_run(call_native_gcd, gargs, 2000);
+    s_jit = bench_run(call_jit2, &jc2, 2000);
+    s_t0 = bench_run(call_t0_gcd, gargs, 20);
     print_stats("Native C", s_native);
     print_stats("VORTEX T2 JIT", s_jit);
     print_stats("VORTEX T0 Interpreter", s_t0);
@@ -403,9 +403,9 @@ int main(void) {
     printf("--- collatz(27) ---\n");
     jc.entry = j_col; jc.arg = vtx_make_smi(27);
     narg = 27;
-    s_native = bench_run(call_native_collatz, (void*)narg, 10000);
-    s_jit = bench_run(call_jit1, &jc, 10000);
-    s_t0 = bench_run(call_t0_collatz, (void*)narg, 100);
+    s_native = bench_run(call_native_collatz, (void*)narg, 2000);
+    s_jit = bench_run(call_jit1, &jc, 2000);
+    s_t0 = bench_run(call_t0_collatz, (void*)narg, 20);
     print_stats("Native C", s_native);
     print_stats("VORTEX T2 JIT", s_jit);
     print_stats("VORTEX T0 Interpreter", s_t0);
@@ -452,9 +452,9 @@ int main(void) {
         printf("--- T3 sum(100) ---\n");
         jc.entry = t3_sum; jc.arg = vtx_make_smi(100);
         narg = 100;
-        s_native = bench_run(call_native_sum, (void*)narg, 10000);
-        stats_t s_t3 = bench_run(call_jit1, &jc, 10000);
-        s_t0 = bench_run(call_t0_sum, (void*)narg, 100);
+        s_native = bench_run(call_native_sum, (void*)narg, 2000);
+        stats_t s_t3 = bench_run(call_jit1, &jc, 2000);
+        s_t0 = bench_run(call_t0_sum, (void*)narg, 20);
         print_stats("Native C", s_native);
         print_stats("VORTEX T3 JIT", s_t3);
         print_stats("VORTEX T2 JIT", s_jit);
@@ -468,10 +468,10 @@ int main(void) {
         printf("--- T3 fib(20) ---\n");
         jc.entry = t3_fib; jc.arg = vtx_make_smi(20);
         narg = 20;
-        s_native = bench_run(call_native_fib, (void*)narg, 10000);
-        s_t3 = bench_run(call_jit1, &jc, 10000);
-        s_jit = bench_run(call_jit1, &(jit1_ctx_t){j_fib, vtx_make_smi(20)}, 10000);
-        s_t0 = bench_run(call_t0_fib, (void*)narg, 100);
+        s_native = bench_run(call_native_fib, (void*)narg, 2000);
+        s_t3 = bench_run(call_jit1, &jc, 2000);
+        s_jit = bench_run(call_jit1, &(jit1_ctx_t){j_fib, vtx_make_smi(20)}, 2000);
+        s_t0 = bench_run(call_t0_fib, (void*)narg, 20);
         print_stats("Native C", s_native);
         print_stats("VORTEX T3 JIT", s_t3);
         print_stats("VORTEX T2 JIT", s_jit);
@@ -484,10 +484,10 @@ int main(void) {
         /* T3 Benchmark: gcd(123456, 7890) */
         printf("--- T3 gcd(123456, 7890) ---\n");
         jc2.entry = t3_gcd; jc2.a = vtx_make_smi(123456); jc2.b = vtx_make_smi(7890);
-        s_native = bench_run(call_native_gcd, gargs, 10000);
-        s_t3 = bench_run(call_jit2, &jc2, 10000);
-        s_jit = bench_run(call_jit2, &(jit2_ctx_t){j_gcd, vtx_make_smi(123456), vtx_make_smi(7890)}, 10000);
-        s_t0 = bench_run(call_t0_gcd, gargs, 100);
+        s_native = bench_run(call_native_gcd, gargs, 2000);
+        s_t3 = bench_run(call_jit2, &jc2, 2000);
+        s_jit = bench_run(call_jit2, &(jit2_ctx_t){j_gcd, vtx_make_smi(123456), vtx_make_smi(7890)}, 2000);
+        s_t0 = bench_run(call_t0_gcd, gargs, 20);
         print_stats("Native C", s_native);
         print_stats("VORTEX T3 JIT", s_t3);
         print_stats("VORTEX T2 JIT", s_jit);
@@ -501,10 +501,10 @@ int main(void) {
         printf("--- T3 collatz(27) ---\n");
         jc.entry = t3_col; jc.arg = vtx_make_smi(27);
         narg = 27;
-        s_native = bench_run(call_native_collatz, (void*)narg, 10000);
-        s_t3 = bench_run(call_jit1, &jc, 10000);
-        s_jit = bench_run(call_jit1, &(jit1_ctx_t){j_col, vtx_make_smi(27)}, 10000);
-        s_t0 = bench_run(call_t0_collatz, (void*)narg, 100);
+        s_native = bench_run(call_native_collatz, (void*)narg, 2000);
+        s_t3 = bench_run(call_jit1, &jc, 2000);
+        s_jit = bench_run(call_jit1, &(jit1_ctx_t){j_col, vtx_make_smi(27)}, 2000);
+        s_t0 = bench_run(call_t0_collatz, (void*)narg, 20);
         print_stats("Native C", s_native);
         print_stats("VORTEX T3 JIT", s_t3);
         print_stats("VORTEX T2 JIT", s_jit);
