@@ -106,3 +106,31 @@ target_link_libraries(bench_t2 PRIVATE
     m
     pthread
 )
+
+# ---- SciMark-style benchmark ----
+
+add_executable(bench_scimark
+    bench_scimark.c
+)
+target_link_libraries(bench_scimark PRIVATE
+    vortex_compile
+    vortex_codecache
+    vortex_lower
+    vortex_interp
+    vortex_runtime
+    vortex_ir
+    vortex_deopt
+    vortex_baseline
+    vortex_inliner
+    vortex_pea
+    vortex_guard
+    vortex_sota
+    vortex_region
+    vortex_trace
+    vortex_midtier
+    vortex_profile
+    vortex_assembler
+    vortex_common
+    m
+    pthread
+)
