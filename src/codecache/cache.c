@@ -211,7 +211,11 @@ int vtx_code_cache_make_writable(vtx_code_cache_t *cache, void *ptr, uint32_t si
     uintptr_t end = ((uintptr_t)ptr + size + (uintptr_t)page_size - 1) &
                     ~((uintptr_t)page_size - 1);
 
-    if (mprotect((void *)start, end - start, PROT_EXEC | PROT_WRITE | PROT_READ) != 0) {
+    /* Fix C8: W^X violation — use PROT_READ|PROT_WRITE (not EXEC) when
+     * making code writable for patching. The code will be made executable
+     * again by vtx_code_cache_make_exec() after patching is done.
+     * Hardened kernels (PaX, SELinux, OpenBSD) refuse PROT_WRITE|PROT_EXEC. */
+    if (mprotect((void *)start, end - start, PROT_READ | PROT_WRITE) != 0) {
         return -1;
     }
     return 0;

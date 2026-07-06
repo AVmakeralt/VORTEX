@@ -196,7 +196,12 @@ static uint32_t resolve_virtual_phis(vtx_graph_t *graph,
             vtx_node_t *node = &table->nodes[i];
             if (node->dead || node->opcode != VTX_OP_Phi) continue;
 
-            /* Check if all inputs are virtual with the same type */
+            /* Check if all data inputs are virtual with the same type.
+             * Fix C20: The old code started at inp=0, but input[0] of a
+             * Phi is the Region/LoopBegin control input — not a data input.
+             * This immediately set all_virtual=false because Region is not
+             * an allocation. Result: no Phi was ever classified as virtual.
+             * Fix: skip control/memory inputs. */
             bool all_virtual = true;
             uint32_t common_type = 0;
             bool first_input = true;
@@ -204,14 +209,21 @@ static uint32_t resolve_virtual_phis(vtx_graph_t *graph,
             for (uint32_t inp = 0; inp < node->input_count; inp++) {
                 vtx_nodeid_t input_id = node->inputs[inp];
                 if (input_id >= result->state_count) {
-                    all_virtual = false;
-                    break;
+                    continue; /* skip out-of-range inputs */
                 }
 
                 vtx_node_t *input_node = vtx_node_get(table, input_id);
                 if (!input_node || input_node->dead) {
-                    all_virtual = false;
-                    break;
+                    continue;
+                }
+
+                /* Skip control inputs (Region, LoopBegin, Proj) */
+                if (vtx_nf_has(input_node->flags, VTX_NF_CONTROL)) {
+                    continue;
+                }
+                /* Skip memory inputs */
+                if (vtx_nf_has(input_node->flags, VTX_NF_MEMORY)) {
+                    continue;
                 }
 
                 /* Check if this input is a virtual allocation */

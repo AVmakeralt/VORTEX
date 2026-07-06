@@ -47,7 +47,9 @@ static vtx_versioned_code_version_t *find_version_list(vtx_versioned_cache_t *vc
 }
 
 /* Force-free the oldest retired version for a method (used when we exceed
- * MAX_RETIRED). This is potentially unsafe but better than unbounded growth. */
+ * MAX_RETIRED). This is potentially unsafe but better than unbounded growth.
+ * Fix C12: Skip versions with on_stack_count > 0 — freeing code that a
+ * thread is currently executing causes a crash. */
 static void force_free_oldest_retired(vtx_versioned_cache_t *vc, uint32_t method_id)
 {
     uint32_t idx = METHOD_INDEX(method_id);
@@ -56,7 +58,9 @@ static void force_free_oldest_retired(vtx_versioned_cache_t *vc, uint32_t method
     vtx_versioned_code_version_t **prev_ptr = &vc->versions[idx];
     vtx_versioned_code_version_t *v = vc->versions[idx];
     while (v != NULL) {
-        if (v->is_retired) {
+        /* Fix C12: Only consider retired versions with no active stack refs */
+        if (v->is_retired && v->on_stack_count <= 0 &&
+            v->method_id == method_id) {
             if (oldest == NULL || v->retire_time_ns < oldest->retire_time_ns) {
                 oldest = v;
                 oldest_ptr = prev_ptr;
@@ -67,9 +71,7 @@ static void force_free_oldest_retired(vtx_versioned_cache_t *vc, uint32_t method
     }
     if (oldest != NULL) {
         *oldest_ptr = oldest->next;
-        if (oldest->on_stack_count > 0) {
-            vc->total_force_frees++;
-        }
+        vc->total_force_frees++;
         vc->total_retired--;
         /* Free the code from the underlying cache. */
         if (oldest->code_ptr != NULL) {
@@ -86,10 +88,13 @@ uint32_t vtx_versioned_cache_install(vtx_versioned_cache_t *vc,
     if (vc == NULL) return 0;
     uint32_t idx = METHOD_INDEX(method_id);
 
-    /* Retire the current active version (if any). */
+    /* Retire the current active version (if any) for THIS method_id.
+     * Fix C11: The old code didn't check v->method_id == method_id,
+     * so a hash collision (method_id % MAX_METHODS) could retire the
+     * wrong method's active version. */
     vtx_versioned_code_version_t *old_active = NULL;
     for (vtx_versioned_code_version_t *v = vc->versions[idx]; v != NULL; v = v->next) {
-        if (v->is_active) {
+        if (v->is_active && v->method_id == method_id) {
             old_active = v;
             break;
         }

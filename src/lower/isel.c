@@ -1354,7 +1354,15 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             int magic_s;
             if (compute_magic_number(magic_d, &M, &magic_s)) {
                 uint32_t dst = ensure_node_vreg(stream, node_id, arena);
-                uint32_t lhs_raw = vtx_isel_alloc_vreg(stream, arena);
+                uint32_t lhs_raw;
+                /* Check if lhs is already RAW_INT (tag-elided) */
+                const vtx_node_t *lhs_node_div = vtx_node_get_const(&graph->node_table, node->inputs[0]);
+                bool lhs_is_raw_div = lhs_node_div && vtx_nf_has(lhs_node_div->flags, VTX_NF_RAW_INT);
+                if (lhs_is_raw_div) {
+                    lhs_raw = lhs_vreg;
+                } else {
+                    lhs_raw = vtx_isel_alloc_vreg(stream, arena);
+                }
                 uint32_t magic_vreg = vtx_isel_alloc_vreg(stream, arena);
                 uint32_t sign_vreg = vtx_isel_alloc_vreg(stream, arena);
                 uint32_t rax_vreg  = vtx_isel_alloc_vreg_fixed(stream, arena, 0);
@@ -1362,13 +1370,14 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
                 if (rax_vreg == VTX_VREG_INVALID || rdx_vreg == VTX_VREG_INVALID) return -1;
 
                 stream->uses_smi = true;
-                /* Untag lhs into lhs_raw (we need it for the sign correction
-                 * later, so mark NO_COALESCE to keep it alive across IMUL). */
-                vtx_inst_t unt = make_rr_inst(VTX_X86_MOV, lhs_raw, lhs_vreg, node_id);
-                unt.flags |= VTX_INST_FLAG_NO_COALESCE;
-                vtx_isel_emit_inst(block, unt, arena);
-                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, lhs_raw, 13, node_id), arena);
-                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, lhs_raw, 16, node_id), arena);
+                /* Untag lhs into lhs_raw (skip if already RAW_INT). */
+                if (!lhs_is_raw_div) {
+                    vtx_inst_t unt = make_rr_inst(VTX_X86_MOV, lhs_raw, lhs_vreg, node_id);
+                    unt.flags |= VTX_INST_FLAG_NO_COALESCE;
+                    vtx_isel_emit_inst(block, unt, arena);
+                    vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, lhs_raw, 13, node_id), arena);
+                    vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, lhs_raw, 16, node_id), arena);
+                }
 
                 /* Load magic constant M into magic_vreg. */
                 vtx_inst_t load_M = make_ri_inst(VTX_X86_MOV, magic_vreg, M, node_id);
@@ -2895,7 +2904,8 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         default: break;
         }
 
-        /* Fix C2: XOR clobbers UCOMISD flags. Use SETCC+MOVZX (same as Cmp). */
+        /* Fix C2: XOR clobbers UCOMISD flags. Use SETCC+MOVZX+retag
+         * (same pattern as integer Cmp). */
         vtx_inst_t setcc;
         memset(&setcc, 0, sizeof(setcc));
         setcc.opcode = VTX_X86_SETCC;
@@ -2906,6 +2916,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         setcc.source_node = node_id;
         vtx_isel_emit_inst(block, setcc, arena);
         vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOVZX, dst, dst, node_id), arena);
+        emit_smi_retag(stream, block, dst, node_id, arena);
         break;
     }
 

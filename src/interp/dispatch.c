@@ -1463,31 +1463,6 @@ dispatch_VT_OP_GOTO:
             vtx_profiler_record_backward_branch(&interp->profiler, frame->method);
             vtx_gc_safepoint(interp->gc);
 
-            /* OSR up: if the method has been JIT-compiled, switch to
-             * the compiled code at the loop back-edge. This enables
-             * long-running loops to benefit from JIT compilation without
-             * waiting for the next method call.
-             *
-             * Simplified OSR: re-enter the JIT-compiled method from the
-             * top, passing current locals as arguments. Correct for
-             * simple loops where back-edge locals match initial args. */
-            if (frame->method->compiled_code != NULL &&
-                interp->compile_ctx != NULL) {
-                typedef vtx_value_t (*vtx_jit_entry_t)(
-                    const vtx_method_desc_t *, void *, void *,
-                    vtx_value_t *, uint32_t);
-                vtx_jit_entry_t jit_entry = (vtx_jit_entry_t)frame->method->compiled_code;
-                uint32_t arg_n = frame->method->arg_count;
-                if (arg_n > 256) arg_n = 256;
-                vtx_value_t jit_args[256];
-                for (uint32_t ai = 0; ai < arg_n && ai < frame->locals_count; ai++)
-                    jit_args[ai] = frame->locals[ai];
-                vtx_value_t jit_result = jit_entry(frame->method, NULL,
-                                                    (void*)1, jit_args, arg_n);
-                *sp++ = jit_result;
-                goto dispatch_VT_OP_RETURN_VALUE;
-            }
-
             /* D7: Decrement-then-test tier-up counter.
              * This is the zero-overhead tier-up detection mechanism.
              * On x86-64, the counter decrement and check compiles to:

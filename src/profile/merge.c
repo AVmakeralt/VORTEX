@@ -191,7 +191,7 @@ void vtx_profile_merge_method(vtx_profile_global_t *target,
                 tgt_br = &tm->branches[tm->branch_count++];
             } else {
                 /* Grow */
-                uint32_t new_cap = tm->branch_capacity * 2;
+                uint32_t new_cap = tm->branch_capacity == 0 ? 8 : tm->branch_capacity * 2;
                 if (new_cap == 0) new_cap = 8;
                 vtx_branch_profile_t *new_arr = realloc(
                     tm->branches,
@@ -228,7 +228,7 @@ void vtx_profile_merge_method(vtx_profile_global_t *target,
             if (tm->field_access_count < tm->field_access_capacity) {
                 tgt_fa = &tm->field_accesses[tm->field_access_count++];
             } else {
-                uint32_t new_cap = tm->field_access_capacity * 2;
+                uint32_t new_cap = tm->field_access_capacity == 0 ? 8 : tm->field_access_capacity * 2;
                 if (new_cap == 0) new_cap = 8;
                 vtx_field_profile_t *new_arr = realloc(
                     tm->field_accesses,
@@ -265,7 +265,7 @@ void vtx_profile_merge_method(vtx_profile_global_t *target,
             if (tm->loop_count < tm->loop_capacity) {
                 tgt_lp = &tm->loops[tm->loop_count++];
             } else {
-                uint32_t new_cap = tm->loop_capacity * 2;
+                uint32_t new_cap = tm->loop_capacity == 0 ? 8 : tm->loop_capacity * 2;
                 if (new_cap == 0) new_cap = 8;
                 vtx_loop_profile_t *new_arr = realloc(
                     tm->loops,
@@ -323,7 +323,7 @@ void vtx_profile_merge_into(vtx_profile_global_t *target,
                 e->frequency = src_edge->frequency;
             } else {
                 /* Grow */
-                uint32_t new_cap = target->call_edge_capacity * 2;
+                uint32_t new_cap = target->call_edge_capacity == 0 ? 8 : target->call_edge_capacity * 2;
                 vtx_call_edge_t *new_arr = realloc(
                     target->call_edges,
                     (size_t)new_cap * sizeof(vtx_call_edge_t));
