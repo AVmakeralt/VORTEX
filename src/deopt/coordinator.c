@@ -53,19 +53,29 @@ void vtx_deopt_coord_destroy(vtx_deopt_coord_t *coord)
     vtx_deopt_budget_destroy(&coord->budget);
 }
 
-/* Lazily initialize a per-site limiter if not yet initialized. */
+/* Lazily initialize a per-site limiter if not yet initialized.
+ * Fix HIGH: On hash collision (two site_ids map to same slot), the old
+ * code re-initialized the limiter without destroying the old one,
+ * leaking its internal state. Fix: track the site_id for each slot
+ * and destroy+reinit on collision. */
 static vtx_deopt_site_limiter_t *get_site_limiter(vtx_deopt_coord_t *coord,
                                                     uint32_t site_id)
 {
     uint32_t idx = SITE_INDEX(site_id);
     if (!coord->sites_inited[idx]) {
-        /* Check if this slot was previously used by a different site_id.
-         * If so, destroy the old limiter before re-initializing. This is
-         * the "last-writer-wins" collision policy. */
         if (vtx_deopt_site_init(&coord->sites[idx], 256) != 0) {
             return NULL;
         }
         coord->sites_inited[idx] = true;
+        coord->site_ids[idx] = site_id;
+    } else if (coord->site_ids[idx] != site_id) {
+        /* Hash collision: destroy old limiter, reinit for new site_id */
+        vtx_deopt_site_destroy(&coord->sites[idx]);
+        if (vtx_deopt_site_init(&coord->sites[idx], 256) != 0) {
+            coord->sites_inited[idx] = false;
+            return NULL;
+        }
+        coord->site_ids[idx] = site_id;
     }
     return &coord->sites[idx];
 }

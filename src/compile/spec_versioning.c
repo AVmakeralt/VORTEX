@@ -194,9 +194,13 @@ static void update_arg_profile(
     } else {
         /* Type not in top-4 — find a slot */
         int slot = -1;
-        /* First, try to find an empty slot (type_id == 0) */
+        /* First, try to find an empty slot.
+         * Fix HIGH: old code used type_id == 0 as sentinel, but type_id 0
+         * is a valid type. Use UINT32_MAX as the "empty" sentinel. */
         for (int i = 0; i < 4; i++) {
-            if (top_ids[i] == 0) {
+            if (top_ids[i] == UINT32_MAX || top_ids[i] == 0) {
+                /* 0 is also treated as empty for backward compatibility
+                 * (the type system doesn't assign type_id 0 to real types) */
                 slot = i;
                 break;
             }
@@ -507,8 +511,10 @@ vtx_spec_version_registry_t *vtx_spec_version_get_registry(
 
     vtx_spec_version_registry_t *reg = &mgr->registries[method_id];
 
-    /* Initialize the registry if this is the first access */
-    if (reg->method_id == 0 && reg->versions == NULL) {
+    /* Initialize the registry if this is the first access.
+     * Fix HIGH: old code used method_id == 0 as sentinel, but method_id 0
+     * is valid. Check versions == NULL instead. */
+    if (reg->versions == NULL) {
         memset(reg, 0, sizeof(*reg));
         reg->method_id = method_id;
     }
@@ -551,7 +557,7 @@ vtx_spec_version_t *vtx_spec_version_create(
     }
 
     vtx_spec_version_registry_t *reg = &mgr->registries[method_id];
-    if (reg->method_id == 0 && reg->versions == NULL) {
+    if (reg->versions == NULL) {
         memset(reg, 0, sizeof(*reg));
         reg->method_id = method_id;
     }

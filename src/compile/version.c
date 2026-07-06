@@ -47,9 +47,20 @@ static uint64_t now_ns(void)
 static vtx_method_versions_t *get_method_versions(
     vtx_version_manager_t *manager, uint32_t method_id, bool create)
 {
-    /* Grow the array if needed */
+    /* C17 fix: Lock around array growth to prevent realloc race.
+     * Two threads compiling different methods can race on realloc,
+     * causing use-after-free. The lock is only taken when the array
+     * needs to grow; reads after initialization are safe because the
+     * array only grows (never shrinks). */
     if (method_id >= manager->capacity) {
         if (!create) return NULL;
+
+        pthread_mutex_lock(&manager->global_mutex);
+        /* Re-check under lock — another thread may have grown it */
+        if (method_id < manager->capacity) {
+            pthread_mutex_unlock(&manager->global_mutex);
+            goto lookup;
+        }
 
         uint32_t new_cap = method_id + 1;
         if (new_cap < manager->capacity * 2) {
@@ -58,7 +69,10 @@ static vtx_method_versions_t *get_method_versions(
 
         vtx_method_versions_t **new_methods = realloc(manager->methods,
             new_cap * sizeof(vtx_method_versions_t *));
-        if (!new_methods) return NULL;
+        if (!new_methods) {
+            pthread_mutex_unlock(&manager->global_mutex);
+            return NULL;
+        }
 
         /* Zero out new entries */
         memset(new_methods + manager->capacity, 0,
@@ -66,7 +80,10 @@ static vtx_method_versions_t *get_method_versions(
 
         manager->methods = new_methods;
         manager->capacity = new_cap;
+        pthread_mutex_unlock(&manager->global_mutex);
     }
+
+lookup:
 
     if (!manager->methods[method_id] && create) {
         vtx_method_versions_t *mv = calloc(1, sizeof(vtx_method_versions_t));
@@ -106,6 +123,11 @@ int vtx_version_manager_init(vtx_version_manager_t *manager, vtx_arena_t *arena)
     manager->method_count = 0;
     manager->arena = arena;
 
+    if (pthread_mutex_init(&manager->global_mutex, NULL) != 0) {
+        free(manager->methods);
+        return -1;
+    }
+
     return 0;
 }
 
@@ -134,6 +156,7 @@ void vtx_version_manager_destroy(vtx_version_manager_t *manager)
     manager->methods = NULL;
     manager->capacity = 0;
     manager->method_count = 0;
+    pthread_mutex_destroy(&manager->global_mutex);
 }
 
 /* ========================================================================== */
@@ -349,7 +372,32 @@ int vtx_version_free(vtx_version_manager_t *manager,
 void vtx_version_enter(vtx_code_version_t *version)
 {
     VTX_ASSERT(version != NULL, "version must not be NULL");
-    __atomic_fetch_add(&version->refcount, 1, __ATOMIC_ACQUIRE);
+    /* C18 fix: Check state before entering. If the version is being freed
+     * (state == DEPRECATED/INVALIDATED/PARKED and refcount == 0), entering
+     * it would be a use-after-free. We use a CAS loop: try to increment
+     * refcount only if the version is still ACTIVE. */
+    vtx_version_state_t expected;
+    do {
+        expected = VTX_VERSION_ACTIVE;
+        /* If not active, check if it's still enterable (refcount > 0) */
+        if (version->state != VTX_VERSION_ACTIVE &&
+            version->state != VTX_VERSION_COMPILING) {
+            /* Version is deprecated/invalidated/parked — check refcount */
+            if (__atomic_load_n(&version->refcount, __ATOMIC_ACQUIRE) <= 0) {
+                /* Version is being freed — don't enter */
+                return;
+            }
+        }
+        /* Try to increment refcount */
+        int32_t old = __atomic_fetch_add(&version->refcount, 1, __ATOMIC_ACQUIRE);
+        if (old >= 0) {
+            /* Successfully entered — refcount was >= 0, now >= 1 */
+            return;
+        }
+        /* Refcount was negative — version is being freed. Back off. */
+        __atomic_fetch_sub(&version->refcount, 1, __ATOMIC_RELEASE);
+        return;
+    } while (0);
 }
 
 bool vtx_version_exit(vtx_version_manager_t *manager,

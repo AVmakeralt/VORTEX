@@ -295,10 +295,30 @@ vtx_hoist_result_t vtx_hoist_guards(vtx_graph_t *graph,
                 preheader->node_capacity = new_cap;
             }
 
-            /* Insert guard at the end of the preheader (before the terminator).
-             * For a preheader block, the terminator is typically a Goto to
-             * the loop header. We want the guard before the Goto. */
-            preheader->nodes[preheader->node_count++] = node_id;
+            /* Insert guard BEFORE the terminator (Goto/LoopEnd/etc).
+             * Fix HIGH: old code appended at the end (after terminator),
+             * making the guard unreachable. Find the terminator and insert
+             * before it. */
+            uint32_t insert_at = preheader->node_count;
+            for (uint32_t k = 0; k < preheader->node_count; k++) {
+                vtx_nodeid_t nid = preheader->nodes[k];
+                if (nid < graph->node_table.count) {
+                    vtx_node_t *pn = &graph->node_table.nodes[nid];
+                    if (pn->opcode == VTX_OP_Goto ||
+                        pn->opcode == VTX_OP_LoopEnd ||
+                        pn->opcode == VTX_OP_Return ||
+                        pn->opcode == VTX_OP_If) {
+                        insert_at = k;
+                        break;
+                    }
+                }
+            }
+            /* Shift nodes after insert_at to make room */
+            memmove(&preheader->nodes[insert_at + 1],
+                    &preheader->nodes[insert_at],
+                    (preheader->node_count - insert_at) * sizeof(vtx_nodeid_t));
+            preheader->nodes[insert_at] = node_id;
+            preheader->node_count++;
 
             /* Step 3: Update node_block mapping */
             if (node_id < schedule->node_block_count) {

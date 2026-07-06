@@ -121,6 +121,7 @@ typedef struct {
     vtx_method_versions_t **methods;     /* array indexed by method_id */
     uint32_t                method_count; /* number of registered methods */
     uint32_t                capacity;     /* allocated capacity */
+    pthread_mutex_t         global_mutex; /* protects array growth (C17 fix) */
 
     /* Statistics */
     uint32_t                total_versions_created;

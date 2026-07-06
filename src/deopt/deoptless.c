@@ -645,7 +645,9 @@ uint64_t vtx_deoptless_compute_decision_hash(const vtx_graph_t *graph)
         if (node->dead) continue;
         if (node->opcode != VTX_OP_DeoptGuard) continue;
 
-        /* Mix the guard's identity into the hash */
+        /* Mix the guard's identity into the hash.
+         * Fix HIGH: old code only hashed the LOW BYTE of each field,
+         * causing hash collisions. Now hashes all 4 bytes of each. */
         uint32_t pc = node->bytecode_pc;
         uint32_t tid = node->type_id;
         uint32_t cond = (uint32_t)node->cond;
@@ -654,9 +656,25 @@ uint64_t vtx_deoptless_compute_decision_hash(const vtx_graph_t *graph)
         h *= 1099511628211ULL;
         h ^= (uint64_t)((pc >> 8) & 0xFF);
         h *= 1099511628211ULL;
+        h ^= (uint64_t)((pc >> 16) & 0xFF);
+        h *= 1099511628211ULL;
+        h ^= (uint64_t)((pc >> 24) & 0xFF);
+        h *= 1099511628211ULL;
         h ^= (uint64_t)(tid & 0xFF);
         h *= 1099511628211ULL;
+        h ^= (uint64_t)((tid >> 8) & 0xFF);
+        h *= 1099511628211ULL;
+        h ^= (uint64_t)((tid >> 16) & 0xFF);
+        h *= 1099511628211ULL;
+        h ^= (uint64_t)((tid >> 24) & 0xFF);
+        h *= 1099511628211ULL;
         h ^= (uint64_t)(cond & 0xFF);
+        h *= 1099511628211ULL;
+        h ^= (uint64_t)((cond >> 8) & 0xFF);
+        h *= 1099511628211ULL;
+        h ^= (uint64_t)((cond >> 16) & 0xFF);
+        h *= 1099511628211ULL;
+        h ^= (uint64_t)((cond >> 24) & 0xFF);
         h *= 1099511628211ULL;
     }
 
@@ -690,9 +708,14 @@ uint64_t vtx_profile_compute_hash(const vtx_type_feedback_t *type_feedback,
         if (site->stable_signature.slot_count > 0) {
             for (uint32_t i = 0; i < site->stable_signature.slot_count && i < VTX_TYPE_SIGNATURE_MAX_SLOTS; i++) {
                 uint32_t tid = site->stable_signature.types[i];
+                /* Fix HIGH: hash all 4 bytes of type_id, not just low 2 */
                 h ^= (uint64_t)(tid & 0xFF);
                 h *= 1099511628211ULL;
                 h ^= (uint64_t)((tid >> 8) & 0xFF);
+                h *= 1099511628211ULL;
+                h ^= (uint64_t)((tid >> 16) & 0xFF);
+                h *= 1099511628211ULL;
+                h ^= (uint64_t)((tid >> 24) & 0xFF);
                 h *= 1099511628211ULL;
             }
         }

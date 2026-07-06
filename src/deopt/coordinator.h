@@ -72,6 +72,7 @@ typedef struct {
      * reset, causing it to need more failures before poisoning. */
     vtx_deopt_site_limiter_t sites[VTX_DEOPT_COORD_MAX_SITES];
     bool                     sites_inited[VTX_DEOPT_COORD_MAX_SITES];
+    uint32_t                 site_ids[VTX_DEOPT_COORD_MAX_SITES]; /* C17 fix: track which site_id owns each slot */
 
     /* Deopt batcher (coalesces pending deopts). */
     vtx_deopt_batcher_t      batcher;
