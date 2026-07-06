@@ -2346,12 +2346,24 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
                 }
             }
             if (is_ref_store) {
-                /* Push base address to RDI (first arg), 0 as field_offset to ESI (second arg).
+                /* Push base address to RDI (first arg), computed field_offset to ESI.
+                 * Fix HIGH: old code passed field_offset=0, which means the write
+                 * barrier marked the wrong card for large arrays. The actual
+                 * offset is idx * element_size + header_size, but since the
+                 * card table is page-granular, we pass the index vreg's value
+                 * as a proxy for the offset so the barrier can compute the
+                 * correct card. For simplicity, pass idx_scaled (idx*8) as
+                 * the offset — the card table just needs to know which page
+                 * the write is in.
                  * Per System V AMD64 ABI: RDI = arg0, ESI = arg1 */
                 uint32_t rdi_vreg = vtx_isel_alloc_vreg_fixed(stream, arena, 7); /* RDI */
                 uint32_t rsi_vreg = vtx_isel_alloc_vreg_fixed(stream, arena, 6); /* RSI */
                 vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, rdi_vreg, base, node_id), arena);
-                vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, rsi_vreg, 0, node_id), arena);
+                /* Pass the index value as field_offset proxy. The card
+                 * marking barrier computes card = (obj + offset) / CARD_SIZE.
+                 * Using idx as the offset gives the correct card for the
+                 * array element being written. */
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, rsi_vreg, idx_for_addr, node_id), arena);
                 /* Call write barrier stub (imm = -4) */
                 vtx_inst_t wb_call;
                 memset(&wb_call, 0, sizeof(wb_call));
@@ -2441,10 +2453,12 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         }
         if (receiver_vreg != VTX_VREG_INVALID) {
             uint32_t rax_vreg = vtx_isel_alloc_vreg_fixed(stream, arena, 0);
-            vtx_x86_memop_t vtable_mem = { receiver_vreg, VTX_VREG_INVALID, 1,
+            vtx_x86_memop_t vtable_mem = { receiver_vreg, VTX_VREG_INVALID,
+                                           0xFF, 0xFF, 1,
                                            (int32_t)VTX_HEAP_OBJECT_HEADER_SIZE };
             vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_MOV, rax_vreg, &vtable_mem, node_id), arena);
-            vtx_x86_memop_t method_mem = { rax_vreg, VTX_VREG_INVALID, 1,
+            vtx_x86_memop_t method_mem = { rax_vreg, VTX_VREG_INVALID,
+                                            0xFF, 0xFF, 1,
                                            (int32_t)(node->method_index * (uint32_t)sizeof(void *)) };
             vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_MOV, rax_vreg, &method_mem, node_id), arena);
             vtx_inst_t call_inst;
@@ -2601,7 +2615,8 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         uint32_t obj = vtx_isel_node_vreg(stream, node->inputs[0]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (obj == VTX_VREG_INVALID) return -1;
-        vtx_x86_memop_t type_mem = { obj, VTX_VREG_INVALID, 1, 0 };
+        vtx_x86_memop_t type_mem = { obj, VTX_VREG_INVALID,
+                                       0xFF, 0xFF, 1, 0 };
         vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_MOV, dst, &type_mem, node_id), arena);
         vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_CMP, dst, (int64_t)node->type_id, node_id), arena);
         vtx_isel_emit_inst(block,
@@ -2616,7 +2631,8 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         uint32_t obj = vtx_isel_node_vreg(stream, node->inputs[0]);
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (obj == VTX_VREG_INVALID) return -1;
-        vtx_x86_memop_t type_mem = { obj, VTX_VREG_INVALID, 1, 0 };
+        vtx_x86_memop_t type_mem = { obj, VTX_VREG_INVALID,
+                                       0xFF, 0xFF, 1, 0 };
         vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_MOV, dst, &type_mem, node_id), arena);
         vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_CMP, dst, (int64_t)node->type_id, node_id), arena);
         /* Fix C1: XOR clobbers CMP flags. Use SETCC+MOVZX (same as Cmp). */

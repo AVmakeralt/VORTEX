@@ -277,7 +277,12 @@ static vtx_lattice_val_t evaluate_node(vtx_node_opcode_t opcode,
         if (input_count < 2) return vtx_lattice_bottom();
         if (inputs[0].tag == VTX_LATTICE_CONSTANT && inputs[1].tag == VTX_LATTICE_CONSTANT) {
             if (inputs[0].value.kind == VTX_TYPE_Int && inputs[1].value.kind == VTX_TYPE_Int) {
-                return vtx_lattice_const_int(inputs[0].value.as.int_val << (inputs[1].value.as.int_val & 63));
+                /* Fix: signed left-shift of negative is UB in C.
+                 * Use unsigned arithmetic to avoid UB. */
+                int64_t val = inputs[0].value.as.int_val;
+                int64_t sh = inputs[1].value.as.int_val & 63;
+                uint64_t uval = (uint64_t)val;
+                return vtx_lattice_const_int((int64_t)(uval << sh));
             }
         }
         if (inputs[0].tag == VTX_LATTICE_TOP || inputs[1].tag == VTX_LATTICE_TOP) {
@@ -290,7 +295,12 @@ static vtx_lattice_val_t evaluate_node(vtx_node_opcode_t opcode,
         if (input_count < 2) return vtx_lattice_bottom();
         if (inputs[0].tag == VTX_LATTICE_CONSTANT && inputs[1].tag == VTX_LATTICE_CONSTANT) {
             if (inputs[0].value.kind == VTX_TYPE_Int && inputs[1].value.kind == VTX_TYPE_Int) {
-                return vtx_lattice_const_int(inputs[0].value.as.int_val >> (inputs[1].value.as.int_val & 63));
+                /* Fix: VTX_OP_Shr is LOGICAL shift right, but >> on
+                 * signed int is arithmetic. Use unsigned for correctness. */
+                int64_t val = inputs[0].value.as.int_val;
+                int64_t sh = inputs[1].value.as.int_val & 63;
+                uint64_t uval = (uint64_t)val;
+                return vtx_lattice_const_int((int64_t)(uval >> sh));
             }
         }
         if (inputs[0].tag == VTX_LATTICE_TOP || inputs[1].tag == VTX_LATTICE_TOP) {

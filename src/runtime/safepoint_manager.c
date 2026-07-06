@@ -62,9 +62,18 @@ void vtx_safepoint_thread_unregister(vtx_safepoint_manager_t *mgr)
     if (mgr == NULL) return;
     pthread_mutex_lock(&mgr->mutex);
     pthread_t self = pthread_self();
+    /* Fix HIGH: old code set state=EXITED but left the entry in the array.
+     * This caused active_count to be correct but the array kept growing
+     * with dead entries, and safepoint checks iterated over all entries
+     * including dead ones. Fix: compact the array by swapping the last
+     * entry into the removed slot. */
     for (uint32_t i = 0; i < mgr->thread_count; i++) {
         if (pthread_equal(mgr->threads[i].tid, self)) {
-            mgr->threads[i].state = VTX_THREAD_STATE_EXITED;
+            /* Swap last entry into this slot */
+            mgr->thread_count--;
+            if (i < mgr->thread_count) {
+                mgr->threads[i] = mgr->threads[mgr->thread_count];
+            }
             mgr->active_count--;
             break;
         }

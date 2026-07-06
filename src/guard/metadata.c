@@ -248,8 +248,17 @@ void vtx_guard_meta_update(vtx_guard_meta_t *meta, bool failed)
         break;
     }
 
-    /* Apply transition */
+    /* Apply transition.
+     * Fix HIGH: When the guard STRENGTHENS (lower enum value = stronger),
+     * reset the EWMA so the new strength gets a clean slate. Without this,
+     * the EWMA still carries the old high failure rate, causing immediate
+     * re-weakening on the next check. */
     if (new_strength != old_strength) {
+        bool is_strengthening = (new_strength < old_strength);
+        if (is_strengthening) {
+            vtx_ewma_reset(&meta->failure_rate_ewma);
+            vtx_ewma_reset(&meta->long_failure_rate_ewma);
+        }
         meta->strength = new_strength;
         meta->strength_changed = true;
     }
