@@ -2610,8 +2610,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         vtx_x86_memop_t type_mem = { obj, VTX_VREG_INVALID, 1, 0 };
         vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_MOV, dst, &type_mem, node_id), arena);
         vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_CMP, dst, (int64_t)node->type_id, node_id), arena);
-        /* P1: XOR+SETCC for InstanceOf (same as Cmp/CmpP) */
-        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_XOR, dst, dst, node_id), arena);
+        /* Fix C1: XOR clobbers CMP flags. Use SETCC+MOVZX (same as Cmp). */
         vtx_inst_t setcc;
         memset(&setcc, 0, sizeof(setcc));
         setcc.opcode = VTX_X86_SETCC;
@@ -2621,6 +2620,8 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         setcc.flags = VTX_INST_FLAG_HAS_COND;
         setcc.source_node = node_id;
         vtx_isel_emit_inst(block, setcc, arena);
+        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOVZX, dst, dst, node_id), arena);
+        emit_smi_retag(stream, block, dst, node_id, arena);
         break;
     }
 
@@ -2696,8 +2697,15 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             implicit_mark.operands[0] = cond_vreg;
             vtx_isel_emit_inst(block, implicit_mark, arena);
         } else if (cond_vreg != VTX_VREG_INVALID) {
-            /* Traditional explicit guard: TEST + JCC */
-            vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_TEST, cond_vreg, 1, node_id), arena);
+            /* Fix C3: TEST cond,1 is wrong for SMI-tagged booleans.
+             * SMI(0) = 0x7FF8000000000000, SMI(1) = 0x7FF8000000000008.
+             * Bit 0 is always 0 for both. Use CMP cond, SMI(0) via R10
+             * (pre-loaded in prologue) instead. */
+            stream->uses_smi = true;
+            vtx_inst_t cmp = make_rr_inst(VTX_X86_CMP, cond_vreg,
+                                           stream->smi_scratch_vreg, node_id);
+            cmp.flags |= VTX_INST_FLAG_NO_TEST;
+            vtx_isel_emit_inst(block, cmp, arena);
             vtx_cond_t deopt_cond = vtx_cond_negate(node->cond);
             vtx_inst_t jcc = make_branch_inst(VTX_X86_JCC, 0, deopt_cond, node_id);
             jcc.flags |= VTX_INST_FLAG_IS_GUARD;
@@ -2887,8 +2895,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         default: break;
         }
 
-        /* P1 isel: XOR+SETCC for float comparisons too (drop AND 0xFF) */
-        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_XOR, dst, dst, node_id), arena);
+        /* Fix C2: XOR clobbers UCOMISD flags. Use SETCC+MOVZX (same as Cmp). */
         vtx_inst_t setcc;
         memset(&setcc, 0, sizeof(setcc));
         setcc.opcode = VTX_X86_SETCC;
@@ -2898,6 +2905,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         setcc.flags = VTX_INST_FLAG_HAS_COND;
         setcc.source_node = node_id;
         vtx_isel_emit_inst(block, setcc, arena);
+        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOVZX, dst, dst, node_id), arena);
         break;
     }
 

@@ -1307,9 +1307,16 @@ int vtx_bounds_check_run(vtx_graph_t *graph,
                         }
                         break;
                     case VTX_COND_GE:
-                        /* After Guard(a >= b): a.min = max(a.min, b.max) */
-                        if (ranges[left_id].min < right_range.max) {
-                            ranges[left_id].min = right_range.max;
+                        /* Fix C15: After Guard(a >= b), a.min should be
+                         * max(a.min, b.min), NOT max(a.min, b.max).
+                         * The old code used b.max which is the UPPER bound
+                         * of b — too aggressive. If a >= b and b is in
+                         * [b.min, b.max], then a >= b.min (the weakest
+                         * constraint). Using b.max is wrong because a could
+                         * be >= b.min but < b.max, and the guard would
+                         * still pass (a >= b is true for a=b.min). */
+                        if (ranges[left_id].min < right_range.min) {
+                            ranges[left_id].min = right_range.min;
                             ranges[left_id].is_const = (ranges[left_id].min == ranges[left_id].max);
                         }
                         break;

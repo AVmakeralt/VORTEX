@@ -250,8 +250,12 @@ int vtx_reloc_apply_external(vtx_reloc_table_t *table,
         /* Only process external/deferred relocations */
         if (!reloc->is_external) continue;
 
-        /* Bounds check */
-        if (reloc->offset + 4 > code_size) continue;
+        /* Fix C13: Bounds check must account for the actual write size.
+         * REL32 writes 4 bytes, ABS64 writes 8 bytes. The old code
+         * checked offset+4 for ALL relocations, causing heap corruption
+         * when offset+4 <= size < offset+8 for ABS64. */
+        uint32_t write_size = (reloc->kind == VTX_RELOC_ABS64) ? 8 : 4;
+        if (reloc->offset + write_size > code_size) continue;
 
         switch (reloc->kind) {
 

@@ -1140,7 +1140,7 @@ int vtx_pipeline_run(vtx_graph_t *graph,
                                 }
                                 guard->bytecode_pc = node->bytecode_pc;
                                 guard->type_id = dominant_type;
-                                guard->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+                                guard->flags = VTX_NF_CONTROL | VTX_NF_DATA | VTX_NF_SIDE_EFFECT | VTX_NF_PINNED;
                             }
                         }
                         /* Annotate the call with the specialized type */
@@ -1481,7 +1481,7 @@ int vtx_pipeline_run(vtx_graph_t *graph,
                     if (guard) {
                         guard->cond = VTX_COND_EQ;
                         guard->type_id = speculated_type;
-                        guard->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+                        guard->flags = VTX_NF_CONTROL | VTX_NF_DATA | VTX_NF_SIDE_EFFECT | VTX_NF_PINNED;
                         guard->bytecode_pc = node->bytecode_pc;
                         /* Add the receiver as input */
                         vtx_node_add_input(ntable, guard_id, receiver_id);

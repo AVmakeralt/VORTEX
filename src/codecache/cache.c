@@ -256,12 +256,16 @@ int vtx_code_cache_free(vtx_code_cache_t *cache, void *code_ptr, uint32_t code_s
             seg->method_count--;
 
             if (seg->method_count == 0) {
-                /* Segment is empty — free it */
+                /* Segment is empty — free it.
+                 * Fix C7: Only decrement total_size by THIS method's
+                 * aligned size, not seg->used (which includes all
+                 * methods that were in the segment). Previous methods
+                 * already decremented total_size when they were freed. */
                 *prev_ptr = seg->next;
                 if (cache->current_segment == seg) {
                     cache->current_segment = NULL;
                 }
-                cache->total_size -= seg->used;
+                cache->total_size -= (code_size + 15u) & ~15u;
                 cache->segment_count--;
                 segment_free(seg);
             } else {

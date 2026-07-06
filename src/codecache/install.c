@@ -189,11 +189,18 @@ bool vtx_install_method(vtx_code_cache_t *cache,
     cm->poly_ics = poly_ics;
     cm->poly_ic_count = poly_ic_count;
 
-    /* Wire the side table into deopt_info so the deopt handler can
-     * find it from the JIT frame header. Without this, the deopt
-     * handler can't reconstruct interpreter state. */
-    if (cm->deopt_info != NULL && side_table != NULL) {
-        cm->deopt_info->side_table = side_table;
+    /* Fix C9: Allocate and wire deopt_info so the deopt handler can
+     * find the side table from the JIT frame header. Without this,
+     * cm->deopt_info is NULL (memset to 0) and the check below never
+     * fires. The deopt handler reads deopt_info from [rbp+16] in the
+     * JIT frame. If it's NULL, multi-method deopt falls back to the
+     * global side table, which may be wrong for this method. */
+    if (side_table != NULL) {
+        cm->deopt_info = (vtx_deopt_info_t *)malloc(sizeof(vtx_deopt_info_t));
+        if (cm->deopt_info != NULL) {
+            memset(cm->deopt_info, 0, sizeof(*cm->deopt_info));
+            cm->deopt_info->side_table = side_table;
+        }
     }
 
     /* Copy dependency sets */

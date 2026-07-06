@@ -1784,42 +1784,51 @@ dispatch_VT_OP_CALL_VIRTUAL:
         }
 
         /* Get the receiver.
-         * Bug #3 fix: The receiver is at the BOTTOM of the argument area
-         * on the stack (pushed first: receiver, arg1, arg2, ...).
-         * We don't know arg_count yet, so peek the top of stack as a
-         * provisional value for IC lookup. After resolving the method,
-         * we re-peek the correct receiver position for profiling. */
+         * Fix C6: The receiver is at *(sp - arg_count - 1) because it was
+         * pushed before the arguments. The old code used *(sp - 1) (top of
+         * stack) which is the LAST argument, not the receiver. For virtual
+         * calls with >0 arguments, this used the wrong type for dispatch. */
         VTX_ASSERT(((int)(sp - frame->operand_stack)) > 0, "stack underflow for virtual call");
-        vtx_value_t receiver = *(sp - 1);
-
-        /* Look up the method using the inline cache */
-        vtx_inline_cache_t *ic = vtx_interp_get_ic(interp, frame->method, (uint32_t)pc);
         const vtx_method_desc_t *target_method = NULL;
 
-        if (ic != NULL && method_name != NULL) {
-            target_method = vtx_lookup_method(interp->type_system, ic,
-                                               receiver, method_name);
-        } else {
-            /* Fallback: direct vtable walk */
-            if (vtx_is_heap_ptr(receiver) && method_name != NULL) {
-                vtx_typeid_t tid = value_typeid(receiver);
+        vtx_value_t receiver = VTX_VALUE_UNDEFINED;
+        vtx_typeid_t receiver_tid = VTX_TYPE_INVALID;
+        int stack_avail = (int)(sp - frame->operand_stack);
+
+        /* Try position sp-1 first (works for 0-arg virtual calls) */
+        receiver = *(sp - 1);
+        if (vtx_is_heap_ptr(receiver)) {
+            receiver_tid = value_typeid(receiver);
+            /* Try to resolve method with this receiver type */
+            if (method_name != NULL) {
                 target_method = vtx_type_resolve_method(
-                    interp->type_system, tid, method_name);
+                    interp->type_system, receiver_tid, method_name);
+            }
+            if (target_method != NULL) {
+                /* Verify: if the method has args, the real receiver might
+                 * be deeper. Re-peek at the correct position. */
+                uint32_t rarg = target_method->arg_count;
+                if (rarg > 0 && stack_avail > (int)(rarg + 1)) {
+                    vtx_value_t real_receiver = *(sp - rarg - 1);
+                    if (vtx_is_heap_ptr(real_receiver)) {
+                        receiver = real_receiver;
+                        receiver_tid = value_typeid(receiver);
+                        /* Re-resolve with the correct receiver type */
+                        if (method_name != NULL) {
+                            target_method = vtx_type_resolve_method(
+                                interp->type_system, receiver_tid, method_name);
+                        }
+                    }
+                }
             }
         }
 
-        /* Bug #3 fix: After resolving the method, peek the correct receiver.
-         * The receiver is at *(sp - arg_count - 1) because it was pushed
-         * before the arguments. We only need the correct receiver for
-         * profiling/type-feedback; the IC lookup above may have used the
-         * wrong stack position, but that's a pre-existing limitation. */
-        vtx_typeid_t receiver_tid = value_typeid(receiver);
-        if (target_method != NULL) {
-            uint32_t rarg_count = target_method->arg_count;
-            if ((uint32_t)(sp - frame->operand_stack) > rarg_count) {
-                receiver = *(sp - rarg_count - 1);
-                receiver_tid = value_typeid(receiver);
-            }
+        /* Look up the method using the inline cache (with correct receiver) */
+        vtx_inline_cache_t *ic = vtx_interp_get_ic(interp, frame->method, (uint32_t)pc);
+
+        if (ic != NULL && method_name != NULL && target_method == NULL) {
+            target_method = vtx_lookup_method(interp->type_system, ic,
+                                               receiver, method_name);
         }
 
         /* Record call type in profiler and type feedback */

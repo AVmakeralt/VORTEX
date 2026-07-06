@@ -1021,16 +1021,22 @@ vtx_iv_range_t vtx_iv_value_range(const vtx_iv_result_t *result,
 
         const vtx_iv_desc_t *base_iv = NULL;
         int64_t c = 0;
+        bool c_known = false;
 
         if (vtx_iv_is_induction(result, left_id)) {
             base_iv = vtx_iv_get(result, left_id);
-            get_int_constant(table, right_id, &c);
+            c_known = get_int_constant(table, right_id, &c);
         } else if (vtx_iv_is_induction(result, right_id)) {
             base_iv = vtx_iv_get(result, right_id);
-            get_int_constant(table, left_id, &c);
+            c_known = get_int_constant(table, left_id, &c);
         }
 
-        if (base_iv != NULL &&
+        /* Fix C14: If the multiplier is NOT a constant (c_known == false),
+         * we must return an unknown range, NOT [0,0]. The old code left
+         * c=0 and fell through to the c==0 check, returning [0,0] which
+         * caused bounds check elimination to incorrectly eliminate guards
+         * for arr[i*stride]. */
+        if (base_iv != NULL && c_known &&
             base_iv->iteration_range.lo_known && base_iv->iteration_range.hi_known) {
             /* Bug #19 fix: Handle Mul(IV, 0) correctly.
              * When c == 0, the result is always 0 regardless of IV range. */
