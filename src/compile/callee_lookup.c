@@ -20,6 +20,7 @@
 #include "runtime/gc.h"
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 
 /* Maximum number of cached callee graphs. Beyond this, we evict the oldest. */
 #define VTX_CALLEE_CACHE_MAX 64
@@ -37,6 +38,7 @@ typedef struct {
     vtx_gc_t              *gc;
     vtx_callee_cache_entry_t cache[VTX_CALLEE_CACHE_MAX];
     uint32_t               cache_count;
+    pthread_mutex_t        cache_lock;  /* C19 fix: protect cache from concurrent access */
 } vtx_callee_lookup_ctx_t;
 
 /* Forward declare the destroy function with the public signature */
@@ -95,33 +97,52 @@ static const vtx_graph_t *callee_lookup_callback(uint32_t method_index,
     vtx_callee_lookup_ctx_t *ctx = (vtx_callee_lookup_ctx_t *)context;
     if (!ctx || !ctx->registry) return NULL;
 
+    /* C19 fix: Lock the cache to prevent concurrent access.
+     * Without locking, two threads compiling different methods can
+     * race on cache eviction, destroying a graph another thread is
+     * reading (use-after-free). */
+    pthread_mutex_lock(&ctx->cache_lock);
+
     /* Check the cache first */
     for (uint32_t i = 0; i < ctx->cache_count; i++) {
         if (ctx->cache[i].valid && ctx->cache[i].method_id == method_index) {
-            return ctx->cache[i].graph;
+            const vtx_graph_t *result = ctx->cache[i].graph;
+            pthread_mutex_unlock(&ctx->cache_lock);
+            return result;
         }
     }
 
     /* Look up the compiled method in the registry to get the method desc */
     vtx_compiled_method_t *cm = vtx_method_registry_get(ctx->registry, method_index);
-    if (!cm || !cm->method_desc || !cm->method_desc->bytecode) return NULL;
+    if (!cm || !cm->method_desc || !cm->method_desc->bytecode) {
+        pthread_mutex_unlock(&ctx->cache_lock);
+        return NULL;
+    }
 
     /* Build the IR graph for this callee */
     vtx_arena_t *arena = NULL;
     vtx_graph_t *graph = build_callee_graph(ctx, cm->method_desc, &arena);
-    if (!graph) return NULL;
+    if (!graph) {
+        pthread_mutex_unlock(&ctx->cache_lock);
+        return NULL;
+    }
 
     /* Cache the graph */
     uint32_t slot;
     if (ctx->cache_count < VTX_CALLEE_CACHE_MAX) {
         slot = ctx->cache_count++;
     } else {
-        /* Evict the oldest entry */
+        /* Evict the oldest entry (slot 0) */
         slot = 0;
         vtx_graph_destroy(ctx->cache[slot].graph);
         free(ctx->cache[slot].graph);
         vtx_arena_destroy(ctx->cache[slot].arena);
         free(ctx->cache[slot].arena);
+        /* Shift remaining entries down to maintain order */
+        for (uint32_t i = 0; i < VTX_CALLEE_CACHE_MAX - 1; i++) {
+            ctx->cache[i] = ctx->cache[i + 1];
+        }
+        slot = VTX_CALLEE_CACHE_MAX - 1;
     }
 
     ctx->cache[slot].method_id = method_index;
@@ -129,6 +150,7 @@ static const vtx_graph_t *callee_lookup_callback(uint32_t method_index,
     ctx->cache[slot].arena = arena;
     ctx->cache[slot].valid = true;
 
+    pthread_mutex_unlock(&ctx->cache_lock);
     return graph;
 }
 
@@ -155,6 +177,11 @@ vtx_callee_lookup_fn vtx_callee_lookup_create(vtx_method_registry_t *registry,
     ctx->gc = gc;
     ctx->cache_count = 0;
 
+    if (pthread_mutex_init(&ctx->cache_lock, NULL) != 0) {
+        free(ctx);
+        return NULL;
+    }
+
     *out_ctx = ctx;
     return callee_lookup_callback;
 }
@@ -167,6 +194,7 @@ void vtx_callee_lookup_destroy(void *context)
     vtx_callee_lookup_ctx_t *ctx = (vtx_callee_lookup_ctx_t *)context;
     if (!ctx) return;
 
+    pthread_mutex_lock(&ctx->cache_lock);
     for (uint32_t i = 0; i < ctx->cache_count; i++) {
         if (ctx->cache[i].valid) {
             vtx_graph_destroy(ctx->cache[i].graph);
@@ -175,6 +203,8 @@ void vtx_callee_lookup_destroy(void *context)
             free(ctx->cache[i].arena);
         }
     }
+    pthread_mutex_unlock(&ctx->cache_lock);
+    pthread_mutex_destroy(&ctx->cache_lock);
 
     free(ctx);
 }

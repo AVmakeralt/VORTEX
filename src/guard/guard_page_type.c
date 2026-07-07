@@ -113,14 +113,22 @@ static int update_snapshot(vtx_type_guard_page_registry_t *registry)
     __atomic_store_n(&registry->snapshot_count, registry->page_count,
                      __ATOMIC_RELEASE);
 
-    /* Free the old snapshot. This is safe because:
-     *   1. We hold the mutex, so no other thread is mutating the registry
-     *   2. The new snapshot has been published, so any signal handler
-     *      that was reading the old snapshot has already finished
-     *      (signal handlers are synchronous with respect to the faulting
-     *       thread, and we are that thread if we're in the handler) */
+    /* Free the old snapshot.
+     * Fix C22: The old code freed the snapshot immediately, but another
+     * thread's signal handler may still be reading it. This is a UAF.
+     *
+     * Proper fix: use a grace-period mechanism. We cannot use RCU directly
+     * in C, so we use a simple deferred-free approach: keep a small ring
+     * buffer of old snapshots and free them after N updates, giving any
+     * in-flight signal handlers time to finish.
+     *
+     * For simplicity (and because signal handlers are very short), we
+     * keep 2 old snapshots in a ring buffer. Each update frees the oldest. */
     if (old_snapshot != NULL) {
-        free(old_snapshot);
+        /* Push old snapshot into the deferred-free ring buffer */
+        free(registry->old_snapshots[registry->old_snapshot_idx]);
+        registry->old_snapshots[registry->old_snapshot_idx] = old_snapshot;
+        registry->old_snapshot_idx = (registry->old_snapshot_idx + 1) % 2;
     }
 
     return 0;
@@ -176,10 +184,16 @@ void vtx_type_guard_page_registry_destroy(vtx_type_guard_page_registry_t *regist
         }
     }
 
-    /* Free the snapshot */
+    /* Free the snapshot and deferred-free ring buffer */
     if (registry->snapshot != NULL) {
         free(registry->snapshot);
         registry->snapshot = NULL;
+    }
+    for (int i = 0; i < 2; i++) {
+        if (registry->old_snapshots[i] != NULL) {
+            free(registry->old_snapshots[i]);
+            registry->old_snapshots[i] = NULL;
+        }
     }
     registry->snapshot_count = 0;
 

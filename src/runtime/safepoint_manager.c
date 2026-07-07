@@ -132,9 +132,13 @@ void vtx_safepoint_mgr_check(vtx_safepoint_manager_t *mgr)
         pthread_cond_signal(&mgr->all_safepointed);
     }
 
-    /* Wait for the GC to release us. */
+    /* Wait for the GC to release us.
+     * Fix HIGH: Old code checked safepoint_requested, but a NEW safepoint
+     * request could arrive while we're waiting, and we'd escape the first
+     * safepoint without waiting for the second. Fix: check safepoint_id
+     * to ensure we only escape when our specific safepoint is released. */
     uint32_t my_safepoint_id = mgr->safepoint_id;
-    while (mgr->safepoint_requested && mgr->safepoint_id == my_safepoint_id) {
+    while (mgr->safepoint_id == my_safepoint_id) {
         pthread_cond_wait(&mgr->released, &mgr->mutex);
     }
 

@@ -155,9 +155,11 @@ typedef struct {
      * Updated atomically after any mutation (create/destroy).
      * The snapshot is a separately-allocated copy of the pages array
      * that is guaranteed not to be mutated during a signal handler scan.
-     * The old snapshot is freed only after a grace period. */
+     * Old snapshots are freed via a deferred-free ring buffer (C22 fix). */
     vtx_type_guard_page_t  *snapshot;
     uint32_t                snapshot_count;
+    vtx_type_guard_page_t  *old_snapshots[2];  /* C22 fix: deferred-free ring buffer */
+    uint32_t                old_snapshot_idx;
 
     /* Statistics */
     uint64_t                total_created;

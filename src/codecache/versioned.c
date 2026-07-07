@@ -161,13 +161,15 @@ void vtx_versioned_cache_on_exit(vtx_versioned_cache_t *vc, uint32_t method_id)
 {
     if (vc == NULL) return;
     uint32_t idx = METHOD_INDEX(method_id);
-    /* Decrement on_stack_count for ALL versions of this method that have
-     * a positive count. In practice, only one version should have a
-     * positive count (the one being exited), but if there's a race,
-     * decrementing all positive ones is safe. */
+    /* Fix HIGH: Old code decremented ALL versions with positive on_stack_count,
+     * not just the one that was entered. If two versions of the same method
+     * were on the stack (e.g., during recompilation), exiting one would
+     * decrement both. Fix: only decrement the ACTIVE version (the one that
+     * was entered via on_enter). Also check method_id to avoid hash collision. */
     for (vtx_versioned_code_version_t *v = vc->versions[idx]; v != NULL; v = v->next) {
-        if (v->on_stack_count > 0) {
+        if (v->is_active && v->method_id == method_id && v->on_stack_count > 0) {
             v->on_stack_count--;
+            break;
         }
     }
 }

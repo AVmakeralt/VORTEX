@@ -276,94 +276,45 @@ const vtx_deopt_stub_t *vtx_deopt_stub_emit(vtx_deopt_context_t *ctx,
 
     /* Save register values using local variable slots as temp storage.
      * We use local[max_locals-1], local[max_locals-2], etc.
-     * If there aren't enough locals, we use the spill area for what fits. */
-    uint32_t locals_available = ctx->frame_layout.max_locals;
-    uint32_t spill_available = ctx->frame_layout.max_spills;
+     * If there aren't enough locals, we push the remaining values onto
+     * the stack before calling the deopt runtime, then pop them after.
+     * Fix C21: Old code silently dropped register values when neither
+     * spill slots nor local slots were available. Now we push to stack. */
+
+    /* Helper macro: save a register to spill area, local slot, or stack */
+    #define SAVE_REG(reg, spill_idx, local_idx) do { \
+        if ((spill_idx) < ctx->frame_layout.max_spills) { \
+            int32_t off = vtx_frame_layout_spill_offset(&ctx->frame_layout, (spill_idx)); \
+            emit_store_to_frame(buf, off, (reg)); \
+        } else if (ctx->frame_layout.max_locals > (local_idx)) { \
+            int32_t off = vtx_frame_layout_local_offset(&ctx->frame_layout, ctx->frame_layout.max_locals - 1 - (local_idx)); \
+            emit_store_to_frame(buf, off, (reg)); \
+        } else { \
+            /* Push to stack as fallback (Fix C21: was silently dropped) */ \
+            vtx_code_buffer_emit_byte(buf, 0x48 | ((reg) >= 8 ? 0x01 : 0x00)); \
+            vtx_code_buffer_emit_byte(buf, 0x50 | ((reg) & 0x07)); /* push reg */ \
+            stack_pushed++; \
+        } \
+    } while(0)
+
+    uint32_t stack_pushed = 0;
 
     if (depth >= 4) {
-        /* RBX = position spilled_count, RDX = spilled_count+1,
-         * RCX = spilled_count+2, RAX = spilled_count+3 */
-        /* Save RBX */
-        if (spilled_count < spill_available) {
-            int32_t off = vtx_frame_layout_spill_offset(&ctx->frame_layout, spilled_count);
-            emit_store_to_frame(buf, off, VTX_REG_RBX);
-        } else if (locals_available > 0) {
-            int32_t off = vtx_frame_layout_local_offset(&ctx->frame_layout, locals_available - 1);
-            emit_store_to_frame(buf, off, VTX_REG_RBX);
-        }
-        /* Save RDX */
-        if (spilled_count + 1 < spill_available) {
-            int32_t off = vtx_frame_layout_spill_offset(&ctx->frame_layout, spilled_count + 1);
-            emit_store_to_frame(buf, off, VTX_REG_RDX);
-        } else if (locals_available > 1) {
-            int32_t off = vtx_frame_layout_local_offset(&ctx->frame_layout, locals_available - 2);
-            emit_store_to_frame(buf, off, VTX_REG_RDX);
-        }
-        /* Save RCX */
-        if (spilled_count + 2 < spill_available) {
-            int32_t off = vtx_frame_layout_spill_offset(&ctx->frame_layout, spilled_count + 2);
-            emit_store_to_frame(buf, off, VTX_REG_RCX);
-        } else if (locals_available > 2) {
-            int32_t off = vtx_frame_layout_local_offset(&ctx->frame_layout, locals_available - 3);
-            emit_store_to_frame(buf, off, VTX_REG_RCX);
-        }
-        /* Save RAX */
-        if (spilled_count + 3 < spill_available) {
-            int32_t off = vtx_frame_layout_spill_offset(&ctx->frame_layout, spilled_count + 3);
-            emit_store_to_frame(buf, off, VTX_REG_RAX);
-        } else if (locals_available > 3) {
-            int32_t off = vtx_frame_layout_local_offset(&ctx->frame_layout, locals_available - 4);
-            emit_store_to_frame(buf, off, VTX_REG_RAX);
-        }
+        SAVE_REG(VTX_REG_RBX, spilled_count, 0);
+        SAVE_REG(VTX_REG_RDX, spilled_count + 1, 1);
+        SAVE_REG(VTX_REG_RCX, spilled_count + 2, 2);
+        SAVE_REG(VTX_REG_RAX, spilled_count + 3, 3);
     } else if (depth == 3) {
-        /* RDX = position 0, RCX = position 1, RAX = position 2 */
-        if (spilled_count < spill_available) {
-            int32_t off = vtx_frame_layout_spill_offset(&ctx->frame_layout, spilled_count);
-            emit_store_to_frame(buf, off, VTX_REG_RDX);
-        } else if (locals_available > 0) {
-            int32_t off = vtx_frame_layout_local_offset(&ctx->frame_layout, locals_available - 1);
-            emit_store_to_frame(buf, off, VTX_REG_RDX);
-        }
-        if (spilled_count + 1 < spill_available) {
-            int32_t off = vtx_frame_layout_spill_offset(&ctx->frame_layout, spilled_count + 1);
-            emit_store_to_frame(buf, off, VTX_REG_RCX);
-        } else if (locals_available > 1) {
-            int32_t off = vtx_frame_layout_local_offset(&ctx->frame_layout, locals_available - 2);
-            emit_store_to_frame(buf, off, VTX_REG_RCX);
-        }
-        if (spilled_count + 2 < spill_available) {
-            int32_t off = vtx_frame_layout_spill_offset(&ctx->frame_layout, spilled_count + 2);
-            emit_store_to_frame(buf, off, VTX_REG_RAX);
-        } else if (locals_available > 2) {
-            int32_t off = vtx_frame_layout_local_offset(&ctx->frame_layout, locals_available - 3);
-            emit_store_to_frame(buf, off, VTX_REG_RAX);
-        }
+        SAVE_REG(VTX_REG_RDX, spilled_count, 0);
+        SAVE_REG(VTX_REG_RCX, spilled_count + 1, 1);
+        SAVE_REG(VTX_REG_RAX, spilled_count + 2, 2);
     } else if (depth == 2) {
-        /* RCX = position 0, RAX = position 1 */
-        if (spilled_count < spill_available) {
-            int32_t off = vtx_frame_layout_spill_offset(&ctx->frame_layout, spilled_count);
-            emit_store_to_frame(buf, off, VTX_REG_RCX);
-        } else if (locals_available > 0) {
-            int32_t off = vtx_frame_layout_local_offset(&ctx->frame_layout, locals_available - 1);
-            emit_store_to_frame(buf, off, VTX_REG_RCX);
-        }
-        if (spilled_count + 1 < spill_available) {
-            int32_t off = vtx_frame_layout_spill_offset(&ctx->frame_layout, spilled_count + 1);
-            emit_store_to_frame(buf, off, VTX_REG_RAX);
-        } else if (locals_available > 1) {
-            int32_t off = vtx_frame_layout_local_offset(&ctx->frame_layout, locals_available - 2);
-            emit_store_to_frame(buf, off, VTX_REG_RAX);
-        }
+        SAVE_REG(VTX_REG_RCX, spilled_count, 0);
+        SAVE_REG(VTX_REG_RAX, spilled_count + 1, 1);
     } else if (depth == 1) {
-        /* RAX = position 0 */
-        if (spilled_count < spill_available) {
-            int32_t off = vtx_frame_layout_spill_offset(&ctx->frame_layout, spilled_count);
-            emit_store_to_frame(buf, off, VTX_REG_RAX);
-        } else if (locals_available > 0) {
-            int32_t off = vtx_frame_layout_local_offset(&ctx->frame_layout, locals_available - 1);
-            emit_store_to_frame(buf, off, VTX_REG_RAX);
-        }
+        SAVE_REG(VTX_REG_RAX, spilled_count, 0);
     }
+    #undef SAVE_REG
 
     /* Step 2: Set up arguments for the runtime deopt function.
      *   RDI = JIT frame RBP (already in RBP)

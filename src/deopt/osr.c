@@ -328,7 +328,8 @@ bool vtx_osr_up(vtx_interp_frame_t *interp,
         /* ---- Step 1: Allocate the JIT frame on the stack ---- */
         "movq 0(%%r15), %%rax\n\t"          /* load frame_sz from params[0] */
         "addq $48, %%rax\n\t"               /* 48 = 40 header + 8 for alignment margin */
-        "andq $-16, %%rax\n\t"              /* align to 16 bytes */
+        "addq $15, %%rax\n\t"               /* Fix C24: round UP for alignment */
+        "andq $-16, %%rax\n\t"              /* align to 16 bytes (rounds up, not down) */
         "subq %%rax, %%rsp\n\t"             /* allocate frame on stack */
 
         /* ---- Step 2: Compute new RBP ---- */

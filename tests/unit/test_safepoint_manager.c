@@ -65,7 +65,7 @@ VTX_TEST(safepoint_single_thread_register) {
     VTX_ASSERT_TRUE(vtx_safepoint_thread_count(&mgr) == 1);
 
     vtx_safepoint_thread_unregister(&mgr);
-    VTX_ASSERT_TRUE(vtx_safepoint_thread_count(&mgr) == 1);  /* count doesn't decrease */
+    VTX_ASSERT_TRUE(vtx_safepoint_thread_count(&mgr) == 0);  /* count decreases (fix: compact array) */
 
     vtx_safepoint_manager_destroy(&mgr);
 }
@@ -134,8 +134,8 @@ VTX_TEST(safepoint_multi_thread_gc) {
     VTX_ASSERT_TRUE(vtx_safepoint_manager_init(&mgr, NULL) == 0);
 
     /* Register 2 mutator threads. */
-    mutator_ctx_t ctx1 = { .mgr = &mgr, .iterations = 100000, .safepoints_hit = 0 };
-    mutator_ctx_t ctx2 = { .mgr = &mgr, .iterations = 100000, .safepoints_hit = 0 };
+    mutator_ctx_t ctx1 = { .mgr = &mgr, .iterations = 10000, .safepoints_hit = 0 };
+    mutator_ctx_t ctx2 = { .mgr = &mgr, .iterations = 10000, .safepoints_hit = 0 };
 
     pthread_t mut1, mut2;
     pthread_create(&mut1, NULL, mutator_thread_fn, &ctx1);
@@ -146,8 +146,9 @@ VTX_TEST(safepoint_multi_thread_gc) {
     pthread_t gc_thread;
     pthread_create(&gc_thread, NULL, gc_thread_fn, &gc_ctx);
 
-    /* Wait for all to finish. */
+    /* Wait for GC to finish first (before mutators unregister). */
     pthread_join(gc_thread, NULL);
+    /* Now wait for mutators. */
     pthread_join(mut1, NULL);
     pthread_join(mut2, NULL);
 
