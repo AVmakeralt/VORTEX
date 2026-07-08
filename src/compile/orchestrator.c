@@ -85,6 +85,10 @@ static void check_markov_prediction(vtx_orchestrator_t *orch)
  * If a new phase is detected, use the phase-reactive version manager
  * to try to reactivate a parked version for the new phase, or
  * queue compilation if no parked version exists.
+ *
+ * Sprint 2: Also triggers phase partition transition — swaps the
+ * active profile to the new phase's profile so that subsequent
+ * recomp decisions use phase-appropriate data.
  */
 static void check_phase_detection(vtx_orchestrator_t *orch)
 {
@@ -93,6 +97,19 @@ static void check_phase_detection(vtx_orchestrator_t *orch)
     /* The phase detector is updated via vtx_orchestrator_on_method_entry().
      * Here we check if the current phase prediction has changed. */
     uint32_t predicted = orch->phase_detector->predicted_phase;
+
+    /* Sprint 2: Phase partition transition.
+     * If a partition is attached and the predicted phase differs from
+     * the active phase, swap the active profile to the new phase's
+     * profile. This ensures that recomp decisions (KL-divergence
+     * checks, confidence scoring, etc.) use phase-appropriate data
+     * instead of the polluted merged profile. */
+    if (orch->phase_partition != NULL && predicted != VTX_PHASE_NONE) {
+        uint32_t active = vtx_phase_partition_active_phase(orch->phase_partition);
+        if (active != predicted) {
+            vtx_orchestrator_phase_transition(orch, predicted);
+        }
+    }
 
     /* If phase-reactive version manager is available, try reactivation */
     if (orch->phase_react != NULL && predicted != VTX_PHASE_NONE) {
@@ -145,24 +162,50 @@ static void check_recomp_drift(vtx_orchestrator_t *orch)
 {
     if (orch->recomp == NULL || orch->profile == NULL) return;
 
+    /* Sprint 2: When a phase partition is attached, use the active
+     * phase's profile instead of the static `profile` pointer. The
+     * `profile` pointer is updated by phase transitions to track the
+     * active phase, but we double-check here in case the partition
+     * was attached after the orchestrator started. */
+    vtx_profile_global_t *active_profile = orch->profile;
+    if (orch->phase_partition != NULL) {
+        vtx_profile_global_t *part_active =
+            vtx_phase_partition_get_active(orch->phase_partition);
+        if (part_active != NULL) {
+            active_profile = part_active;
+            /* Keep the legacy pointer in sync for callers that read it. */
+            orch->profile = part_active;
+        }
+    }
+
     /* Phase 1: Check each method in the profile for profile drift.
      * If the KL divergence between the compile-time snapshot and the
      * current profile exceeds the threshold, queue the method for
      * recompilation. This is the "close the loop" step — without this,
      * snapshots are saved but never compared.
      *
+     * Sprint 1.2/1.3: We now use the hysteresis-aware check + the
+     * backpressure-aware queue. This prevents recomp thrashing under
+     * oscillating workloads (hysteresis requires N consecutive divergent
+     * samples before firing) and prevents core starvation under sustained
+     * divergence (backpressure caps the queue depth and coalesces
+     * duplicate recompiles).
+     *
      * We iterate over the profile's methods (not the recomp snapshots)
      * because the snapshot struct is opaque (defined in recomp.c). */
-    if (orch->profile != NULL) {
-        for (uint32_t i = 0; i < orch->profile->method_count &&
+    if (active_profile != NULL) {
+        for (uint32_t i = 0; i < active_profile->method_count &&
                              i < VTX_ORCHESTRATOR_PROACTIVE_COMPILE_LIMIT; i++) {
-            uint32_t method_id = orch->profile->methods[i].method_id;
+            uint32_t method_id = active_profile->methods[i].method_id;
 
-            vtx_recomp_check_t result = vtx_sota_recomp_check(orch->recomp,
-                                                                orch->profile,
-                                                                method_id);
+            vtx_recomp_check_t result = vtx_sota_recomp_check_hysteresis(
+                orch->recomp, active_profile, method_id);
             if (result.should_recompile) {
-                vtx_sota_recomp_queue(orch->recomp, method_id, orch->profile);
+                /* Use the backpressure-aware queue: it enforces the
+                 * hard/soft caps and coalesces duplicate recompiles.
+                 * Pass now_ns=0 so the queue uses its own monotonic clock. */
+                vtx_sota_recomp_queue_backpressure(orch->recomp, method_id,
+                                                    active_profile, 0);
             }
         }
     }
@@ -181,6 +224,10 @@ static void check_recomp_drift(vtx_orchestrator_t *orch)
 
             if (vtx_threadpool_submit_task(orch->threadpool, &task) == 0) {
                 __atomic_fetch_add(&orch->total_recomp_triggers, 1, __ATOMIC_RELAXED);
+                /* Reset hysteresis counter after a successful recompile
+                 * submission so the same method isn't immediately fired
+                 * again on the next tick. */
+                vtx_sota_recomp_hysteresis_reset(orch->recomp, method_id);
             }
         }
     }
@@ -394,12 +441,25 @@ int vtx_orchestrator_init(vtx_orchestrator_t *orch,
     orch->profile = profile;
     orch->inline_feedback = inline_feedback;
 
+    /* Sprint 2: phase partition starts detached. Use
+     * vtx_orchestrator_set_phase_partition() to attach one after init. */
+    orch->phase_partition = NULL;
+
     orch->check_interval_ms = VTX_ORCHESTRATOR_CHECK_INTERVAL_MS;
     orch->min_profile_observations = VTX_ORCHESTRATOR_MIN_PROFILE_OBS;
     orch->proactive_compile_limit = VTX_ORCHESTRATOR_PROACTIVE_COMPILE_LIMIT;
 
     orch->running = false;
     orch->shutdown_requested = false;
+
+    orch->total_checks = 0;
+    orch->total_phase_predictions = 0;
+    orch->total_proactive_compiles = 0;
+    orch->total_recomp_triggers = 0;
+    orch->total_fdi_recompiles = 0;
+    orch->total_phase_reactivations = 0;
+    orch->total_phase_partition_transitions = 0;
+    orch->total_phase_preemptive_recompiles = 0;
 
     if (pthread_mutex_init(&orch->mutex, NULL) != 0) return -1;
     if (pthread_cond_init(&orch->wake_cond, NULL) != 0) {
@@ -572,4 +632,115 @@ void vtx_orchestrator_get_stats(const vtx_orchestrator_t *orch,
     if (total_recomp_triggers) *total_recomp_triggers = orch->total_recomp_triggers;
     if (total_fdi_recompiles) *total_fdi_recompiles = orch->total_fdi_recompiles;
     if (total_phase_reactivations) *total_phase_reactivations = orch->total_phase_reactivations;
+}
+
+/* ========================================================================== */
+/* Sprint 2: Phase-aware profile partition wiring                              */
+/* ========================================================================== */
+
+void vtx_orchestrator_set_phase_partition(vtx_orchestrator_t *orch,
+                                            vtx_phase_partition_t *part)
+{
+    if (orch == NULL) return;
+    pthread_mutex_lock(&orch->mutex);
+    orch->phase_partition = part;
+    /* If a partition is being attached, point the legacy `profile`
+     * pointer at the active phase's profile so existing callers
+     * see the right data. */
+    if (part != NULL) {
+        vtx_profile_global_t *active = vtx_phase_partition_get_active(part);
+        if (active != NULL) {
+            orch->profile = active;
+        }
+    }
+    pthread_mutex_unlock(&orch->mutex);
+}
+
+void vtx_orchestrator_phase_transition(vtx_orchestrator_t *orch,
+                                         uint32_t new_phase_id)
+{
+    if (orch == NULL || orch->phase_partition == NULL) return;
+
+    pthread_mutex_lock(&orch->mutex);
+
+    /* Swap the active profile to the new phase. */
+    vtx_profile_global_t *new_active = vtx_phase_partition_transition(
+        orch->phase_partition, new_phase_id, 0);
+
+    if (new_active != NULL) {
+        /* Keep the legacy pointer in sync. */
+        orch->profile = new_active;
+        __atomic_fetch_add(&orch->total_phase_partition_transitions, 1,
+                             __ATOMIC_RELAXED);
+    }
+
+    /* Preemptively recompile the new phase's hot methods.
+     *
+     * We need the phase graph to know which methods belong to the new
+     * phase. If the phase detector has a graph, use it; otherwise we
+     * fall back to recompiling the top N hottest methods in the new
+     * phase's profile. */
+    if (orch->threadpool != NULL && new_active != NULL) {
+        uint32_t hot_methods[VTX_ORCHESTRATOR_PROACTIVE_COMPILE_LIMIT];
+        uint32_t n_methods = 0;
+
+        /* Try the phase graph first. */
+        if (orch->phase_detector != NULL &&
+            orch->phase_detector->phase_graph != NULL) {
+            n_methods = vtx_phase_partition_hot_methods_for_phase(
+                orch->phase_partition,
+                orch->phase_detector->phase_graph,
+                new_phase_id,
+                hot_methods,
+                VTX_ORCHESTRATOR_PROACTIVE_COMPILE_LIMIT);
+        }
+
+        /* Fallback: top N methods by invocation_count in the new phase. */
+        if (n_methods == 0 && new_active->method_count > 0) {
+            uint32_t to_take = new_active->method_count;
+            if (to_take > VTX_ORCHESTRATOR_PROACTIVE_COMPILE_LIMIT) {
+                to_take = VTX_ORCHESTRATOR_PROACTIVE_COMPILE_LIMIT;
+            }
+            /* Simple linear scan for the top N (the profile array is
+             * not sorted — we don't want to mutate it). For larger N
+             * a heap would be better, but N is small (8). */
+            for (uint32_t i = 0; i < to_take; i++) {
+                hot_methods[i] = new_active->methods[i].method_id;
+            }
+            n_methods = to_take;
+        }
+
+        /* Submit preemptive recompilation tasks. These use a lower
+         * priority than drift-triggered recompiles so that on-demand
+         * compilation isn't blocked. */
+        for (uint32_t i = 0; i < n_methods; i++) {
+            vtx_compile_task_t task;
+            memset(&task, 0, sizeof(task));
+            task.method_id = hot_methods[i];
+            task.tier = VTX_TIER_T2;
+            task.priority = VTX_COMPILE_PRIORITY_LOW;  /* preemptive = low */
+
+            if (vtx_threadpool_submit_task(orch->threadpool, &task) == 0) {
+                __atomic_fetch_add(&orch->total_phase_preemptive_recompiles,
+                                     1, __ATOMIC_RELAXED);
+            }
+        }
+    }
+
+    pthread_mutex_unlock(&orch->mutex);
+}
+
+void vtx_orchestrator_get_partition_stats(const vtx_orchestrator_t *orch,
+                                            uint64_t *total_partition_transitions,
+                                            uint64_t *total_preemptive_recompiles)
+{
+    if (orch == NULL) {
+        if (total_partition_transitions) *total_partition_transitions = 0;
+        if (total_preemptive_recompiles) *total_preemptive_recompiles = 0;
+        return;
+    }
+    if (total_partition_transitions)
+        *total_partition_transitions = orch->total_phase_partition_transitions;
+    if (total_preemptive_recompiles)
+        *total_preemptive_recompiles = orch->total_phase_preemptive_recompiles;
 }

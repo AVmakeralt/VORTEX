@@ -33,6 +33,8 @@
 #include "profile/data.h"
 #include "profile/persist.h"
 #include "profile/phase.h"
+#include "profile/deterministic.h"
+#include "profile/confidence.h"
 #include "ir/node.h"
 #include "ir/graph.h"
 #include "ir/gvn.h"
@@ -3085,11 +3087,21 @@ int main(int argc, char *argv[])
          * rejected. If VORTEX_NO_PGO=1 is set, skip loading entirely.
          *
          * The profile directory defaults to $HOME/.cache/vortex/profiles/
-         * but can be overridden with VORTEX_PROFILE_DIR. */
+         * but can be overridden with VORTEX_PROFILE_DIR.
+         *
+         * Sprint 1.4: VORTEX_DETERMINISTIC=1 disables PGO persistence so
+         * that each CI run starts from a clean slate and produces identical
+         * compilation decisions. This eliminates the dominant source of
+         * flaky tests in JIT CI pipelines. */
+        vtx_deterministic_init();  /* cache the env var probe */
         bool pgo_enabled = true;
         const char *no_pgo = getenv("VORTEX_NO_PGO");
         if (no_pgo && strcmp(no_pgo, "1") == 0) {
             pgo_enabled = false;
+        }
+        if (vtx_deterministic_disable_persistence()) {
+            pgo_enabled = false;
+            fprintf(stderr, "[pgo] Disabled (VORTEX_DETERMINISTIC=1 — persistence off for CI)\n");
         }
 
         /* Compute bytecode hash for version gating */

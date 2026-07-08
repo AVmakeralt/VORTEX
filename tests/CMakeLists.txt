@@ -332,6 +332,35 @@ target_link_libraries(test_safepoint_manager PRIVATE
 add_test(NAME test_safepoint_manager COMMAND test_safepoint_manager)
 set_tests_properties(test_safepoint_manager PROPERTIES TIMEOUT 30)
 
+# test_pgo_sprint1: PGO stability features (confidence, hysteresis, backpressure, deterministic)
+add_executable(test_pgo_sprint1
+    unit/test_pgo_sprint1.c
+)
+target_link_libraries(test_pgo_sprint1 PRIVATE
+    vortex_test_framework
+    vortex_profile
+    vortex_sota
+    vortex_runtime
+    m
+    pthread
+)
+add_test(NAME test_pgo_sprint1 COMMAND test_pgo_sprint1)
+set_tests_properties(test_pgo_sprint1 PROPERTIES TIMEOUT 30)
+
+# test_pgo_sprint2: PGO phase partitioning (per-phase storage, transition, persistence)
+add_executable(test_pgo_sprint2
+    unit/test_pgo_sprint2.c
+)
+target_link_libraries(test_pgo_sprint2 PRIVATE
+    vortex_test_framework
+    vortex_profile
+    vortex_runtime
+    m
+    pthread
+)
+add_test(NAME test_pgo_sprint2 COMMAND test_pgo_sprint2)
+set_tests_properties(test_pgo_sprint2 PROPERTIES TIMEOUT 30)
+
 # ---- Stress tests (1000 tests) ----
 
 # test_stress_runtime: Arena, Object, Type System, Bytecode, GC (200 tests)

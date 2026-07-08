@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
 
 /* ========================================================================== */
 /* Profile snapshot                                                            */
@@ -53,9 +54,31 @@ int vtx_sota_recomp_init(vtx_sota_recomp_t *recomp)
     }
     recomp->recomp_queue_count = 0;
 
+    /* Sprint 1.2: Initialize hysteresis hash table.
+     * Capacity is a power of 2 for fast modulo. Start with 128 slots —
+     * the table grows if load factor exceeds 0.75. */
+    recomp->hysteresis_capacity = 128;
+    recomp->hysteresis = (vtx_recomp_hysteresis_t *)calloc(
+        recomp->hysteresis_capacity, sizeof(vtx_recomp_hysteresis_t));
+    if (recomp->hysteresis == NULL) {
+        free(recomp->recomp_queue);
+        free(recomp->snapshots);
+        recomp->snapshots = NULL;
+        recomp->snapshot_capacity = 0;
+        recomp->recomp_queue = NULL;
+        recomp->recomp_queue_capacity = 0;
+        recomp->hysteresis_capacity = 0;
+        return -1;
+    }
+    recomp->hysteresis_count = 0;
+
     recomp->total_checks = 0;
     recomp->total_recompilations_triggered = 0;
     recomp->total_false_positives = 0;
+    recomp->total_hysteresis_blocks = 0;
+    recomp->total_dropped_soft_cap = 0;
+    recomp->total_dropped_hard_cap = 0;
+    recomp->total_coalesced = 0;
 
     return 0;
 }
@@ -80,10 +103,17 @@ void vtx_sota_recomp_destroy(vtx_sota_recomp_t *recomp)
         recomp->recomp_queue = NULL;
     }
 
+    if (recomp->hysteresis != NULL) {
+        free(recomp->hysteresis);
+        recomp->hysteresis = NULL;
+    }
+
     recomp->snapshot_count = 0;
     recomp->snapshot_capacity = 0;
     recomp->recomp_queue_count = 0;
     recomp->recomp_queue_capacity = 0;
+    recomp->hysteresis_count = 0;
+    recomp->hysteresis_capacity = 0;
 }
 
 /* ========================================================================== */
@@ -556,4 +586,383 @@ bool vtx_sota_recomp_has_pending(const vtx_sota_recomp_t *recomp)
         }
     }
     return false;
+}
+
+/* ========================================================================== */
+/* Sprint 1.2: Hysteresis hash table                                           */
+/* ========================================================================== */
+
+/* Open-addressing hash table with linear probing.
+ * Hash: method_id mod capacity (capacity is a power of 2).
+ * Tombstone-free: deleted entries are reset to valid=false and reused. */
+
+static uint32_t hysteresis_hash(uint32_t method_id, uint32_t capacity)
+{
+    /* Fibonacci hashing — good distribution for small power-of-2 tables. */
+    return (uint32_t)((method_id * 2654435761u) & (capacity - 1));
+}
+
+static vtx_recomp_hysteresis_t *hysteresis_find_slot(
+    vtx_sota_recomp_t *recomp, uint32_t method_id, bool create)
+{
+    if (recomp->hysteresis == NULL || recomp->hysteresis_capacity == 0) {
+        return NULL;
+    }
+
+    uint32_t mask = recomp->hysteresis_capacity - 1;
+    uint32_t start = hysteresis_hash(method_id, recomp->hysteresis_capacity);
+    uint32_t first_invalid = UINT32_MAX;
+
+    for (uint32_t probe = 0; probe <= mask; probe++) {
+        uint32_t idx = (start + probe) & mask;
+        vtx_recomp_hysteresis_t *slot = &recomp->hysteresis[idx];
+
+        if (!slot->valid) {
+            if (first_invalid == UINT32_MAX) first_invalid = idx;
+            /* Keep probing in case the method_id is later in the chain. */
+            continue;
+        }
+
+        if (slot->method_id == method_id) {
+            return slot;
+        }
+    }
+
+    if (!create) return NULL;
+
+    /* Grow if load factor > 0.75 */
+    if ((recomp->hysteresis_count * 4) > (recomp->hysteresis_capacity * 3)) {
+        uint32_t new_cap = recomp->hysteresis_capacity * 2;
+        vtx_recomp_hysteresis_t *new_table = (vtx_recomp_hysteresis_t *)calloc(
+            new_cap, sizeof(vtx_recomp_hysteresis_t));
+        if (new_table == NULL) {
+            /* Allocation failed — fall back to reusing an invalid slot
+             * if we found one. */
+            if (first_invalid != UINT32_MAX) {
+                vtx_recomp_hysteresis_t *slot = &recomp->hysteresis[first_invalid];
+                memset(slot, 0, sizeof(*slot));
+                slot->method_id = method_id;
+                slot->valid = true;
+                recomp->hysteresis_count++;
+                return slot;
+            }
+            return NULL;
+        }
+
+        /* Rehash */
+        for (uint32_t i = 0; i < recomp->hysteresis_capacity; i++) {
+            vtx_recomp_hysteresis_t *old = &recomp->hysteresis[i];
+            if (!old->valid) continue;
+            uint32_t new_idx = hysteresis_hash(old->method_id, new_cap);
+            while (new_table[new_idx].valid) {
+                new_idx = (new_idx + 1) & (new_cap - 1);
+            }
+            new_table[new_idx] = *old;
+        }
+
+        free(recomp->hysteresis);
+        recomp->hysteresis = new_table;
+        recomp->hysteresis_capacity = new_cap;
+
+        /* Find a free slot in the new table */
+        uint32_t idx = hysteresis_hash(method_id, new_cap);
+        while (recomp->hysteresis[idx].valid) {
+            idx = (idx + 1) & (new_cap - 1);
+        }
+        vtx_recomp_hysteresis_t *slot = &recomp->hysteresis[idx];
+        memset(slot, 0, sizeof(*slot));
+        slot->method_id = method_id;
+        slot->valid = true;
+        recomp->hysteresis_count++;
+        return slot;
+    }
+
+    if (first_invalid != UINT32_MAX) {
+        vtx_recomp_hysteresis_t *slot = &recomp->hysteresis[first_invalid];
+        memset(slot, 0, sizeof(*slot));
+        slot->method_id = method_id;
+        slot->valid = true;
+        recomp->hysteresis_count++;
+        return slot;
+    }
+
+    return NULL;  /* table full (shouldn't happen with growth) */
+}
+
+vtx_recomp_check_t vtx_sota_recomp_check_hysteresis(vtx_sota_recomp_t *recomp,
+                                                       const vtx_profile_global_t *profile,
+                                                       uint32_t method_id)
+{
+    vtx_recomp_check_t result;
+    memset(&result, 0, sizeof(result));
+    result.method_id = method_id;
+
+    if (recomp == NULL || profile == NULL) return result;
+
+    /* First, run the raw check to get the divergence value. */
+    vtx_recomp_check_t raw = vtx_sota_recomp_check(recomp, profile, method_id);
+    result.kl_divergence = raw.kl_divergence;
+    result.divergent_call_sites = raw.divergent_call_sites;
+    result.method_id = raw.method_id;
+
+    /* Update the hysteresis counter for this method. */
+    vtx_recomp_hysteresis_t *slot = hysteresis_find_slot(recomp, method_id, true);
+    if (slot == NULL) {
+        /* Allocation failure — fall back to raw result so we don't
+         * silently drop divergences. */
+        result.should_recompile = raw.should_recompile;
+        return result;
+    }
+
+    if (raw.divergent_call_sites > 0) {
+        slot->consecutive_divergent++;
+    } else {
+        slot->consecutive_divergent = 0;
+    }
+
+    /* Only fire if the hysteresis threshold is met. */
+    if (slot->consecutive_divergent >= VTX_RECOMP_HYSTERESIS_CONSECUTIVE) {
+        result.should_recompile = true;
+    } else {
+        result.should_recompile = false;
+        if (raw.should_recompile) {
+            recomp->total_hysteresis_blocks++;
+        }
+    }
+
+    return result;
+}
+
+void vtx_sota_recomp_hysteresis_reset(vtx_sota_recomp_t *recomp,
+                                        uint32_t method_id)
+{
+    if (recomp == NULL) return;
+    vtx_recomp_hysteresis_t *slot = hysteresis_find_slot(recomp, method_id, false);
+    if (slot != NULL) {
+        slot->consecutive_divergent = 0;
+    }
+}
+
+uint32_t vtx_sota_recomp_hysteresis_count(const vtx_sota_recomp_t *recomp,
+                                            uint32_t method_id)
+{
+    if (recomp == NULL) return 0;
+    /* Const-cast: find_slot may create, but we pass create=false so it
+     * never mutates. */
+    vtx_sota_recomp_t *mut = (vtx_sota_recomp_t *)recomp;
+    vtx_recomp_hysteresis_t *slot = hysteresis_find_slot(mut, method_id, false);
+    return slot ? slot->consecutive_divergent : 0;
+}
+
+/* ========================================================================== */
+/* Sprint 1.3: Backpressure-aware queue                                        */
+/* ========================================================================== */
+
+/* Helper: monotonic time in nanoseconds. */
+static uint64_t recomp_now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+/* Helper: find the lowest-priority (lowest KL divergence) unprocessed entry
+ * in the queue. Returns the index, or UINT32_MAX if none. */
+static uint32_t find_lowest_priority_entry(const vtx_sota_recomp_t *recomp)
+{
+    uint32_t lowest_idx = UINT32_MAX;
+    double   lowest_kl  = 0.0;
+    for (uint32_t i = 0; i < recomp->recomp_queue_count; i++) {
+        if (recomp->recomp_queue[i].processed) continue;
+        if (lowest_idx == UINT32_MAX ||
+            recomp->recomp_queue[i].kl_divergence < lowest_kl) {
+            lowest_idx = i;
+            lowest_kl  = recomp->recomp_queue[i].kl_divergence;
+        }
+    }
+    return lowest_idx;
+}
+
+/* Helper: find an existing unprocessed entry for the given method_id. */
+static int32_t find_existing_entry(const vtx_sota_recomp_t *recomp,
+                                     uint32_t method_id)
+{
+    for (uint32_t i = 0; i < recomp->recomp_queue_count; i++) {
+        if (!recomp->recomp_queue[i].processed &&
+            recomp->recomp_queue[i].method_id == method_id) {
+            return (int32_t)i;
+        }
+    }
+    return -1;
+}
+
+/* Helper: remove the entry at the given index by shifting subsequent
+ * entries down. Preserves queue order. */
+static void queue_remove_at(vtx_sota_recomp_t *recomp, uint32_t idx)
+{
+    if (idx >= recomp->recomp_queue_count) return;
+    for (uint32_t i = idx; i + 1 < recomp->recomp_queue_count; i++) {
+        recomp->recomp_queue[i] = recomp->recomp_queue[i + 1];
+    }
+    recomp->recomp_queue_count--;
+}
+
+bool vtx_sota_recomp_queue_backpressure(vtx_sota_recomp_t *recomp,
+                                          uint32_t method_id,
+                                          const vtx_profile_global_t *new_profile,
+                                          uint64_t now_ns_)
+{
+    if (recomp == NULL) return false;
+
+    uint64_t now = (now_ns_ == 0) ? recomp_now_ns() : now_ns_;
+    const uint64_t window_ns =
+        (uint64_t)VTX_RECOMP_COALESCE_WINDOW_SEC * 1000000000ull;
+
+    /* ---- COALESCE: check if this method is being recompiled too often ---- */
+    vtx_recomp_hysteresis_t *hyst = hysteresis_find_slot(recomp, method_id, true);
+    if (hyst != NULL) {
+        /* Reset the coalesce window if it has elapsed. */
+        if (hyst->window_start_ns == 0 ||
+            (now - hyst->window_start_ns) > window_ns) {
+            hyst->window_start_ns = now;
+            hyst->recomp_count_in_window = 0;
+        }
+        hyst->recomp_count_in_window++;
+        hyst->last_recomp_time_ns = now;
+
+        /* If this method has been recompiled too many times in the window,
+         * coalesce: replace any existing unprocessed entry with this one
+         * (updating the KL divergence) rather than adding a duplicate. */
+        if (hyst->recomp_count_in_window > VTX_RECOMP_COALESCE_MAX_DUPLICATES) {
+            int32_t existing = find_existing_entry(recomp, method_id);
+            if (existing >= 0) {
+                /* Update the existing entry's KL divergence and timestamp. */
+                double kl = 0.0;
+                if (new_profile != NULL) {
+                    const vtx_profile_method_t *cur =
+                        vtx_profile_get_method(new_profile, method_id);
+                    if (cur != NULL) {
+                        vtx_profile_method_t old_method;
+                        memset(&old_method, 0, sizeof(old_method));
+                        old_method.method_id = method_id;
+                        for (uint32_t i = 0; i < recomp->snapshot_count; i++) {
+                            if (recomp->snapshots[i].method_id == method_id &&
+                                recomp->snapshots[i].valid) {
+                                old_method.call_sites = recomp->snapshots[i].call_sites;
+                                old_method.call_site_count = recomp->snapshots[i].call_site_count;
+                                break;
+                            }
+                        }
+                        kl = vtx_sota_recomp_compute_divergence(&old_method, cur);
+                    }
+                }
+                recomp->recomp_queue[existing].kl_divergence = kl;
+                recomp->recomp_queue[existing].enqueue_time_ns = now;
+                recomp->recomp_queue[existing].processed = false;
+                recomp->total_coalesced++;
+                return true;
+            }
+            /* No existing entry — fall through to normal enqueue. */
+        }
+    }
+
+    /* ---- HARD CAP: reject if the queue is full ---- */
+    if (recomp->recomp_queue_count >= VTX_RECOMP_QUEUE_HARD_CAP) {
+        recomp->total_dropped_hard_cap++;
+        return false;
+    }
+
+    /* ---- SOFT CAP: evict the lowest-priority entry if over the cap ---- */
+    if (recomp->recomp_queue_count >= VTX_RECOMP_QUEUE_SOFT_CAP) {
+        uint32_t lowest = find_lowest_priority_entry(recomp);
+        if (lowest != UINT32_MAX) {
+            queue_remove_at(recomp, lowest);
+            recomp->total_dropped_soft_cap++;
+        }
+    }
+
+    /* ---- Check for duplicate (unprocessed entry for the same method) ----
+     * If one exists, we don't add a second — the existing entry is
+     * already pending and will be picked up. */
+    if (find_existing_entry(recomp, method_id) >= 0) {
+        return true;  /* already queued — not an error */
+    }
+
+    /* ---- Grow the queue if at capacity (still under HARD_CAP) ---- */
+    if (recomp->recomp_queue_count >= recomp->recomp_queue_capacity) {
+        uint32_t new_cap = recomp->recomp_queue_capacity * 2;
+        if (new_cap > VTX_RECOMP_QUEUE_HARD_CAP) {
+            new_cap = VTX_RECOMP_QUEUE_HARD_CAP;
+        }
+        if (new_cap <= recomp->recomp_queue_capacity) {
+            recomp->total_dropped_hard_cap++;
+            return false;
+        }
+        vtx_recomp_queue_entry_t *new_queue = (vtx_recomp_queue_entry_t *)realloc(
+            recomp->recomp_queue, new_cap * sizeof(vtx_recomp_queue_entry_t));
+        if (new_queue == NULL) {
+            recomp->total_dropped_hard_cap++;
+            return false;
+        }
+        memset(new_queue + recomp->recomp_queue_capacity, 0,
+               (new_cap - recomp->recomp_queue_capacity) * sizeof(vtx_recomp_queue_entry_t));
+        recomp->recomp_queue = new_queue;
+        recomp->recomp_queue_capacity = new_cap;
+    }
+
+    /* ---- Compute KL divergence for the new entry ---- */
+    double kl = 0.0;
+    if (new_profile != NULL) {
+        const vtx_profile_method_t *cur =
+            vtx_profile_get_method(new_profile, method_id);
+        if (cur != NULL) {
+            vtx_profile_method_t old_method;
+            memset(&old_method, 0, sizeof(old_method));
+            old_method.method_id = method_id;
+            for (uint32_t i = 0; i < recomp->snapshot_count; i++) {
+                if (recomp->snapshots[i].method_id == method_id &&
+                    recomp->snapshots[i].valid) {
+                    old_method.call_sites = recomp->snapshots[i].call_sites;
+                    old_method.call_site_count = recomp->snapshots[i].call_site_count;
+                    break;
+                }
+            }
+            kl = vtx_sota_recomp_compute_divergence(&old_method, cur);
+        }
+    }
+
+    /* ---- Enqueue ---- */
+    vtx_recomp_queue_entry_t *entry = &recomp->recomp_queue[recomp->recomp_queue_count];
+    entry->method_id = method_id;
+    entry->kl_divergence = kl;
+    entry->enqueue_time_ns = now;
+    entry->processed = false;
+    recomp->recomp_queue_count++;
+    recomp->total_recompilations_triggered++;
+
+    /* Save a new snapshot with the current profile. */
+    if (new_profile != NULL) {
+        vtx_sota_recomp_save_snapshot(recomp, method_id, new_profile);
+    }
+
+    return true;
+}
+
+void vtx_sota_recomp_backpressure_stats(const vtx_sota_recomp_t *recomp,
+                                          uint64_t *dropped_soft_cap,
+                                          uint64_t *dropped_hard_cap,
+                                          uint64_t *coalesced,
+                                          uint64_t *hysteresis_blocks)
+{
+    if (recomp == NULL) {
+        if (dropped_soft_cap) *dropped_soft_cap = 0;
+        if (dropped_hard_cap) *dropped_hard_cap = 0;
+        if (coalesced)        *coalesced = 0;
+        if (hysteresis_blocks) *hysteresis_blocks = 0;
+        return;
+    }
+    if (dropped_soft_cap)  *dropped_soft_cap  = recomp->total_dropped_soft_cap;
+    if (dropped_hard_cap)  *dropped_hard_cap  = recomp->total_dropped_hard_cap;
+    if (coalesced)         *coalesced         = recomp->total_coalesced;
+    if (hysteresis_blocks) *hysteresis_blocks = recomp->total_hysteresis_blocks;
 }

@@ -67,6 +67,33 @@ typedef struct {
 /* Forward declaration — defined in recomp.c */
 typedef struct vtx_recomp_snapshot vtx_recomp_snapshot_t;
 
+/* ========================================================================== */
+/* Sprint 1.2: Hysteresis per-method state                                     */
+/* ========================================================================== */
+
+/**
+ * Per-method hysteresis state for KL-divergence recompilation.
+ *
+ * Without hysteresis, the orchestrator fires recomp on every divergent
+ * sample. A workload that oscillates between two phases causes the same
+ * method to be recompiled repeatedly — thrashing.
+ *
+ * Hysteresis requires VTX_RECOMP_HYSTERESIS_CONSECUTIVE consecutive
+ * divergent samples before triggering recompilation. A non-divergent
+ * sample resets the counter to zero.
+ *
+ * The state is keyed by method_id and stored in a small hash table
+ * inside vtx_sota_recomp_t. Lookups are O(1) amortized.
+ */
+typedef struct {
+    uint32_t method_id;              /* method this state is for */
+    uint32_t consecutive_divergent;  /* consecutive divergent samples seen */
+    uint64_t last_recomp_time_ns;    /* last time this method was recompiled */
+    uint64_t recomp_count_in_window; /* recompiles within the coalesce window */
+    uint64_t window_start_ns;        /* start of the current coalesce window */
+    bool     valid;                  /* true if this slot is in use */
+} vtx_recomp_hysteresis_t;
+
 typedef struct {
     /* Per-method compilation-time profile snapshot.
      * Stored as a dense array indexed by method_id.
@@ -82,10 +109,23 @@ typedef struct {
     uint32_t                  recomp_queue_count;
     uint32_t                  recomp_queue_capacity;
 
+    /* Sprint 1.2: Hysteresis state per method.
+     * Small open-addressing hash table keyed by method_id. */
+    vtx_recomp_hysteresis_t *hysteresis;
+    uint32_t                 hysteresis_count;
+    uint32_t                 hysteresis_capacity;
+
+    /* Sprint 1.3: Backpressure statistics.
+     * Tracks how many queue entries were dropped due to soft/hard cap. */
+    uint64_t total_dropped_soft_cap;   /* dropped because queue > soft cap */
+    uint64_t total_dropped_hard_cap;   /* rejected because queue >= hard cap */
+    uint64_t total_coalesced;          /* older entries merged into newer */
+
     /* Statistics */
     uint64_t total_checks;
     uint64_t total_recompilations_triggered;
     uint64_t total_false_positives;  /* recompiled but profile didn't actually change */
+    uint64_t total_hysteresis_blocks; /* Sprint 1.2: would-have-fired but blocked by hysteresis */
 } vtx_sota_recomp_t;
 
 /* ========================================================================== */
@@ -248,5 +288,98 @@ uint32_t vtx_sota_recomp_dequeue(vtx_sota_recomp_t *recomp);
  * Check if the recompilation queue has pending entries.
  */
 bool vtx_sota_recomp_has_pending(const vtx_sota_recomp_t *recomp);
+
+/* ========================================================================== */
+/* Sprint 1.2: Hysteresis-aware check                                          */
+/* ========================================================================== */
+
+/**
+ * Hysteresis-aware recompilation check.
+ *
+ * This is the same as vtx_sota_recomp_check(), but it tracks consecutive
+ * divergent samples per method and only returns should_recompile=true
+ * after VTX_RECOMP_HYSTERESIS_CONSECUTIVE consecutive divergent checks.
+ * A non-divergent check resets the per-method counter.
+ *
+ * Use this in the orchestrator instead of the raw check to prevent
+ * recomp thrashing under oscillating workloads.
+ *
+ * @param recomp     Recompilation monitor
+ * @param profile    Current global profile data
+ * @param method_id  Method to check
+ * @return           Check result; should_recompile is true only if the
+ *                   hysteresis threshold has been reached
+ */
+vtx_recomp_check_t vtx_sota_recomp_check_hysteresis(vtx_sota_recomp_t *recomp,
+                                                       const vtx_profile_global_t *profile,
+                                                       uint32_t method_id);
+
+/**
+ * Reset the hysteresis counter for a method (e.g., after a successful
+ * recompilation, so the counter doesn't immediately fire again).
+ *
+ * @param recomp     Recompilation monitor
+ * @param method_id  Method whose counter to reset
+ */
+void vtx_sota_recomp_hysteresis_reset(vtx_sota_recomp_t *recomp,
+                                        uint32_t method_id);
+
+/**
+ * Get the current consecutive-divergent count for a method.
+ * Returns 0 if no state exists for the method.
+ */
+uint32_t vtx_sota_recomp_hysteresis_count(const vtx_sota_recomp_t *recomp,
+                                            uint32_t method_id);
+
+/* ========================================================================== */
+/* Sprint 1.3: Backpressure-aware queue                                        */
+/* ========================================================================== */
+
+/**
+ * Backpressure-aware queue submission.
+ *
+ * Same as vtx_sota_recomp_queue(), but enforces backpressure:
+ *
+ *   - HARD CAP: if the queue is at VTX_RECOMP_QUEUE_HARD_CAP, the entry
+ *     is rejected (returns false). The orchestrator will re-check the
+ *     method on the next tick.
+ *
+ *   - SOFT CAP: if the queue is above VTX_RECOMP_QUEUE_SOFT_CAP, the
+ *     lowest-priority unprocessed entry (lowest KL divergence) is
+ *     evicted before the new entry is added. This keeps the queue
+ *     drained under sustained divergence.
+ *
+ *   - COALESCE: if the same method is already queued (unprocessed) AND
+ *     was recompiled at least VTX_RECOMP_COALESCE_MAX_DUPLICATES times
+ *     within VTX_RECOMP_COALESCE_WINDOW_SEC, the older entry is removed
+ *     and replaced with the newer one (with updated KL divergence).
+ *
+ * @param recomp       Recompilation monitor
+ * @param method_id    Method to recompile
+ * @param new_profile  Current profile data
+ * @param now_ns       Current monotonic time in nanoseconds (used for
+ *                     coalesce windowing; pass 0 to disable coalescing)
+ * @return             true if the entry was queued, false if rejected
+ *                     by the hard cap
+ */
+bool vtx_sota_recomp_queue_backpressure(vtx_sota_recomp_t *recomp,
+                                          uint32_t method_id,
+                                          const vtx_profile_global_t *new_profile,
+                                          uint64_t now_ns);
+
+/**
+ * Get backpressure statistics.
+ *
+ * @param recomp                Recompilation monitor
+ * @param dropped_soft_cap      Out: entries dropped because queue > soft cap
+ * @param dropped_hard_cap      Out: entries rejected because queue >= hard cap
+ * @param coalesced             Out: older entries merged into newer
+ * @param hysteresis_blocks     Out: would-have-fired but blocked by hysteresis
+ */
+void vtx_sota_recomp_backpressure_stats(const vtx_sota_recomp_t *recomp,
+                                          uint64_t *dropped_soft_cap,
+                                          uint64_t *dropped_hard_cap,
+                                          uint64_t *coalesced,
+                                          uint64_t *hysteresis_blocks);
 
 #endif /* VORTEX_SOTA_RECOMP_H */

@@ -102,6 +102,68 @@
 #define VTX_PHASE_MIN_METHODS 3
 #define VTX_PHASE_MIN_FREQUENCY 1000
 
+/* ======================================================================== */
+/* PGO Stability — confidence, hysteresis, backpressure (Sprint 1)          */
+/* ======================================================================== */
+
+/* Per-feature confidence sample thresholds (Sprint 1.1).
+ *
+ * confidence = min(sample_count / threshold, 1.0)
+ * Below the threshold, the profile datum is considered low-confidence and
+ * MUST NOT be used for speculative optimization (prevents the "saw it once,
+ * now I speculate" deopt storms that dominate bad PGO behavior).
+ *
+ * The values are calibrated to balance two failure modes:
+ *   - Too low: speculation fires on noise → deopt storms
+ *   - Too high: speculation never fires → no PGO benefit
+ *
+ * Branch direction needs the most samples because branch prediction
+ * mistakes are cheap to recover from (just a recompile), so we want to be
+ * sure before we bake the direction into T2/T3 code. Call target needs the
+ * fewest because monomorphic inlining is a high-payoff bet that we want
+ * to take as soon as we have any reasonable evidence. */
+#define VTX_CONFIDENCE_THRESHOLD_BRANCH       100u   /* branch direction samples */
+#define VTX_CONFIDENCE_THRESHOLD_CALL_TARGET  50u    /* monomorphic call target samples */
+#define VTX_CONFIDENCE_THRESHOLD_TYPE_DIST    200u   /* type distribution samples */
+#define VTX_CONFIDENCE_THRESHOLD_LOOP_TRIP    50u    /* loop trip-count samples */
+#define VTX_CONFIDENCE_THRESHOLD_FIELD_SHAPE  100u   /* field shape samples */
+
+/* Tier promotion confidence gates (Sprint 1.1).
+ *
+ * Tier promotion is now gated on BOTH heat (invocation count) AND confidence
+ * (sample quality). A method that is hot but whose profile is low-confidence
+ * stays at T1 and keeps profiling — it does not get promoted to speculative
+ * tiers where wrong assumptions cause deopts. */
+#define VTX_PROMOTION_CONFIDENCE_T2  0.5   /* T1→T2: at least 50% confidence */
+#define VTX_PROMOTION_CONFIDENCE_T3  0.75  /* T2→T3: at least 75% confidence */
+#define VTX_PROMOTION_CONFIDENCE_T4  0.9   /* T3→T4: at least 90% confidence */
+
+/* KL-divergence recomp hysteresis (Sprint 1.2).
+ *
+ * Without hysteresis, KL-recomp fires on every divergent sample. A workload
+ * that oscillates between two phases causes thrashing — the same method
+ * gets recompiled repeatedly. Hysteresis requires N consecutive divergent
+ * samples before triggering recompilation, which filters out transient
+ * blips (GC pause, OS noise, single weird input). */
+#define VTX_RECOMP_HYSTERESIS_CONSECUTIVE 3u
+
+/* Recomp queue backpressure (Sprint 1.3).
+ *
+ * The recomp queue is bounded. When it exceeds the soft cap, low-priority
+ * entries (low KL divergence, recently-recompiled methods) are dropped
+ * to prevent core starvation. The hard cap is the absolute maximum queue
+ * depth; attempts to enqueue past this are rejected (the method will be
+ * re-checked on the next orchestrator tick). */
+#define VTX_RECOMP_QUEUE_SOFT_CAP 64u
+#define VTX_RECOMP_QUEUE_HARD_CAP 256u
+
+/* Coalesce window for re-recompilation (Sprint 1.3).
+ * If the same method diverges N times within this window (seconds), the
+ * older queue entries are coalesced into the newest one — recompile once
+ * with the latest profile, not N times. */
+#define VTX_RECOMP_COALESCE_WINDOW_SEC 1u
+#define VTX_RECOMP_COALESCE_MAX_DUPLICATES 5u
+
 /* LRU */
 #define VTX_LRU_UPDATE_INTERVAL 100
 

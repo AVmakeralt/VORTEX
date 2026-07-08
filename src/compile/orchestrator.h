@@ -10,6 +10,7 @@
 #include "interp/type_feedback.h"
 #include "interp/profiler.h"
 #include "profile/data.h"
+#include "profile/phase_partition.h"
 #include "inliner/feedback.h"
 
 /* Forward declaration */
@@ -104,6 +105,14 @@ typedef struct {
     vtx_profile_global_t      *profile;          /* global profile data */
     vtx_inline_feedback_t     *inline_feedback;  /* inline feedback tracker */
 
+    /* Sprint 2: Phase-aware profile partition.
+     * When non-NULL, this overrides `profile` for recomp decisions —
+     * the orchestrator reads from the partition's active phase profile
+     * and transitions on phase changes. The `profile` pointer is kept
+     * for backward compatibility (it points to the active phase's
+     * profile, updated on each transition). */
+    vtx_phase_partition_t     *phase_partition;   /* per-phase profile storage */
+
     /* Deoptless continuation tables (array indexed by method_id).
      * The orchestrator checks these periodically for methods that
      * have accumulated enough failed guards to warrant continuation
@@ -130,6 +139,8 @@ typedef struct {
     uint64_t                   total_recomp_triggers;
     uint64_t                   total_fdi_recompiles;
     uint64_t                   total_phase_reactivations;
+    uint64_t                   total_phase_partition_transitions; /* Sprint 2 */
+    uint64_t                   total_phase_preemptive_recompiles; /* Sprint 2 */
 } vtx_orchestrator_t;
 
 /* ========================================================================== */
@@ -263,6 +274,49 @@ void vtx_orchestrator_on_compile_done(vtx_orchestrator_t *orch,
 void vtx_orchestrator_wake(vtx_orchestrator_t *orch);
 
 /* ========================================================================== */
+/* Sprint 2: Phase-aware profile partition wiring                              */
+/* ========================================================================== */
+
+/**
+ * Attach a phase-aware profile partition to the orchestrator.
+ *
+ * After this call, the orchestrator will:
+ *   - Read from the partition's active phase profile (instead of the
+ *     static `profile` pointer) for recomp decisions.
+ *   - On phase transitions detected by the phase detector, call
+ *     vtx_phase_partition_transition() to swap the active profile.
+ *   - After a transition, preemptively recompile the new phase's hot
+ *     methods using the new phase's profile.
+ *
+ * The orchestrator does NOT own the partition — the caller must keep it
+ * alive for the orchestrator's lifetime and destroy it after
+ * vtx_orchestrator_stop().
+ *
+ * Pass NULL to detach (revert to the single-profile mode).
+ *
+ * @param orch   Orchestrator
+ * @param part   Phase partition (may be NULL)
+ */
+void vtx_orchestrator_set_phase_partition(vtx_orchestrator_t *orch,
+                                            vtx_phase_partition_t *part);
+
+/**
+ * Manually trigger a phase partition transition.
+ *
+ * Called by the interpreter/runtime when a phase transition is detected
+ * outside the orchestrator's periodic check (e.g., immediately when
+ * the phase detector fires). This swaps the active profile and queues
+ * preemptive recompilation of the new phase's hot methods.
+ *
+ * If no partition is attached, this is a no-op.
+ *
+ * @param orch          Orchestrator
+ * @param new_phase_id  Phase to transition to
+ */
+void vtx_orchestrator_phase_transition(vtx_orchestrator_t *orch,
+                                         uint32_t new_phase_id);
+
+/* ========================================================================== */
 /* Statistics                                                                  */
 /* ========================================================================== */
 
@@ -276,5 +330,16 @@ void vtx_orchestrator_get_stats(const vtx_orchestrator_t *orch,
                                   uint64_t *total_recomp_triggers,
                                   uint64_t *total_fdi_recompiles,
                                   uint64_t *total_phase_reactivations);
+
+/**
+ * Get Sprint 2 partition statistics.
+ *
+ * @param orch                              Orchestrator
+ * @param total_partition_transitions       Out: phase profile swaps
+ * @param total_preemptive_recompiles       Out: methods recompiled on phase entry
+ */
+void vtx_orchestrator_get_partition_stats(const vtx_orchestrator_t *orch,
+                                            uint64_t *total_partition_transitions,
+                                            uint64_t *total_preemptive_recompiles);
 
 #endif /* VORTEX_COMPILE_ORCHESTRATOR_H */

@@ -122,6 +122,10 @@ add_library(vortex_profile STATIC
     profile/merge.c
     profile/phase.c
     profile/sha256.c
+    profile/confidence.c
+    profile/deterministic.c
+    profile/phase_partition.c
+    profile/phase_persist.c
 )
 target_include_directories(vortex_profile PUBLIC ${VORTEX_INCLUDE_DIRS})
 target_link_libraries(vortex_profile PUBLIC vortex_runtime)
