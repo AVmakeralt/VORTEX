@@ -361,6 +361,20 @@ target_link_libraries(test_pgo_sprint2 PRIVATE
 add_test(NAME test_pgo_sprint2 COMMAND test_pgo_sprint2)
 set_tests_properties(test_pgo_sprint2 PROPERTIES TIMEOUT 30)
 
+# test_pgo_sprint3: PGO ensemble profiles (robust aggregate, demotion, rollback)
+add_executable(test_pgo_sprint3
+    unit/test_pgo_sprint3.c
+)
+target_link_libraries(test_pgo_sprint3 PRIVATE
+    vortex_test_framework
+    vortex_profile
+    vortex_runtime
+    m
+    pthread
+)
+add_test(NAME test_pgo_sprint3 COMMAND test_pgo_sprint3)
+set_tests_properties(test_pgo_sprint3 PROPERTIES TIMEOUT 30)
+
 # ---- Stress tests (1000 tests) ----
 
 # test_stress_runtime: Arena, Object, Type System, Bytecode, GC (200 tests)
