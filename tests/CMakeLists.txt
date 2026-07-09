@@ -375,6 +375,20 @@ target_link_libraries(test_pgo_sprint3 PRIVATE
 add_test(NAME test_pgo_sprint3 COMMAND test_pgo_sprint3)
 set_tests_properties(test_pgo_sprint3 PROPERTIES TIMEOUT 30)
 
+# test_pgo_sprint4: PGO input-shape-keyed profiles (novel differentiator)
+add_executable(test_pgo_sprint4
+    unit/test_pgo_sprint4.c
+)
+target_link_libraries(test_pgo_sprint4 PRIVATE
+    vortex_test_framework
+    vortex_profile
+    vortex_runtime
+    m
+    pthread
+)
+add_test(NAME test_pgo_sprint4 COMMAND test_pgo_sprint4)
+set_tests_properties(test_pgo_sprint4 PROPERTIES TIMEOUT 30)
+
 # ---- Stress tests (1000 tests) ----
 
 # test_stress_runtime: Arena, Object, Type System, Bytecode, GC (200 tests)

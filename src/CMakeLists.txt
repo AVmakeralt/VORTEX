@@ -127,6 +127,8 @@ add_library(vortex_profile STATIC
     profile/phase_partition.c
     profile/phase_persist.c
     profile/ensemble.c
+    profile/input_shape.c
+    profile/shape_dispatch.c
 )
 target_include_directories(vortex_profile PUBLIC ${VORTEX_INCLUDE_DIRS})
 target_link_libraries(vortex_profile PUBLIC vortex_runtime)
