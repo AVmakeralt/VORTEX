@@ -36,6 +36,7 @@
 #include "profile/deterministic.h"
 #include "profile/confidence.h"
 #include "profile/ensemble.h"
+#include "codecache/t1_persist.h"
 #include "ir/node.h"
 #include "ir/graph.h"
 #include "ir/gvn.h"
@@ -3144,6 +3145,45 @@ int main(int argc, char *argv[])
 
             /* Register atexit handler to save profile on shutdown */
             vtx_profile_register_atexit(&profile, profile_file, bytecode_hash);
+
+            /* Sprint 5: T1 code persistence — the cold-start killer.
+             *
+             * On startup, try to mmap the persisted T1 code cache. If it
+             * exists and the bytecode hash matches, the interpreter can
+             * skip directly to native code for known methods — no profiling
+             * phase, no T1 compilation overhead.
+             *
+             * Only T1 (non-speculative) code is persisted. T2/T3 code is
+             * speculative and depends on profile matching, so it's not
+             * persisted (wrong-code risk).
+             *
+             * The T1 cache file is at <dir>/<hash_hex>.t1c. If it doesn't
+             * exist (first run), this is a no-op — the interpreter runs
+             * normally and the T1 cache will be saved at exit.
+             *
+             * Opt-out via VORTEX_NO_T1_CACHE=1. */
+            vtx_t1_cache_t t1_cache;
+            bool t1_cache_loaded = false;
+            const char *no_t1 = getenv("VORTEX_NO_T1_CACHE");
+            if (!(no_t1 && strcmp(no_t1, "1") == 0) &&
+                !vtx_deterministic_disable_persistence()) {
+                char t1_file[600];
+                if (vtx_t1_cache_filename(dir, hash_hex, t1_file, sizeof(t1_file)) == 0) {
+                    if (vtx_t1_cache_load(&t1_cache, t1_file, bytecode_hash)) {
+                        uint32_t mcount = 0, csize = 0;
+                        uint64_t ltime = 0;
+                        uint32_t relocs = 0;
+                        vtx_t1_cache_stats(&t1_cache, &mcount, &csize, &ltime, &relocs);
+                        fprintf(stderr, "[pgo] Loaded T1 code cache from %s "
+                                "(%u methods, %u bytes, %lu ns load)\n",
+                                t1_file, mcount, csize, (unsigned long)ltime);
+                        t1_cache_loaded = true;
+                    } else {
+                        fprintf(stderr, "[pgo] No T1 code cache at %s (cold start)\n",
+                                t1_file);
+                    }
+                }
+            }
 
             /* Sprint 3: Ensemble profiles (opt-in via VORTEX_ENSEMBLE=1).
              *

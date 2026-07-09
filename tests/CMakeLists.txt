@@ -389,6 +389,24 @@ target_link_libraries(test_pgo_sprint4 PRIVATE
 add_test(NAME test_pgo_sprint4 COMMAND test_pgo_sprint4)
 set_tests_properties(test_pgo_sprint4 PROPERTIES TIMEOUT 30)
 
+# test_pgo_sprint5: PGO T1 code persistence (cold-start killer)
+add_executable(test_pgo_sprint5
+    unit/test_pgo_sprint5.c
+)
+target_link_libraries(test_pgo_sprint5 PRIVATE
+    vortex_test_framework
+    vortex_codecache
+    vortex_profile
+    vortex_runtime
+    vortex_lower
+    vortex_ir
+    vortex_deopt
+    m
+    pthread
+)
+add_test(NAME test_pgo_sprint5 COMMAND test_pgo_sprint5)
+set_tests_properties(test_pgo_sprint5 PROPERTIES TIMEOUT 30)
+
 # ---- Stress tests (1000 tests) ----
 
 # test_stress_runtime: Arena, Object, Type System, Bytecode, GC (200 tests)
