@@ -131,11 +131,20 @@ static bool ensure_capacity_locked(vtx_shape_dispatch_mgr_t *mgr,
 {
     if (method_id < mgr->table_capacity) return true;
 
+    /* BUGFIX P21: Same overflow fix as input_shape.c — check for
+     * overflow before doubling. */
     uint32_t new_cap = mgr->table_capacity;
-    while (new_cap <= method_id) new_cap *= 2;
+    while (new_cap <= method_id) {
+        if (new_cap >= (UINT32_MAX / 2)) {
+            new_cap = UINT32_MAX;
+            break;
+        }
+        new_cap *= 2;
+    }
+    if (new_cap <= method_id) return false;
 
     vtx_shape_dispatch_t **new_tables = (vtx_shape_dispatch_t **)realloc(
-        mgr->tables, new_cap * sizeof(vtx_shape_dispatch_t *));
+        mgr->tables, (size_t)new_cap * sizeof(vtx_shape_dispatch_t *));
     if (new_tables == NULL) return false;
     memset(new_tables + mgr->table_capacity, 0,
            (new_cap - mgr->table_capacity) * sizeof(vtx_shape_dispatch_t *));
@@ -282,41 +291,61 @@ void *vtx_shape_dispatch_lookup(vtx_shape_dispatch_mgr_t *mgr,
                                   vtx_input_shape_t shape)
 {
     if (mgr == NULL) return NULL;
-    if (method_id >= mgr->table_count) return NULL;
-    vtx_shape_dispatch_t *table = mgr->tables[method_id];
-    if (table == NULL) return NULL;
 
-    /* Lock-free read: we scan the versions array without acquiring the
-     * mutex. This is safe because:
-     *   - Writes use atomic pointer swaps (the compiled_code field is
-     *     aligned and naturally atomic on x86-64 for 8-byte values)
-     *   - The 'valid' flag is set BEFORE the pointer (release ordering)
-     *   - If we read a stale 'valid=false', we just fall back to default
+    /* BUGFIX P5/P6: The old code was "lock-free" but actually racy:
+     *   P5: plain reads/writes, no atomics. On x86-64 the compiler can
+     *       reorder; on ARM the CPU reorders. Torn pointer read → jump
+     *       to garbage.
+     *   P6: reader accesses mgr->tables[method_id] without lock. A
+     *       concurrent install triggers realloc → UAF on the old array.
      *
-     * First, try the specific shape. */
+     * Fix: acquire the global mutex for the tables array access, then
+     * acquire the per-method mutex for the versions array. This is
+     * slower than the broken "lock-free" version, but it's correct.
+     * The call-time path can be optimized later with RCU or hazard
+     * pointers, but correctness first. */
+    pthread_mutex_lock(&mgr->global_mutex);
+    if (method_id >= mgr->table_count) {
+        pthread_mutex_unlock(&mgr->global_mutex);
+        return NULL;
+    }
+    /* Read the table pointer while holding the global lock so we don't
+     * race with a realloc of the tables array. */
+    vtx_shape_dispatch_t *table = mgr->tables[method_id];
+    if (table == NULL) {
+        pthread_mutex_unlock(&mgr->global_mutex);
+        return NULL;
+    }
+    /* Hold the per-method mutex while scanning versions. This prevents
+     * P7 (eviction UAF): the compiler can't free a version while we're
+     * holding the lock. */
+    pthread_mutex_lock(&table->mutex);
+    pthread_mutex_unlock(&mgr->global_mutex);  /* can release global now */
+
+    /* Try the specific shape first. */
+    void *result = NULL;
     for (uint32_t i = 1; i < VTX_SHAPE_DISPATCH_MAX_VERSIONS; i++) {
         if (table->versions[i].valid && table->versions[i].shape == shape) {
             void *code = table->versions[i].compiled_code;
             if (code != NULL) {
-                /* Atomic increment of call_count (no mutex needed for stats). */
-                __atomic_fetch_add(&table->versions[i].call_count, 1,
-                                     __ATOMIC_RELAXED);
-                return code;
+                table->versions[i].call_count++;
+                result = code;
+                break;
             }
         }
     }
 
-    /* Fall back to the default version (index 0). */
-    if (table->versions[0].valid) {
+    /* Fall back to the default version (index 0) if no shape-specific match. */
+    if (result == NULL && table->versions[0].valid) {
         void *code = table->versions[0].compiled_code;
         if (code != NULL) {
-            __atomic_fetch_add(&table->versions[0].call_count, 1,
-                                 __ATOMIC_RELAXED);
-            return code;
+            table->versions[0].call_count++;
+            result = code;
         }
     }
 
-    return NULL;
+    pthread_mutex_unlock(&table->mutex);
+    return result;
 }
 
 void vtx_shape_dispatch_record(vtx_shape_dispatch_mgr_t *mgr,

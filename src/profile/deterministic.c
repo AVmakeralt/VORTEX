@@ -3,27 +3,38 @@
  *
  * Caches the VORTEX_DETERMINISTIC env var at startup so the hot path
  * is a single boolean check.
+ *
+ * BUGFIX P22: The old code had a race on lazy init — g_initialized and
+ * g_enabled were non-atomic plain bools, and getenv() is not thread-safe.
+ * Two threads calling vtx_deterministic_enabled() concurrently on first
+ * access could both read g_initialized=false, both call getenv(), and
+ * race on writing g_enabled. Fix: use pthread_once for thread-safe
+ * one-time initialization.
  */
 
 #include "profile/deterministic.h"
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 
 /* ========================================================================== */
 /* Module state                                                                */
 /* ========================================================================== */
 
-static bool     g_initialized = false;
 static bool     g_enabled     = false;
+static pthread_once_t g_once  = PTHREAD_ONCE_INIT;
 
 /* ========================================================================== */
-/* Initialization                                                              */
+/* Initialization (thread-safe via pthread_once)                               */
 /* ========================================================================== */
 
-void vtx_deterministic_init(void)
+static void deterministic_init_once(void)
 {
-    if (g_initialized) return;
-
+    /* getenv() is not thread-safe in general, but pthread_once ensures
+     * this function runs exactly once before any concurrent access.
+     * After pthread_once returns, g_enabled is stable and can be read
+     * without synchronization (it's written before the once completes,
+     * and pthread_once provides a happens-before relationship). */
     const char *val = getenv("VORTEX_DETERMINISTIC");
     if (val == NULL) {
         g_enabled = false;
@@ -35,8 +46,11 @@ void vtx_deterministic_init(void)
         /* "1", "true", "yes", anything non-empty non-"0" → enabled. */
         g_enabled = true;
     }
+}
 
-    g_initialized = true;
+void vtx_deterministic_init(void)
+{
+    pthread_once(&g_once, deterministic_init_once);
 }
 
 /* ========================================================================== */
@@ -45,7 +59,7 @@ void vtx_deterministic_init(void)
 
 bool vtx_deterministic_enabled(void)
 {
-    if (!g_initialized) vtx_deterministic_init();
+    pthread_once(&g_once, deterministic_init_once);
     return g_enabled;
 }
 

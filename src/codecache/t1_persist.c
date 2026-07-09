@@ -102,11 +102,22 @@ bool vtx_t1_cache_save(const char *filename,
     char tmpname[1024];
     snprintf(tmpname, sizeof(tmpname), "%s.tmp", filename);
 
-    FILE *f = fopen(tmpname, "wb");
-    if (f == NULL) return false;
-
-    /* Set restrictive permissions (0600). */
-    chmod(tmpname, 0600);
+    /* BUGFIX P20: The old code used fopen("wb") which creates the file
+     * with 0644 permissions (world-readable), then called chmod(0600)
+     * after. There's a window where the file is world-readable and
+     * contains executable native code. An attacker could read the code
+     * before chmod runs.
+     *
+     * Fix: use open() with O_CREAT and mode 0600 directly, then fdopen
+     * to get a FILE*. The file is created with restrictive permissions
+     * from the start — no window. */
+    int tmpfd = open(tmpname, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (tmpfd < 0) return false;
+    FILE *f = fdopen(tmpfd, "wb");
+    if (f == NULL) {
+        close(tmpfd);
+        return false;
+    }
 
     /* Compute total code size and build the method/reloc descriptors. */
     uint32_t total_code_size = 0;
@@ -130,11 +141,15 @@ bool vtx_t1_cache_save(const char *filename,
     header.method_count = method_count;
     header.total_code_size = total_code_size;
 
-    /* CRC is computed over everything after the CRC field. */
+    /* CRC is computed over everything AFTER the CRC field (offset 12).
+     * BUGFIX P3: The old save code included magic+version in the CRC
+     * (they're before the CRC field), causing a mismatch with the load
+     * code which starts at offset 12. Fix: only CRC the fields after
+     * the CRC field. */
     uint32_t crc = 0;
-    crc = crc32_update(crc, &header.magic, 4);
-    crc = crc32_update(crc, &header.version, 4);
-    /* skip CRC field itself */
+    /* Skip magic (4) + version (4) + crc32 (4) = 12 bytes.
+     * CRC covers: bytecode_hash + method_count + total_code_size +
+     * method descriptors + code blob. */
     crc = crc32_update(crc, header.bytecode_hash, VTX_PROFILE_HASH_SIZE);
     crc = crc32_update(crc, &header.method_count, 4);
     crc = crc32_update(crc, &header.total_code_size, 4);
@@ -234,6 +249,56 @@ bool vtx_t1_cache_load(vtx_t1_cache_t *cache,
         fclose(f); return false;
     }
 
+    /* BUGFIX P3: Verify the CRC32. The old code computed the CRC on save
+     * but NEVER checked it on load. A corrupted file would be mmap'd as
+     * PROT_EXEC and executed — arbitrary code execution from corrupted
+     * or attacker-controlled data.
+     *
+     * Fix: read the entire file, compute the CRC over everything after
+     * the CRC field, and reject if it doesn't match. */
+    {
+        /* Get file size. */
+        struct stat st;
+        if (fstat(fileno(f), &st) != 0) {
+            fclose(f); return false;
+        }
+        size_t file_size = (size_t)st.st_size;
+
+        /* The CRC field is at offset 8 (after magic + version). Everything
+         * after the CRC field (offset 12) is CRC'd. */
+        if (file_size < 12) {
+            fclose(f); return false;
+        }
+
+        /* Read everything after the CRC field. */
+        size_t crc_region_len = file_size - 12;
+        uint8_t *crc_region = (uint8_t *)malloc(crc_region_len);
+        if (crc_region == NULL) {
+            fclose(f); return false;
+        }
+        /* Seek to offset 12 (after magic+version+crc). */
+        if (fseek(f, 12, SEEK_SET) != 0) {
+            free(crc_region); fclose(f); return false;
+        }
+        if (fread(crc_region, 1, crc_region_len, f) != crc_region_len) {
+            free(crc_region); fclose(f); return false;
+        }
+        uint32_t actual_crc = crc32_update(0, crc_region, crc_region_len);
+        free(crc_region);
+
+        if (actual_crc != header.crc32) {
+            fprintf(stderr, "[t1_cache] CRC mismatch: file corrupted (expected %08x, got %08x)\n",
+                    header.crc32, actual_crc);
+            fclose(f);
+            return false;
+        }
+
+        /* Seek back to after the header for method reading. */
+        if (fseek(f, sizeof(vtx_t1_cache_header_t), SEEK_SET) != 0) {
+            fclose(f); return false;
+        }
+    }
+
     /* Verify bytecode hash (version gating). */
     if (expected_hash != NULL) {
         if (memcmp(header.bytecode_hash, expected_hash, VTX_PROFILE_HASH_SIZE) != 0) {
@@ -255,6 +320,26 @@ bool vtx_t1_cache_load(vtx_t1_cache_t *cache,
     for (uint32_t i = 0; i < cache->method_count; i++) {
         if (fread(&cache->methods[i], 1, sizeof(vtx_t1_persist_method_t), f)
             != sizeof(vtx_t1_persist_method_t)) {
+            free(cache->methods); cache->methods = NULL;
+            fclose(f); return false;
+        }
+        /* BUGFIX P4: Validate entry point bounds. The old code did
+         * code_base + code_offset + entry_offset without checking that
+         * the result is within the mmap'd region. A malformed file
+         * could cause a jump to unmapped memory.
+         *
+         * Fix: verify code_offset + code_size <= total_code_size, and
+         * entry_offset < code_size. */
+        if (cache->methods[i].code_offset > header.total_code_size ||
+            cache->methods[i].code_size > header.total_code_size - cache->methods[i].code_offset) {
+            fprintf(stderr, "[t1_cache] method %u: code_offset/size out of bounds\n",
+                    cache->methods[i].method_id);
+            free(cache->methods); cache->methods = NULL;
+            fclose(f); return false;
+        }
+        if (cache->methods[i].entry_offset >= cache->methods[i].code_size) {
+            fprintf(stderr, "[t1_cache] method %u: entry_offset out of bounds\n",
+                    cache->methods[i].method_id);
             free(cache->methods); cache->methods = NULL;
             fclose(f); return false;
         }

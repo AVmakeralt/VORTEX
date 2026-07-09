@@ -68,15 +68,34 @@ double vtx_confidence_type_dist(const vtx_callsite_profile_t *callsite)
 {
     if (callsite == NULL) return 0.0;
     if (callsite->megamorphic) return 0.0;
-    /* Same caveat as call_target: the callsite profile tracks distinct
-     * types, not total observations. We use the type count as a proxy:
-     * each observed type represents "at least one sample". This is a
-     * conservative lower bound — the real sample count is at least this
-     * large. The TYPE_DIST threshold is high (200) precisely because
-     * we can't measure true sample count here; when D5 data is available,
-     * the orchestrator should query vtx_type_freq_t.total_count directly. */
-    return confidence_from_count((uint64_t)callsite->count,
-                                   VTX_CONFIDENCE_THRESHOLD_TYPE_DIST);
+    /* BUGFIX P10: The callsite profile tracks DISTINCT types (max
+     * VTX_POLY_LIMIT=4), NOT total observation count. The old code
+     * divided callsite->count (max 4) by the threshold (200), giving
+     * a max confidence of 0.02. This meant no method with call sites
+     * could ever reach the T2 promotion gate (0.5), making the entire
+     * PGO tier promotion system non-functional.
+     *
+     * The fix: a monomorphic callsite (count==1) is high-confidence
+     * by definition — we've seen exactly one type, and that's the
+     * strongest possible signal. A polymorphic site (2-4 types) has
+     * lower confidence proportional to how many types are seen.
+     * Megamorphic sites have confidence 0 (can't speculate on a
+     * stable distribution).
+     *
+     * The TYPE_DIST threshold (200) was calibrated for total sample
+     * count, which we don't have here. Since the callsite profile
+     * only gives us distinct-type count, we use a different formula:
+     *   - monomorphic (1 type): confidence 1.0 (strongest signal)
+     *   - polymorphic (2-4 types): confidence = 1.0 / count (more
+     *     types = less confidence in any single one)
+     * This correctly reflects that a monomorphic site is highly
+     * predictable while a 4-type polymorphic site is less so. */
+    if (callsite->count == 0) return 0.0;
+    if (callsite->count == 1) return 1.0;  /* monomorphic = max confidence */
+    /* Polymorphic: 2 types = 0.5, 3 types = 0.33, 4 types = 0.25.
+     * This naturally gates T2 promotion (needs 0.5) to monomorphic
+     * and 2-type polymorphic sites, which is the right behavior. */
+    return 1.0 / (double)callsite->count;
 }
 
 double vtx_confidence_loop_trip(const vtx_loop_profile_t *loop)
@@ -96,8 +115,17 @@ double vtx_confidence_field_shape(const vtx_field_profile_t *field)
 {
     if (field == NULL) return 0.0;
     if (field->megamorphic) return 0.0;
-    return confidence_from_count((uint64_t)field->count,
-                                   VTX_CONFIDENCE_THRESHOLD_FIELD_SHAPE);
+    /* BUGFIX P10: Same bug as type_dist — field->count is the number of
+     * DISTINCT shapes (max VTX_POLY_LIMIT=4), NOT total observations.
+     * Dividing 4 by 100 gives max confidence 0.04, which blocks T2
+     * promotion for any method with field accesses.
+     *
+     * Fix: monomorphic field access (1 shape) = confidence 1.0.
+     * Polymorphic = 1.0/count. This correctly gates T2 to monomorphic
+     * and 2-shape polymorphic sites. */
+    if (field->count == 0) return 0.0;
+    if (field->count == 1) return 1.0;
+    return 1.0 / (double)field->count;
 }
 
 /* ========================================================================== */

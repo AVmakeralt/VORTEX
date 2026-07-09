@@ -390,13 +390,20 @@ static void aggregate_method(vtx_profile_method_t *out_method,
             }
 
             /* Ensure the output has this callsite. */
+            /* BUGFIX P9: The old code used a while loop that broke on realloc
+             * failure, then fell through to write past the allocated array.
+             * If realloc fails, we must skip this callsite entirely, not
+             * write to unallocated memory. */
             while (cs_idx >= out_method->call_site_capacity) {
                 uint32_t new_cap = out_method->call_site_capacity == 0
                     ? 8 : out_method->call_site_capacity * 2;
                 vtx_callsite_profile_t *new_arr = realloc(
                     out_method->call_sites,
                     (size_t)new_cap * sizeof(vtx_callsite_profile_t));
-                if (new_arr == NULL) break;
+                if (new_arr == NULL) {
+                    /* Realloc failed — skip this callsite, don't write OOB. */
+                    goto skip_callsite;
+                }
                 memset(new_arr + out_method->call_site_capacity, 0,
                        (size_t)(new_cap - out_method->call_site_capacity) *
                        sizeof(vtx_callsite_profile_t));
@@ -431,6 +438,7 @@ static void aggregate_method(vtx_profile_method_t *out_method,
                 }
                 ocs->types[ocs->count++] = types_seen[best];
             }
+        skip_callsite: ;
         }
     }
 

@@ -72,6 +72,45 @@ VTX_TEST(confidence_call_target_monomorphic)
     VTX_ASSERT_TRUE(vtx_confidence_call_target(&cs) == 1.0);
 }
 
+VTX_TEST(confidence_type_dist_monomorphic_is_high)
+{
+    /* BUGFIX P10: monomorphic callsite must have high confidence (1.0),
+     * not 0.005 (the old broken behavior). This is the bug that made
+     * PGO tier promotion non-functional. */
+    vtx_callsite_profile_t cs;
+    memset(&cs, 0, sizeof(cs));
+    cs.count = 1;
+    cs.types[0] = 42;
+    VTX_ASSERT_TRUE(vtx_confidence_type_dist(&cs) == 1.0);
+}
+
+VTX_TEST(confidence_type_dist_polymorphic_decreases)
+{
+    /* 2 types → 0.5, 3 types → 0.33, 4 types → 0.25.
+     * 2-type sites should meet the T2 gate (0.5); 3+ should not. */
+    vtx_callsite_profile_t cs2;
+    memset(&cs2, 0, sizeof(cs2));
+    cs2.count = 2; cs2.types[0] = 1; cs2.types[1] = 2;
+    double c2 = vtx_confidence_type_dist(&cs2);
+    VTX_ASSERT_TRUE(c2 >= 0.49 && c2 <= 0.51);
+
+    vtx_callsite_profile_t cs3;
+    memset(&cs3, 0, sizeof(cs3));
+    cs3.count = 3; cs3.types[0] = 1; cs3.types[1] = 2; cs3.types[2] = 3;
+    double c3 = vtx_confidence_type_dist(&cs3);
+    VTX_ASSERT_TRUE(c3 >= 0.30 && c3 <= 0.37);
+}
+
+VTX_TEST(confidence_field_shape_monomorphic_is_high)
+{
+    /* BUGFIX P10: same fix for field shapes. */
+    vtx_field_profile_t fp;
+    memset(&fp, 0, sizeof(fp));
+    fp.count = 1;
+    fp.shapes[0] = 7;
+    VTX_ASSERT_TRUE(vtx_confidence_field_shape(&fp) == 1.0);
+}
+
 VTX_TEST(confidence_call_target_megamorphic)
 {
     vtx_callsite_profile_t cs;

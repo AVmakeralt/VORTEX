@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/uio.h>  /* writev */
 #include <time.h>
 
 /* ========================================================================== */
@@ -100,13 +101,23 @@ static int write_entry(vtx_patch_log_t *log,
     eh.payload_len = payload_len;
     eh.crc32 = (payload_len > 0) ? pl_crc32(payload, payload_len) : 0;
 
-    /* Write entry header. */
-    if (write(log->fd, &eh, sizeof(eh)) != (ssize_t)sizeof(eh)) return -1;
+    /* BUGFIX P15: The old code used two separate write() calls (header,
+     * then payload). O_APPEND makes each write atomic, but the PAIR is
+     * not atomic — a crash between the two writes produces a torn entry.
+     * The CRC check on replay catches this, but we can do better: use
+     * writev() to make the header+payload a single atomic write.
+     *
+     * writev() with O_APPEND is atomic on Linux for the full iovec
+     * (see writev(2) man page: "The data is written atomically"). */
+    struct iovec iov[2];
+    iov[0].iov_base = &eh;
+    iov[0].iov_len = sizeof(eh);
+    iov[1].iov_base = (void *)payload;
+    iov[1].iov_len = payload_len;
 
-    /* Write payload. */
-    if (payload_len > 0 && payload != NULL) {
-        if (write(log->fd, payload, payload_len) != (ssize_t)payload_len) return -1;
-    }
+    ssize_t total = sizeof(eh) + payload_len;
+    ssize_t written = writev(log->fd, iov, (payload_len > 0) ? 2 : 1);
+    if (written != total) return -1;
 
     log->entry_count++;
     log->bytes_written += sizeof(eh) + payload_len;
@@ -289,21 +300,42 @@ int vtx_patch_log_append_snapshot(vtx_patch_log_t *log,
 {
     if (method == NULL) return -1;
 
-    /* Build the payload: header + branches + callsites + loops + fields. */
-    vtx_snapshot_payload_header_t sph;
-    sph.invocation_count = method->invocation_count;
-    sph.branch_count = method->branch_count;
-    sph.callsite_count = method->call_site_count;
-    sph.loop_count = method->loop_count;
-    sph.field_count = method->field_access_count;
+    /* BUGFIX P1: The old payload_len computation used call_site_count *
+     * sizeof(callsite_entry), but the write loop iterates cs->count
+     * per callsite (up to VTX_POLY_LIMIT=4 types each). A polymorphic
+     * callsite with 4 types writes 4 entries but payload_len only
+     * accounted for 1. Heap buffer overflow on any polymorphic call
+     * site. Same bug for field_access_count (shapes per field).
+     *
+     * Fix: compute the ACTUAL number of callsite/field entries by
+     * summing cs->count and fp->count.
+     *
+     * BUGFIX P2: The old computation used uint32_t multiplication,
+     * which overflows for large profiles (>4GB). Fix: use size_t and
+     * check for overflow. */
 
-    uint32_t payload_len = sizeof(sph)
-        + method->branch_count * sizeof(vtx_snapshot_branch_t)
-        + method->call_site_count * sizeof(vtx_snapshot_callsite_t)
-        + method->loop_count * sizeof(vtx_snapshot_loop_t)
-        + method->field_access_count * sizeof(vtx_snapshot_field_t);
+    /* Count actual callsite entries (sum of types per callsite). */
+    uint32_t callsite_entries = 0;
+    for (uint32_t c = 0; c < method->call_site_count; c++) {
+        callsite_entries += method->call_sites[c].count;
+    }
 
-    if (payload_len > VTX_PATCH_LOG_MAX_PAYLOAD) {
+    /* Count actual field entries (sum of shapes per field). */
+    uint32_t field_entries = 0;
+    for (uint32_t f = 0; f < method->field_access_count; f++) {
+        field_entries += method->field_accesses[f].count;
+    }
+
+    /* Compute payload size using size_t to avoid uint32_t overflow. */
+    size_t payload_len_sz = sizeof(vtx_snapshot_payload_header_t)
+        + (size_t)method->branch_count * sizeof(vtx_snapshot_branch_t)
+        + (size_t)callsite_entries * sizeof(vtx_snapshot_callsite_t)
+        + (size_t)method->loop_count * sizeof(vtx_snapshot_loop_t)
+        + (size_t)field_entries * sizeof(vtx_snapshot_field_t);
+
+    /* Check for overflow: if payload_len_sz doesn't fit in uint32_t,
+     * fall back to individual deltas. */
+    if (payload_len_sz > VTX_PATCH_LOG_MAX_PAYLOAD) {
         /* Method too large for a single entry — fall back to individual deltas. */
         for (uint32_t b = 0; b < method->branch_count; b++) {
             vtx_branch_payload_t bp;
@@ -313,11 +345,39 @@ int vtx_patch_log_append_snapshot(vtx_patch_log_t *log,
             if (write_entry(log, VTX_PATCH_BRANCH_UPDATE, method->method_id,
                             &bp, sizeof(bp)) != 0) return -1;
         }
+        for (uint32_t c = 0; c < method->call_site_count; c++) {
+            const vtx_callsite_profile_t *cs = &method->call_sites[c];
+            for (uint32_t t = 0; t < cs->count; t++) {
+                if (vtx_patch_log_append_callsite(log, method->method_id,
+                                                     c, cs->types[t]) != 0) return -1;
+            }
+        }
+        for (uint32_t l = 0; l < method->loop_count; l++) {
+            if (vtx_patch_log_append_loop(log, method->method_id,
+                                            method->loops[l].loop_header_pc,
+                                            method->loops[l].backedge_count) != 0) return -1;
+        }
+        for (uint32_t f = 0; f < method->field_access_count; f++) {
+            const vtx_field_profile_t *fp = &method->field_accesses[f];
+            for (uint32_t s = 0; s < fp->count; s++) {
+                if (vtx_patch_log_append_field(log, method->method_id,
+                                                 fp->field_offset, fp->shapes[s]) != 0) return -1;
+            }
+        }
         return 0;
     }
 
+    uint32_t payload_len = (uint32_t)payload_len_sz;
     uint8_t *buf = (uint8_t *)malloc(payload_len);
     if (buf == NULL) return -1;
+
+    /* Build the payload header. */
+    vtx_snapshot_payload_header_t sph;
+    sph.invocation_count = method->invocation_count;
+    sph.branch_count = method->branch_count;
+    sph.callsite_count = callsite_entries;  /* ACTUAL entry count, not call_site_count */
+    sph.loop_count = method->loop_count;
+    sph.field_count = field_entries;        /* ACTUAL entry count, not field_access_count */
 
     uint32_t off = 0;
     memcpy(buf + off, &sph, sizeof(sph)); off += sizeof(sph);
@@ -470,11 +530,41 @@ int vtx_patch_log_replay(vtx_patch_log_t *log,
                     if (off + sizeof(vtx_snapshot_branch_t) > eh.payload_len) break;
                     vtx_snapshot_branch_t *sb = (vtx_snapshot_branch_t *)(payload + off);
                     off += sizeof(vtx_snapshot_branch_t);
-                    /* Apply via the public API to handle allocation. */
-                    for (uint64_t t = 0; t < sb->taken; t++)
-                        vtx_profile_record_branch(profile, eh.method_id, sb->bytecode_pc, true);
-                    for (uint64_t t = 0; t < sb->not_taken; t++)
-                        vtx_profile_record_branch(profile, eh.method_id, sb->bytecode_pc, false);
+                    /* BUGFIX P14: Set counts directly instead of looping.
+                     * We directly create/find the branch entry and set the
+                     * counts. This avoids calling vtx_profile_record_branch
+                     * N times (O(n) per branch — DoS for large counts). */
+                    vtx_profile_method_t *bm = vtx_profile_add_method(profile, eh.method_id);
+                    if (bm != NULL) {
+                        vtx_branch_profile_t *bp = NULL;
+                        for (uint32_t j = 0; j < bm->branch_count; j++) {
+                            if (bm->branches[j].bytecode_pc == sb->bytecode_pc) {
+                                bp = &bm->branches[j];
+                                break;
+                            }
+                        }
+                        if (bp == NULL) {
+                            /* Create a new branch entry directly (grow if needed). */
+                            if (bm->branch_count >= bm->branch_capacity) {
+                                uint32_t new_cap = bm->branch_capacity == 0 ? 8 : bm->branch_capacity * 2;
+                                vtx_branch_profile_t *new_arr = realloc(bm->branches,
+                                    (size_t)new_cap * sizeof(vtx_branch_profile_t));
+                                if (new_arr == NULL) continue;
+                                memset(new_arr + bm->branch_capacity, 0,
+                                       (size_t)(new_cap - bm->branch_capacity) * sizeof(vtx_branch_profile_t));
+                                bm->branches = new_arr;
+                                bm->branch_capacity = new_cap;
+                            }
+                            bp = &bm->branches[bm->branch_count++];
+                            memset(bp, 0, sizeof(*bp));
+                            bp->bytecode_pc = sb->bytecode_pc;
+                        }
+                        /* Set counts directly (add, saturating). */
+                        uint64_t t_sum = bp->taken + sb->taken;
+                        bp->taken = (t_sum < bp->taken) ? UINT64_MAX : t_sum;
+                        uint64_t n_sum = bp->not_taken + sb->not_taken;
+                        bp->not_taken = (n_sum < bp->not_taken) ? UINT64_MAX : n_sum;
+                    }
                 }
                 for (uint32_t c = 0; c < sph->callsite_count; c++) {
                     if (off + sizeof(vtx_snapshot_callsite_t) > eh.payload_len) break;
@@ -487,8 +577,35 @@ int vtx_patch_log_replay(vtx_patch_log_t *log,
                     if (off + sizeof(vtx_snapshot_loop_t) > eh.payload_len) break;
                     vtx_snapshot_loop_t *sl = (vtx_snapshot_loop_t *)(payload + off);
                     off += sizeof(vtx_snapshot_loop_t);
-                    for (uint64_t t = 0; t < sl->backedge_count; t++)
-                        vtx_profile_record_loop_backedge(profile, eh.method_id, sl->loop_header_pc);
+                    /* BUGFIX P14: Same fix — create loop entry directly. */
+                    vtx_profile_method_t *lm = vtx_profile_add_method(profile, eh.method_id);
+                    if (lm != NULL) {
+                        vtx_loop_profile_t *lp = NULL;
+                        for (uint32_t j = 0; j < lm->loop_count; j++) {
+                            if (lm->loops[j].loop_header_pc == sl->loop_header_pc) {
+                                lp = &lm->loops[j];
+                                break;
+                            }
+                        }
+                        if (lp == NULL) {
+                            /* Create a new loop entry directly. */
+                            if (lm->loop_count >= lm->loop_capacity) {
+                                uint32_t new_cap = lm->loop_capacity == 0 ? 8 : lm->loop_capacity * 2;
+                                vtx_loop_profile_t *new_arr = realloc(lm->loops,
+                                    (size_t)new_cap * sizeof(vtx_loop_profile_t));
+                                if (new_arr == NULL) continue;
+                                memset(new_arr + lm->loop_capacity, 0,
+                                       (size_t)(new_cap - lm->loop_capacity) * sizeof(vtx_loop_profile_t));
+                                lm->loops = new_arr;
+                                lm->loop_capacity = new_cap;
+                            }
+                            lp = &lm->loops[lm->loop_count++];
+                            memset(lp, 0, sizeof(*lp));
+                            lp->loop_header_pc = sl->loop_header_pc;
+                        }
+                        uint64_t be_sum = lp->backedge_count + sl->backedge_count;
+                        lp->backedge_count = (be_sum < lp->backedge_count) ? UINT64_MAX : be_sum;
+                    }
                 }
                 for (uint32_t f = 0; f < sph->field_count; f++) {
                     if (off + sizeof(vtx_snapshot_field_t) > eh.payload_len) break;
@@ -503,10 +620,42 @@ int vtx_patch_log_replay(vtx_patch_log_t *log,
             case VTX_PATCH_BRANCH_UPDATE: {
                 if (eh.payload_len < sizeof(vtx_branch_payload_t)) break;
                 vtx_branch_payload_t *p = (vtx_branch_payload_t *)payload;
-                for (uint64_t t = 0; t < p->taken; t++)
-                    vtx_profile_record_branch(profile, eh.method_id, p->bytecode_pc, true);
-                for (uint64_t t = 0; t < p->not_taken; t++)
-                    vtx_profile_record_branch(profile, eh.method_id, p->bytecode_pc, false);
+                /* BUGFIX P14: Add counts directly instead of looping. */
+                {
+                    vtx_profile_method_t *bm = vtx_profile_add_method(profile, eh.method_id);
+                    if (bm != NULL) {
+                        vtx_branch_profile_t *bp = NULL;
+                        for (uint32_t j = 0; j < bm->branch_count; j++) {
+                            if (bm->branches[j].bytecode_pc == p->bytecode_pc) {
+                                bp = &bm->branches[j];
+                                break;
+                            }
+                        }
+                        if (bp == NULL) {
+                            /* Create a new branch entry directly. */
+                            if (bm->branch_count >= bm->branch_capacity) {
+                                uint32_t new_cap = bm->branch_capacity == 0 ? 8 : bm->branch_capacity * 2;
+                                vtx_branch_profile_t *new_arr = realloc(bm->branches,
+                                    (size_t)new_cap * sizeof(vtx_branch_profile_t));
+                                if (new_arr == NULL) break;
+                                memset(new_arr + bm->branch_capacity, 0,
+                                       (size_t)(new_cap - bm->branch_capacity) * sizeof(vtx_branch_profile_t));
+                                bm->branches = new_arr;
+                                bm->branch_capacity = new_cap;
+                            }
+                            bp = &bm->branches[bm->branch_count++];
+                            memset(bp, 0, sizeof(*bp));
+                            bp->bytecode_pc = p->bytecode_pc;
+                            bp->taken = p->taken;
+                            bp->not_taken = p->not_taken;
+                        } else {
+                            uint64_t t_sum = bp->taken + p->taken;
+                            bp->taken = (t_sum < bp->taken) ? UINT64_MAX : t_sum;
+                            uint64_t n_sum = bp->not_taken + p->not_taken;
+                            bp->not_taken = (n_sum < bp->not_taken) ? UINT64_MAX : n_sum;
+                        }
+                    }
+                }
                 applied++;
                 break;
             }
@@ -521,8 +670,39 @@ int vtx_patch_log_replay(vtx_patch_log_t *log,
             case VTX_PATCH_LOOP_UPDATE: {
                 if (eh.payload_len < sizeof(vtx_loop_payload_t)) break;
                 vtx_loop_payload_t *p = (vtx_loop_payload_t *)payload;
-                for (uint64_t t = 0; t < p->backedge_count; t++)
-                    vtx_profile_record_loop_backedge(profile, eh.method_id, p->loop_header_pc);
+                /* BUGFIX P14: Add count directly instead of looping. */
+                {
+                    vtx_profile_method_t *lm = vtx_profile_add_method(profile, eh.method_id);
+                    if (lm != NULL) {
+                        vtx_loop_profile_t *lp = NULL;
+                        for (uint32_t j = 0; j < lm->loop_count; j++) {
+                            if (lm->loops[j].loop_header_pc == p->loop_header_pc) {
+                                lp = &lm->loops[j];
+                                break;
+                            }
+                        }
+                        if (lp == NULL) {
+                            /* Create a new loop entry directly. */
+                            if (lm->loop_count >= lm->loop_capacity) {
+                                uint32_t new_cap = lm->loop_capacity == 0 ? 8 : lm->loop_capacity * 2;
+                                vtx_loop_profile_t *new_arr = realloc(lm->loops,
+                                    (size_t)new_cap * sizeof(vtx_loop_profile_t));
+                                if (new_arr == NULL) break;
+                                memset(new_arr + lm->loop_capacity, 0,
+                                       (size_t)(new_cap - lm->loop_capacity) * sizeof(vtx_loop_profile_t));
+                                lm->loops = new_arr;
+                                lm->loop_capacity = new_cap;
+                            }
+                            lp = &lm->loops[lm->loop_count++];
+                            memset(lp, 0, sizeof(*lp));
+                            lp->loop_header_pc = p->loop_header_pc;
+                            lp->backedge_count = p->backedge_count;
+                        } else {
+                            uint64_t be_sum = lp->backedge_count + p->backedge_count;
+                            lp->backedge_count = (be_sum < lp->backedge_count) ? UINT64_MAX : be_sum;
+                        }
+                    }
+                }
                 applied++;
                 break;
             }
@@ -596,24 +776,38 @@ int vtx_patch_log_compact(vtx_patch_log_t *log,
     for (uint32_t i = 0; i < profile->method_count; i++) {
         const vtx_profile_method_t *m = &profile->methods[i];
 
-        /* Build the payload inline (reuse the snapshot logic). */
+        /* BUGFIX P1/P2: Same fix as append_snapshot — count actual
+         * callsite/field entries (sum of cs->count/fp->count), not
+         * call_site_count/field_access_count. Use size_t for the
+         * payload size computation to avoid uint32_t overflow. */
+        uint32_t callsite_entries = 0;
+        for (uint32_t c = 0; c < m->call_site_count; c++) {
+            callsite_entries += m->call_sites[c].count;
+        }
+        uint32_t field_entries = 0;
+        for (uint32_t f = 0; f < m->field_access_count; f++) {
+            field_entries += m->field_accesses[f].count;
+        }
+
+        size_t payload_len_sz = sizeof(vtx_snapshot_payload_header_t)
+            + (size_t)m->branch_count * sizeof(vtx_snapshot_branch_t)
+            + (size_t)callsite_entries * sizeof(vtx_snapshot_callsite_t)
+            + (size_t)m->loop_count * sizeof(vtx_snapshot_loop_t)
+            + (size_t)field_entries * sizeof(vtx_snapshot_field_t);
+
+        if (payload_len_sz > VTX_PATCH_LOG_MAX_PAYLOAD) continue;
+
+        uint32_t payload_len = (uint32_t)payload_len_sz;
+        uint8_t *buf = (uint8_t *)malloc(payload_len);
+        if (buf == NULL) continue;
+
+        /* Build the payload header with ACTUAL entry counts. */
         vtx_snapshot_payload_header_t sph;
         sph.invocation_count = m->invocation_count;
         sph.branch_count = m->branch_count;
-        sph.callsite_count = m->call_site_count;
+        sph.callsite_count = callsite_entries;
         sph.loop_count = m->loop_count;
-        sph.field_count = m->field_access_count;
-
-        uint32_t payload_len = sizeof(sph)
-            + m->branch_count * sizeof(vtx_snapshot_branch_t)
-            + m->call_site_count * sizeof(vtx_snapshot_callsite_t)
-            + m->loop_count * sizeof(vtx_snapshot_loop_t)
-            + m->field_access_count * sizeof(vtx_snapshot_field_t);
-
-        if (payload_len > VTX_PATCH_LOG_MAX_PAYLOAD) continue;
-
-        uint8_t *buf = (uint8_t *)malloc(payload_len);
-        if (buf == NULL) continue;
+        sph.field_count = field_entries;
 
         uint32_t off = 0;
         memcpy(buf + off, &sph, sizeof(sph)); off += sizeof(sph);

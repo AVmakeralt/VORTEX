@@ -208,10 +208,163 @@ vtx_profile_method_t *vtx_input_shape_table_get_or_create(
             return &table->entries[0].method;
         }
 
-        /* Merge the evicted shape's data into the default. */
+        /* Merge the evicted shape's data into the default.
+         * BUGFIX P8: The old code called vtx_profile_merge_method(&def->method,
+         * &evicted->method), but that function takes (vtx_profile_global_t*,
+         * vtx_profile_method_t*) — passing a method struct as the global
+         * argument causes it to interpret method fields as global struct
+         * fields, reading garbage pointers and causing heap corruption.
+         *
+         * Fix: merge method-to-method directly. We inline the merge logic
+         * because there's no existing method-to-method merge API. The logic
+         * is: sum invocation counts, merge branches/callsites/loops/fields
+         * by finding or creating matching entries. */
         vtx_shape_profile_entry_t *evicted = &table->entries[free_idx];
         vtx_shape_profile_entry_t *def = &table->entries[0];
-        vtx_profile_merge_method(&def->method, &evicted->method);
+        vtx_profile_method_t *dst = &def->method;
+        const vtx_profile_method_t *src = &evicted->method;
+
+        /* Sum invocation counts (saturating). */
+        uint64_t inv_sum = dst->invocation_count + src->invocation_count;
+        dst->invocation_count = (inv_sum < dst->invocation_count) ? UINT64_MAX : inv_sum;
+
+        /* Merge branches by bytecode_pc. */
+        for (uint32_t b = 0; b < src->branch_count; b++) {
+            const vtx_branch_profile_t *sb = &src->branches[b];
+            vtx_branch_profile_t *db = NULL;
+            for (uint32_t j = 0; j < dst->branch_count; j++) {
+                if (dst->branches[j].bytecode_pc == sb->bytecode_pc) {
+                    db = &dst->branches[j];
+                    break;
+                }
+            }
+            if (db == NULL) {
+                /* Grow dst->branches if needed. */
+                if (dst->branch_count >= dst->branch_capacity) {
+                    uint32_t new_cap = dst->branch_capacity == 0 ? 8 : dst->branch_capacity * 2;
+                    vtx_branch_profile_t *new_arr = realloc(dst->branches,
+                        (size_t)new_cap * sizeof(vtx_branch_profile_t));
+                    if (new_arr == NULL) continue;
+                    memset(new_arr + dst->branch_capacity, 0,
+                           (size_t)(new_cap - dst->branch_capacity) * sizeof(vtx_branch_profile_t));
+                    dst->branches = new_arr;
+                    dst->branch_capacity = new_cap;
+                }
+                db = &dst->branches[dst->branch_count++];
+                memset(db, 0, sizeof(*db));
+                db->bytecode_pc = sb->bytecode_pc;
+            }
+            uint64_t t_sum = db->taken + sb->taken;
+            db->taken = (t_sum < db->taken) ? UINT64_MAX : t_sum;
+            uint64_t n_sum = db->not_taken + sb->not_taken;
+            db->not_taken = (n_sum < db->not_taken) ? UINT64_MAX : n_sum;
+        }
+
+        /* Merge callsites by index (union types). */
+        for (uint32_t c = 0; c < src->call_site_count; c++) {
+            const vtx_callsite_profile_t *sc = &src->call_sites[c];
+            if (c >= dst->call_site_capacity) {
+                uint32_t new_cap = dst->call_site_capacity == 0 ? 8 : dst->call_site_capacity * 2;
+                while (new_cap <= c) new_cap *= 2;
+                vtx_callsite_profile_t *new_arr = realloc(dst->call_sites,
+                    (size_t)new_cap * sizeof(vtx_callsite_profile_t));
+                if (new_arr == NULL) continue;
+                memset(new_arr + dst->call_site_capacity, 0,
+                       (size_t)(new_cap - dst->call_site_capacity) * sizeof(vtx_callsite_profile_t));
+                dst->call_sites = new_arr;
+                dst->call_site_capacity = new_cap;
+            }
+            if (c >= dst->call_site_count) {
+                dst->call_site_count = c + 1;
+            }
+            vtx_callsite_profile_t *dc = &dst->call_sites[c];
+            if (sc->megamorphic) dc->megamorphic = true;
+            if (dc->megamorphic) continue;
+            for (uint32_t t = 0; t < sc->count; t++) {
+                vtx_typeid_t ty = sc->types[t];
+                bool found = false;
+                for (uint32_t j = 0; j < dc->count; j++) {
+                    if (dc->types[j] == ty) { found = true; break; }
+                }
+                if (!found && dc->count < VTX_POLY_LIMIT) {
+                    dc->types[dc->count++] = ty;
+                } else if (!found) {
+                    dc->megamorphic = true;
+                    break;
+                }
+            }
+        }
+
+        /* Merge loops by loop_header_pc. */
+        for (uint32_t l = 0; l < src->loop_count; l++) {
+            const vtx_loop_profile_t *sl = &src->loops[l];
+            vtx_loop_profile_t *dl = NULL;
+            for (uint32_t j = 0; j < dst->loop_count; j++) {
+                if (dst->loops[j].loop_header_pc == sl->loop_header_pc) {
+                    dl = &dst->loops[j];
+                    break;
+                }
+            }
+            if (dl == NULL) {
+                if (dst->loop_count >= dst->loop_capacity) {
+                    uint32_t new_cap = dst->loop_capacity == 0 ? 8 : dst->loop_capacity * 2;
+                    vtx_loop_profile_t *new_arr = realloc(dst->loops,
+                        (size_t)new_cap * sizeof(vtx_loop_profile_t));
+                    if (new_arr == NULL) continue;
+                    memset(new_arr + dst->loop_capacity, 0,
+                           (size_t)(new_cap - dst->loop_capacity) * sizeof(vtx_loop_profile_t));
+                    dst->loops = new_arr;
+                    dst->loop_capacity = new_cap;
+                }
+                dl = &dst->loops[dst->loop_count++];
+                memset(dl, 0, sizeof(*dl));
+                dl->loop_header_pc = sl->loop_header_pc;
+            }
+            uint64_t be_sum = dl->backedge_count + sl->backedge_count;
+            dl->backedge_count = (be_sum < dl->backedge_count) ? UINT64_MAX : be_sum;
+        }
+
+        /* Merge field accesses by field_offset (union shapes). */
+        for (uint32_t f = 0; f < src->field_access_count; f++) {
+            const vtx_field_profile_t *sf = &src->field_accesses[f];
+            vtx_field_profile_t *df = NULL;
+            for (uint32_t j = 0; j < dst->field_access_count; j++) {
+                if (dst->field_accesses[j].field_offset == sf->field_offset) {
+                    df = &dst->field_accesses[j];
+                    break;
+                }
+            }
+            if (df == NULL) {
+                if (dst->field_access_count >= dst->field_access_capacity) {
+                    uint32_t new_cap = dst->field_access_capacity == 0 ? 8 : dst->field_access_capacity * 2;
+                    vtx_field_profile_t *new_arr = realloc(dst->field_accesses,
+                        (size_t)new_cap * sizeof(vtx_field_profile_t));
+                    if (new_arr == NULL) continue;
+                    memset(new_arr + dst->field_access_capacity, 0,
+                           (size_t)(new_cap - dst->field_access_capacity) * sizeof(vtx_field_profile_t));
+                    dst->field_accesses = new_arr;
+                    dst->field_access_capacity = new_cap;
+                }
+                df = &dst->field_accesses[dst->field_access_count++];
+                memset(df, 0, sizeof(*df));
+                df->field_offset = sf->field_offset;
+            }
+            if (sf->megamorphic) df->megamorphic = true;
+            if (df->megamorphic) continue;
+            for (uint32_t s = 0; s < sf->count; s++) {
+                vtx_shapeid_t sh = sf->shapes[s];
+                bool found = false;
+                for (uint32_t j = 0; j < df->count; j++) {
+                    if (df->shapes[j] == sh) { found = true; break; }
+                }
+                if (!found && df->count < VTX_POLY_LIMIT) {
+                    df->shapes[df->count++] = sh;
+                } else if (!found) {
+                    df->megamorphic = true;
+                    break;
+                }
+            }
+        }
 
         /* Free the evicted entry's arrays. */
         if (evicted->method.call_sites)    { free(evicted->method.call_sites);    evicted->method.call_sites = NULL; }
@@ -394,11 +547,22 @@ static bool ensure_capacity(vtx_input_shape_manager_t *mgr, uint32_t method_id)
 {
     if (method_id < mgr->table_capacity) return true;
 
+    /* BUGFIX P21: The old loop `while (new_cap <= method_id) new_cap *= 2`
+     * overflows to 0 when method_id is near UINT32_MAX, causing an
+     * infinite loop. Fix: check for overflow and cap at a sane maximum. */
     uint32_t new_cap = mgr->table_capacity;
-    while (new_cap <= method_id) new_cap *= 2;
+    while (new_cap <= method_id) {
+        if (new_cap >= (UINT32_MAX / 2)) {
+            /* Would overflow — cap at UINT32_MAX. */
+            new_cap = UINT32_MAX;
+            break;
+        }
+        new_cap *= 2;
+    }
+    if (new_cap <= method_id) return false;  /* still too small — give up */
 
     vtx_input_shape_table_t **new_tables = (vtx_input_shape_table_t **)realloc(
-        mgr->tables, new_cap * sizeof(vtx_input_shape_table_t *));
+        mgr->tables, (size_t)new_cap * sizeof(vtx_input_shape_table_t *));
     if (new_tables == NULL) return false;
     memset(new_tables + mgr->table_capacity, 0,
            (new_cap - mgr->table_capacity) * sizeof(vtx_input_shape_table_t *));
