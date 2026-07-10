@@ -3002,9 +3002,12 @@ int main(int argc, char *argv[])
         compile_ctx.deoptless_tables = (struct vtx_deoptless_table **)
             calloc(compile_ctx.deoptless_table_capacity, sizeof(struct vtx_deoptless_table *));
 
-        /* Create and wire threadpool for background compilation */
+        /* Create and wire threadpool for background compilation.
+         * P11 fix: In deterministic mode, use 1 worker thread for
+         * deterministic compilation ordering. */
         vtx_threadpool_t pool;
-        if (vtx_threadpool_init(&pool, 0) == 0) {  /* 0 = auto-detect cores */
+        uint32_t nthreads = vtx_deterministic_threads();  /* 0 = auto, 1 = deterministic */
+        if (vtx_threadpool_init(&pool, nthreads) == 0) {
             compile_ctx.threadpool = &pool;
             vtx_compile_context_wire_threadpool(&compile_ctx);
         }
@@ -3275,6 +3278,14 @@ int main(int argc, char *argv[])
             NULL
 #endif
             );
+
+        /* P11 fix: In deterministic mode, use a fixed check interval
+         * (no jitter) for reproducible CI behavior. */
+        uint32_t det_interval = vtx_deterministic_check_interval_ms();
+        if (det_interval > 0) {
+            orchestrator.check_interval_ms = det_interval;
+        }
+
         vtx_orchestrator_start(&orchestrator);
         compile_ctx.orchestrator = &orchestrator;
 

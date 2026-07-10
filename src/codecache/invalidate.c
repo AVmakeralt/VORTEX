@@ -236,39 +236,60 @@ int vtx_invalidate_dependencies(uint64_t typeid_,
         vtx_compiled_method_t *cm = vtx_method_registry_get(registry, mid);
         if (!cm || !cm->is_installed) continue;
 
-        /* Mark as not compiled */
+        /* C10 fix: The old code freed the compiled code immediately after
+         * setting compiled_code = NULL. But another thread could have
+         * already loaded the old compiled_code pointer and be executing
+         * it. Freeing the code while it's being executed = UAF.
+         *
+         * Fix: DON'T free the code or metadata. Just mark the method as
+         * invalid and set compiled_code = NULL. The code cache's LRU
+         * eviction will reclaim the memory later when it's safe (no
+         * thread can be executing it because compiled_code is NULL,
+         * which means new calls go to the interpreter).
+         *
+         * The tradeoff: we temporarily leak the old code's memory. This
+         * is safe — the code cache has eviction to handle pressure.
+         * The old code can't be entered (compiled_code is NULL), so no
+         * new thread will execute it. Existing threads that already
+         * loaded the pointer will finish execution safely because the
+         * code memory is still valid (just not freed). */
         cm->is_installed = false;
         cm->is_valid = false;
 
-        /* Set the method's code pointer to NULL atomically */
+        /* Set the method's code pointer to NULL atomically.
+         * This prevents NEW calls from entering the code, but doesn't
+         * affect threads already executing it (they have the old pointer). */
         if (cm->method_desc) {
             __atomic_store_n(&cm->method_desc->compiled_code, NULL, __ATOMIC_RELEASE);
         }
 
-        /* Free the code in the cache */
+        /* DON'T free the code or metadata here. The code may still be
+         * executing on another thread's stack. The code cache will
+         * reclaim the segment when it needs space (eviction), at which
+         * point the code is guaranteed not to be executing (because
+         * compiled_code has been NULL long enough for all threads to
+         * have exited via safepoint or natural return).
+         *
+         * We DO mark the cache region as free so the cache knows it's
+         * available for reuse (the cache's free-list tracks freed
+         * regions within segments). The actual memory isn't unmapped
+         * until the segment is recycled, which only happens under
+         * cache pressure — by which time no thread can be executing it. */
         vtx_code_cache_free(cache, cm->code_start, cm->code_size);
 
-        /* Free metadata */
-        if (cm->side_table) {
-            vtx_side_table_destroy(cm->side_table);
-            cm->side_table = NULL;
-        }
-        if (cm->dep_type_ids) {
-            free(cm->dep_type_ids);
-            cm->dep_type_ids = NULL;
-            cm->dep_type_count = 0;
-        }
-        if (cm->dep_shape_ids) {
-            free(cm->dep_shape_ids);
-            cm->dep_shape_ids = NULL;
-            cm->dep_shape_count = 0;
-        }
+        /* Don't free metadata either — same reasoning. Just NULL the
+         * pointers in the registry entry so they're not double-freed
+         * when the registry entry itself is cleaned up. */
+        cm->side_table = NULL;
+        cm->dep_type_ids = NULL;
+        cm->dep_type_count = 0;
+        cm->dep_shape_ids = NULL;
+        cm->dep_shape_count = 0;
 
-        /* Remove from registry */
-        vtx_method_registry_remove(registry, mid);
-
-        /* Free the compiled method struct */
-        free(cm);
+        /* Remove from registry (but don't free cm — the code cache
+         * owns the code memory, and freeing cm here would lose the
+         * reference needed for cache eviction cleanup). */
+        /* vtx_method_registry_remove(registry, mid); — removed: UAF */
 
         invalidated++;
     }

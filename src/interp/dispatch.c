@@ -2,6 +2,7 @@
 #include "baseline/codegen.h"
 #include "compile/orchestrator.h"
 #include "compile/spec_versioning.h"
+#include "deopt/osr.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -1482,6 +1483,33 @@ dispatch_VT_OP_GOTO:
                  * submits the method for background compilation. */
                 if (interp->compile_ctx != NULL) {
                     vtx_request_compilation(interp->compile_ctx, frame->method, vtx_profiler_method_heat(&interp->profiler, frame->method));
+                }
+            }
+
+            /* W1 fix: OSR (On-Stack Replacement) up.
+             * After requesting compilation, check if the compiled code
+             * is now available. If so, transfer to it mid-execution via
+             * OSR. Without this, a long-running method (like a loop)
+             * never benefits from JIT compilation — it runs forever in
+             * the interpreter because there's no opportunity to switch
+             * to compiled code at a method call boundary.
+             *
+             * OSR transfers the current interpreter frame to a compiled
+             * frame at the loop back-edge. The compiled code picks up
+             * execution from the loop header, skipping the already-
+             * executed portion of the method. */
+            if (frame->method != NULL) {
+                void *cc = __atomic_load_n(&frame->method->compiled_code,
+                                              __ATOMIC_ACQUIRE);
+                if (cc != NULL && interp->compile_ctx != NULL) {
+                    /* Compiled code is available — try OSR up.
+                     * If it succeeds, we don't return here (execution
+                     * continues in compiled code). If it fails, we
+                     * continue in the interpreter. */
+                    (void)vtx_osr_up(frame, frame->method->vtable_index,
+                                       (const vtx_compiled_code_t *)cc,
+                                       (uint32_t)pc);
+                    /* If OSR up returned, it failed — continue in interp. */
                 }
             }
 

@@ -866,26 +866,64 @@ bool vtx_sota_recomp_queue_backpressure(vtx_sota_recomp_t *recomp,
         }
     }
 
+    /* ---- Check for duplicate (unprocessed entry for the same method) ----
+     * P12 fix: The old code did the soft-cap eviction BEFORE the duplicate
+     * check. If the new entry was a duplicate, we evicted a valid entry
+     * for nothing (data loss). Fix: check for duplicates FIRST, before
+     * any eviction. */
+    if (find_existing_entry(recomp, method_id) >= 0) {
+        return true;  /* already queued — not an error */
+    }
+
     /* ---- HARD CAP: reject if the queue is full ---- */
     if (recomp->recomp_queue_count >= VTX_RECOMP_QUEUE_HARD_CAP) {
         recomp->total_dropped_hard_cap++;
         return false;
     }
 
-    /* ---- SOFT CAP: evict the lowest-priority entry if over the cap ---- */
+    /* ---- SOFT CAP: evict the lowest-priority entry if over the cap ----
+     * P13 fix: The old code evicted the lowest-KL entry unconditionally,
+     * even if the new entry had lower priority (lower KL). That's priority
+     * inversion — we'd evict a more important entry for a less important one.
+     * Fix: compute the new entry's KL first, then only evict if the new
+     * entry has HIGHER priority (higher KL divergence = more urgent). */
     if (recomp->recomp_queue_count >= VTX_RECOMP_QUEUE_SOFT_CAP) {
+        /* Compute the new entry's KL divergence for priority comparison. */
+        double new_kl = 0.0;
+        if (new_profile != NULL) {
+            const vtx_profile_method_t *cur =
+                vtx_profile_get_method(new_profile, method_id);
+            if (cur != NULL) {
+                vtx_profile_method_t old_method;
+                memset(&old_method, 0, sizeof(old_method));
+                old_method.method_id = method_id;
+                for (uint32_t i = 0; i < recomp->snapshot_count; i++) {
+                    if (recomp->snapshots[i].method_id == method_id &&
+                        recomp->snapshots[i].valid) {
+                        old_method.call_sites = recomp->snapshots[i].call_sites;
+                        old_method.call_site_count = recomp->snapshots[i].call_site_count;
+                        break;
+                    }
+                }
+                new_kl = vtx_sota_recomp_compute_divergence(&old_method, cur);
+            }
+        }
+
         uint32_t lowest = find_lowest_priority_entry(recomp);
         if (lowest != UINT32_MAX) {
-            queue_remove_at(recomp, lowest);
-            recomp->total_dropped_soft_cap++;
+            /* P13 fix: Only evict if the new entry has higher priority
+             * (higher KL divergence = more urgent). If the new entry has
+             * lower or equal priority, drop it instead — don't evict a
+             * more important entry for a less important one. */
+            if (new_kl > recomp->recomp_queue[lowest].kl_divergence) {
+                queue_remove_at(recomp, lowest);
+                recomp->total_dropped_soft_cap++;
+            } else {
+                /* New entry has lower priority — drop it, don't evict. */
+                recomp->total_dropped_soft_cap++;
+                return false;
+            }
         }
-    }
-
-    /* ---- Check for duplicate (unprocessed entry for the same method) ----
-     * If one exists, we don't add a second — the existing entry is
-     * already pending and will be picked up. */
-    if (find_existing_entry(recomp, method_id) >= 0) {
-        return true;  /* already queued — not an error */
     }
 
     /* ---- Grow the queue if at capacity (still under HARD_CAP) ---- */

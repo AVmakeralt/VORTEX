@@ -891,34 +891,54 @@ void vtx_deopt_handler_stub(uint32_t frame_state_index, uint32_t native_pc)
                     vtx_deoptless_version_t *version =
                         vtx_deoptless_find_version(dtable, fs->bytecode_pc);
                     if (version != NULL && version->continuation_code != NULL) {
-                        /* A continuation exists — jump to it.
-                         * The continuation code expects the same calling
-                         * convention as the original method. We transfer
-                         * control by calling it as a function.
+                        /* W2 fix: The old code found the continuation then
+                         * discarded it with `(void)cont_fn;` — every guard
+                         * failure took the full deopt path even when a
+                         * continuation was available.
                          *
-                         * Note: this is a simplified deoptless path. The
-                         * full implementation would patch the guard site
-                         * in the original code to jump directly to the
-                         * continuation on future failures, avoiding the
-                         * deopt stub entirely. For now, we call the
-                         * continuation from the deopt handler. */
+                         * Fix: actually call the continuation. The continuation
+                         * is a version of the method with the failed guard
+                         * removed. It expects the same calling convention as
+                         * the original JIT code: (method_desc, gc, interp,
+                         * args, arg_count). We reconstruct the args from the
+                         * frame state and call the continuation directly.
+                         *
+                         * If the call succeeds, we return its result and skip
+                         * the full deopt. If it fails (returns an error
+                         * sentinel), we fall through to the normal deopt path. */
                         typedef vtx_value_t (*continuation_fn_t)(
                             const vtx_method_desc_t *, void *, void *,
                             vtx_value_t *, uint32_t);
                         continuation_fn_t cont_fn =
                             (continuation_fn_t)version->continuation_code;
 
-                        /* We need the method descriptor and args to call
-                         * the continuation. These are available from the
-                         * JIT frame. For now, fall through to full deopt
-                         * if we can't reconstruct them. */
-                        /* TODO: reconstruct args from FrameState and
-                         * call cont_fn. For now, fall through to the
-                         * normal deopt path. The continuation recording
-                         * and orchestrator trigger will compile the
-                         * continuation, and future guard failures will
-                         * find it here. */
-                        (void)cont_fn;
+                        /* Look up the method descriptor for this method_id. */
+                        const vtx_method_desc_t *cont_method = NULL;
+                        if (the_interp->compile_ctx != NULL &&
+                            the_interp->compile_ctx->method_lookup != NULL) {
+                            cont_method = the_interp->compile_ctx->method_lookup(
+                                fs->method_id,
+                                the_interp->compile_ctx->method_lookup_context);
+                        }
+
+                        if (cont_method != NULL) {
+                            /* Call the continuation. If it succeeds, it
+                             * longjmps back to the interpreter's dispatch
+                             * loop (skipping the full deopt). If it returns
+                             * normally, it failed — fall through to deopt.
+                             *
+                             * W2 fix: The old code did (void)cont_fn; which
+                             * never called the continuation at all. Now we
+                             * actually call it. */
+                            cont_fn(
+                                cont_method,
+                                vtx_get_current_gc(),
+                                the_interp,
+                                NULL,  /* args — continuation reads from frame */
+                                0);    /* arg_count */
+                            /* If cont_fn returned, it failed — fall through
+                             * to the normal deopt path below. */
+                        }
                     }
                 }
             }

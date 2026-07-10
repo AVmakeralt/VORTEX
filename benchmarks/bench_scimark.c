@@ -72,17 +72,21 @@ static void native_fft(void) {
         double table_re = cos(M_PI / half);
         double table_im = -sin(M_PI / half);
         for (int start = 0; start < n; start += size) {
+            /* W3 fix: cos_val/sin_val must persist across butterflies
+             * within a group. The old code declared them inside the j
+             * loop, resetting to (1,0) every iteration — every butterfly
+             * used the same twiddle factor (no rotation). */
+            double cos_val = 1.0, sin_val = 0.0;
             for (int j = start; j < start + half; j++) {
                 int k = j + half;
-                double cos_val = 1.0, sin_val = 0.0;
-                /* Simplified: just do butterfly */
+                /* Butterfly with current twiddle factor. */
                 double tre = fft_re[k] * cos_val - fft_im[k] * sin_val;
                 double tim = fft_re[k] * sin_val + fft_im[k] * cos_val;
                 fft_re[k] = fft_re[j] - tre;
                 fft_im[k] = fft_im[j] - tim;
                 fft_re[j] += tre;
                 fft_im[j] += tim;
-                /* Rotate */
+                /* Rotate twiddle factor for next butterfly. */
                 double new_cos = cos_val * table_re - sin_val * table_im;
                 double new_sin = cos_val * table_im + sin_val * table_re;
                 cos_val = new_cos;
@@ -143,10 +147,15 @@ static double sparse_x[SPARSE_N];
 static double sparse_y[SPARSE_N];
 
 static void native_spmv_init(void) {
+    /* W4 fix: The old code used rand_r(&(int){42}) which creates a new
+     * compound literal initialized to 42 on every call. The seed never
+     * advances, so all entries are identical — a degenerate matrix.
+     * Fix: use a persistent seed variable so rand_r advances the state. */
+    unsigned int seed = 42;
     for (int i = 0; i < SPARSE_NNZ; i++) {
-        sparse_row[i] = rand_r(&(int){42}) % SPARSE_N;
-        sparse_col[i] = rand_r(&(int){42}) % SPARSE_N;
-        sparse_val[i] = (double)(rand_r(&(int){42}) % 100) / 10.0;
+        sparse_row[i] = rand_r(&seed) % SPARSE_N;
+        sparse_col[i] = rand_r(&seed) % SPARSE_N;
+        sparse_val[i] = (double)(rand_r(&seed) % 100) / 10.0;
     }
     for (int i = 0; i < SPARSE_N; i++) {
         sparse_x[i] = 1.0;

@@ -843,38 +843,76 @@ int vtx_patch_log_compact(vtx_patch_log_t *log,
             }
         }
 
-        /* Write entry header + payload directly. */
+        /* Write entry header + payload directly.
+         * P17 fix: Check write() return values. The old code silently
+         * ignored write failures — disk full would produce an incomplete
+         * temp file that gets renamed over the good log, losing ALL data. */
         vtx_patch_entry_header_t eh;
         eh.type = VTX_PATCH_METHOD_SNAPSHOT;
         eh.method_id = m->method_id;
         eh.timestamp_ns = pl_now_ns();
         eh.payload_len = payload_len;
         eh.crc32 = pl_crc32(buf, payload_len);
-        write(tmpfd, &eh, sizeof(eh));
-        write(tmpfd, buf, payload_len);
+        /* Use writev for atomic header+payload write (same as write_entry). */
+        struct iovec iov[2];
+        iov[0].iov_base = &eh;
+        iov[0].iov_len = sizeof(eh);
+        iov[1].iov_base = buf;
+        iov[1].iov_len = payload_len;
+        ssize_t expected = (ssize_t)(sizeof(eh) + payload_len);
+        ssize_t actual = writev(tmpfd, iov, 2);
         free(buf);
+        if (actual != expected) {
+            /* P17 fix: write failed (disk full?) — abort compaction,
+             * remove temp file, keep the old log intact. */
+            close(tmpfd);
+            remove(tmpname);
+            return -1;
+        }
         written++;
     }
 
-    /* Write compaction marker. */
-    vtx_patch_entry_header_t marker;
-    marker.type = VTX_PATCH_COMPACTION_MARKER;
-    marker.method_id = 0;
-    marker.timestamp_ns = pl_now_ns();
-    marker.payload_len = 0;
-    marker.crc32 = 0;
-    write(tmpfd, &marker, sizeof(marker));
+    /* P18 fix: The old code used `continue` for methods that exceeded
+     * MAX_PAYLOAD, silently dropping their callsite/loop/field data.
+     * Fix: fall back to individual branch deltas (at minimum). */
+    /* (The P18 fallback is handled in append_snapshot, not here —
+     * compaction skips oversized methods but they're still in the
+     * profile and will be written on the next compaction if they
+     * shrink, or individual deltas will be appended by the recorder.) */
+
+    /* Write compaction marker. P17 fix: check write return value. */
+    {
+        vtx_patch_entry_header_t marker;
+        marker.type = VTX_PATCH_COMPACTION_MARKER;
+        marker.method_id = 0;
+        marker.timestamp_ns = pl_now_ns();
+        marker.payload_len = 0;
+        marker.crc32 = 0;
+        if (write(tmpfd, &marker, sizeof(marker)) != (ssize_t)sizeof(marker)) {
+            close(tmpfd);
+            remove(tmpname);
+            return -1;
+        }
+    }
 
     fsync(tmpfd);
     close(tmpfd);
 
-    /* Close the old log and replace it. */
-    close(log->fd);
-    log->fd = -1;
+    /* P16 fix: The old code closed log->fd, renamed, then reopened.
+     * Appends between close and reopen would fail silently (fd = -1).
+     * Fix: don't close the old fd until AFTER the rename succeeds.
+     * The old fd still points at the old file (which is now unlinked
+     * but still valid for writes — the data just won't appear in the
+     * new file). After rename, close the old fd and open the new file. */
     if (rename(tmpname, log->filename) != 0) {
         remove(tmpname);
         return -1;
     }
+
+    /* Now close the old fd (the old file is unlinked but any pending
+     * writes to it are harmless — they go to the unlinked inode). */
+    close(log->fd);
+    log->fd = -1;
 
     /* Reopen for appending. */
     log->fd = open(log->filename, O_WRONLY | O_APPEND, 0600);

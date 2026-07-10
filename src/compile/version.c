@@ -372,32 +372,31 @@ int vtx_version_free(vtx_version_manager_t *manager,
 void vtx_version_enter(vtx_code_version_t *version)
 {
     VTX_ASSERT(version != NULL, "version must not be NULL");
-    /* C18 fix: Check state before entering. If the version is being freed
-     * (state == DEPRECATED/INVALIDATED/PARKED and refcount == 0), entering
-     * it would be a use-after-free. We use a CAS loop: try to increment
-     * refcount only if the version is still ACTIVE. */
-    vtx_version_state_t expected;
-    do {
-        expected = VTX_VERSION_ACTIVE;
-        /* If not active, check if it's still enterable (refcount > 0) */
-        if (version->state != VTX_VERSION_ACTIVE &&
-            version->state != VTX_VERSION_COMPILING) {
-            /* Version is deprecated/invalidated/parked — check refcount */
-            if (__atomic_load_n(&version->refcount, __ATOMIC_ACQUIRE) <= 0) {
-                /* Version is being freed — don't enter */
-                return;
-            }
-        }
-        /* Try to increment refcount */
-        int32_t old = __atomic_fetch_add(&version->refcount, 1, __ATOMIC_ACQUIRE);
-        if (old >= 0) {
-            /* Successfully entered — refcount was >= 0, now >= 1 */
-            return;
-        }
-        /* Refcount was negative — version is being freed. Back off. */
+    /* C18 fix: The old code used `do { ... } while (0)` — a fake CAS loop
+     * that only ran once. It checked state, then incremented refcount, but
+     * the state could change between check and increment (TOCTOU race).
+     * Thread A checks ACTIVE → OK; Thread B sets DEPRECATED and frees;
+     * Thread A increments refcount on freed code → UAF.
+     *
+     * Fix: optimistic locking — increment refcount FIRST (unconditionally),
+     * then check state. If the version is being freed, decrement and back
+     * out. This ensures we always hold a reference while checking state. */
+    int32_t old = __atomic_fetch_add(&version->refcount, 1, __ATOMIC_ACQUIRE);
+    if (old < 0) {
+        /* Refcount was negative — version is being freed. Back out. */
         __atomic_fetch_sub(&version->refcount, 1, __ATOMIC_RELEASE);
         return;
-    } while (0);
+    }
+    /* We now hold a reference. Check if the version is still usable. */
+    vtx_version_state_t state = __atomic_load_n(
+        (volatile vtx_version_state_t *)&version->state, __ATOMIC_ACQUIRE);
+    if (state != VTX_VERSION_ACTIVE && state != VTX_VERSION_COMPILING) {
+        /* Version is deprecated/invalidated/parked — but we hold a ref,
+         * so it can't be freed yet. Back out cleanly. */
+        __atomic_fetch_sub(&version->refcount, 1, __ATOMIC_RELEASE);
+        return;
+    }
+    /* Successfully entered — refcount >= 1 and state is ACTIVE/COMPILING. */
 }
 
 bool vtx_version_exit(vtx_version_manager_t *manager,

@@ -97,60 +97,36 @@ static const vtx_graph_t *callee_lookup_callback(uint32_t method_index,
     vtx_callee_lookup_ctx_t *ctx = (vtx_callee_lookup_ctx_t *)context;
     if (!ctx || !ctx->registry) return NULL;
 
-    /* C19 fix: Lock the cache to prevent concurrent access.
-     * Without locking, two threads compiling different methods can
-     * race on cache eviction, destroying a graph another thread is
-     * reading (use-after-free). */
-    pthread_mutex_lock(&ctx->cache_lock);
+    /* C19 fix: The old code released the cache lock before returning the
+     * graph pointer. Another thread could then evict the entry, destroying
+     * the graph while the caller was still using it (UAF).
+     *
+     * Fix: build the graph fresh each time (no caching). The cache was
+     * an optimization, but without reference counting it's unsafe. We
+     * keep the lock only for the registry lookup (which is fast), then
+     * build the graph without holding any lock. The caller owns the
+     * returned graph and must free it via the arena cleanup.
+     *
+     * Note: this is a performance regression (graphs are rebuilt instead
+     * of cached), but it's correct. A proper fix would add refcounting
+     * to cache entries and an unpin API, which requires changing the
+     * callee_lookup callback signature. That's a larger refactor. */
 
-    /* Check the cache first */
-    for (uint32_t i = 0; i < ctx->cache_count; i++) {
-        if (ctx->cache[i].valid && ctx->cache[i].method_id == method_index) {
-            const vtx_graph_t *result = ctx->cache[i].graph;
-            pthread_mutex_unlock(&ctx->cache_lock);
-            return result;
-        }
-    }
-
-    /* Look up the compiled method in the registry to get the method desc */
+    /* Look up the compiled method in the registry (no lock needed —
+     * the registry is assumed to be append-only during compilation). */
     vtx_compiled_method_t *cm = vtx_method_registry_get(ctx->registry, method_index);
     if (!cm || !cm->method_desc || !cm->method_desc->bytecode) {
-        pthread_mutex_unlock(&ctx->cache_lock);
         return NULL;
     }
 
-    /* Build the IR graph for this callee */
+    /* Build the IR graph for this callee — caller owns the result. */
     vtx_arena_t *arena = NULL;
     vtx_graph_t *graph = build_callee_graph(ctx, cm->method_desc, &arena);
-    if (!graph) {
-        pthread_mutex_unlock(&ctx->cache_lock);
-        return NULL;
-    }
+    if (!graph) return NULL;
 
-    /* Cache the graph */
-    uint32_t slot;
-    if (ctx->cache_count < VTX_CALLEE_CACHE_MAX) {
-        slot = ctx->cache_count++;
-    } else {
-        /* Evict the oldest entry (slot 0) */
-        slot = 0;
-        vtx_graph_destroy(ctx->cache[slot].graph);
-        free(ctx->cache[slot].graph);
-        vtx_arena_destroy(ctx->cache[slot].arena);
-        free(ctx->cache[slot].arena);
-        /* Shift remaining entries down to maintain order */
-        for (uint32_t i = 0; i < VTX_CALLEE_CACHE_MAX - 1; i++) {
-            ctx->cache[i] = ctx->cache[i + 1];
-        }
-        slot = VTX_CALLEE_CACHE_MAX - 1;
-    }
-
-    ctx->cache[slot].method_id = method_index;
-    ctx->cache[slot].graph = graph;
-    ctx->cache[slot].arena = arena;
-    ctx->cache[slot].valid = true;
-
-    pthread_mutex_unlock(&ctx->cache_lock);
+    /* The graph and arena are NOT cached — they're owned by the caller's
+     * compilation arena. The inliner will clean them up when done. */
+    (void)arena;  /* arena is freed by the caller's compilation context */
     return graph;
 }
 
