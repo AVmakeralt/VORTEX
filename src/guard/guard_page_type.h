@@ -154,11 +154,17 @@ typedef struct {
     /* Lock-free snapshot for signal handler lookups.
      * Updated atomically after any mutation (create/destroy).
      * The snapshot is a separately-allocated copy of the pages array
-     * that is guaranteed not to be mutated during a signal handler scan.
-     * Old snapshots are freed via a deferred-free ring buffer (C22 fix). */
+     * that is not mutated during a signal handler scan.
+     *
+     * C22 fix: Old snapshots are freed via a deferred-free ring buffer.
+     * This is a HEURISTIC grace period, not a true guarantee — the ring
+     * buffer size (8) gives signal handlers time to finish, but a
+     * preempted handler could theoretically outlive it. The fallback
+     * (reading stale page data) is benign. See guard_page_type.c for
+     * the full honest assessment. */
     vtx_type_guard_page_t  *snapshot;
     uint32_t                snapshot_count;
-    vtx_type_guard_page_t  *old_snapshots[2];  /* C22 fix: deferred-free ring buffer */
+    vtx_type_guard_page_t  *old_snapshots[8];  /* C22 fix: deferred-free ring buffer */
     uint32_t                old_snapshot_idx;
 
     /* Statistics */

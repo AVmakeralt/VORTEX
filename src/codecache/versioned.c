@@ -143,7 +143,12 @@ vtx_versioned_code_version_t *vtx_versioned_cache_get_active(
     if (vc == NULL) return NULL;
     uint32_t idx = METHOD_INDEX(method_id);
     for (vtx_versioned_code_version_t *v = vc->versions[idx]; v != NULL; v = v->next) {
-        if (v->is_active) return v;
+        /* C11 fix: The old code checked only is_active but NOT method_id.
+         * METHOD_INDEX uses modulo hashing, so two distinct method_ids
+         * can collide into the same bucket. Without this check, calling
+         * get_active(A) could return B's active version when A and B
+         * hash to the same bucket. */
+        if (v->is_active && v->method_id == method_id) return v;
     }
     return NULL;
 }

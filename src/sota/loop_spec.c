@@ -855,15 +855,25 @@ vtx_loop_unroll_result_t vtx_sota_loop_unroll_check(
     /* For unrolling, we want a small constant trip count.
      * Check if the trip count is consistent (low CV).
      * Since we don't have per-entry trip counts, we estimate CV
-     * using the same CLT approximation as in vectorization. */
+     * using the same CLT approximation as in vectorization.
+     *
+     * C16 fix: The old code only checked CV for backedge_count > 100,
+     * and rejected for < 10, but SKIPPED the check entirely for
+     * backedge_count ∈ [10, 100]. The vectorize path (line 413-417)
+     * sets cv=1.0 for <= 100 observations, which gets rejected by the
+     * threshold. The unroll path should be consistent — reject when
+     * there's insufficient data. */
     if (backedge_count > 100) {
         double cv = 1.0 / sqrt((double)backedge_count / 10.0);
         if (cv >= VTX_LOOP_CV_THRESHOLD) {
             /* Trip count is not consistent enough */
             return result;
         }
-    } else if (backedge_count < 10) {
-        /* Not enough profiling data */
+    } else {
+        /* backedge_count <= 100: not enough profiling data.
+         * Be consistent with vectorize — reject. The old code only
+         * rejected for < 10, letting [10, 100] through without a CV
+         * check. That's inconsistent with vectorize's behavior. */
         return result;
     }
 

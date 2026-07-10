@@ -255,6 +255,11 @@ typedef struct {
     vtx_ic_state_t  state;
     vtx_ic_entry_t  entries[VTX_POLY_LIMIT + 1]; /* +1 for megamorphic sentinel */
     uint32_t        count;
+    /* C17 fix: per-IC spinlock for update synchronization.
+     * Lookup uses atomic reads (lock-free), update uses the spinlock.
+     * This prevents the race where two threads both pass count < LIMIT,
+     * both write entries[count], and both increment count past LIMIT. */
+    volatile int    lock;
 } vtx_inline_cache_t;
 
 /**

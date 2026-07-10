@@ -321,8 +321,15 @@ int main(void) {
     print_stats("Sparse MatVec (1Kx5K)", s_spmv);
     printf("\n");
 
-    /* === VORTEX JIT integer kernels === */
-    printf("--- VORTEX JIT integer kernels ---\n");
+    /* === VORTEX JIT integer kernels ===
+     * W5 fix: The old section was labeled "VORTEX JIT integer kernels"
+     * but the output claimed it was running SciMark kernels through the
+     * JIT. In reality, FFT/SOR/MonteCarlo/SparseMatVec only run as
+     * native C above — the JIT section runs sum/collatz/gcd (integer
+     * programs) because the JIT currently only supports SMI (integer)
+     * operations. Float support is needed to run the actual SciMark
+     * kernels through the JIT. */
+    printf("--- VORTEX JIT integer kernels (not SciMark — JIT lacks float support) ---\n");
 
     /* Compile JIT programs */
     fprintf(stderr, "Compiling sum_loop...\n");

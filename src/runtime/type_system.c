@@ -794,6 +794,7 @@ void vtx_ic_init(vtx_inline_cache_t *ic)
     VTX_ASSERT(ic != NULL, "inline cache must not be NULL");
     ic->state = VT_IC_MONOMORPHIC;
     ic->count = 0;
+    ic->lock = 0;  /* C17 fix: initialize spinlock */
     memset(ic->entries, 0, sizeof(ic->entries));
 }
 
@@ -802,13 +803,21 @@ const vtx_method_desc_t *vtx_ic_lookup(const vtx_inline_cache_t *ic,
 {
     VTX_ASSERT(ic != NULL, "inline cache must not be NULL");
 
-    /* Megamorphic: no fast path lookup, return NULL to trigger vtable walk */
-    if (ic->state == VT_IC_MEGAMORPHIC) {
+    /* C17 fix: Use atomic reads to prevent torn reads during concurrent
+     * updates. The lock-free read path is safe because:
+     *   - We read count atomically (acquire), so we never see a partial update
+     *   - Entries are written BEFORE count is incremented (release ordering)
+     *   - If we read a stale count, we just miss the new entry (safe —
+     *     the caller falls through to vtable walk) */
+    vtx_ic_state_t state = __atomic_load_n((volatile vtx_ic_state_t *)&ic->state,
+                                              __ATOMIC_ACQUIRE);
+    if (state == VT_IC_MEGAMORPHIC) {
         return NULL;
     }
 
+    uint32_t count = __atomic_load_n(&ic->count, __ATOMIC_ACQUIRE);
     /* Linear scan through entries */
-    for (uint32_t i = 0; i < ic->count; i++) {
+    for (uint32_t i = 0; i < count && i <= VTX_POLY_LIMIT; i++) {
         if (ic->entries[i].typeid_ == typeid_) {
             return ic->entries[i].method;
         }
@@ -823,8 +832,20 @@ void vtx_ic_update(vtx_inline_cache_t *ic,
 {
     VTX_ASSERT(ic != NULL, "inline cache must not be NULL");
 
+    /* C17 fix: Use a per-IC spinlock for updates. The old code had no
+     * synchronization — two threads could both pass count < LIMIT,
+     * both write entries[count], and both increment count past LIMIT
+     * (out-of-bounds write). The spinlock ensures updates are atomic. */
+
+    /* Acquire spinlock (spin-wait) */
+    while (__atomic_test_and_set(&ic->lock, __ATOMIC_ACQUIRE)) {
+        /* Spin — IC updates are rare (only on type miss), so contention
+         * is low. A futex/condition variable would be overkill here. */
+    }
+
     /* Already megamorphic — no updates */
     if (ic->state == VT_IC_MEGAMORPHIC) {
+        __atomic_clear(&ic->lock, __ATOMIC_RELEASE);
         return;
     }
 
@@ -832,16 +853,18 @@ void vtx_ic_update(vtx_inline_cache_t *ic,
     for (uint32_t i = 0; i < ic->count; i++) {
         if (ic->entries[i].typeid_ == typeid_) {
             /* Already cached, nothing to do */
+            __atomic_clear(&ic->lock, __ATOMIC_RELEASE);
             return;
         }
     }
 
     /* Check if we have room */
     if (ic->count < VTX_POLY_LIMIT) {
-        /* Add the entry */
+        /* Add the entry — write entries BEFORE incrementing count
+         * (release ordering ensures readers see the entry). */
         ic->entries[ic->count].typeid_ = typeid_;
         ic->entries[ic->count].method  = method;
-        ic->count++;
+        __atomic_store_n(&ic->count, ic->count + 1, __ATOMIC_RELEASE);
 
         /* Transition: monomorphic → polymorphic */
         if (ic->count > 1) {
@@ -852,4 +875,6 @@ void vtx_ic_update(vtx_inline_cache_t *ic,
         ic->state = VT_IC_MEGAMORPHIC;
         ic->count = VTX_POLY_LIMIT; /* keep existing entries for potential future use */
     }
+
+    __atomic_clear(&ic->lock, __ATOMIC_RELEASE);
 }

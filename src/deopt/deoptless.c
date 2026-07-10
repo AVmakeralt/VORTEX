@@ -57,6 +57,9 @@ vtx_graph_t *vtx_deoptless_create_continuation(vtx_graph_t *graph,
     if (dst_table->capacity < src_table->count) {
         vtx_node_table_destroy(dst_table);
         if (vtx_node_table_init(dst_table, src_table->capacity) != 0) {
+            /* C9 fix: Use vtx_graph_destroy (not free) to also free
+             * new_graph->parameters allocated by vtx_graph_init. */
+            vtx_graph_destroy(new_graph);
             free(new_graph);
             return NULL;
         }

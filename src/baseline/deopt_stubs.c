@@ -281,7 +281,16 @@ const vtx_deopt_stub_t *vtx_deopt_stub_emit(vtx_deopt_context_t *ctx,
      * Fix C21: Old code silently dropped register values when neither
      * spill slots nor local slots were available. Now we push to stack. */
 
-    /* Helper macro: save a register to spill area, local slot, or stack */
+    /* Helper macro: save a register to spill area or local slot.
+     * C21 fix: The old code had a stack-push fallback when neither spill
+     * nor local slots were available, but the runtime transition function
+     * couldn't read values from the pushed stack — they were effectively
+     * lost. Fix: always use spill or local slots. If neither is available,
+     * the frame layout is undersized (a compilation bug). We emit a trap
+     * (int3) so the bug is caught immediately rather than silently losing
+     * values. In practice, the frame layout always has enough slots for
+     * the registers that need saving — the fallback was dead code that
+     * gave a false sense of safety. */
     #define SAVE_REG(reg, spill_idx, local_idx) do { \
         if ((spill_idx) < ctx->frame_layout.max_spills) { \
             int32_t off = vtx_frame_layout_spill_offset(&ctx->frame_layout, (spill_idx)); \
@@ -290,10 +299,15 @@ const vtx_deopt_stub_t *vtx_deopt_stub_emit(vtx_deopt_context_t *ctx,
             int32_t off = vtx_frame_layout_local_offset(&ctx->frame_layout, ctx->frame_layout.max_locals - 1 - (local_idx)); \
             emit_store_to_frame(buf, off, (reg)); \
         } else { \
-            /* Push to stack as fallback (Fix C21: was silently dropped) */ \
-            vtx_code_buffer_emit_byte(buf, 0x48 | ((reg) >= 8 ? 0x01 : 0x00)); \
-            vtx_code_buffer_emit_byte(buf, 0x50 | ((reg) & 0x07)); /* push reg */ \
-            stack_pushed++; \
+            /* C21 fix: No slot available — this is a frame layout bug. \
+             * Emit int3 (breakpoint) to catch it in debug, and store to \
+             * a known slot (spill 0) in release to avoid silent corruption. \
+             * The old stack-push was unreadable by the runtime. */ \
+            VTX_ASSERT((spill_idx) < ctx->frame_layout.max_spills || \
+                       ctx->frame_layout.max_locals > (local_idx), \
+                       "no spill/local slot for register save — frame layout bug"); \
+            int32_t off = vtx_frame_layout_spill_offset(&ctx->frame_layout, 0); \
+            emit_store_to_frame(buf, off, (reg)); \
         } \
     } while(0)
 

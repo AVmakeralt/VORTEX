@@ -1297,9 +1297,19 @@ int vtx_bounds_check_run(vtx_graph_t *graph,
                     /* Apply post-guard range constraints for generic Cmp */
                     switch (cond->cond) {
                     case VTX_COND_LT:
-                        /* After Guard(a < b): a.max = min(a.max, b.min - 1) */
-                        if (right_range.is_const || right_range.min > INT64_MIN) {
-                            int64_t bound = safe_dec(right_range.min);
+                        /* C15 fix: After Guard(a < b), the guaranteed fact
+                         * is a < b (runtime), which means a < b.max (since
+                         * b <= b.max). So a.max = min(a.max, b.max - 1).
+                         *
+                         * The old code used right_range.min (b.min), which
+                         * is too aggressive — it claims a < b.min when a
+                         * could be as large as b.max - 1. Example:
+                         *   a ∈ [-inf, 50], b ∈ [5, 100], guard passes with
+                         *   a=50, b=100. Old code: a.max = 4 (wrong).
+                         *   Correct: a.max = 99 (b.max - 1).
+                         */
+                        if (right_range.is_const || right_range.max < INT64_MAX) {
+                            int64_t bound = safe_dec(right_range.max);
                             if (bound < ranges[left_id].max) {
                                 ranges[left_id].max = bound;
                                 ranges[left_id].is_const = (ranges[left_id].min == ranges[left_id].max);
