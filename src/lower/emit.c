@@ -2384,7 +2384,10 @@ static uint32_t estimate_inst_size(const vtx_inst_t *inst)
     case VTX_X86_POP:    return 2;  /* REX + 58+rd */
     case VTX_X86_JMP:    return 5;  /* E9 + rel32 */
     case VTX_X86_JCC:    return 6;  /* 0F 8x + rel32 */
-    case VTX_X86_CALL:   return 5;  /* E8 + rel32 */
+    case VTX_X86_CALL:
+        if (inst->flags & VTX_INST_FLAG_HAS_IMM && inst->imm > 4096)
+            return 13;  /* MOV R11, imm64 (10) + CALL R11 (3) */
+        return 5;  /* E8 + rel32 */
     case VTX_X86_CQO:    return 2;  /* REX.W 99 */
     case VTX_X86_MOV:
         if (inst->flags & VTX_INST_FLAG_HAS_IMM) {
@@ -3541,7 +3544,32 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
         break;
 
     case VTX_X86_CALL:
-        vtx_x86_emit_call_rel32(e, 0); /* placeholder, will be patched */
+        /* Check if this is an external call (has a function pointer as imm).
+         * External calls can target functions far from the code cache
+         * (e.g. printf at 0x55... vs code cache at 0x7f...), where the
+         * 32-bit relative displacement overflows. Use a 64-bit indirect
+         * call (MOV R11, imm64; CALL R11) for external calls.
+         * R11 is caller-saved and already in the clobber list for CALL.
+         *
+         * For internal calls (CALL rel32 to a label), use the regular
+         * rel32 encoding which is patched by the relocation system. */
+        if ((inst->flags & VTX_INST_FLAG_HAS_IMM) && inst->imm > 4096) {
+            /* External call: MOV R11, imm64; CALL R11
+             * R11 = register 11. REX.W + B8+rd is MOV r64, imm64.
+             * But R11 needs REX.B: REX.WB + B8+0 = 49 BB + imm64.
+             * CALL R11: 41 FF D3 (REX.B + FF /2 + R11) */
+            emit_byte(e, 0x49);  /* REX.WB */
+            emit_byte(e, 0xBB);  /* MOV R11, imm64 */
+            emit_dword(e, (uint32_t)(inst->imm & 0xFFFFFFFF));
+            emit_dword(e, (uint32_t)((inst->imm >> 32) & 0xFFFFFFFF));
+            emit_byte(e, 0x41);  /* REX.B */
+            emit_byte(e, 0xFF);  /* CALL */
+            emit_byte(e, 0xD3);  /* ModRM: /2, R11 */
+            /* No relocation needed — the address is embedded directly */
+        } else {
+            /* Internal call: CALL rel32 (will be patched by relocation) */
+            vtx_x86_emit_call_rel32(e, 0);
+        }
         break;
 
     case VTX_X86_RET:
@@ -4740,6 +4768,27 @@ int vtx_x86_emit_function(vtx_x86_emit_t *emit, vtx_inst_stream_t *stream,
                                    (uint64_t)(uintptr_t)vtx_helpers_write_barrier,
                                    emit->reloc_arena);
             }
+            /* ---- Runtime builtin call relocation ---- *
+             * External calls now use MOV R11, imm64; CALL R11 (indirect),
+             * so the function address is embedded directly in the code.
+             * No relocation needed — skip. */
+            /* (Old rel32 relocation code removed — indirect call handles it) */
+        }
+    }
+
+    /* Emit a RET sentinel after all blocks. If a block is empty (no
+     * instructions), its label_offset points here. Branches to empty
+     * blocks will then hit this RET instead of executing garbage past
+     * the code buffer. This happens when the scheduler moves a block's
+     * instructions to a different block (e.g., end-block code placed
+     * inside the loop body), leaving the original block empty. */
+    vtx_x86_emit_ret(emit);
+    uint32_t sentinel_offset = vtx_x86_emit_position(emit) - 1; /* RET is 1 byte */
+
+    /* Patch label_offsets for empty blocks to point to the sentinel */
+    for (uint32_t b = 0; b < stream->block_count; b++) {
+        if (label_off[b] >= sentinel_offset) {
+            label_off[b] = sentinel_offset;
         }
     }
 

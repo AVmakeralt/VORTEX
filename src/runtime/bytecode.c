@@ -324,3 +324,34 @@ size_t vtx_bytecode_disassemble_op(const vtx_bytecode_t *bc, size_t pc,
 
     return pc + vtx_bytecode_insn_length(bc, pc);
 }
+
+/* Scan the bytecode stream for the highest local index referenced by any
+ * LOAD_LOCAL or STORE_LOCAL instruction. Returns 0 if no locals are used.
+ * Used as a fallback when the bytecode file format does not include an
+ * explicit max_locals field (VOBC v1 files). */
+uint16_t vtx_bytecode_scan_max_locals(const vtx_bytecode_t *bc)
+{
+    if (bc == NULL || bc->code == NULL || bc->length == 0) return 0;
+    uint16_t max_idx = 0;
+    bool any = false;
+    size_t pc = 0;
+    while (pc < bc->length) {
+        uint8_t op = bc->code[pc];
+        if (op >= VT_OP_COUNT) break;
+        const vtx_opcode_info_t *info = &vtx_opcode_table[op];
+        size_t insn_len = 1 + (info->has_operand ? info->operand_size : 0);
+        if (info->has_operand && pc + 2 < bc->length) {
+            uint16_t operand = ((uint16_t)bc->code[pc + 1] << 8) |
+                               (uint16_t)bc->code[pc + 2];
+            if (op == VT_OP_LOAD_LOCAL || op == VT_OP_STORE_LOCAL) {
+                if (!any || operand > max_idx) {
+                    max_idx = operand;
+                }
+                any = true;
+            }
+        }
+        pc += insn_len;
+    }
+    (void)any;
+    return max_idx;
+}

@@ -212,4 +212,19 @@ size_t vtx_bytecode_disassemble_op(const vtx_bytecode_t *bc, size_t pc,
  */
 size_t vtx_bytecode_insn_length(const vtx_bytecode_t *bc, size_t pc);
 
+/**
+ * Scan the bytecode stream for the highest local index referenced by
+ * any LOAD_LOCAL or STORE_LOCAL instruction. Used as a fallback when
+ * the bytecode file format does not include an explicit max_locals
+ * field (VOBC v1 files, or files loaded by main_new.c's own loader).
+ *
+ * Without this scan, max_locals stays as uninitialized arena memory,
+ * causing the locals array to be undersized — STORE_LOCAL N then
+ * aliases with the operand stack, producing silent data corruption.
+ *
+ * @param bc  The bytecode module (must have code + length populated)
+ * @return    The highest local index used (0 if no locals are referenced)
+ */
+uint16_t vtx_bytecode_scan_max_locals(const vtx_bytecode_t *bc);
+
 #endif /* VORTEX_BYTECODE_H */

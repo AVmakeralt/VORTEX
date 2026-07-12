@@ -7,10 +7,12 @@
 #include "runtime/object.h"
 #include "runtime/type_system.h"  /* for vtx_method_desc_t */
 #include "compile/priority.h"    /* for vtx_compile_tier_t */
+#include "compile/threadpool.h"  /* for vtx_threadpool_t */
 #include "interp/type_feedback.h" /* for vtx_type_feedback_t */
+#include "interp/profiler.h"     /* for vtx_profiler_t, vtx_profile_data_t */
+#include "sota/markov.h"         /* for vtx_markov_t */
 
 /* Forward declarations */
-struct vtx_threadpool;
 struct vtx_code_cache;
 struct vtx_method_registry;
 struct vtx_arena;
@@ -20,7 +22,6 @@ struct vtx_deopt_coord;
 struct vtx_versioned_cache;
 struct vtx_safepoint_manager;
 struct vtx_deoptless_table;
-struct vtx_markov;
 
 /**
  * VORTEX Compilation Request
@@ -45,7 +46,7 @@ struct vtx_markov;
  * the compilation thread pool. Initialized once at startup.
  */
 typedef struct {
-    struct vtx_threadpool        *threadpool;
+    vtx_threadpool_t             *threadpool;
     struct vtx_code_cache        *code_cache;
     struct vtx_method_registry   *method_registry;
     struct vtx_arena             *global_arena;
@@ -70,7 +71,15 @@ typedef struct {
     /* Markov chain for predictive compilation. Forwarded to the pipeline
      * config so the pipeline can check for predicted phase transitions
      * and proactively compile methods that will be hot in the next phase. */
-    struct vtx_markov             *markov;
+    vtx_markov_t                  *markov;
+
+    /* Profiler — used by the compile callback to record which tier a
+     * method was compiled at (vtx_profiler_set_compiled_tier) and to
+     * reset the tier-up counter after T1/T2 compilation so the method
+     * can be promoted to a higher tier when it gets hotter.
+     * Without this, every method compiles exactly once at whatever
+     * tier it first crossed the threshold for, and T3 is never reached. */
+    vtx_profiler_t                *profiler;
 
     /* Method lookup: given a method_id, returns the method descriptor.
      * This is needed by the threadpool worker to find the method's

@@ -1,7 +1,9 @@
 #include "interp/dispatch.h"
 #include "baseline/codegen.h"
+#include "baseline/frame_layout.h"
 #include "compile/orchestrator.h"
 #include "compile/spec_versioning.h"
+#include "codecache/install.h"
 #include "deopt/osr.h"
 
 #include <stdlib.h>
@@ -1476,13 +1478,10 @@ dispatch_VT_OP_GOTO:
              * actually compiled (for tier-up to the next tier). */
             if (VTX_UNLIKELY(vtx_profiler_tier_up_check(&interp->profiler,
                                                           frame->method))) {
-                /* Threshold reached — request JIT compilation.
-                 * This is the key wiring that connects the interpreter's
-                 * hot-code detection to the JIT compilation thread pool.
-                 * Previously this was a TODO comment; now it actually
-                 * submits the method for background compilation. */
+                /* Threshold reached — request JIT compilation. */
                 if (interp->compile_ctx != NULL) {
-                    vtx_request_compilation(interp->compile_ctx, frame->method, vtx_profiler_method_heat(&interp->profiler, frame->method));
+                    vtx_request_compilation(interp->compile_ctx, frame->method,
+                        vtx_profiler_method_heat(&interp->profiler, frame->method));
                 }
             }
 
@@ -1502,14 +1501,14 @@ dispatch_VT_OP_GOTO:
                 void *cc = __atomic_load_n(&frame->method->compiled_code,
                                               __ATOMIC_ACQUIRE);
                 if (cc != NULL && interp->compile_ctx != NULL) {
-                    /* Compiled code is available — try OSR up.
-                     * If it succeeds, we don't return here (execution
-                     * continues in compiled code). If it fails, we
-                     * continue in the interpreter. */
-                    (void)vtx_osr_up(frame, frame->method->vtable_index,
-                                       (const vtx_compiled_code_t *)cc,
-                                       (uint32_t)pc);
-                    /* If OSR up returned, it failed — continue in interp. */
+                    /* JIT compiled code is available. Set a flag and return
+                     * from the dispatch loop. The caller (main_new.c)
+                     * will call the JIT entry point from a clean stack
+                     * context, avoiding stack alignment issues from calling
+                     * deep inside the dispatch loop's computed-goto machinery. */
+                    interp->jit_reenter_pending = true;
+                    interp->running = false;
+                    goto dispatch_done;
                 }
             }
 
@@ -2440,6 +2439,54 @@ dispatch_VT_OP_CALL_RUNTIME:
                     result = vtx_interp_handle_uncaught(interp, a);
                     goto dispatch_done;
                 }
+            }
+            break;
+        case 4: /* print_ln — pop 1, print it + newline */
+            a = *--sp;
+            {
+                if (vtx_is_smi(a)) {
+                    printf("%lld\n", (long long)vtx_smi_value(a));
+                } else if (vtx_is_bool(a)) {
+                    printf("%s\n", vtx_bool_value(a) ? "true" : "false");
+                } else if (vtx_is_null(a)) {
+                    printf("null\n");
+                } else if (vtx_is_undefined(a)) {
+                    printf("undefined\n");
+                } else if (vtx_is_double(a)) {
+                    printf("%g\n", vtx_double_value(a));
+                } else {
+                    printf("<object>\n");
+                }
+                fflush(stdout);
+            }
+            break;
+        case 5: /* print — pop 1, print it (no newline) */
+            a = *--sp;
+            {
+                if (vtx_is_smi(a)) {
+                    printf("%lld", (long long)vtx_smi_value(a));
+                } else if (vtx_is_bool(a)) {
+                    printf("%s", vtx_bool_value(a) ? "true" : "false");
+                } else if (vtx_is_null(a)) {
+                    printf("null");
+                } else if (vtx_is_undefined(a)) {
+                    printf("undefined");
+                } else if (vtx_is_double(a)) {
+                    printf("%g", vtx_double_value(a));
+                } else {
+                    printf("<object>");
+                }
+                fflush(stdout);
+            }
+            break;
+        case 6: /* exit — pop exit code, terminate */
+            a = *--sp;
+            {
+                long long code = 0;
+                if (vtx_is_smi(a)) code = vtx_smi_value(a);
+                else if (vtx_is_double(a)) code = (long long)vtx_double_value(a);
+                result = vtx_make_smi(code);
+                goto dispatch_done;
             }
             break;
         default:

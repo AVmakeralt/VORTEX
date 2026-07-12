@@ -6,6 +6,8 @@
 #include <stddef.h>
 #include "vortex_config.h"
 #include "codecache/cache.h"
+#include "codecache/types.h"
+#include "baseline/frame_layout.h"
 #include "deopt/side_table.h"
 #include "deopt/types.h"
 #include "lower/reloc.h"
@@ -95,6 +97,12 @@ struct vtx_compiled_method {
     /* State */
     bool                     is_installed;      /* true if code is installed */
     bool                     is_valid;          /* false if invalidated */
+
+    /* Frame layout (persisted from vtx_compiled_code_t at install time
+     * so OSR can set up the JIT frame correctly). */
+    vtx_jit_frame_layout_t   frame_layout;
+    vtx_bc_pc_map_entry_t   *bc_pc_map;
+    uint32_t                 bc_pc_map_count;
 
     /* Linked list for method registry */
     vtx_compiled_method_t   *next;

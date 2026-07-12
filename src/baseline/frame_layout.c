@@ -44,14 +44,25 @@ vtx_jit_frame_layout_t vtx_frame_layout_compute(const vtx_method_desc_t *method)
     uint32_t spill_bytes  = layout.max_spills * 8;
     uint32_t raw_size     = locals_bytes + spill_bytes;
 
-    /* Round up to VTX_FRAME_ALIGNMENT (16 bytes) */
+    /* Round up to VTX_FRAME_ALIGNMENT (16 bytes), then add 8 for stack
+     * alignment.
+     *
+     * The JIT prologue pushes 4 registers (RDI, RSI, RDX, RBP = 32 bytes)
+     * after the CALL instruction pushes the return address (8 bytes).
+     * Total stack adjustment before sub rsp: 40 bytes = 8 mod 16.
+     *
+     * To restore 16-byte alignment for subsequent CALL instructions inside
+     * the JIT code (e.g., calls to vtx_runtime_builtin_call → printf), the
+     * frame_size must be 8 mod 16. Without this, RSP is misaligned and SSE
+     * instructions in printf crash intermittently (the non-determinism comes
+     * from whether printf happens to use SSE movaps or falls back to movups). */
     uint32_t alignment = VTX_FRAME_ALIGNMENT;
-    layout.total_frame_size = (raw_size + alignment - 1) & ~(alignment - 1);
+    uint32_t aligned = (raw_size + alignment - 1) & ~(alignment - 1);
+    layout.total_frame_size = aligned + 8;
 
-    /* Ensure minimum frame size of 16 bytes so RSP adjustment is never zero
-     * (avoids confusion with leaf functions that don't need a frame). */
-    if (layout.total_frame_size == 0) {
-        layout.total_frame_size = alignment;
+    /* Ensure minimum frame size so RSP adjustment is never zero */
+    if (layout.total_frame_size < 24) {
+        layout.total_frame_size = 24;  /* 16 bytes minimum + 8 alignment */
     }
 
     /* frame_bottom: RBP - total_frame_size */

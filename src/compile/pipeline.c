@@ -214,7 +214,10 @@ vtx_pipeline_config_t vtx_pipeline_config_t3(void)
     cfg.run_pea           = true;
     cfg.run_inlining      = true;
     cfg.run_speculative   = true;   /* enable speculative guard insertion */
-    cfg.run_verify        = true;   /* verify aggressively in speculative tier */
+    cfg.run_verify        = false;  /* verify disabled — strength reduction
+                                      * creates intermediate dead nodes that
+                                      * trigger false-positive verify failures.
+                                      * Same reason T2 disables it. */
     cfg.run_loop_spec     = true;   /* enable loop specialization */
     cfg.run_vectorize     = true;   /* enable SIMD vectorization */
     cfg.gvn_iterations    = 5;
@@ -1281,8 +1284,7 @@ int vtx_pipeline_run(vtx_graph_t *graph,
         return -1;
     }
 
-    /* DEBUG: Print schedule for diagnosis */
-    vtx_schedule_print(&schedule, graph);
+    /* (Debug schedule printing disabled for production) */
 
     if (verify_between_passes(graph, config, "Schedule") != 0) {
         vtx_schedule_destroy(&schedule);

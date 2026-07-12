@@ -13,6 +13,12 @@
 #define VORTEX_T2_THRESHOLD 10000
 #define VORTEX_COMPILE_THREADS 0
 
+/* T3 threshold: 10x T2. A method must be VERY hot to warrant T3
+ * (speculative guards, SIMD, 5 optimization iterations). */
+#ifndef VORTEX_T3_THRESHOLD
+#define VORTEX_T3_THRESHOLD (VORTEX_T2_THRESHOLD * 10)
+#endif
+
 /* Derived constants — principled, not magic */
 
 /* Heap alignment is 8 bytes → 3 low bits for tags */

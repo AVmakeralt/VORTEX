@@ -260,4 +260,18 @@ vtx_value_t vtx_runtime_call_interface_reg(void *interp,
                                              vtx_value_t *args,
                                              uint32_t arg_count);
 
+/**
+ * Dispatch a runtime builtin call from JIT-compiled code.
+ *
+ * The JIT emits CALL_RUNTIME with a runtime function ID (0-6).
+ * This function dispatches to the correct implementation:
+ *   0 = typeof, 1 = monitor_enter, 2 = monitor_exit, 3 = throw,
+ *   4 = print_ln, 5 = print, 6 = exit
+ *
+ * @param func_id  Runtime function ID (from the bytecode operand)
+ * @param arg      The argument value (popped from the stack)
+ * @return         Result value (undefined for void calls, SMI for typeof/exit)
+ */
+vtx_value_t vtx_runtime_builtin_call(uint32_t func_id, vtx_value_t arg);
+
 #endif /* VORTEX_HELPERS_H */

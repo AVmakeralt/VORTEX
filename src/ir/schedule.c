@@ -915,7 +915,7 @@ int vtx_schedule_run(vtx_graph_t *graph, vtx_arena_t *arena, vtx_schedule_t *sch
 
     /* BUG-16 fix: Guard debug CFG printing with VORTEX_ENABLE_VERIFY
      * so it doesn't spam stderr in production builds. */
-#ifdef VORTEX_ENABLE_VERIFY
+#if 0
     fprintf(stderr, "[schedule] CFG edges after Phase 3:\n");
     for (uint32_t dbi = 0; dbi < schedule->count; dbi++) {
         vtx_schedule_block_t *dbl = &schedule->blocks[dbi];

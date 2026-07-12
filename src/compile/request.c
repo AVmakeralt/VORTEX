@@ -16,6 +16,7 @@
 #include "baseline/codegen.h"
 #include "ir/graph.h"
 #include "runtime/arena.h"
+#include "interp/profiler.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -25,8 +26,21 @@
 /* Default tier decision                                                        */
 /* ========================================================================== */
 
+/* T3 promotion: a method is promoted to T3 (speculative JIT with
+ * SIMD, loop specialization, and aggressive inlining) when its heat
+ * exceeds VORTEX_T3_THRESHOLD (10x T2_THRESHOLD = 100,000 by default).
+ *
+ * The tier decision is stateless — it picks the tier based purely on
+ * execution_count. The stateful part (knowing whether a method is
+ * already compiled at T2 and needs promotion to T3) is handled by
+ * the recompilation path in the orchestrator, which clears the
+ * compilation_requested flag after T1/T2 compilation so the method
+ * can be re-detected as hot and re-compiled at a higher tier. */
 static vtx_compile_tier_t default_tier_decision(uint64_t execution_count)
 {
+    if (execution_count >= VORTEX_T3_THRESHOLD) {
+        return VTX_TIER_T3;
+    }
     if (execution_count >= VORTEX_T2_THRESHOLD) {
         return VTX_TIER_T2;
     }
@@ -203,10 +217,10 @@ void vtx_request_compilation(vtx_compile_context_t *ctx,
  *   4. Installs the compiled code into the code cache
  *   5. Clears the compilation_requested flag
  */
-static void compile_callback(uint32_t method_id, vtx_compile_tier_t tier, void *context)
+static int compile_callback(uint32_t method_id, vtx_compile_tier_t tier, void *context)
 {
     vtx_compile_context_t *ctx = (vtx_compile_context_t *)context;
-    if (ctx == NULL) return;
+    if (ctx == NULL) return -1;
 
     /* Look up the method descriptor */
     const vtx_method_desc_t *method = NULL;
@@ -216,20 +230,43 @@ static void compile_callback(uint32_t method_id, vtx_compile_tier_t tier, void *
     if (method == NULL || method->bytecode == NULL) {
         /* Method not found or has no bytecode — skip */
         vtx_clear_compilation_requested(ctx, method_id);
-        return;
+        return -1;
     }
 
-    /* Don't compile if already compiled */
+    /* Don't compile if already compiled — UNLESS this is a tier promotion.
+     * When the method is already compiled at T1 and we're now asked to
+     * compile at T2 (or T2→T3), we proceed: the new compilation will
+     * atomically replace the old compiled_code pointer via
+     * vtx_code_cache_install. The old code stays in the cache until
+     * versioned reclamation frees it (safe even if other threads are
+     * still executing it).
+     *
+     * Without this exception, T2 and T3 are unreachable: the first
+     * compilation (at T1) sets compiled_code, and every subsequent
+     * request would bail out here. */
     if (__atomic_load_n(&method->compiled_code, __ATOMIC_ACQUIRE) != NULL) {
-        vtx_clear_compilation_requested(ctx, method_id);
-        return;
+        /* Check the current compiled tier. If the new tier is not
+         * higher, skip (no point recompiling at the same or lower tier). */
+        vtx_compile_tier_t current_tier = VT_TIER_T0;
+        if (ctx->profiler != NULL) {
+            vtx_profile_data_t *pd = vtx_profiler_get_method_data(
+                ctx->profiler, method);
+            if (pd != NULL) {
+                current_tier = pd->compiled_tier;
+            }
+        }
+        if (tier <= current_tier) {
+            vtx_clear_compilation_requested(ctx, method_id);
+            return 0;  /* not an error — just no recompilation needed */
+        }
+        /* Tier promotion: proceed to recompile at the higher tier. */
     }
 
     /* Create a per-compilation arena */
     vtx_arena_t compile_arena;
     if (vtx_arena_init(&compile_arena) != 0) {
         vtx_clear_compilation_requested(ctx, method_id);
-        return;
+        return -1;
     }
 
     if (tier == VTX_TIER_T1) {
@@ -246,6 +283,16 @@ static void compile_callback(uint32_t method_id, vtx_compile_tier_t tier, void *
              * Destroy the compiled_code wrapper (the actual code lives
              * in the code cache now). */
             vtx_compiled_code_destroy(compiled);
+
+            /* Record the compiled tier and reset the tier-up counter
+             * so the method can be promoted to T2 when it gets hotter.
+             * Without this reset, compilation_requested stays true
+             * forever and the method is never re-compiled at a higher
+             * tier — T2 and T3 become unreachable. */
+            if (ctx->profiler != NULL) {
+                vtx_profiler_set_compiled_tier(ctx->profiler, method, tier);
+                vtx_profiler_tier_up_reset(ctx->profiler, method, 0);
+            }
         } else {
             fprintf(stderr, "[compile] T1 compilation failed for method %u\n", method_id);
         }
@@ -255,13 +302,13 @@ static void compile_callback(uint32_t method_id, vtx_compile_tier_t tier, void *
         if (vtx_graph_init(&graph, method->arg_count) != 0) {
             vtx_arena_destroy(&compile_arena);
             vtx_clear_compilation_requested(ctx, method_id);
-            return;
+            return -1;
         }
         if (vtx_graph_build(&graph, method->bytecode, method, &compile_arena) != 0) {
             vtx_graph_destroy(&graph);
             vtx_arena_destroy(&compile_arena);
             vtx_clear_compilation_requested(ctx, method_id);
-            return;
+            return -1;
         }
 
         vtx_pipeline_config_t config;
@@ -319,7 +366,24 @@ static void compile_callback(uint32_t method_id, vtx_compile_tier_t tier, void *
         int rc = vtx_pipeline_run(&graph, &config, &compile_arena, &result);
 
         if (rc == 0 && result.success) {
-            /* Pipeline succeeded — code is installed */
+            /* Pipeline succeeded — code is installed.
+             *
+             * Tier promotion: after T2 compilation, reset the tier-up
+             * counter so the method can be promoted to T3 when its heat
+             * crosses VORTEX_T3_THRESHOLD. T3 adds speculative guards,
+             * SIMD vectorization, loop specialization, and 5 optimization
+             * iterations (vs 3 for T2) — but only fires if the method is
+             * very hot, so we need the counter reset to detect that.
+             *
+             * After T3 compilation, don't reset — T3 is the top tier and
+             * recompiling again would just thrash. */
+            if (ctx->profiler != NULL && tier < VTX_TIER_T3) {
+                vtx_profiler_set_compiled_tier(ctx->profiler, method, tier);
+                vtx_profiler_tier_up_reset(ctx->profiler, method, 0);
+            } else if (ctx->profiler != NULL) {
+                /* T3 — record the tier but don't reset the counter. */
+                vtx_profiler_set_compiled_tier(ctx->profiler, method, tier);
+            }
         } else {
             fprintf(stderr, "[compile] T%d compilation failed for method %u (rc=%d)\n",
                     tier, method_id, rc);
@@ -333,6 +397,7 @@ static void compile_callback(uint32_t method_id, vtx_compile_tier_t tier, void *
 
     vtx_arena_destroy(&compile_arena);
     vtx_clear_compilation_requested(ctx, method_id);
+    return 0;
 }
 
 /* ========================================================================== */

@@ -2484,9 +2484,45 @@ int vtx_graph_build(vtx_graph_t *graph,
                 break;
             }
 
-            case VT_OP_HALT:
+            case VT_OP_HALT: {
+                /* HALT = return undefined (the method exits).
+                 * Create a Return node so the emitter generates a RET
+                 * instruction. Without this, the JIT code has no
+                 * terminator and falls off the end into garbage. */
+                result = vtx_node_create(&graph->node_table, VTX_OP_Return);
+                if (result == VTX_NODEID_INVALID) return -1;
+                vtx_node_add_input(&graph->node_table, result, block->control_node);
+                block->control_node = result;
+                break;
+            }
             case VT_OP_NOP:
                 break;
+
+            case VT_OP_CALL_RUNTIME: {
+                /* CALL_RUNTIME pops 1 argument (the value to print/exit on)
+                 * and calls the runtime function identified by the operand. */
+                if (sp < 1) return -1; /* stack underflow: CALL_RUNTIME */
+                vtx_nodeid_t arg = op_stack[--sp];
+                result = vtx_node_create(&graph->node_table, VTX_OP_CallRuntime);
+                if (result == VTX_NODEID_INVALID) return -1;
+                vtx_node_t *n = vtx_node_get(&graph->node_table, result);
+                /* Store the runtime function ID in method_index.
+                 * isel uses this to resolve the target function pointer. */
+                n->method_index = operand;
+                /* Input order: control, memory, data — matching the convention
+                 * used by other control nodes (CallStatic, etc.).
+                 * The scheduler walks input[0] as the control dependency,
+                 * so control MUST be first. */
+                vtx_node_add_input(&graph->node_table, result, block->control_node);
+                vtx_node_add_input(&graph->node_table, result, block->memory_node);
+                vtx_node_add_input(&graph->node_table, result, arg);
+                block->control_node = result;
+                block->memory_node = result;
+                /* Push result (undefined for void runtime calls, but DCE
+                 * will remove it if unused). */
+                op_stack[sp++] = result;
+                break;
+            }
 
             default:
                 /* Unknown opcode — skip */

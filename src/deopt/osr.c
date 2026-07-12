@@ -166,24 +166,35 @@ bool vtx_osr_up(vtx_interp_frame_t *interp,
                  uint32_t loop_header_pc)
 {
     if (!interp || !compiled_code || !compiled_code->entry_point) {
+        fprintf(stderr, "[osr] FAIL: null check (interp=%p code=%p entry=%p)\n",
+                (void*)interp, (void*)compiled_code,
+                compiled_code ? (void*)compiled_code->entry_point : NULL);
         return false;
     }
 
     /* Verify the method matches */
     if (compiled_code->method_id != method_id) {
+        fprintf(stderr, "[osr] FAIL: method_id mismatch (code=%u frame=%u)\n",
+                compiled_code->method_id, method_id);
         return false;
     }
 
     /* Verify the interpreter is at the loop header PC */
     if (interp->bytecode_pc != loop_header_pc) {
+        fprintf(stderr, "[osr] FAIL: pc mismatch (frame_pc=%u loop_header=%u)\n",
+                interp->bytecode_pc, loop_header_pc);
         return false;
     }
 
     /* Verify frame size compatibility */
     if (interp->local_count > compiled_code->local_slots) {
+        fprintf(stderr, "[osr] FAIL: locals overflow (frame=%u code=%u)\n",
+                interp->local_count, compiled_code->local_slots);
         return false;
     }
     if (interp->stack_top > compiled_code->stack_slots) {
+        fprintf(stderr, "[osr] FAIL: stack overflow (frame=%u code=%u)\n",
+                interp->stack_top, compiled_code->stack_slots);
         return false;
     }
 

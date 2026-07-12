@@ -479,3 +479,68 @@ vtx_value_t vtx_runtime_call_interface_reg(void *interp,
     free(full_args);
     return result;
 }
+
+/* ========================================================================== */
+/* Runtime builtin dispatch (for JIT CALL_RUNTIME)                             */
+/* ========================================================================== */
+
+/* The JIT compiler emits CALL_RUNTIME nodes for built-in operations
+ * (print_ln, exit, etc.). The isel emits a CALL to this function,
+ * passing the runtime function ID and the argument value.
+ *
+ * This mirrors the switch statement in the interpreter's dispatch loop
+ * (dispatch.c, VT_OP_CALL_RUNTIME handler), but as a standalone
+ * function that JIT code can call directly. */
+vtx_value_t vtx_runtime_builtin_call(uint32_t func_id, vtx_value_t arg)
+{
+    switch (func_id) {
+    case 0: { /* typeof */
+        vtx_typeid_t tid = vtx_value_typeid(arg);
+        return vtx_make_smi((int64_t)tid);
+    }
+    case 1: /* monitor_enter — no-op in T0/T1 */
+        return VTX_VALUE_UNDEFINED;
+    case 2: /* monitor_exit — no-op */
+        return VTX_VALUE_UNDEFINED;
+    case 3: /* throw — can't fully handle without interpreter context */
+        return VTX_VALUE_UNDEFINED;
+    case 4: { /* print_ln */
+        if (vtx_is_smi(arg)) {
+            printf("%lld\n", (long long)vtx_smi_value(arg));
+        } else if (vtx_is_bool(arg)) {
+            printf("%s\n", vtx_bool_value(arg) ? "true" : "false");
+        } else if (vtx_is_null(arg)) {
+            printf("null\n");
+        } else if (vtx_is_undefined(arg)) {
+            printf("undefined\n");
+        } else if (vtx_is_double(arg)) {
+            printf("%g\n", vtx_double_value(arg));
+        } else {
+            printf("<object>\n");
+        }
+        fflush(stdout);
+        return VTX_VALUE_UNDEFINED;
+    }
+    case 5: { /* print */
+        if (vtx_is_smi(arg)) {
+            printf("%lld", (long long)vtx_smi_value(arg));
+        } else if (vtx_is_bool(arg)) {
+            printf("%s", vtx_bool_value(arg) ? "true" : "false");
+        } else if (vtx_is_null(arg)) {
+            printf("null");
+        } else if (vtx_is_undefined(arg)) {
+            printf("undefined");
+        } else if (vtx_is_double(arg)) {
+            printf("%g", vtx_double_value(arg));
+        } else {
+            printf("<object>");
+        }
+        fflush(stdout);
+        return VTX_VALUE_UNDEFINED;
+    }
+    case 6: /* exit */
+        return arg;  /* return the exit code; caller handles termination */
+    default:
+        return VTX_VALUE_UNDEFINED;
+    }
+}

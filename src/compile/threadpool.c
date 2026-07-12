@@ -75,12 +75,15 @@ static void *worker_thread_func(void *arg)
 
         if (task.task_fn) {
             task.task_fn(task.arg);
-        } else if (task.method_id != 0 && pool->compile_callback != NULL) {
+        } else if (pool->compile_callback != NULL) {
             /* Method compilation task (no task_fn, but has method_id).
              * This is the path used by the orchestrator and
              * vtx_request_compilation(). Previously, these tasks
-             * were silently discarded because task_fn was NULL.
-             * Now we invoke the compile callback to run the pipeline. */
+             * were silently discarded because task_fn was NULL and
+             * method_id was checked with != 0 — which skipped the
+             * very common method_id=0 case (the main/top-level method).
+             * Now we invoke the compile callback for ANY method_id,
+             * including 0. */
             pool->compile_callback(task.method_id, task.tier,
                                    pool->compile_callback_context);
         }

@@ -23,6 +23,7 @@
 #include "ir/graph.h"
 #include "compile/safepoint.h"
 #include "runtime/object.h"
+#include "runtime/helpers.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
@@ -2493,7 +2494,18 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
     }
 
     case VTX_OP_CallRuntime: {
-        uint32_t data_arg_idx = 0;
+        /* CALL_RUNTIME dispatches to vtx_runtime_builtin_call(func_id, arg).
+         * System V AMD64 ABI: RDI = func_id, RSI = arg value.
+         * Return value in RAX.
+         *
+         * Input order (from graph builder): control, memory, data.
+         * The data input is the argument value. */
+        /* RDI = runtime function ID (from node->method_index) */
+        uint32_t rdi_preg = vtx_isel_alloc_vreg_fixed(stream, arena, vtx_arg_regs[0]); /* RDI */
+        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, rdi_preg,
+                                                (int64_t)node->method_index, node_id), arena);
+
+        /* RSI = argument value (the data input — input[2] after control+memory) */
         for (uint32_t i = 0; i < node->input_count; i++) {
             const vtx_node_t *inp = vtx_node_get_const(&graph->node_table, node->inputs[i]);
             if (!inp || vtx_nf_has(inp->flags, VTX_NF_CONTROL) ||
@@ -2501,17 +2513,17 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
                 continue;
             uint32_t arg_vreg = vtx_isel_node_vreg(stream, node->inputs[i]);
             if (arg_vreg == VTX_VREG_INVALID) continue;
-            if (data_arg_idx < 6) {
-                uint32_t arg_preg = vtx_isel_alloc_vreg_fixed(stream, arena, vtx_arg_regs[data_arg_idx]);
-                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, arg_preg, arg_vreg, node_id), arena);
-            }
-            data_arg_idx++;
+            uint32_t rsi_preg = vtx_isel_alloc_vreg_fixed(stream, arena, vtx_arg_regs[1]); /* RSI */
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, rsi_preg, arg_vreg, node_id), arena);
+            break; /* only one data argument for CALL_RUNTIME */
         }
+
+        /* CALL vtx_runtime_builtin_call */
         vtx_inst_t call_inst;
         memset(&call_inst, 0, sizeof(call_inst));
         call_inst.opcode = VTX_X86_CALL;
         call_inst.opnd_kinds[0] = VTX_OPND_IMM;
-        call_inst.imm = (int64_t)node->method_index;
+        call_inst.imm = (int64_t)(uintptr_t)vtx_runtime_builtin_call;
         call_inst.flags = VTX_INST_FLAG_HAS_IMM | VTX_INST_FLAG_IS_CALL |
                           VTX_INST_FLAG_CLOBBER_RAX | VTX_INST_FLAG_CLOBBER_RCX |
                           VTX_INST_FLAG_CLOBBER_RDX | VTX_INST_FLAG_CLOBBER_RSI |
@@ -2520,7 +2532,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
                           VTX_INST_FLAG_CLOBBER_R11;
         call_inst.source_node = node_id;
         vtx_isel_emit_inst(block, call_inst, arena);
-        uint32_t result_vreg = vtx_isel_alloc_vreg_fixed(stream, arena, 0);
+        uint32_t result_vreg = vtx_isel_alloc_vreg_fixed(stream, arena, 0); /* RAX */
         vtx_isel_map_node_vreg(stream, node_id, result_vreg, arena);
         return 0;
     }

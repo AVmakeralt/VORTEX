@@ -92,6 +92,12 @@ typedef struct {
     uint32_t            deopt_resume_pc;
     bool                deopt_resume_pending;
 
+    /* JIT re-enter: set by the dispatch loop when compiled_code becomes
+     * available mid-execution. The dispatch loop returns, and
+     * vtx_interp_run calls the JIT entry point from a clean stack
+     * context (instead of deep inside the computed-goto dispatch loop). */
+    bool                jit_reenter_pending;
+
     /* Pending exception (VTX_VALUE_UNDEFINED if none) */
     vtx_value_t         exception;
 
