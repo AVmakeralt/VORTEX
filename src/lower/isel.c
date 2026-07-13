@@ -913,6 +913,39 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             (void)rhs_const;
         }
 
+        /* Perf 2: SMI fast path for Add(Var, Var) — no untag/retag needed.
+         *
+         * SMI(a) + SMI(b) = 2*HEADER | ((a+b)<<3)
+         * SMI(a+b) = HEADER | ((a+b)<<3)
+         * So: SMI(a+b) = SMI(a) + SMI(b) - HEADER
+         *
+         * This is 3 instructions (MOV + ADD + SUB) vs 10 (untag both + add + retag).
+         * Safe when a+b doesn't overflow the 48-bit SMI data field.
+         *
+         * Skip if either input is RAW_INT (handled below) or float-typed. */
+        if (!vtx_nf_has(node->flags, VTX_NF_RAW_INT) && node->type != VTX_TYPE_Float) {
+            const vtx_node_t *lhs_n = vtx_node_get_const(&graph->node_table, node->inputs[0]);
+            const vtx_node_t *rhs_n = vtx_node_get_const(&graph->node_table, node->inputs[1]);
+            bool lhs_raw = lhs_n && vtx_nf_has(lhs_n->flags, VTX_NF_RAW_INT);
+            bool rhs_raw = rhs_n && vtx_nf_has(rhs_n->flags, VTX_NF_RAW_INT);
+            bool rhs_const;
+            int64_t dummy;
+            rhs_const = try_get_const_int(graph, node->inputs[1], &dummy);
+
+            if (!lhs_raw && !rhs_raw && !rhs_const) {
+                /* Both inputs are tagged SMIs, neither is raw, rhs is not a
+                 * constant (const has its own fast path above). Use the
+                 * header-subtraction trick: dst = lhs + rhs - HEADER. */
+                stream->uses_smi = true;
+                if (dst != lhs_vreg) {
+                    vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_vreg, node_id), arena);
+                }
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_ADD, dst, rhs_vreg, node_id), arena);
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_SUB, dst, stream->smi_scratch_vreg, node_id), arena);
+                break;
+            }
+        }
+
         /* Variable + Variable (or Variable + Const): untag both, add, retag.
          *
          * SMI tag elision: if the node is marked RAW_INT, the inputs are
@@ -1035,6 +1068,32 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
                 }
             }
             (void)rhs_const;
+        }
+
+        /* Perf 2: SMI fast path for Sub(Var, Var) — no untag/retag needed.
+         *
+         * SMI(a) - SMI(b) = (a-b)<<3  (headers cancel)
+         * SMI(a-b) = HEADER | ((a-b)<<3)
+         * So: SMI(a-b) = SMI(a) - SMI(b) + HEADER
+         *
+         * 3 instructions (MOV + SUB + ADD) vs 10 (untag both + sub + retag). */
+        if (!vtx_nf_has(node->flags, VTX_NF_RAW_INT) && node->type != VTX_TYPE_Float) {
+            const vtx_node_t *lhs_n = vtx_node_get_const(&graph->node_table, node->inputs[0]);
+            const vtx_node_t *rhs_n = vtx_node_get_const(&graph->node_table, node->inputs[1]);
+            bool lhs_raw = lhs_n && vtx_nf_has(lhs_n->flags, VTX_NF_RAW_INT);
+            bool rhs_raw = rhs_n && vtx_nf_has(rhs_n->flags, VTX_NF_RAW_INT);
+            int64_t dummy;
+            bool rhs_const = try_get_const_int(graph, node->inputs[1], &dummy);
+
+            if (!lhs_raw && !rhs_raw && !rhs_const) {
+                stream->uses_smi = true;
+                if (dst != lhs_vreg) {
+                    vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_vreg, node_id), arena);
+                }
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_SUB, dst, rhs_vreg, node_id), arena);
+                vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_ADD, dst, stream->smi_scratch_vreg, node_id), arena);
+                break;
+            }
         }
 
         /* Variable - Variable (or Variable - Const): untag both, sub, retag.
