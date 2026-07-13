@@ -964,8 +964,11 @@ static int vtx_record_instruction(vtx_record_state_t *state)
         }
 
         /* Pop arguments from stack (in reverse order) and connect to Call node */
-        vtx_nodeid_t args[16]; /* max 16 args */
-        if (arg_count > 16) arg_count = 16;
+        if (arg_count > 16) {
+            /* Fail trace recording instead of silently truncating */
+            return -1;
+        }
+        vtx_nodeid_t args[16];
         for (uint32_t i = 0; i < arg_count; i++) {
             vtx_nodeid_t arg = vtx_record_stack_pop(state);
             if (arg == VTX_NODEID_INVALID) return -1;
@@ -1022,8 +1025,10 @@ static int vtx_record_instruction(vtx_record_state_t *state)
         }
 
         /* Pop arguments from stack (in reverse order: last arg first) */
-        vtx_nodeid_t args[16]; /* max 16 args including receiver */
-        if (arg_count > 16) arg_count = 16;
+        if (arg_count > 16) {
+            return -1;
+        }
+        vtx_nodeid_t args[16];
         for (uint32_t i = 0; i < arg_count; i++) {
             vtx_nodeid_t arg = vtx_record_stack_pop(state);
             if (arg == VTX_NODEID_INVALID) return -1;
@@ -1110,8 +1115,10 @@ static int vtx_record_instruction(vtx_record_state_t *state)
         }
 
         /* Pop arguments from stack (in reverse order: last arg first) */
-        vtx_nodeid_t args[16]; /* max 16 args including receiver */
-        if (arg_count > 16) arg_count = 16;
+        if (arg_count > 16) {
+            return -1;
+        }
+        vtx_nodeid_t args[16];
         for (uint32_t i = 0; i < arg_count; i++) {
             vtx_nodeid_t arg = vtx_record_stack_pop(state);
             if (arg == VTX_NODEID_INVALID) return -1;

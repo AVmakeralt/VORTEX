@@ -2342,7 +2342,7 @@ dispatch_VT_OP_CATCH_TYPED:
          * The handler PC is in 'operand' (first 2 bytes).
          * The catch type ID is in the next 2 bytes. */
         uint32_t handler_pc = (uint32_t)operand;
-        uint16_t catch_type_raw = (uint16_t)read_operand(code, pc + 3);
+        uint16_t catch_type_raw = (uint16_t)read_operand(code, pc + 2);
         frame->catch_handler_pc = handler_pc;
         frame->catch_type = (vtx_typeid_t)catch_type_raw;
         /* Push undefined as a placeholder for the exception variable */
