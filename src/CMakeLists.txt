@@ -167,6 +167,7 @@ add_library(vortex_compile STATIC
     compile/phase_react.c
     compile/spec_versioning.c
     compile/orchestrator.c
+    compile/decision.c
     compile/request.c
     compile/callee_lookup.c
 )

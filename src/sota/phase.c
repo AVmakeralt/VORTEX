@@ -36,6 +36,7 @@ int vtx_sota_phase_init(vtx_sota_phase_t *phase,
     phase->predictions_made = 0;
     phase->predictions_correct = 0;
     phase->predictions_wrong = 0;
+    phase->hits_in_current_prediction = 0;
 
     return 0;
 }
@@ -81,8 +82,14 @@ void vtx_sota_phase_update(vtx_sota_phase_t *phase, uint32_t entered_method)
         uint32_t method_phase = vtx_phase_for_method(phase->phase_graph, entered_method);
 
         if (method_phase == phase->predicted_phase) {
-            /* This method is in the predicted phase — prediction was correct */
-            vtx_sota_phase_record_hit(phase, entered_method);
+            /* This method is in the predicted phase. The actual
+             * "pre-compiled method was called" hit is recorded in
+             * Step 3 below via vtx_sota_phase_record_hit, which is
+             * the canonical place to bump predictions_correct.
+             *
+             * B26 fix: The old code ALSO called vtx_sota_phase_record_hit
+             * here, which double-counted any method that was both in
+             * the predicted phase AND in the precompiled list. */
         } else if (method_phase != VTX_PHASE_NONE && method_phase != phase->predicted_phase) {
             /* Method is in a different phase — we may be transitioning.
              * Check if we should end the current prediction and start a new one.
@@ -104,11 +111,17 @@ void vtx_sota_phase_update(vtx_sota_phase_t *phase, uint32_t entered_method)
 
     /* Step 3: Check if the entered method was pre-compiled by us.
      * This tracks prediction accuracy — if a pre-compiled method is
-     * actually called, the prediction was useful. */
+     * actually called, the prediction was useful.
+     *
+     * B26 fix: Route through vtx_sota_phase_record_hit so we bump both
+     * the per-prediction hits and the cumulative counter in one place.
+     * The old code called vtx_sota_phase_record_hit in Step 2 AND
+     * incremented predictions_correct directly here, double-counting
+     * any method that was both in the predicted phase and pre-compiled. */
     for (uint32_t i = 0; i < phase->precompiled_count; i++) {
         if (phase->precompiled_methods[i] == entered_method) {
             /* Found it — this pre-compiled method was actually used */
-            phase->predictions_correct++;
+            vtx_sota_phase_record_hit(phase, entered_method);
             break;
         }
     }
@@ -397,8 +410,13 @@ int vtx_sota_phase_predict_with_methods(vtx_sota_phase_t *phase,
 void vtx_sota_phase_record_hit(vtx_sota_phase_t *phase, uint32_t method_id)
 {
     if (phase == NULL) return;
-    /* A pre-compiled method was actually called → prediction was correct */
+    /* A pre-compiled method was actually called → prediction was correct.
+     * B26 fix: bump BOTH the per-prediction counter (used by
+     * vtx_sota_phase_end_prediction to compute predictions_wrong) and
+     * the cumulative counter (used for accuracy reporting). */
+    phase->hits_in_current_prediction++;
     phase->predictions_correct++;
+    (void)method_id;
 }
 
 void vtx_sota_phase_end_prediction(vtx_sota_phase_t *phase)
@@ -408,8 +426,15 @@ void vtx_sota_phase_end_prediction(vtx_sota_phase_t *phase)
     if (phase->predicted_phase != VTX_PHASE_NONE) {
         /* Count methods that were pre-compiled but never called as wrong predictions.
          * The difference between precompiled_count and the number of hits
-         * gives the number of wrong predictions. */
-        uint32_t hits_in_phase = phase->predictions_correct;
+         * gives the number of wrong predictions.
+         *
+         * B27 fix: Use hits_in_current_prediction (per-prediction) instead
+         * of predictions_correct (cumulative across all predictions). The
+         * old code compared the current prediction's precompiled_count
+         * against the cumulative correct count, so after the first
+         * prediction the wrong-count was systematically under-reported
+         * (and could even underflow-safe-compare as negative-equivalent). */
+        uint32_t hits_in_phase = phase->hits_in_current_prediction;
         if (phase->precompiled_count > hits_in_phase) {
             phase->predictions_wrong +=
                 (phase->precompiled_count - hits_in_phase);
@@ -418,4 +443,5 @@ void vtx_sota_phase_end_prediction(vtx_sota_phase_t *phase)
 
     phase->predicted_phase = VTX_PHASE_NONE;
     phase->precompiled_count = 0;
+    phase->hits_in_current_prediction = 0;
 }

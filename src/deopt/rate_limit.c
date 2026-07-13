@@ -67,7 +67,11 @@ static void site_evict_expired(vtx_deopt_site_limiter_t *sl, uint64_t now_ns)
 
 bool vtx_deopt_site_record_failure(vtx_deopt_site_limiter_t *sl, uint64_t now_ns)
 {
-    if (sl == NULL || sl->poisoned) return sl->poisoned;
+    /* B18 fix: Return false when sl is NULL — the old expression
+     * `sl == NULL || sl->poisoned ? return sl->poisoned` dereferenced sl
+     * when it was NULL. A NULL limiter cannot be poisoned, so return false. */
+    if (sl == NULL) return false;
+    if (sl->poisoned) return true;
 
     if (sl->total_failures == 0) {
         sl->first_failure_ns = now_ns;

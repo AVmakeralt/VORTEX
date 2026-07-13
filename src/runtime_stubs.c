@@ -24,6 +24,7 @@
 #include "deopt/deoptless.h"
 #include "deopt/coordinator.h"
 #include "compile/orchestrator.h"
+#include "compile/decision.h"
 #include "deopt/frame_state.h"
 #include "deopt/types.h"
 
@@ -829,6 +830,19 @@ void vtx_deopt_handler_stub(uint32_t frame_state_index, uint32_t native_pc)
                                           ((uint64_t)fs->method_id << 32) |
                                               fs->bytecode_pc,
                                           VTX_GUARD_ID_INVALID);
+
+                /* BUG-1 fix: Feed the deopt event to the decision engine
+                 * as well. vtx_orchestrator_on_deopt above feeds FDI /
+                 * Markov, but the decision engine never saw deopt events
+                 * — so it could not factor them into compile-submit
+                 * decisions (priority boosting for deopt-driven recompiles,
+                 * suppression for poisoned sites, deopt-storm detection).
+                 * Without this call the engine was blind to deopts. */
+                vtx_decision_record_deopt(the_interp->compile_ctx->orchestrator,
+                                            fs->method_id,
+                                            ((uint64_t)fs->method_id << 32) |
+                                                fs->bytecode_pc,
+                                            VTX_GUARD_ID_INVALID);
             }
 
             /* Notify the deopt coordinator that a guard failed.

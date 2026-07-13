@@ -1808,14 +1808,20 @@ int vtx_x86_emit_safepoint_poll_guard_page(vtx_x86_emit_t *e)
     if (!e) return -1;
 
     /* Emit:
-     *   movq rax, [rip + disp32]     ; 7 bytes
+     *   movq r11, [rip + disp32]     ; 7 bytes
+     *
+     * B15 fix: Use R11 instead of RAX. The previous encoding
+     *   `movq rax, [rip + disp32]`
+     * destroyed live RAX values. R11 is a caller-saved scratch register
+     * that isel reserves for these polls (it is not used as a general
+     * vreg allocation target), so clobbering it is safe.
      *
      * MOV r64, r/m64 with RIP-relative addressing:
-     *   REX.W (0x48) + 0x8B + ModR/M(00, rax(0), 101) + disp32
-     *   0x48 0x8B 0x05 dd dd dd dd
+     *   REX.WR (0x4C) + 0x8B + ModR/M(00, r11(low3=011), 101) + disp32
+     *   0x4C 0x8B 0x1D dd dd dd dd
      *
      * When the guard page is readable, this is a normal load — the
-     * value in rax is ignored. When the guard page is PROT_NONE,
+     * value in r11 is ignored. When the guard page is PROT_NONE,
      * this triggers SIGSEGV, which the signal handler catches and
      * processes as a safepoint.
      *
@@ -1835,12 +1841,12 @@ int vtx_x86_emit_safepoint_poll_guard_page(vtx_x86_emit_t *e)
     /* Ensure buffer has space: 7 bytes */
     if (vtx_x86_emit_ensure(e, 7) != 0) return -1;
 
-    /* ---- Emit MOV rax, [rip + disp32] ---- */
+    /* ---- Emit MOV r11, [rip + disp32] ---- */
     uint32_t mov_disp_offset = vtx_x86_emit_position(e) + 3; /* disp32 starts at byte 3 */
 
-    emit_byte(e, 0x48);  /* REX.W */
+    emit_byte(e, 0x4C);  /* REX.WR (W=1, R=1 for R11, B=0) */
     emit_byte(e, 0x8B);  /* MOV r64, r/m64 */
-    emit_byte(e, 0x05);  /* ModR/M: mod=00, reg=0 (RAX), r/m=5 (RIP-relative) */
+    emit_byte(e, 0x1D);  /* ModR/M: mod=00, reg=011 (R11 low3), r/m=5 (RIP-relative) */
     emit_dword(e, 0);    /* placeholder disp32 — will be patched by relocation */
 
     /* Record RIP-relative relocation for the MOV's displacement.
@@ -3241,7 +3247,21 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
 
             if (inst->opnd_kinds[0] == VTX_OPND_PREG && inst->opnd_kinds[1] == VTX_OPND_MEM) {
                 /* Load: mov reg, [base + index*scale + disp] */
-                if (r0 != 0xFF) {
+                /* B13 fix: When the destination vreg is spilled (r0 == 0xFF),
+                 * the old code silently dropped the load. Emit the load into
+                 * VTX_SPILL_TMP_REG (R12) and then store it to the spill slot. */
+                if (r0 == 0xFF) {
+                    uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+                    if (slot0 != VTX_NO_SPILL) {
+                        if (index != 0xFF) {
+                            vtx_x86_emit_sib_mem(e, 0x8B, 0, VTX_SPILL_TMP_REG, base, index,
+                                                  inst->mem.scale, disp, true);
+                        } else {
+                            vtx_x86_emit_mov_rmem(e, VTX_SPILL_TMP_REG, base, disp);
+                        }
+                        emit_spill_store(e, slot0, VTX_SPILL_TMP_REG, ra);
+                    }
+                } else {
                     if (index != 0xFF) {
                         vtx_x86_emit_sib_mem(e, 0x8B, 0, r0, base, index,
                                               inst->mem.scale, disp, true);
@@ -3251,8 +3271,22 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
                 }
             } else if (inst->opnd_kinds[0] == VTX_OPND_MEM && inst->opnd_kinds[1] == VTX_OPND_PREG) {
                 /* Store: mov [base + index*scale + disp], reg */
-                r1 = (uint8_t)inst->operands[1];
-                if (r1 != 0xFF) {
+                /* B13 fix: When the source vreg is spilled (r1 == 0xFF), the
+                 * old code silently dropped the store. Load the spilled value
+                 * into VTX_SPILL_TMP_REG (R12) and then store it to memory. */
+                r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
+                if (r1 == 0xFF) {
+                    uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+                    if (slot1 != VTX_NO_SPILL) {
+                        emit_spill_load(e, slot1, VTX_SPILL_TMP_REG, ra);
+                        if (index != 0xFF) {
+                            vtx_x86_emit_sib_mem(e, 0x89, 0, VTX_SPILL_TMP_REG, base, index,
+                                                  inst->mem.scale, disp, false);
+                        } else {
+                            vtx_x86_emit_mov_memr(e, base, disp, VTX_SPILL_TMP_REG);
+                        }
+                    }
+                } else {
                     if (index != 0xFF) {
                         vtx_x86_emit_sib_mem(e, 0x89, 0, r1, base, index,
                                               inst->mem.scale, disp, false);

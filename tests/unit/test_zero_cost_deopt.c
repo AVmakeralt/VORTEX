@@ -551,11 +551,16 @@ VTX_TEST(guard_page_poll_emission)
     int result = vtx_x86_emit_safepoint_poll_guard_page(&emit);
     VTX_ASSERT_EQUAL(result, 0);
 
-    /* Verify emitted bytes: REX.W + MOV + ModR/M + disp32 = 7 bytes */
+    /* Verify emitted bytes: REX.WR + MOV + ModR/M + disp32 = 7 bytes
+     * B15 fix: poll now uses R11 instead of RAX to avoid clobbering live
+     * RAX values. Encoding:
+     *   0x4C = REX.WR (W=1, R=1 for R11)
+     *   0x8B = MOV r64, r/m64
+     *   0x1D = ModR/M: mod=00, reg=011 (R11 low3), r/m=5 (RIP-relative) */
     VTX_ASSERT_EQUAL(emit.position, 7);
-    VTX_ASSERT_EQUAL(emit.buffer[0], 0x48);  /* REX.W */
+    VTX_ASSERT_EQUAL(emit.buffer[0], 0x4C);  /* REX.WR */
     VTX_ASSERT_EQUAL(emit.buffer[1], 0x8B);  /* MOV r64, r/m64 */
-    VTX_ASSERT_EQUAL(emit.buffer[2], 0x05);  /* ModR/M: rax, RIP-relative */
+    VTX_ASSERT_EQUAL(emit.buffer[2], 0x1D);  /* ModR/M: r11, RIP-relative */
 
     /* A relocation should be recorded */
     VTX_ASSERT_TRUE(relocs.count > 0);

@@ -1111,7 +1111,12 @@ void vtx_gc_collect_young(vtx_gc_t *gc)
     /* Rebuild remembered set by scanning old-gen objects for young references */
     if (gc->old_gen.start != NULL && gc->old_gen.size > 0) {
         uint8_t *ptr = gc->old_gen.start;
-        uint8_t *end = gc->old_gen.start + gc->old_gen.used;
+        /* B11 fix: Scan the entire old-gen region [start, start+size) rather
+         * than [start, start+used). Using `used` misses old-gen objects that
+         * live past the current `used` watermark (e.g., free list blocks or
+         * pinned objects near the end), dropping their old→young references
+         * from the remembered set and leading to premature collection. */
+        uint8_t *end = gc->old_gen.start + gc->old_gen.size;
         while (ptr < end) {
             vtx_heap_object_t *obj = (vtx_heap_object_t *)ptr;
             if (obj->gc_mark == 0xFF) {

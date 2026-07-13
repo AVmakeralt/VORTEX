@@ -141,6 +141,12 @@ typedef struct {
     uint64_t                   total_phase_reactivations;
     uint64_t                   total_phase_partition_transitions; /* Sprint 2 */
     uint64_t                   total_phase_preemptive_recompiles; /* Sprint 2 */
+
+    /* Decision engine state (BUG-1 / BUG-3).
+     * Per-reason submit counters and a deopt-event counter. Updated
+     * atomically by compile/decision.c. See decision.h for the API. */
+    uint64_t                   decision_submit_counts[8 /* VTX_DECISION_REASON_COUNT */];
+    uint64_t                   decision_deopt_count;
 } vtx_orchestrator_t;
 
 /* ========================================================================== */

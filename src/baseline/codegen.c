@@ -2736,11 +2736,29 @@ static void compile_new(vtx_compile_ctx_t *ctx, uint16_t typeid_)
     emit_mov_reg_reg64(buf, VTX_REG_RAX, VTX_REG_R12);
 }
 
-static void compile_newarray(vtx_compile_ctx_t *ctx, uint16_t count)
+static void compile_newarray(vtx_compile_ctx_t *ctx, uint16_t element_typeid)
 {
     vtx_code_buffer_t *buf = &ctx->buf;
 
-    /* Allocate an array with `count` elements.
+    /* B6 fix: The bytecode operand `element_typeid` is the array's element
+     * type, NOT the array size. The array size is popped from the operand
+     * stack (TOS is an SMI representing the requested element count).
+     * The previous implementation used the typeid operand as the size,
+     * producing arrays of the wrong length. */
+
+    /* element_typeid is currently unused by the baseline allocator (the
+     * array is allocated as VTX_TYPE_OBJECT). Read it to silence unused
+     * warnings and keep the signature stable for future element-typing. */
+    (void)element_typeid;
+
+    /* Save TOS (size as SMI) into R12 (callee-saved, preserved across the
+     * GC calls below). Then pop the size off the expression stack. */
+    emit_mov_reg_reg64(buf, VTX_REG_R12, VTX_REG_RAX);
+    emit_stack_pop(ctx);
+    /* Untag the SMI in R12 to get the raw element count. */
+    emit_untag_smi(ctx, VTX_REG_R12);
+
+    /* Allocate an array with `count` elements (count is in R12 at runtime).
      * The array is a heap object with fields[0] = length (SMI),
      * fields[1..count] = elements (initialized to UNDEFINED). */
     emit_push(buf, VTX_REG_RAX);
@@ -2748,7 +2766,13 @@ static void compile_newarray(vtx_compile_ctx_t *ctx, uint16_t count)
     emit_push(buf, VTX_REG_RDX);
     emit_push(buf, VTX_REG_RBX);
 
-    size_t alloc_size = vtx_heap_object_alloc_size(count + 1); /* +1 for length */
+    /* Compute alloc_size = VTX_HEAP_OBJECT_HEADER_SIZE + (count + 1) * 8
+     * into RSI. count is in R12. Use RAX as scratch. */
+    emit_mov_reg_reg64(buf, VTX_REG_RSI, VTX_REG_R12);   /* RSI = count */
+    emit_add_reg_imm32(buf, VTX_REG_RSI, 1);              /* RSI = count + 1 */
+    emit_shl_reg_imm8(buf, VTX_REG_RSI, 3);               /* RSI = (count+1)*8 */
+    emit_add_reg_imm32(buf, VTX_REG_RSI,
+                       (int32_t)VTX_HEAP_OBJECT_HEADER_SIZE);
 
     extern vtx_gc_t *vtx_get_current_gc(void);
     emit_mov_reg_imm64(buf, VTX_REG_RAX,
@@ -2756,7 +2780,7 @@ static void compile_newarray(vtx_compile_ctx_t *ctx, uint16_t count)
     emit_call_reg(buf, VTX_REG_RAX);
 
     emit_mov_reg_reg64(buf, VTX_REG_RDI, VTX_REG_RAX);
-    emit_mov_reg_imm32(buf, VTX_REG_RSI, (uint32_t)alloc_size);
+    /* RSI already holds alloc_size */
     emit_mov_reg_imm32(buf, VTX_REG_RDX, VTX_TYPE_OBJECT); /* array type */
 
     extern vtx_heap_object_t *vtx_gc_alloc(vtx_gc_t *, size_t, vtx_typeid_t);
@@ -2764,14 +2788,16 @@ static void compile_newarray(vtx_compile_ctx_t *ctx, uint16_t count)
         (uint64_t)(uintptr_t)vtx_gc_alloc);
     emit_call_reg(buf, VTX_REG_RAX);
 
-    /* Set the length field: fields[0] = vtx_make_smi(count) */
-    vtx_value_t len_val = vtx_make_smi(count);
-    emit_mov_reg_imm64(buf, VTX_REG_R10, len_val);
-    /* mov [rax + header_size], r10 */
+    /* Set the length field: fields[0] = vtx_make_smi(count).
+     * count is in R12 (raw int). Tag it into R11 (emit_tag_smi clobbers
+     * R10 as scratch, so we cannot use R10 as the val_reg). */
+    emit_mov_reg_reg64(buf, VTX_REG_R11, VTX_REG_R12);
+    emit_tag_smi(ctx, VTX_REG_R11);
+    /* mov [rax + header_size], r11 */
     int32_t len_off = (int32_t)VTX_HEAP_OBJECT_HEADER_SIZE;
-    emit_rex64(buf, VTX_REG_R10, VTX_REG_RAX);
+    emit_rex64(buf, VTX_REG_R11, VTX_REG_RAX);
     vtx_code_buffer_emit_byte(buf, 0x89);
-    vtx_code_buffer_emit_byte(buf, modrm(1, VTX_REG_R10, VTX_REG_RAX));
+    vtx_code_buffer_emit_byte(buf, modrm(1, VTX_REG_R11, VTX_REG_RAX));
     vtx_code_buffer_emit_byte(buf, (uint8_t)(len_off & 0xFF));
 
     /* Tag the heap pointer */
@@ -2784,6 +2810,8 @@ static void compile_newarray(vtx_compile_ctx_t *ctx, uint16_t count)
         VTX_NAN_BOX_HEADER | VTX_TAG_HEAP_PTR);
     emit_or_reg_reg(buf, VTX_REG_RAX, VTX_REG_R10);
 
+    /* R12 is no longer needed (count consumed). Reuse it to save the
+     * tagged result across the register restore below. */
     emit_mov_reg_reg64(buf, VTX_REG_R12, VTX_REG_RAX);
 
     emit_pop(buf, VTX_REG_RBX);
@@ -2857,10 +2885,16 @@ static void compile_instanceof(vtx_compile_ctx_t *ctx, uint16_t typeid_)
     /* Compare RAX (type_id) with typeid_ */
     emit_cmp_reg_imm32(buf, VTX_REG_RAX, (int32_t)typeid_);
 
-    /* sete al */
-    vtx_code_buffer_emit_byte(buf, 0x31);
-    vtx_code_buffer_emit_byte(buf, modrm(3, VTX_REG_RAX, VTX_REG_RAX));
+    /* B5 fix: The old code did `xor eax, eax` here, which clobbered the
+     * flags from CMP before SETCC could read them — making INSTANCEOF
+     * always return true. Use SETCC + MOVZX instead: SETCC writes AL
+     * from the CMP flags, then MOVZX zero-extends AL to EAX without
+     * touching flags. */
     emit_setcc(buf, CC_E, VTX_REG_RAX);
+    /* movzx eax, al — 0x0F 0xB6 /r */
+    vtx_code_buffer_emit_byte(buf, 0x0F);
+    vtx_code_buffer_emit_byte(buf, 0xB6);
+    vtx_code_buffer_emit_byte(buf, modrm(3, VTX_REG_RAX, VTX_REG_RAX));
     /* Jump past null case */
     uint32_t jmp_pos = emit_jmp32(buf);
 
@@ -3149,10 +3183,15 @@ static void compile_isnull(vtx_compile_ctx_t *ctx)
     emit_mov_reg_imm64(buf, VTX_REG_R10, VTX_VALUE_NULL);
     emit_cmp_reg_reg(buf, VTX_REG_RAX, VTX_REG_R10);
 
-    /* sete al */
-    vtx_code_buffer_emit_byte(buf, 0x31);
-    vtx_code_buffer_emit_byte(buf, modrm(3, VTX_REG_RAX, VTX_REG_RAX));
+    /* B4 fix: The old code did `xor eax, eax` here, which clobbered the
+     * flags from CMP before SETCC could read them — making ISNULL always
+     * return true. Use SETCC + MOVZX instead: SETCC writes AL from the
+     * CMP flags, then MOVZX zero-extends AL to EAX without touching flags. */
     emit_setcc(buf, CC_E, VTX_REG_RAX);
+    /* movzx eax, al — 0x0F 0xB6 /r */
+    vtx_code_buffer_emit_byte(buf, 0x0F);
+    vtx_code_buffer_emit_byte(buf, 0xB6);
+    vtx_code_buffer_emit_byte(buf, modrm(3, VTX_REG_RAX, VTX_REG_RAX));
     emit_tag_smi(ctx, VTX_REG_RAX);
 }
 

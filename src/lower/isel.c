@@ -2631,8 +2631,14 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
                                        0xFF, 0xFF, 1, 0 };
         vtx_isel_emit_inst(block, make_rm_inst(VTX_X86_MOV, dst, &type_mem, node_id), arena);
         vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_CMP, dst, (int64_t)node->type_id, node_id), arena);
-        vtx_isel_emit_inst(block,
-            make_branch_inst(VTX_X86_JCC, 0, VTX_COND_NE, node_id), arena);
+        /* B16 fix: Mark the JCC with VTX_INST_FLAG_IS_GUARD so the guard
+         * emission pipeline patches it to a deopt stub. Without this flag,
+         * the cast-failure branch is left as an unresolved jump and never
+         * deoptimizes — a CheckCast that should have deopted instead falls
+         * through into the move below, silently accepting the wrong type. */
+        vtx_inst_t checkcast_jcc = make_branch_inst(VTX_X86_JCC, 0, VTX_COND_NE, node_id);
+        checkcast_jcc.flags |= VTX_INST_FLAG_IS_GUARD;
+        vtx_isel_emit_inst(block, checkcast_jcc, arena);
         vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, obj, node_id), arena);
         break;
     }
@@ -3510,8 +3516,25 @@ static int resolve_phis(vtx_inst_stream_t *stream, const vtx_schedule_t *schedul
                 INSERT_MOV(temp_vreg, copy_src[first], copy_node[first], cur_insert);
                 cur_insert++;
 
-                /* Emit copies in reverse cycle order (last to second) */
-                for (int ci = (int)cycle_len - 1; ci >= 1; ci--) {
+                /* B14 fix: Emit copies in FORWARD cycle order (second to last).
+                 *
+                 * The old code emitted in REVERSE order (last down to second),
+                 * which silently corrupted cycles of length >= 3.
+                 *
+                 * Example cycle A<-B, B<-C, C<-A (cycle_indices=[0,1,2]):
+                 *   Old (reverse, ci=2 then ci=1): emit C<-A then B<-C.
+                 *     After C<-A, C holds A_orig. Then B<-C reads C, which
+                 *     was just overwritten, so B gets A_orig instead of C_orig.
+                 *   New (forward, ci=1 then ci=2): emit B<-C then C<-A.
+                 *     B<-C reads original C (C not yet written). C<-A reads
+                 *     original A (A not yet written — A is only written by
+                 *     the first copy, which we skipped and handle via temp).
+                 * Then A<-temp (saved B_orig) completes the cycle.
+                 *
+                 * For a 2-cycle A<-B, B<-A, forward vs. reverse is the same
+                 * (only one copy emitted in the loop), so this fix is
+                 * backward-compatible with the 2-cycle case. */
+                for (uint32_t ci = 1; ci < cycle_len; ci++) {
                     uint32_t idx = cycle_indices[ci];
                     INSERT_MOV(copy_dst[idx], copy_src[idx], copy_node[idx], cur_insert);
                     cur_insert++;

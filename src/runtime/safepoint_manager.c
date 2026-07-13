@@ -181,6 +181,11 @@ int vtx_safepoint_release_all(vtx_safepoint_manager_t *mgr)
     pthread_mutex_lock(&mgr->mutex);
 
     mgr->safepoint_requested = false;
+    /* B12 fix: Increment safepoint_id so waiting threads observing it in
+     * vtx_safepoint_mgr_check (which loops while safepoint_id == my_safepoint_id)
+     * see the safepoint as released and exit the wait loop. Without this
+     * increment, threads would block forever on the released condition. */
+    mgr->safepoint_id++;
 
     /* Wake up all waiting threads. */
     pthread_cond_broadcast(&mgr->released);

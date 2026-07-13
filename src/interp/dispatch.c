@@ -625,12 +625,19 @@ vtx_value_t vtx_interp_run(vtx_interp_t *interp,
 
 #if VTX_USE_COMPUTED_GOTO
     static void *local_dispatch_table[VT_OP_COUNT] = { NULL };
-    static volatile bool dispatch_table_built = false;
+    /* B9 fix: Use a 3-state flag instead of a bool. The original code did a
+     * CAS that set `dispatch_table_built = true` BEFORE populating the table,
+     * so a second thread entering vtx_interp_run concurrently would see the
+     * flag as set, skip the build, and immediately memcpy an incompletely
+     * populated table — a torn-read race.
+     *
+     * States: 0 = unbuilt, 1 = building (claimed), 2 = ready.
+     * - Builder thread CASes 0 -> 1, populates the table, then release-stores 2.
+     * - Other threads either skip (if 2) or spin-wait (if 1) until ready. */
+    static volatile int dispatch_table_state = 0;
 
-    /* Bug #6 fix: Use atomic CAS to prevent race condition when two threads
-     * enter vtx_interp_run concurrently and both try to build the table. */
-    bool expected = false;
-    if (__atomic_compare_exchange_n(&dispatch_table_built, &expected, true,
+    int expected0 = 0;
+    if (__atomic_compare_exchange_n(&dispatch_table_state, &expected0, 1,
                                      false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
 #define DISPATCH_LABEL(op) &&dispatch_##op
         local_dispatch_table[VT_OP_HALT]           = DISPATCH_LABEL(VT_OP_HALT);
@@ -701,6 +708,16 @@ vtx_value_t vtx_interp_run(vtx_interp_t *interp,
         local_dispatch_table[VT_OP_TYPEOF]         = DISPATCH_LABEL(VT_OP_TYPEOF);
         local_dispatch_table[VT_OP_CALL_RUNTIME]   = DISPATCH_LABEL(VT_OP_CALL_RUNTIME);
 #undef DISPATCH_LABEL
+        /* B9 fix: Publish the table AFTER it is fully populated so that
+         * concurrent readers never observe a half-built table. The release
+         * store pairs with the acquire load in the spin-wait below. */
+        __atomic_store_n(&dispatch_table_state, 2, __ATOMIC_RELEASE);
+    } else {
+        /* Lost the CAS — another thread is building (or has built) the table.
+         * Spin-wait until the builder publishes state == 2 (ready). */
+        while (__atomic_load_n(&dispatch_table_state, __ATOMIC_ACQUIRE) != 2) {
+            /* spin */
+        }
     }
 
     /* Copy dispatch table to interpreter instance */

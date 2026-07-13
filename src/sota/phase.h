@@ -88,6 +88,12 @@ typedef struct {
     uint32_t predictions_made;
     uint32_t predictions_correct;  /* methods in predicted phase were actually called */
     uint32_t predictions_wrong;    /* methods in predicted phase were never called */
+    /* B26/B27 fix: Per-prediction hit counter. `predictions_correct` is
+     * cumulative across all predictions, so it cannot be used to compute
+     * `predictions_wrong` at the end of a single prediction. This field
+     * tracks hits for the CURRENT prediction only, and is reset in
+     * vtx_sota_phase_end_prediction(). */
+    uint32_t hits_in_current_prediction;
 } vtx_sota_phase_t;
 
 /* ========================================================================== */

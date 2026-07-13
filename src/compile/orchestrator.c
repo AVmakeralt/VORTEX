@@ -9,6 +9,7 @@
 
 #define _POSIX_C_SOURCE 199309L
 #include "compile/orchestrator.h"
+#include "compile/decision.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -68,7 +69,10 @@ static void check_markov_prediction(vtx_orchestrator_t *orch)
         task.tier = VTX_TIER_T2;
         task.priority = VTX_COMPILE_PRIORITY_LOW;
 
-        if (vtx_threadpool_submit_task(orch->threadpool, &task) == 0) {
+        /* BUG-3 fix (1/6): Route through the decision engine instead of
+         * submitting directly to the threadpool. */
+        if (vtx_decision_submit_compile(orch, &task,
+                                          VTX_DECISION_REASON_PROACTIVE) == 0) {
             __atomic_fetch_add(&orch->total_proactive_compiles, 1, __ATOMIC_RELAXED);
         }
     }
@@ -222,7 +226,9 @@ static void check_recomp_drift(vtx_orchestrator_t *orch)
             task.tier = VTX_TIER_T2;  /* recompile at T2 by default */
             task.priority = VTX_COMPILE_PRIORITY_HIGH; /* drift = urgent */
 
-            if (vtx_threadpool_submit_task(orch->threadpool, &task) == 0) {
+            /* BUG-3 fix (2/6): Route through the decision engine. */
+            if (vtx_decision_submit_compile(orch, &task,
+                                              VTX_DECISION_REASON_DRIFT) == 0) {
                 __atomic_fetch_add(&orch->total_recomp_triggers, 1, __ATOMIC_RELAXED);
                 /* Reset hysteresis counter after a successful recompile
                  * submission so the same method isn't immediately fired
@@ -275,7 +281,9 @@ static void check_fdi_feedback(vtx_orchestrator_t *orch)
         task.tier = VTX_TIER_T2;
         task.priority = VTX_COMPILE_PRIORITY_HIGH;
 
-        if (vtx_threadpool_submit_task(orch->threadpool, &task) == 0) {
+        /* BUG-3 fix (3/6): Route through the decision engine. */
+        if (vtx_decision_submit_compile(orch, &task,
+                                          VTX_DECISION_REASON_FDI) == 0) {
             __atomic_fetch_add(&orch->total_fdi_recompiles, 1, __ATOMIC_RELAXED);
         }
     }
@@ -321,7 +329,9 @@ static void check_deoptless_continuations(vtx_orchestrator_t *orch)
             task.tier = VTX_TIER_T2;
             task.priority = VTX_COMPILE_PRIORITY_NORMAL;
 
-            if (vtx_threadpool_submit_task(orch->threadpool, &task) == 0) {
+            /* BUG-3 fix (4/6): Route through the decision engine. */
+            if (vtx_decision_submit_compile(orch, &task,
+                                              VTX_DECISION_REASON_DEOPTLESS) == 0) {
                 /* Reset the failed guard count so we don't re-trigger
                  * on every orchestrator check. The recompilation will
                  * create a continuation that handles these guards. */
@@ -567,7 +577,9 @@ void vtx_orchestrator_on_deopt(vtx_orchestrator_t *orch,
             task.method_id = method_id;
             task.tier = VTX_TIER_T2;
             task.priority = VTX_COMPILE_PRIORITY_HIGH;
-            if (vtx_threadpool_submit_task(orch->threadpool, &task) == 0) {
+            /* BUG-3 fix (5/6): Route through the decision engine. */
+            if (vtx_decision_submit_compile(orch, &task,
+                                              VTX_DECISION_REASON_DEOPT) == 0) {
                 __atomic_fetch_add(&orch->total_fdi_recompiles, 1, __ATOMIC_RELAXED);
             }
         }
@@ -720,7 +732,9 @@ void vtx_orchestrator_phase_transition(vtx_orchestrator_t *orch,
             task.tier = VTX_TIER_T2;
             task.priority = VTX_COMPILE_PRIORITY_LOW;  /* preemptive = low */
 
-            if (vtx_threadpool_submit_task(orch->threadpool, &task) == 0) {
+            /* BUG-3 fix (6/6): Route through the decision engine. */
+            if (vtx_decision_submit_compile(orch, &task,
+                                              VTX_DECISION_REASON_PHASE) == 0) {
                 __atomic_fetch_add(&orch->total_phase_preemptive_recompiles,
                                      1, __ATOMIC_RELAXED);
             }
