@@ -104,8 +104,8 @@ static uint32_t build_tree_from_spec(vtx_gbdt_node_t *base,
         uint32_t root = build_split(base, &pos, spec->f0, spec->t0);
         uint32_t left = build_leaf(base, &pos, spec->leaves[0]);
         uint32_t right = build_leaf(base, &pos, spec->leaves[1]);
-        base[root].left_child  = (int16_t)left;
-        base[root].right_child = (int16_t)right;
+        base[root].left_child  = (int32_t)left;
+        base[root].right_child = (int32_t)right;
         node_count = 3;
     } else if (spec->depth == 2) {
         /* Root + 2 internal + 4 leaves */
@@ -116,12 +116,12 @@ static uint32_t build_tree_from_spec(vtx_gbdt_node_t *base,
         uint32_t l1   = build_leaf(base, &pos, spec->leaves[1]);
         uint32_t l2   = build_leaf(base, &pos, spec->leaves[2]);
         uint32_t l3   = build_leaf(base, &pos, spec->leaves[3]);
-        base[root].left_child  = (int16_t)n1;
-        base[root].right_child = (int16_t)n2;
-        base[n1].left_child    = (int16_t)l0;
-        base[n1].right_child   = (int16_t)l1;
-        base[n2].left_child    = (int16_t)l2;
-        base[n2].right_child   = (int16_t)l3;
+        base[root].left_child  = (int32_t)n1;
+        base[root].right_child = (int32_t)n2;
+        base[n1].left_child    = (int32_t)l0;
+        base[n1].right_child   = (int32_t)l1;
+        base[n2].left_child    = (int32_t)l2;
+        base[n2].right_child   = (int32_t)l3;
         node_count = 7;
     } else {
         /* Full depth 3: root + 2 internal + 4 internal + 8 leaves = 15 nodes */
@@ -140,20 +140,20 @@ static uint32_t build_tree_from_spec(vtx_gbdt_node_t *base,
         uint32_t l5   = build_leaf(base, &pos, spec->leaves[5]);
         uint32_t l6   = build_leaf(base, &pos, spec->leaves[6]);
         uint32_t l7   = build_leaf(base, &pos, spec->leaves[7]);
-        base[root].left_child  = (int16_t)n1;
-        base[root].right_child = (int16_t)n2;
-        base[n1].left_child    = (int16_t)n3;
-        base[n1].right_child   = (int16_t)n4;
-        base[n2].left_child    = (int16_t)n5;
-        base[n2].right_child   = (int16_t)n6;
-        base[n3].left_child    = (int16_t)l0;
-        base[n3].right_child   = (int16_t)l1;
-        base[n4].left_child    = (int16_t)l2;
-        base[n4].right_child   = (int16_t)l3;
-        base[n5].left_child    = (int16_t)l4;
-        base[n5].right_child   = (int16_t)l5;
-        base[n6].left_child    = (int16_t)l6;
-        base[n6].right_child   = (int16_t)l7;
+        base[root].left_child  = (int32_t)n1;
+        base[root].right_child = (int32_t)n2;
+        base[n1].left_child    = (int32_t)n3;
+        base[n1].right_child   = (int32_t)n4;
+        base[n2].left_child    = (int32_t)n5;
+        base[n2].right_child   = (int32_t)n6;
+        base[n3].left_child    = (int32_t)l0;
+        base[n3].right_child   = (int32_t)l1;
+        base[n4].left_child    = (int32_t)l2;
+        base[n4].right_child   = (int32_t)l3;
+        base[n5].left_child    = (int32_t)l4;
+        base[n5].right_child   = (int32_t)l5;
+        base[n6].left_child    = (int32_t)l6;
+        base[n6].right_child   = (int32_t)l7;
         node_count = 15;
     }
 
@@ -483,8 +483,8 @@ int vtx_gbdt_load_model(vtx_gbdt_model_t *model, const double *data, uint32_t co
             vtx_gbdt_node_t *node = &nodes[node_offset + n];
             node->feature_index = (uint16_t)data[pos++];
             node->threshold     = (float)data[pos++];
-            node->left_child    = (int16_t)data[pos++];
-            node->right_child   = (int16_t)data[pos++];
+            int32_t rel_left    = (int32_t)data[pos++];
+            int32_t rel_right   = (int32_t)data[pos++];
             node->leaf_value    = (float)data[pos++];
 
             /* Validate: feature index must be in range or LEAF_MARKER */
@@ -496,16 +496,40 @@ int vtx_gbdt_load_model(vtx_gbdt_model_t *model, const double *data, uint32_t co
                 return -1;
             }
 
-            /* Validate: child indices must be non-negative for internal nodes */
+            /* Validate: child indices must be non-negative for internal nodes
+             * and within this tree's node_count (they are stored RELATIVE
+             * to the tree root in the serialized format). */
             if (node->feature_index != VTX_GBDT_LEAF_MARKER) {
-                if (node->left_child < 0 || node->right_child < 0 ||
-                    (uint32_t)node->left_child >= nc ||
-                    (uint32_t)node->right_child >= nc) {
+                if (rel_left < 0 || rel_right < 0 ||
+                    (uint32_t)rel_left >= nc ||
+                    (uint32_t)rel_right >= nc) {
                     free(nodes);
                     model->nodes = NULL;
                     model->tree_count = 0;
                     return -1;
                 }
+            }
+
+            /* B20 fix: trees are stored sequentially in the flat `nodes`
+             * array, so a child index that is relative to this tree's
+             * root (0..nc-1) must be converted to an ABSOLUTE index into
+             * the flat array by adding `node_offset` (this tree's base).
+             *
+             * The previous code stored the raw relative index, which made
+             * every tree after the first one read nodes from the wrong
+             * tree (tree 2's left_child=1 pointed at tree 1's node 1).
+             *
+             * `traverse_tree` walks the flat array using absolute indices,
+             * matching what build_tree_from_spec() emits for the default
+             * model. With this fix, loaded models and the default model
+             * use the same absolute-index convention. */
+            if (node->feature_index != VTX_GBDT_LEAF_MARKER) {
+                node->left_child  = (int32_t)(node_offset + (uint32_t)rel_left);
+                node->right_child = (int32_t)(node_offset + (uint32_t)rel_right);
+            } else {
+                /* Leaves don't use child indices — leave them as -1. */
+                node->left_child  = -1;
+                node->right_child = -1;
             }
         }
 

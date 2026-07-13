@@ -99,6 +99,11 @@ void vtx_trace_selector_destroy(vtx_trace_selector_t *selector)
 /**
  * Scan the interpreter profiler for methods with hot backward branches.
  * Each method's backward_branch_count is used as the heat metric.
+ *
+ * B21 fix: We now properly record method_id (from the method descriptor)
+ * and loop_header_pc (decoded from the bytecode at each hot branch PC).
+ * This lets Phase 2 (global profile scan) match its per-loop entries
+ * against the per-method entries from Phase 1 to refine heat values.
  */
 static int vtx_trace_selector_scan_profiler(
     vtx_trace_selector_t *selector,
@@ -114,34 +119,81 @@ static int vtx_trace_selector_scan_profiler(
         uint64_t backedge_count = pd->backward_branch_count;
         if (backedge_count <= (uint64_t)VORTEX_T2_THRESHOLD) continue;
 
-        vtx_hot_loop_t loop;
-        loop.method = pd->method;
-        loop.heat = backedge_count;
-        loop.method_id = 0; /* profiler doesn't use method_id directly */
+        /* B21 fix: record the actual method_id so Phase 2 can match.
+         * The convention used by main_new.c when syncing profiler data
+         * into the global profile is `method_id = method->vtable_index`,
+         * so we use the same here. */
+        const vtx_method_desc_t *method = pd->method;
+        uint32_t method_id = method->vtable_index;
 
-        /* Try to find the actual loop header PC from branch data.
-         * Backward branches are IF_TRUE/IF_FALSE/GOTO whose target PC
-         * is less than the current PC. We look at the branch counters
-         * to find the PC of the backward branch instruction. */
-        loop.loop_header_pc = 0; /* will be refined below */
+        /* B21 fix: scan the branch arrays and the bytecode to identify
+         * the actual loop header PC for each hot backward branch.
+         *
+         * For every PC `j` with branch_taken_counts[j] > 0:
+         *   1. Read the opcode at PC j from the bytecode.
+         *   2. If it's GOTO/IF_TRUE/IF_FALSE, read the 2-byte target PC.
+         *   3. If target < j, this is a backward branch — the target is
+         *      the loop header. Add a hot_loop entry for it.
+         *
+         * Without this, Phase 1 sets loop_header_pc=0 for every method,
+         * so Phase 2's duplicate check (existing->loop_header_pc ==
+         * lp->loop_header_pc) never matches and Phase 2 effectively
+         * becomes dead code — global profile per-loop data is discarded. */
+        const vtx_bytecode_t *bc = method->bytecode;
+        bool found_loop_header = false;
 
-        /* Search the branch array for backward branches.
-         * NOTE: We cannot determine the actual loop header PC here
-         * because we don't have the bytecode to decode branch targets.
-         * The branch_taken_counts[j] == 0 check only tells us that
-         * a branch at PC j was taken, not that j is the loop header.
-         * The loop header is the TARGET of the backward branch, not
-         * the PC of the branch instruction itself.
-         * We leave loop_header_pc as 0; the global profile scan
-         * (Phase 2) provides the correct loop_header_pc from
-         * lp->loop_header_pc. */
+        if (bc != NULL && bc->code != NULL &&
+            pd->branch_taken_counts != NULL &&
+            pd->branch_total_counts != NULL) {
+            uint32_t bsize = pd->branch_array_size;
+            if (bsize > bc->length) bsize = (uint32_t)bc->length;
 
-        /* If we couldn't find a specific loop header from branches,
-         * we still add the method as a hot loop candidate with PC=0.
-         * The recorder will need the bytecode to determine the actual
-         * loop header. */
-        if (vtx_hot_loop_list_append(&selector->hot_loops, &loop) != 0) {
-            return -1;
+            size_t pc = 0;
+            while (pc < bsize) {
+                vtx_opcode_t op = vtx_bytecode_opcode_at(bc, pc);
+                size_t insn_len = vtx_bytecode_insn_length(bc, pc);
+
+                if (op == VT_OP_GOTO || op == VT_OP_IF_TRUE ||
+                    op == VT_OP_IF_FALSE) {
+                    uint32_t taken = pd->branch_taken_counts[pc];
+                    if (taken > 0) {
+                        uint16_t target = vtx_bytecode_read_operand(bc, pc);
+                        if (target < pc) {
+                            /* Backward branch — target is the loop header.
+                             * Use the branch's taken count as the heat. */
+                            vtx_hot_loop_t loop;
+                            loop.method = method;
+                            loop.method_id = method_id;
+                            loop.loop_header_pc = target;
+                            loop.heat = taken;
+                            if (vtx_hot_loop_list_append(&selector->hot_loops,
+                                                          &loop) != 0) {
+                                return -1;
+                            }
+                            found_loop_header = true;
+                        }
+                    }
+                }
+
+                if (insn_len == 0) break; /* safety: avoid infinite loop */
+                pc += insn_len;
+            }
+        }
+
+        /* If we didn't find a specific loop header (e.g., the bytecode
+         * wasn't available or no backward branch was hot enough), still
+         * add the method as a hot loop candidate with the method-level
+         * backedge_count as the heat. PC=0 here means "any loop in this
+         * method" — Phase 2 may still refine it. */
+        if (!found_loop_header) {
+            vtx_hot_loop_t loop;
+            loop.method = method;
+            loop.method_id = method_id;
+            loop.loop_header_pc = 0;
+            loop.heat = backedge_count;
+            if (vtx_hot_loop_list_append(&selector->hot_loops, &loop) != 0) {
+                return -1;
+            }
         }
     }
 

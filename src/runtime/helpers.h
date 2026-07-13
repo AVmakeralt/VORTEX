@@ -200,63 +200,67 @@ void vtx_helpers_write_barrier(void *obj, uint32_t field_offset);
 /**
  * Call a method with arguments passed in registers.
  *
- * This replaces the variadic vtx_runtime_call_static/virtual/interface
- * functions with register-based dispatch. The JIT codegen places arguments
- * directly into the System V AMD64 ABI registers (RDI, RSI, RDX, RCX, R8, R9),
- * and this function receives them as a flat array.
+ * B7/B8 fix: The JIT entry calling convention (T2) is:
+ *   RDI = method_ptr, RSI = deopt_info, RDX = profile_data,
+ *   RCX = args array pointer, R8 = arg_count
  *
- * The key advantage: no variadic argument marshaling. The JIT-compiled code
- * at the call site moves arguments directly from the expression stack to the
- * correct registers, and the callee receives them in the same registers
- * without any intermediate memory operations.
+ * The baseline codegen sets up exactly these registers and calls this
+ * helper. The helper ignores deopt_info/profile_data (they are
+ * per-callsite values that the callee resolves from its own
+ * compiled_code metadata), looks up the interpreter via
+ * vtx_get_current_interp(), and dispatches to vtx_interp_run().
  *
- * @param interp     Interpreter state (provides type system, GC, profiler).
- *                   Opaque pointer — cast from vtx_interp_t* in the implementation.
- * @param method     Method descriptor for the target method
- * @param args       Array of argument values (already in the right order)
- * @param arg_count  Number of arguments in the args array
- * @return           The method's return value
+ * @param method        Method descriptor for the target method
+ * @param deopt_info    Deopt info pointer (NULL for fresh calls — ignored)
+ * @param profile_data  Profile data pointer (NULL or sentinel 1 — ignored)
+ * @param args          Array of argument values (already in the right order)
+ * @param arg_count     Number of arguments in the args array
+ * @return              The method's return value
  */
-vtx_value_t vtx_runtime_call_reg(void *interp,
-                                   const vtx_method_desc_t *method,
+vtx_value_t vtx_runtime_call_reg(const vtx_method_desc_t *method,
+                                   void *deopt_info,
+                                   void *profile_data,
                                    vtx_value_t *args,
                                    uint32_t arg_count);
 
 /**
  * Call a virtual method with register-based dispatch.
  *
- * Similar to vtx_runtime_call_reg but performs virtual dispatch:
- * looks up the actual method based on the receiver's type, then
- * calls it with register-based argument passing.
+ * B7/B8 fix: Uses the same JIT entry calling convention as
+ * vtx_runtime_call_reg. The receiver is args[0]; the method name is
+ * derived from `method->name`. The receiver's type is used to resolve
+ * the actual target method.
  *
- * @param interp       Interpreter state (opaque pointer)
- * @param method_name  Name of the virtual method to resolve
- * @param receiver     The receiver object (first implicit argument)
- * @param args         Remaining arguments (after receiver)
- * @param arg_count    Number of remaining arguments (not counting receiver)
- * @return             The method's return value
+ * @param method        Method descriptor (provides method name) — this is
+ *                      the statically-known method at the call site
+ * @param deopt_info    Deopt info pointer (NULL — ignored)
+ * @param profile_data  Profile data pointer (NULL or sentinel 1 — ignored)
+ * @param args          Array of argument values; args[0] is the receiver
+ * @param arg_count     Number of arguments in the args array (incl. receiver)
+ * @return              The method's return value
  */
-vtx_value_t vtx_runtime_call_virtual_reg(void *interp,
-                                           const char *method_name,
-                                           vtx_value_t receiver,
+vtx_value_t vtx_runtime_call_virtual_reg(const vtx_method_desc_t *method,
+                                           void *deopt_info,
+                                           void *profile_data,
                                            vtx_value_t *args,
                                            uint32_t arg_count);
 
 /**
  * Call an interface method with register-based dispatch.
  *
- * @param interp            Interpreter state (opaque pointer)
- * @param interface_typeid  TypeID of the interface
- * @param method_name       Name of the interface method
- * @param receiver          The receiver object
- * @param args              Remaining arguments
- * @param arg_count         Number of remaining arguments
- * @return                  The method's return value
+ * B7/B8 fix: Uses the JIT entry calling convention. The interface
+ * typeid is derived from the receiver's type via the type system.
+ *
+ * @param method        Method descriptor (provides method name)
+ * @param deopt_info    Deopt info pointer (NULL — ignored)
+ * @param profile_data  Profile data pointer (NULL or sentinel 1 — ignored)
+ * @param args          Array of argument values; args[0] is the receiver
+ * @param arg_count     Number of arguments (incl. receiver)
+ * @return              The method's return value
  */
-vtx_value_t vtx_runtime_call_interface_reg(void *interp,
-                                             vtx_typeid_t interface_typeid,
-                                             const char *method_name,
-                                             vtx_value_t receiver,
+vtx_value_t vtx_runtime_call_interface_reg(const vtx_method_desc_t *method,
+                                             void *deopt_info,
+                                             void *profile_data,
                                              vtx_value_t *args,
                                              uint32_t arg_count);
 

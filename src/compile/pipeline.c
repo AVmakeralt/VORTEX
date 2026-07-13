@@ -746,6 +746,17 @@ static int run_lowering_pipeline(vtx_graph_t *graph,
     /* Step 4: Peephole optimization on the allocated instructions */
     vtx_peephole_optimize(inst_stream, ra_result);
 
+    /* Perf 5: Branch optimization — merge conditional jumps over unconditional
+     * jumps (inverted branch chains), eliminate dead branches, and compute
+     * short-jump offsets. Called after peephole but before emission so the
+     * emitter sees the optimized instruction stream. */
+    {
+        vtx_x86_emit_t tmp_emit;
+        vtx_x86_emit_init(&tmp_emit, 256);
+        vtx_branch_optimize(inst_stream, &tmp_emit, ra_result);
+        vtx_x86_emit_destroy(&tmp_emit);
+    }
+
     /* Step 5: Build guard descriptor array from the graph.
      * Scan for Guard/DeoptGuard nodes and create descriptors so we can
      * emit deopt stubs and build the side table during code emission. */

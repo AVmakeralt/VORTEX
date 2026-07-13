@@ -1,5 +1,6 @@
 #include "interp/dispatch.h"
 #include "baseline/codegen.h"
+#include "baseline/deopt_stubs.h"
 #include "baseline/frame_layout.h"
 #include "compile/orchestrator.h"
 #include "compile/spec_versioning.h"
@@ -591,6 +592,13 @@ vtx_value_t vtx_interp_run(vtx_interp_t *interp,
 {
     VTX_ASSERT(interp != NULL, "interpreter must not be NULL");
     VTX_ASSERT(method != NULL, "method must not be NULL");
+
+    /* B1 fix: Wire the deopt entry point so guard failures can deoptimize
+     * instead of crashing. g_interp_entry is set once and checked by the
+     * deopt stub — without this, every guard failure segfaults. */
+    if (vtx_deopt_get_interp_entry() == NULL) {
+        vtx_deopt_set_interp_entry((vtx_interp_entry_t)&vtx_interp_run);
+    }
 
     /* ===================================================================
      * JIT DISPATCH: If the method has been compiled, call JIT code

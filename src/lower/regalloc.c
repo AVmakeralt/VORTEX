@@ -685,19 +685,30 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
     if (!active && active_capacity > 0) return NULL;
 
     /* Free register pools: separate bitmasks for GPR and XMM.
-     * GPR: caller-saved + callee-saved, minus reserved (RSP, RBP, RAX, RDX).
-     * RAX and RDX are reserved because IDIV/CQO/IMUL_FULL clobbers them.
-     * Fixed vregs (rax_vreg, rdx_vreg) still use RAX/RDX via is_fixed path.
+     * GPR: caller-saved + callee-saved, minus reserved (RSP, RBP).
      *
-     * NOTE: A previous optimization made RAX/RDX conditional (only reserved
-     * when IDIV/IMUL_FULL is present). This caused magic-number division
-     * tests to fail because the regalloc doesn't process CLOBBER_RAX/RDX
-     * flags — it relies on global reservation. Reverted to always reserve
-     * until the regalloc properly handles per-instruction clobbers. */
+     * Perf 4: RAX and RDX are only needed by IDIV/CQO/IMUL_FULL. Scan the
+     * instruction stream and only reserve them when such instructions exist.
+     * This gives non-IDIV functions 2 extra registers, reducing spills. */
     uint32_t free_gpr_regs = VTX_CALLER_SAVED_MASK | VTX_CALLEE_SAVED_MASK;
     free_gpr_regs &= ~VTX_REG_RESERVED_MASK;
-    free_gpr_regs &= ~(1u << 0);  /* RAX — reserved for IDIV quotient */
-    free_gpr_regs &= ~(1u << 2);  /* RDX — reserved for IDIV remainder */
+
+    /* Check if any instruction uses IDIV/IMUL_FULL/CQO */
+    bool uses_idiv = false;
+    for (uint32_t b = 0; b < stream->block_count && !uses_idiv; b++) {
+        for (uint32_t i = 0; i < stream->blocks[b].inst_count; i++) {
+            vtx_x86_opcode_t op = stream->blocks[b].insts[i].opcode;
+            if (op == VTX_X86_IDIV || op == VTX_X86_CQO ||
+                op == VTX_X86_IMUL_FULL || op == VTX_X86_MUL) {
+                uses_idiv = true;
+                break;
+            }
+        }
+    }
+    if (uses_idiv) {
+        free_gpr_regs &= ~(1u << 0);  /* RAX — reserved for IDIV quotient */
+        free_gpr_regs &= ~(1u << 2);  /* RDX — reserved for IDIV remainder */
+    }
     uint32_t free_xmm_regs = VTX_XMM_ALLOCATABLE_MASK;
 
     /* Track which callee-saved registers are used */

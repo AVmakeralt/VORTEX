@@ -28,6 +28,20 @@ static inline bool is_allocation(vtx_node_opcode_t opcode)
  * Collect the current values of all fields of a scalar-replaced allocation.
  * For each StoreField that targets this allocation, record the stored value.
  * Returns the field count and fills the offsets/values arrays.
+ *
+ * B22 fix: The previous implementation iterated over all StoreField nodes
+ * in TABLE ORDER (i.e., node-creation order) and applied "last write wins"
+ * based on that order. But node-creation order does NOT match execution
+ * order after inlining/GVN/LICM passes — a StoreField created later (higher
+ * node id) might actually execute BEFORE an earlier-created StoreField if
+ * it was moved or cloned by a transformation.
+ *
+ * The fix: walk the MEMORY CHAIN (threaded through StoreField.inputs[0])
+ * to determine execution order. Each StoreField's first input is the
+ * previous memory state — either the alloc itself, an earlier StoreField,
+ * or some other memory-producing node. Following this chain from head to
+ * tail gives us the writes in execution order; overwriting as we go means
+ * the LAST write in execution order wins for each field offset.
  */
 static uint32_t collect_field_values(vtx_graph_t *graph, vtx_nodeid_t alloc_id,
                                       uint32_t *offsets, vtx_nodeid_t *values,
@@ -36,32 +50,88 @@ static uint32_t collect_field_values(vtx_graph_t *graph, vtx_nodeid_t alloc_id,
     vtx_node_table_t *table = &graph->node_table;
     uint32_t count = 0;
 
-    for (uint32_t i = 0; i < table->count; i++) {
+    /* Step 1: collect all StoreField node IDs targeting this alloc.
+     * We use a small fixed-size buffer (a single scalar-replaced
+     * allocation in a non-looping graph typically has <32 stores;
+     * loops would have been unrolled before PEA). */
+    const uint32_t MAX_SF = 256;
+    vtx_nodeid_t sf_nodes[256];
+    uint32_t sf_count = 0;
+
+    for (uint32_t i = 0; i < table->count && sf_count < MAX_SF; i++) {
         vtx_node_t *node = &table->nodes[i];
         if (node->dead) continue;
         if (node->opcode != VTX_OP_StoreField) continue;
         if (node->input_count < 2) continue;
 
         vtx_nodeid_t receiver_id = node->inputs[node->input_count - 2];
-        vtx_nodeid_t value_id    = node->inputs[node->input_count - 1];
-
         if (receiver_id != alloc_id) continue;
 
-        /* Check if this field offset is already recorded (last write wins) */
+        sf_nodes[sf_count++] = node->id;
+    }
+
+    if (sf_count == 0) return 0;
+
+    /* Step 2: find the chain HEAD — the StoreField whose memory input
+     * is NOT another StoreField in sf_nodes. (The head's mem input is
+     * typically the alloc itself or some entry memory state.) */
+    vtx_nodeid_t head = VTX_NODEID_INVALID;
+    for (uint32_t i = 0; i < sf_count; i++) {
+        vtx_node_t *node = vtx_node_get(table, sf_nodes[i]);
+        if (!node || node->input_count < 1) continue;
+        vtx_nodeid_t mem_in = node->inputs[0];
+
+        bool is_chain_member = false;
+        for (uint32_t j = 0; j < sf_count; j++) {
+            if (sf_nodes[j] == mem_in) { is_chain_member = true; break; }
+        }
+        if (!is_chain_member) {
+            head = sf_nodes[i];
+            break;
+        }
+    }
+    /* Fallback: if no head found (e.g., a cycle, which shouldn't happen
+     * in valid SSA), use the first node in table order. */
+    if (head == VTX_NODEID_INVALID) head = sf_nodes[0];
+
+    /* Step 3: walk forward from head, overwriting field values as we
+     * encounter later writes. The last write in the chain wins (which
+     * is the last in EXECUTION order, not table order). */
+    vtx_nodeid_t cur = head;
+    uint32_t safety = 0;
+    while (cur != VTX_NODEID_INVALID && safety++ < sf_count + 1) {
+        vtx_node_t *node = vtx_node_get(table, cur);
+        if (!node || node->input_count < 2) break;
+
+        uint32_t field_offset = node->field_offset;
+        vtx_nodeid_t value_id = node->inputs[node->input_count - 1];
+
         bool found = false;
         for (uint32_t k = 0; k < count; k++) {
-            if (offsets[k] == node->field_offset) {
-                values[k] = value_id; /* update: last write wins */
+            if (offsets[k] == field_offset) {
+                values[k] = value_id; /* overwrite: last write in chain wins */
                 found = true;
                 break;
             }
         }
-
         if (!found && count < max_fields) {
-            offsets[count] = node->field_offset;
+            offsets[count] = field_offset;
             values[count]  = value_id;
             count++;
         }
+
+        /* Find the next StoreField in the chain — the one whose memory
+         * input is `cur`. */
+        vtx_nodeid_t next = VTX_NODEID_INVALID;
+        for (uint32_t j = 0; j < sf_count; j++) {
+            vtx_node_t *sf = vtx_node_get(table, sf_nodes[j]);
+            if (!sf || sf->input_count < 1) continue;
+            if (sf->inputs[0] == cur) {
+                next = sf_nodes[j];
+                break;
+            }
+        }
+        cur = next;
     }
 
     return count;

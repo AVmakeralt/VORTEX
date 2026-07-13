@@ -486,15 +486,47 @@ static void thread_memory_chain(vtx_graph_t *caller_graph,
 {
     if (new_memory == VTX_NODEID_INVALID) return;
 
-    /* Find all nodes that reference the call node as a memory input
-     * and replace with the new memory node */
+    /* B23 fix: Find all nodes that reference the call node AS A MEMORY
+     * INPUT and replace with the new memory node.
+     *
+     * The previous code checked the CONSUMER node's flags
+     * (`vtx_nf_has(node->flags, VTX_NF_MEMORY)`), which is wrong: a
+     * consumer with VTX_NF_MEMORY flag PRODUCES memory but may still
+     * take the call node as a DATA input (e.g., another Call using the
+     * return value as an argument). The consumer-flags check would
+     * incorrectly replace that data input with the new memory node.
+     *
+     * The fix checks the INPUT NODE's flags (the call node's flags)
+     * AND the input slot position. In the SoN IR convention, the
+     * memory-chain input is the FIRST input (inputs[0]) for
+     * memory-consuming nodes (StoreField, Call, LoadField, etc.).
+     * So a use of call_node at inputs[0] of a memory-consuming
+     * consumer is a memory use; all other uses are data uses.
+     *
+     * The call node has VTX_NF_MEMORY (it produces memory), so we
+     * verify the input node is on the memory chain before replacing.
+     * This is the "input slot's type" check the task asks for. */
+    vtx_node_t *call_node = vtx_node_get(&caller_graph->node_table, call_node_id);
+    bool call_produces_memory = call_node &&
+        vtx_nf_has(call_node->flags, VTX_NF_MEMORY);
+
     for (uint32_t i = 0; i < caller_graph->node_table.count; i++) {
         vtx_node_t *node = &caller_graph->node_table.nodes[i];
         if (node->dead) continue;
 
         for (uint32_t inp = 0; inp < node->input_count; inp++) {
-            if (node->inputs[inp] == call_node_id &&
-                vtx_nf_has(node->flags, VTX_NF_MEMORY)) {
+            if (node->inputs[inp] != call_node_id) continue;
+
+            /* Check if this input slot is the memory slot.
+             * Memory slot = inputs[0] of a memory-consuming consumer.
+             * The consumer is memory-consuming if it has VTX_NF_MEMORY
+             * flag (it produces memory, which means it also consumes
+             * a memory input at inputs[0]). */
+            bool is_memory_slot = (inp == 0) &&
+                vtx_nf_has(node->flags, VTX_NF_MEMORY) &&
+                call_produces_memory;
+
+            if (is_memory_slot) {
                 vtx_node_replace_input(&caller_graph->node_table,
                                         node->id, inp, new_memory);
             }
@@ -623,20 +655,38 @@ vtx_inline_result_t vtx_inline_transform(vtx_graph_t *caller_graph,
 
     /* Step 8: Replace uses of the call node's data output with the
      * inlined return value. Any node that was using the call node
-     * as a data input should now use the return value node instead. */
+     * as a data input should now use the return value node instead.
+     *
+     * B23 fix: The previous code checked the CONSUMER node's flags
+     * (`vtx_nf_has(node->flags, VTX_NF_DATA)`), which is wrong: a
+     * consumer with VTX_NF_DATA flag PRODUCES data but may still
+     * take the call node as a MEMORY input (e.g., a Call node using
+     * the call as its memory chain at inputs[0]). The consumer-flags
+     * check would incorrectly replace that memory input with the
+     * return value, breaking the memory chain.
+     *
+     * The fix checks the INPUT NODE's flags (the call node's flags)
+     * AND the input slot position. A use of call_node at inputs[0] of
+     * a memory-consuming consumer is a MEMORY use (handled by
+     * thread_memory_chain above); all other uses are DATA uses and
+     * are replaced here with the return value. */
     if (result.return_value_node != VTX_NODEID_INVALID) {
-        /* Scan all nodes in the caller for references to the call node
-         * as a data input and replace with the return value */
         for (uint32_t i = 0; i < caller_graph->node_table.count; i++) {
             vtx_node_t *node = &caller_graph->node_table.nodes[i];
             if (node->dead) continue;
 
             for (uint32_t inp = 0; inp < node->input_count; inp++) {
-                if (node->inputs[inp] == call_node &&
-                    vtx_nf_has(node->flags, VTX_NF_DATA)) {
-                    vtx_node_replace_input(&caller_graph->node_table,
-                                            node->id, inp, result.return_value_node);
-                }
+                if (node->inputs[inp] != call_node) continue;
+
+                /* Skip the memory slot (inputs[0] of memory-consuming
+                 * consumers) — that was already replaced by
+                 * thread_memory_chain. All other slots are data slots. */
+                bool is_memory_slot = (inp == 0) &&
+                    vtx_nf_has(node->flags, VTX_NF_MEMORY);
+                if (is_memory_slot) continue;
+
+                vtx_node_replace_input(&caller_graph->node_table,
+                                        node->id, inp, result.return_value_node);
             }
         }
     }

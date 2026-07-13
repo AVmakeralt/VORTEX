@@ -58,14 +58,28 @@ static vtx_virtual_obj_t *find_or_create_virtual_obj(
         }
     }
 
-    /* Create new entry */
+    /* Create new entry.
+     * B17 fix: Do NOT set state=VTX_VIRTUAL_YES here. The caller is
+     * responsible for setting the state once the object is fully
+     * initialized. For allocations (classify_allocations), state is
+     * set to YES immediately after this call. For Phi nodes
+     * (resolve_virtual_phis), state is set to YES only AFTER the
+     * per-field Phi nodes have been created and the field_values
+     * array has been populated.
+     *
+     * The previous code unconditionally set state=YES on creation,
+     * which caused resolve_virtual_phis's `if (obj->state == YES)
+     * continue;` check to skip every newly-created Phi — the field
+     * resolution logic was dead code, and Phis of virtual objects
+     * were left with empty field_values arrays, producing wrong
+     * materialization later. */
     vtx_virtual_obj_t *obj = grow_virtual_objs(result, arena);
     if (!obj) return NULL;
 
     memset(obj, 0, sizeof(*obj));
     obj->alloc_id = alloc_id;
     obj->type_id  = type_id;
-    obj->state    = VTX_VIRTUAL_YES;
+    obj->state    = VTX_VIRTUAL_UNKNOWN;  /* caller sets to YES when ready */
 
     /* Allocate field arrays with initial capacity */
     obj->field_capacity = 8;
@@ -159,6 +173,9 @@ static int classify_allocations(vtx_graph_t *graph,
             vtx_virtual_obj_t *obj = find_or_create_virtual_obj(
                 result, alloc_id, type_id, arena);
             if (!obj) return -1;
+            /* B17 fix: find_or_create_virtual_obj no longer sets
+             * state=YES — set it here for confirmed-virtual allocations. */
+            obj->state = VTX_VIRTUAL_YES;
         } else {
             /* Escaping allocation → not virtual */
             result->virtual_states[alloc_id] = VTX_VIRTUAL_NO;

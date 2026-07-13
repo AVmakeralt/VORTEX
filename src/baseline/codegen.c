@@ -2207,29 +2207,51 @@ static void compile_call_static(vtx_compile_ctx_t *ctx, uint16_t method_idx)
      * will place args directly in registers and call the compiled
      * code without any runtime helper. */
 
+    /* B7/B8 fix: Set up the T2 JIT entry calling convention.
+     *
+     * The JIT entry (and the runtime helpers that wrap it) expect:
+     *   RDI = method_ptr        (loaded from frame [RBP+24])
+     *   RSI = deopt_info        (NULL for fresh calls — callee resolves
+     *                            from its own compiled_code metadata)
+     *   RDX = profile_data      (sentinel 1 — non-NULL so the JIT
+     *                            prologue's instrumentation check fires
+     *                            but doesn't deref NULL)
+     *   RCX = args array ptr    (NULL when the baseline doesn't gather args)
+     *   R8  = arg_count         (0 when no args are gathered)
+     *
+     * The previous code loaded the caller's deopt_info/profile_data from
+     * the frame into RSI/RDX, which matched the JIT entry ABI in shape
+     * but passed the WRONG values (caller's per-callsite data instead of
+     * NULL/sentinel). It also never set RCX/R8, so the callee saw garbage
+     * arg pointers. The runtime helper signature was updated to take
+     * (method, deopt_info, profile_data, args, arg_count) — matching
+     * this calling convention exactly. */
+
     /* Save expression stack registers */
     emit_push(buf, VTX_REG_RAX);
     emit_push(buf, VTX_REG_RCX);
     emit_push(buf, VTX_REG_RDX);
     emit_push(buf, VTX_REG_RBX);
 
-    /* RDI = interp pointer (from frame header).
-     * The interp pointer is stored in the frame at a fixed offset. */
+    /* RDI = method pointer (from frame header). */
     emit_mov_reg_rbp_offset(buf, VTX_REG_RDI, VTX_FRAME_METHOD_PTR_OFFSET);
 
-    /* RSI = method descriptor pointer.
-     * For static calls, the target method is known at compile time.
-     * It's loaded from the constant pool at the call site's method_idx. */
-    emit_mov_reg_rbp_offset(buf, VTX_REG_RSI, VTX_FRAME_DEOPT_INFO_OFFSET);
+    /* RSI = NULL (deopt_info — callee resolves from its own metadata). */
+    emit_xor_reg_reg(buf, VTX_REG_RSI, VTX_REG_RSI);
 
-    /* RDX = profile_data pointer (needed for profiling in the callee) */
-    emit_mov_reg_rbp_offset(buf, VTX_REG_RDX, VTX_FRAME_PROFILE_DATA_OFFSET);
+    /* RDX = sentinel 1 (profile_data — non-NULL but not a real pointer). */
+    emit_mov_reg_imm32(buf, VTX_REG_RDX, 1);
+
+    /* RCX = NULL (args array — baseline doesn't gather args into array). */
+    emit_xor_reg_reg(buf, VTX_REG_RCX, VTX_REG_RCX);
+
+    /* R8 = 0 (arg_count). */
+    emit_xor_reg_reg(buf, VTX_REG_R8, VTX_REG_R8);
 
     /* Call the register-based runtime helper.
-     * vtx_runtime_call_reg(interp, method, args, arg_count) uses the
-     * System V AMD64 ABI, so arguments are passed in RDI, RSI, RDX, RCX.
-     * This eliminates variadic argument marshaling overhead. */
-    /* vtx_runtime_call_reg is declared in runtime/helpers.h with void* for interp */
+     * vtx_runtime_call_reg(method, deopt_info, profile_data, args, arg_count)
+     * uses the System V AMD64 ABI, so arguments are passed in
+     * RDI, RSI, RDX, RCX, R8 — matching the JIT entry convention. */
     emit_mov_reg_imm64(buf, VTX_REG_RAX,
         (uint64_t)(uintptr_t)vtx_runtime_call_reg);
     emit_call_reg(buf, VTX_REG_RAX);
@@ -2275,15 +2297,18 @@ static void compile_call_virtual(vtx_compile_ctx_t *ctx, uint16_t method_idx)
     /* Allocate a poly IC for this call site */
     vtx_poly_ic_t *ic = (vtx_poly_ic_t *)calloc(1, sizeof(vtx_poly_ic_t));
     if (!ic) {
-        /* Allocation failed — fall back to non-IC path using
-         * D8 register-based calling convention */
+        /* Allocation failed — fall back to runtime helper using the
+         * JIT entry calling convention (B7/B8 fix). */
         emit_push(buf, VTX_REG_RAX);
         emit_push(buf, VTX_REG_RCX);
         emit_push(buf, VTX_REG_RDX);
         emit_push(buf, VTX_REG_RBX);
 
         emit_mov_reg_rbp_offset(buf, VTX_REG_RDI, VTX_FRAME_METHOD_PTR_OFFSET);
-        emit_mov_reg_rbp_offset(buf, VTX_REG_RSI, VTX_FRAME_DEOPT_INFO_OFFSET);
+        emit_xor_reg_reg(buf, VTX_REG_RSI, VTX_REG_RSI);   /* NULL deopt_info */
+        emit_mov_reg_imm32(buf, VTX_REG_RDX, 1);            /* sentinel profile_data */
+        emit_xor_reg_reg(buf, VTX_REG_RCX, VTX_REG_RCX);   /* NULL args array */
+        emit_xor_reg_reg(buf, VTX_REG_R8, VTX_REG_R8);     /* 0 arg_count */
 
         /* vtx_runtime_call_virtual_reg declared in runtime/helpers.h */
         emit_mov_reg_imm64(buf, VTX_REG_RAX,
@@ -2356,19 +2381,16 @@ static void compile_call_virtual(vtx_compile_ctx_t *ctx, uint16_t method_idx)
         vtx_code_buffer_patch_dword(buf, jne_not_heap, (uint32_t)disp);
     }
 
-    /* Call runtime: D8 register-based dispatch.
-     * vtx_runtime_call_virtual_reg(interp, method_name, receiver, args, arg_count)
-     * Uses the System V AMD64 ABI register calling convention instead of
-     * variadic argument marshaling. */
+    /* B7/B8 fix: Call runtime with the JIT entry calling convention.
+     * vtx_runtime_call_virtual_reg(method, deopt_info, profile_data, args, arg_count)
+     * The helper derives the receiver from args[0] and resolves the
+     * virtual method via the type system. */
     emit_mov_reg_rbp_offset(buf, VTX_REG_RDI, VTX_FRAME_METHOD_PTR_OFFSET);
-    emit_mov_reg_rbp_offset(buf, VTX_REG_RSI, VTX_FRAME_DEOPT_INFO_OFFSET);
+    emit_xor_reg_reg(buf, VTX_REG_RSI, VTX_REG_RSI);   /* NULL deopt_info */
+    emit_mov_reg_imm32(buf, VTX_REG_RDX, 1);            /* sentinel profile_data */
+    emit_xor_reg_reg(buf, VTX_REG_RCX, VTX_REG_RCX);   /* NULL args array */
+    emit_xor_reg_reg(buf, VTX_REG_R8, VTX_REG_R8);     /* 0 arg_count */
 
-    /* Also pass the IC pointer so the runtime can update it */
-    emit_mov_reg_imm64(buf, VTX_REG_RDX, (uint64_t)(uintptr_t)ic);
-
-    /* Call the register-based virtual dispatch helper.
-     * The helper resolves the method, updates the IC, and executes the call. */
-    /* vtx_runtime_call_virtual_reg declared in runtime/helpers.h */
     emit_mov_reg_imm64(buf, VTX_REG_RAX,
         (uint64_t)(uintptr_t)vtx_runtime_call_virtual_reg);
     emit_call_reg(buf, VTX_REG_RAX);
@@ -2407,11 +2429,17 @@ static void compile_call_virtual(vtx_compile_ctx_t *ctx, uint16_t method_idx)
     /* je ic_miss — if target is NULL, treat as miss */
     uint32_t je_null_target = emit_jcc32(buf, CC_E);
 
-    /* Target is valid — set up args and call.
-     * The callee expects: RDI=method, RSI=deopt_info, RDX=profile_data */
-    /* RDI already has the method pointer */
-    emit_mov_reg_rbp_offset(buf, VTX_REG_RSI, VTX_FRAME_DEOPT_INFO_OFFSET);
-    emit_mov_reg_rbp_offset(buf, VTX_REG_RDX, VTX_FRAME_PROFILE_DATA_OFFSET);
+    /* B7/B8 fix: Target is valid — set up JIT entry calling convention
+     * and call the cached method's compiled code directly.
+     *   RDI already has the target method pointer (loaded from IC)
+     *   RSI = NULL (deopt_info — callee resolves from its own metadata)
+     *   RDX = sentinel 1 (profile_data — non-NULL but not a real pointer)
+     *   RCX = NULL (args array — baseline doesn't gather args)
+     *   R8  = 0 (arg_count) */
+    emit_xor_reg_reg(buf, VTX_REG_RSI, VTX_REG_RSI);
+    emit_mov_reg_imm32(buf, VTX_REG_RDX, 1);
+    emit_xor_reg_reg(buf, VTX_REG_RCX, VTX_REG_RCX);
+    emit_xor_reg_reg(buf, VTX_REG_R8, VTX_REG_R8);
 
     /* Call the method's compiled code: call [rdi + offsetof(compiled_code)] */
     /* offsetof(vtx_method_desc_t, compiled_code) = 24 (after name:8, signature:8, bytecode:8) */
@@ -2429,9 +2457,13 @@ static void compile_call_virtual(vtx_compile_ctx_t *ctx, uint16_t method_idx)
         int32_t null_disp = (int32_t)null_target_start - (int32_t)(je_null_target + 4);
         vtx_code_buffer_patch_dword(buf, je_null_target, (uint32_t)null_disp);
     }
-    /* Fall through to IC miss path — re-emit the miss code using D8 convention */
+    /* Fall through to IC miss path — re-emit the miss code using
+     * the JIT entry calling convention (B7/B8 fix). */
     emit_mov_reg_rbp_offset(buf, VTX_REG_RDI, VTX_FRAME_METHOD_PTR_OFFSET);
-    emit_mov_reg_rbp_offset(buf, VTX_REG_RSI, VTX_FRAME_DEOPT_INFO_OFFSET);
+    emit_xor_reg_reg(buf, VTX_REG_RSI, VTX_REG_RSI);
+    emit_mov_reg_imm32(buf, VTX_REG_RDX, 1);
+    emit_xor_reg_reg(buf, VTX_REG_RCX, VTX_REG_RCX);
+    emit_xor_reg_reg(buf, VTX_REG_R8, VTX_REG_R8);
     emit_mov_reg_imm64(buf, VTX_REG_RAX,
         (uint64_t)(uintptr_t)vtx_runtime_call_virtual_reg);
     emit_call_reg(buf, VTX_REG_RAX);
@@ -2487,14 +2519,18 @@ static void compile_call_interface(vtx_compile_ctx_t *ctx, uint16_t method_idx)
     /* Allocate a poly IC for this interface call site */
     vtx_poly_ic_t *ic = (vtx_poly_ic_t *)calloc(1, sizeof(vtx_poly_ic_t));
     if (!ic) {
-        /* Allocation failed — fall back to non-IC path using D8 convention */
+        /* Allocation failed — fall back to runtime helper using the
+         * JIT entry calling convention (B7/B8 fix). */
         emit_push(buf, VTX_REG_RAX);
         emit_push(buf, VTX_REG_RCX);
         emit_push(buf, VTX_REG_RDX);
         emit_push(buf, VTX_REG_RBX);
 
         emit_mov_reg_rbp_offset(buf, VTX_REG_RDI, VTX_FRAME_METHOD_PTR_OFFSET);
-        emit_mov_reg_rbp_offset(buf, VTX_REG_RSI, VTX_FRAME_DEOPT_INFO_OFFSET);
+        emit_xor_reg_reg(buf, VTX_REG_RSI, VTX_REG_RSI);   /* NULL deopt_info */
+        emit_mov_reg_imm32(buf, VTX_REG_RDX, 1);            /* sentinel profile_data */
+        emit_xor_reg_reg(buf, VTX_REG_RCX, VTX_REG_RCX);   /* NULL args array */
+        emit_xor_reg_reg(buf, VTX_REG_R8, VTX_REG_R8);     /* 0 arg_count */
 
         /* vtx_runtime_call_interface_reg declared in runtime/helpers.h */
         emit_mov_reg_imm64(buf, VTX_REG_RAX,
@@ -2557,8 +2593,12 @@ static void compile_call_interface(vtx_compile_ctx_t *ctx, uint16_t method_idx)
         vtx_code_buffer_patch_dword(buf, jne_not_heap, (uint32_t)disp);
     }
 
+    /* B7/B8 fix: JIT entry calling convention. */
     emit_mov_reg_rbp_offset(buf, VTX_REG_RDI, VTX_FRAME_METHOD_PTR_OFFSET);
-    emit_mov_reg_rbp_offset(buf, VTX_REG_RSI, VTX_FRAME_DEOPT_INFO_OFFSET);
+    emit_xor_reg_reg(buf, VTX_REG_RSI, VTX_REG_RSI);
+    emit_mov_reg_imm32(buf, VTX_REG_RDX, 1);
+    emit_xor_reg_reg(buf, VTX_REG_RCX, VTX_REG_RCX);
+    emit_xor_reg_reg(buf, VTX_REG_R8, VTX_REG_R8);
 
     /* vtx_runtime_call_interface_reg declared in runtime/helpers.h */
     emit_mov_reg_imm64(buf, VTX_REG_RAX,
@@ -2590,9 +2630,13 @@ static void compile_call_interface(vtx_compile_ctx_t *ctx, uint16_t method_idx)
     emit_cmp_reg_imm32(buf, VTX_REG_RDI, 0);
     uint32_t je_null_target = emit_jcc32(buf, CC_E);
 
-    /* Set up args and call */
-    emit_mov_reg_rbp_offset(buf, VTX_REG_RSI, VTX_FRAME_DEOPT_INFO_OFFSET);
-    emit_mov_reg_rbp_offset(buf, VTX_REG_RDX, VTX_FRAME_PROFILE_DATA_OFFSET);
+    /* B7/B8 fix: Set up JIT entry calling convention and call cached
+     * method's compiled code directly. RDI already has the target method
+     * pointer (loaded from IC). */
+    emit_xor_reg_reg(buf, VTX_REG_RSI, VTX_REG_RSI);
+    emit_mov_reg_imm32(buf, VTX_REG_RDX, 1);
+    emit_xor_reg_reg(buf, VTX_REG_RCX, VTX_REG_RCX);
+    emit_xor_reg_reg(buf, VTX_REG_R8, VTX_REG_R8);
 
     /* call [rdi + 24] — call compiled_code */
     emit_rex64(buf, VTX_REG_RAX, VTX_REG_RDI);
@@ -2608,8 +2652,12 @@ static void compile_call_interface(vtx_compile_ctx_t *ctx, uint16_t method_idx)
         int32_t null_disp = (int32_t)null_start - (int32_t)(je_null_target + 4);
         vtx_code_buffer_patch_dword(buf, je_null_target, (uint32_t)null_disp);
     }
+    /* B7/B8 fix: Fall-through to runtime with JIT entry calling convention. */
     emit_mov_reg_rbp_offset(buf, VTX_REG_RDI, VTX_FRAME_METHOD_PTR_OFFSET);
-    emit_mov_reg_rbp_offset(buf, VTX_REG_RSI, VTX_FRAME_DEOPT_INFO_OFFSET);
+    emit_xor_reg_reg(buf, VTX_REG_RSI, VTX_REG_RSI);
+    emit_mov_reg_imm32(buf, VTX_REG_RDX, 1);
+    emit_xor_reg_reg(buf, VTX_REG_RCX, VTX_REG_RCX);
+    emit_xor_reg_reg(buf, VTX_REG_R8, VTX_REG_R8);
     emit_mov_reg_imm64(buf, VTX_REG_RAX,
         (uint64_t)(uintptr_t)vtx_runtime_call_interface_reg);
     emit_call_reg(buf, VTX_REG_RAX);

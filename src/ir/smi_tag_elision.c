@@ -58,6 +58,14 @@ static bool can_produce_raw_int(vtx_node_opcode_t op) {
     case VTX_OP_Xor:
     case VTX_OP_Neg:
         return true;
+    /* Perf 2: Enable Phi for loop-carried SMI tag elision.
+     * A Phi can be RAW_INT if ALL its data inputs are RAW_INT or constants.
+     * This is checked at the call site (mark_chain) before setting the flag.
+     * The isel Phi handler copies the raw int value directly — no retag.
+     * This eliminates tag/untag on every loop iteration for counters and
+     * accumulators, which is the single biggest perf win for loop-heavy code. */
+    case VTX_OP_Phi:
+        return true;
     default:
         return false;
     }

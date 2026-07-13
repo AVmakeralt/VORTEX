@@ -73,8 +73,8 @@
 typedef struct {
     uint16_t feature_index;  /* feature to test, or VTX_GBDT_LEAF_MARKER for leaf */
     float    threshold;      /* decision threshold for split */
-    int16_t  left_child;     /* index of left child (feature < threshold) */
-    int16_t  right_child;    /* index of right child (feature >= threshold) */
+    int32_t  left_child;     /* index of left child (feature < threshold) */
+    int32_t  right_child;    /* index of right child (feature >= threshold) */
     float    leaf_value;     /* value if this is a leaf node */
 } vtx_gbdt_node_t;
 
