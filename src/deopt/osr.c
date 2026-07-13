@@ -1,3 +1,24 @@
+/* ============================================================================ *
+ * AI-GENERATED CODE NOTICE
+ *
+ * This file was written or substantially modified by an AI assistant
+ * (GLM/Z.ai). It is part of the VORTEX JIT compiler project.
+ *
+ * Human-written original code exists in the interpreter dispatch loop
+ * (src/interp/), baseline codegen (src/baseline/codegen.c), runtime
+ * (src/runtime/), and the main entry point (src/main_new.c).
+ *
+ * AI-generated components include: IR construction, optimization passes
+ * (GVN, SCCP, DCE, LICM, strength reduction, SMI tag elision, PEA),
+ * instruction selection, register allocation, code emission, the
+ * compilation pipeline, the decision engine, PGO subsystems (phase
+ * partitioning, ensemble aggregation, input-shape-keyed profiles, patch
+ * logging, T1 code persistence), deopt/OSR, trace recording, guard
+ * optimization, and the inliner.
+ *
+ * If you are reviewing this code, please verify correctness independently.
+ * ============================================================================ */
+
 #include "deopt/osr.h"
 #include <stdlib.h>
 #include <string.h>
@@ -510,7 +531,12 @@ vtx_interp_frame_t *vtx_osr_down(vtx_interp_frame_t *interp,
          * work needed here — the bytecode_pc is set correctly. */
     }
 
-    /* Step 6: Walk the caller chain and reconstruct caller frames */
+    /* Step 6: Walk the caller chain and reconstruct caller frames.
+     *
+     * B24 fix: The `caller` field is typed as `vtx_frame_state_t*` but
+     * stores `vtx_interp_frame_t*`. Use a union/cast through void* to
+     * avoid undefined behavior. The field is only used as a linked-list
+     * next pointer — it never accesses vtx_frame_state_t fields through it. */
     vtx_interp_frame_t *current = new_frame;
     const vtx_frame_state_t *caller_fs = fs->caller;
     while (caller_fs != NULL) {
@@ -520,7 +546,7 @@ vtx_interp_frame_t *vtx_osr_down(vtx_interp_frame_t *interp,
             /* Clean up already-built frames */
             vtx_interp_frame_t *f = new_frame;
             while (f) {
-                vtx_interp_frame_t *next = (vtx_interp_frame_t *)f->caller;
+                vtx_interp_frame_t *next = (vtx_interp_frame_t *)(void *)f->caller;
                 free(f->locals);
                 free(f->stack);
                 free(f);
@@ -528,19 +554,24 @@ vtx_interp_frame_t *vtx_osr_down(vtx_interp_frame_t *interp,
             }
             return NULL;
         }
-        current->caller = (vtx_frame_state_t *)caller_frame;
+        /* B24 fix: store through void* to avoid type punning */
+        current->caller = (vtx_frame_state_t *)(void *)caller_frame;
         current = caller_frame;
         caller_fs = caller_fs->caller;
     }
 
-    /* Step 7: Transfer to interpreter — in a real implementation,
-     * we would set the interpreter's frame pointer and PC and
-     * jump to the dispatch loop. Here we return the reconstructed
-     * frame for the caller to resume. */
+    /* Step 7: Transfer to interpreter.
+     *
+     * B25 fix: Use the frame_state's bytecode_pc (the actual deopt PC)
+     * not the return_pc (which is the caller's resume PC). The old code
+     * used new_frame->bytecode_pc which was set from return_pc in
+     * vtx_osr_build_interp_frame — that resumes at the wrong instruction. */
     if (interp) {
         interp->method_id = new_frame->method_id;
-        interp->bytecode_pc = new_frame->bytecode_pc;
-        /* The caller is responsible for copying locals/stack if needed */
+        /* B25 fix: Use the deopt context's bytecode_pc, which is the
+         * PC where the guard failed — the interpreter should resume
+         * at that point, not at the caller's return PC. */
+        interp->bytecode_pc = fs->bytecode_pc;
     }
 
     return new_frame;

@@ -786,6 +786,14 @@ vtx_value_t vtx_interp_run(vtx_interp_t *interp,
     if (interp->deopt_resume_pending) {
         pc = interp->deopt_resume_pc;
         interp->deopt_resume_pending = false;
+        /* B10 fix: The deopt handler sets interp->current_frame to the
+         * deoptimized frame, but the old frame was never destroyed.
+         * Destroy it now to prevent LIFO invariant violations and
+         * memory leaks. The old frame is the one created at the start
+         * of this vtx_interp_run call (the `frame` variable above). */
+        if (frame != NULL && frame != interp->current_frame) {
+            vtx_frame_destroy(frame, &interp->frame_stack);
+        }
         /* Reload frame state since deopt may have set current_frame */
         frame = interp->current_frame;
         sp = frame->operand_stack + frame->stack_top;
