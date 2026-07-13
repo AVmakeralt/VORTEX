@@ -962,15 +962,13 @@ static int run_lowering_pipeline(vtx_graph_t *graph,
 
     /* Copy the emitted code into the result.
      * We use malloc here (not arena) because the native code must outlive
-     * the compilation arena -- it gets installed in the code cache. */
+     * the compilation arena -- it gets installed in the code cache.
+     *
+     * No hard size reject: the code cache is growable (see emit.c) and
+     * L2/i-cache pressure is a tuning concern for the user, not a
+     * correctness gate. A 2MB hot function is better than a 0-byte one
+     * that fell back to the interpreter forever. */
     uint32_t code_size = vtx_x86_emit_position(&emitter);
-    if (code_size > VTX_MAX_NATIVE_SIZE) {
-        fprintf(stderr, "[pipeline] emitted code too large: %u bytes (max %d)\n",
-                code_size, VTX_MAX_NATIVE_SIZE);
-        vtx_x86_emit_destroy(&emitter);
-        *time_ns = elapsed_ns(start);
-        return -1;
-    }
 
     uint8_t *native_code = (uint8_t *)malloc(code_size);
     if (!native_code) {

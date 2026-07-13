@@ -38,16 +38,27 @@
  * contract that tests and downstream code rely on. */
 #define VTX_POLY_LIMIT 4
 
-/* Trace length and depth limits — max-aggro: push hard, deoptless recovers.
+/* Trace length and depth limits — no artificial caps.
  *
- * Longer traces capture more hot context for optimization; deep trees are
- * handled by deoptless which can undo bad decisions at zero interpreter cost;
- * huge hyperblocks compile in the background thread without pausing execution;
- * large native code stays resident in L2 cache (256KB–1MB typical). */
-#define VTX_MAX_TRACE_LENGTH 4096
-#define VTX_MAX_TREE_DEPTH 32
-#define VTX_MAX_HYPERBLOCK_NODES 65536
-#define VTX_MAX_NATIVE_SIZE 524288  /* 512KB — hot code stays in L2 cache */
+ * Previous versions had magic numbers (4096 bytecodes, 512KB native, 65536
+ * nodes) that aborted compilation when hit. That was wrong: a hot function
+ * that emitted 600KB of native code got punted back to the interpreter
+ * forever. The code cache is growable, the compiler runs in a background
+ * thread, and L2/i-cache pressure is a tuning concern for the user — not
+ * a correctness gate.
+ *
+ * VTX_MAX_TRACE_LENGTH: 1M bytecodes. A method with >1M bytecodes of hot
+ *   loop body has bigger problems than trace truncation. Natural termination
+ *   (backedge close or method exit) handles the common case.
+ * VTX_MAX_TREE_DEPTH: 64. Real exponential compile-time cost — kept bounded.
+ * VTX_MAX_HYPERBLOCK_NODES: 4M nodes. Effectively unlimited; the stitcher's
+ *   own greedy heuristic stops adding branches when marginal benefit drops.
+ * VTX_MAX_NATIVE_SIZE: 256MB. Effectively unlimited; the growable code
+ *   buffer in emit.c handles arbitrary sizes. */
+#define VTX_MAX_TRACE_LENGTH 1048576
+#define VTX_MAX_TREE_DEPTH 64
+#define VTX_MAX_HYPERBLOCK_NODES 4194304
+#define VTX_MAX_NATIVE_SIZE 268435456  /* 256MB — effectively unbounded */
 
 /* Cache configuration */
 #define VTX_CACHE_SEGMENT_SIZE 1048576

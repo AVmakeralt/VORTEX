@@ -41,10 +41,10 @@
  * handled by deoptless which can undo bad decisions at zero interpreter cost;
  * huge hyperblocks compile in the background thread without pausing execution;
  * large native code stays resident in L2 cache (256KB–1MB typical). */
-#define VTX_MAX_TRACE_LENGTH 4096
-#define VTX_MAX_TREE_DEPTH 32
-#define VTX_MAX_HYPERBLOCK_NODES 65536
-#define VTX_MAX_NATIVE_SIZE 524288  /* 512KB — hot code stays in L2 cache */
+#define VTX_MAX_TRACE_LENGTH 1048576
+#define VTX_MAX_TREE_DEPTH 64
+#define VTX_MAX_HYPERBLOCK_NODES 4194304
+#define VTX_MAX_NATIVE_SIZE 268435456  /* 256MB — effectively unbounded */
 
 /* Cache configuration */
 #define VTX_CACHE_SEGMENT_SIZE 1048576

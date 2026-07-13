@@ -1423,6 +1423,33 @@ static int vtx_record_instruction(vtx_record_state_t *state)
         state->stopped = true;
         return 1;
 
+    case VT_OP_CALL_RUNTIME: {
+        /* CALL_RUNTIME pops 1 argument (the value to print/exit on) and
+         * calls the runtime function identified by the operand.
+         * Mirrors the IR builder's handling in graph.c. */
+        vtx_nodeid_t arg = vtx_record_stack_pop(state);
+        if (arg == VTX_NODEID_INVALID) return -1;
+
+        vtx_nodeid_t nid = vtx_record_emit_node(state, VTX_OP_CallRuntime);
+        if (nid == VTX_NODEID_INVALID) return -1;
+        vtx_node_t *node = vtx_node_get(&state->graph->node_table, nid);
+        if (node) {
+            node->method_index = operand;  /* runtime function ID */
+            node->type = VTX_TYPE_Bottom;
+            node->bytecode_pc = state->pc;
+        }
+        /* Input order: control, memory, data — matches graph.c convention. */
+        vtx_node_add_input(&state->graph->node_table, nid, state->control);
+        vtx_node_add_input(&state->graph->node_table, nid, state->memory);
+        vtx_node_add_input(&state->graph->node_table, nid, arg);
+
+        state->control = nid;
+        state->memory = nid;
+        /* Push result (undefined for void calls; DCE removes if unused). */
+        vtx_record_stack_push(state, nid);
+        break;
+    }
+
     /* ---- Unsupported opcodes — truncate trace ---- */
     case VT_OP_THROW:
     case VT_OP_CATCH:
@@ -1430,7 +1457,6 @@ static int vtx_record_instruction(vtx_record_state_t *state)
     case VT_OP_MONITOR_EXIT:
     case VT_OP_ISNULL:
     case VT_OP_TYPEOF:
-    case VT_OP_CALL_RUNTIME:
         /* These opcodes are not supported in trace recording.
          * The trace is truncated at this point. */
         state->trace->kind = VTX_TRACE_TRUNCATED;
