@@ -1,22 +1,13 @@
 /* ============================================================================ *
- * AI-GENERATED CODE NOTICE
+ * AI-GENERATED CODE
  *
- * This file was written or substantially modified by an AI assistant
- * (GLM/Z.ai). It is part of the VORTEX JIT compiler project.
+ * This file was written from scratch by an AI assistant (GLM/Z.ai).
+ * It is part of the VORTEX JIT compiler project.
  *
- * Human-written original code exists in the interpreter dispatch loop
- * (src/interp/), baseline codegen (src/baseline/codegen.c), runtime
- * (src/runtime/), and the main entry point (src/main_new.c).
+ * Human-written code lives in: src/interp/ (dispatch loop), src/baseline/
+ * (codegen), src/runtime/ (GC, type system, arena), src/main_new.c.
  *
- * AI-generated components include: IR construction, optimization passes
- * (GVN, SCCP, DCE, LICM, strength reduction, SMI tag elision, PEA),
- * instruction selection, register allocation, code emission, the
- * compilation pipeline, the decision engine, PGO subsystems (phase
- * partitioning, ensemble aggregation, input-shape-keyed profiles, patch
- * logging, T1 code persistence), deopt/OSR, trace recording, guard
- * optimization, and the inliner.
- *
- * If you are reviewing this code, please verify correctness independently.
+ * If reviewing, please verify correctness independently.
  * ============================================================================ */
 
 /*

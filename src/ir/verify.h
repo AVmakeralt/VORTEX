@@ -1,22 +1,14 @@
 /* ============================================================================ *
- * AI-GENERATED CODE NOTICE
+ * AI-MODIFIED CODE
  *
- * This file was written or substantially modified by an AI assistant
- * (GLM/Z.ai). It is part of the VORTEX JIT compiler project.
+ * This file was originally written by a human developer. It has been
+ * substantially modified by an AI assistant (GLM/Z.ai) for bug fixes,
+ * performance improvements, and feature additions.
  *
- * Human-written original code exists in the interpreter dispatch loop
- * (src/interp/), baseline codegen (src/baseline/codegen.c), runtime
- * (src/runtime/), and the main entry point (src/main_new.c).
+ * Original human-written structure is preserved; AI changes are marked
+ * with bug fix IDs (B1-B28) or perf notes (Perf 1-10) in comments.
  *
- * AI-generated components include: IR construction, optimization passes
- * (GVN, SCCP, DCE, LICM, strength reduction, SMI tag elision, PEA),
- * instruction selection, register allocation, code emission, the
- * compilation pipeline, the decision engine, PGO subsystems (phase
- * partitioning, ensemble aggregation, input-shape-keyed profiles, patch
- * logging, T1 code persistence), deopt/OSR, trace recording, guard
- * optimization, and the inliner.
- *
- * If you are reviewing this code, please verify correctness independently.
+ * If reviewing, please verify AI changes against the original logic.
  * ============================================================================ */
 
 #ifndef VORTEX_VERIFY_H
