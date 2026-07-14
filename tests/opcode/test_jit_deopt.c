@@ -408,14 +408,12 @@ int main(void) {
 
     test_jit_simple_add(&arena, &ts, &gc);
     test_jit_loop_equivalence(&arena, &ts, &gc);
-    /* TODO: Field access and array access tests crash due to deopt stub
-     * generation bugs (frame layout / SAVE_REG assertion). These need
-     * the deopt stub register-save logic fixed — currently the SAVE_REG
-     * macro hits an assertion when the frame doesn't have enough spill
-     * slots for the guard's register saves. The fix to ensure min 4
-     * spill slots helps but the deopt stub emission still has issues.
-     * These tests are skipped until the deopt stub code is fixed. */
-    /* test_jit_field_access(&arena, &ts, &gc); */
+    test_jit_field_access(&arena, &ts, &gc);
+    /* TODO: Array access crashes due to deopt stub / guard interaction.
+     * The untag and frame size fixes resolved the field access crash,
+     * but array access still segfaults in the deopt stub path. The
+     * bounds check guard appears to fire spuriously or the deopt stub
+     * has a register-save issue. Needs further investigation. */
     /* test_jit_array_access(&arena, &ts, &gc); */
     test_jit_call_runtime(&arena, &ts, &gc);
 

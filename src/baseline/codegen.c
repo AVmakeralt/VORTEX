@@ -888,28 +888,22 @@ static void emit_untag_smi(vtx_compile_ctx_t *ctx, vtx_reg_t val_reg)
 
     /* SMI decoding: raw = (val >> 3) & VTX_NAN_DATA_MASK, then sign-extend.
      *
-     * For positive SMI values, the result after SAR+AND is correct.
-     * For negative SMI values, the AND mask clears bits [63:48] which
-     * contained the sign extension. We need to restore it.
+     * Bug fix: The old code used R10 as the mask temporary, but R10 is
+     * frequently used to hold the untagged heap pointer (see
+     * emit_untag_heap_ptr → compile_array_load). The mask load clobbered
+     * the pointer, causing the bounds check to compare against garbage.
      *
-     * Approach: branchless sign extension using arithmetic shift.
-     * After AND with VTX_NAN_DATA_MASK (48-bit mask), bit 47 is the sign bit.
-     * We can sign-extend by:
-     *   1. sar val_reg, 3          -- shift out tag bits
-     *   2. shl val_reg, 16         -- shift sign bit to bit 63
-     *   3. sar val_reg, 16         -- arithmetic shift back, propagating sign
-     *
-     * This works because:
-     *   - For positive values: bit 47 = 0, so bits [63:48] become 0 after sar
-     *   - For negative values: bit 47 = 1, so bits [63:48] become all 1s after sar
-     */
+     * Fix: use R8 as the mask temporary (same fix as emit_untag_heap_ptr).
+     * If val_reg IS R8, fall back to R9. */
 
     /* Step 1: sar val_reg, 3 — arithmetic shift right by VTX_NAN_DATA_SHIFT */
     emit_sar_reg_imm8(buf, val_reg, VTX_NAN_DATA_SHIFT);
 
     /* Step 2: and val_reg, VTX_NAN_DATA_MASK — mask out NaN-box header bits */
-    emit_mov_reg_imm64(buf, VTX_REG_R10, VTX_NAN_DATA_MASK);
-    emit_and_reg_reg(buf, val_reg, VTX_REG_R10);
+    vtx_reg_t temp = VTX_REG_R8;
+    if (val_reg == VTX_REG_R8) temp = VTX_REG_R9;
+    emit_mov_reg_imm64(buf, temp, VTX_NAN_DATA_MASK);
+    emit_and_reg_reg(buf, val_reg, temp);
 
     /* Step 3: Sign-extend from 48 bits using shift trick:
      *   shl val_reg, 16  — moves bit 47 to bit 63
@@ -957,39 +951,41 @@ static void emit_untag_smi(vtx_compile_ctx_t *ctx, vtx_reg_t val_reg)
 static void emit_untag_heap_ptr(vtx_compile_ctx_t *ctx, vtx_reg_t val_reg, vtx_reg_t result_reg)
 {
     /* Extract heap pointer from NaN-boxed value.
-     * Method: use the formula ptr = ((val >> 3) & VTX_NAN_DATA_MASK) << 3
-     * But VTX_NAN_DATA_MASK = 0x0000FFFFFFFFFFFF
      *
-     * Since the pointer is 8-byte aligned and fits in 48 bits:
-     * (val >> 3) & mask gives us ptr >> 3
-     * Then (ptr >> 3) << 3 = ptr (since low 3 bits are zero)
+     * Formula: ptr = ((val >> 3) & VTX_NAN_DATA_MASK) << 3
+     * VTX_NAN_DATA_MASK = 0x0000FFFFFFFFFFFF (48-bit mask)
      *
-     * So effectively: ptr = (val & 0x0000FFFFFFFFFFFFF8)
-     * But that's not quite right because the NaN header bits are in the top.
+     * Bug fix: The old code used R10 as the mask temporary, but R10 is
+     * also the result register in several call sites (e.g., LOAD_FIELD).
+     * The mask load overwrote the value, causing the JIT to read from
+     * address 0x0000FFFFFFFFFFF8 instead of the actual heap pointer.
      *
-     * Let's just do: mov result, val; shr result, 3; and result, mask; shl result, 3
-     * But we need the 48-bit mask as a 64-bit immediate.
-     *
-     * Easier: call the vtx_heap_ptr() function.
-     */
-    /* For the baseline JIT, we call the helper function.
-     * Save expression stack registers, call, restore. */
-    emit_mov_reg_reg64(&ctx->buf, result_reg, val_reg);
+     * Fix: use R8 as the mask temporary. R8 is caller-saved and not used
+     * by the expression stack (RAX/RCX/RDX/RBX) or any codegen path.
+     * If result_reg IS R8, fall back to R9. */
+    vtx_code_buffer_t *buf = &ctx->buf;
 
-    /* mov r10, VTX_NAN_DATA_MASK */
-    emit_mov_reg_imm64(&ctx->buf, VTX_REG_R10, VTX_NAN_DATA_MASK);
+    /* mov result_reg, val_reg */
+    emit_mov_reg_reg64(buf, result_reg, val_reg);
+
+    /* Pick a temp register that's NOT the result register */
+    vtx_reg_t temp = VTX_REG_R8;
+    if (result_reg == VTX_REG_R8) temp = VTX_REG_R9;
+
+    /* mov temp, VTX_NAN_DATA_MASK */
+    emit_mov_reg_imm64(buf, temp, VTX_NAN_DATA_MASK);
 
     /* shr result_reg, 3 */
-    emit_rex64(&ctx->buf, (vtx_reg_t)5, result_reg);
-    vtx_code_buffer_emit_byte(&ctx->buf, 0xC1);
-    vtx_code_buffer_emit_byte(&ctx->buf, modrm(3, 5, result_reg));
-    vtx_code_buffer_emit_byte(&ctx->buf, 3);
+    emit_rex64(buf, (vtx_reg_t)5, result_reg);
+    vtx_code_buffer_emit_byte(buf, 0xC1);
+    vtx_code_buffer_emit_byte(buf, modrm(3, 5, result_reg));
+    vtx_code_buffer_emit_byte(buf, 3);
 
-    /* and result_reg, r10 */
-    emit_and_reg_reg(&ctx->buf, result_reg, VTX_REG_R10);
+    /* and result_reg, temp */
+    emit_and_reg_reg(buf, result_reg, temp);
 
     /* shl result_reg, 3 */
-    emit_shl_reg_imm8(&ctx->buf, result_reg, 3);
+    emit_shl_reg_imm8(buf, result_reg, 3);
 }
 
 /* ========================================================================== */
@@ -1055,7 +1051,13 @@ static void emit_prologue(vtx_compile_ctx_t *ctx)
      * Need frame_size ≡ 8 (mod 16) for proper stack alignment. */
     uint32_t locals_bytes = ctx->layout.max_locals * 8;
     uint32_t spill_bytes = ctx->layout.max_spills * 8;
-    uint32_t raw_size = locals_bytes + spill_bytes;
+    /* Calculate frame_size for sub rsp (saved regs + locals + spills).
+     * Bug fix: The old code did not include VTX_FRAME_SAVED_REGS_SIZE in
+     * raw_size, causing the frame to be 16 bytes too small. With max_spills=4,
+     * spill[3] at RBP-64 was below RSP (RBP-56), causing a stack smash
+     * when the deopt stub saved registers to spill slots.
+     * Fix: include saved regs in the frame size calculation. */
+    uint32_t raw_size = VTX_FRAME_SAVED_REGS_SIZE + locals_bytes + spill_bytes;
     uint32_t frame_size = ((raw_size + 7) & ~(uint32_t)0xF) | 8;
     if (frame_size < 8) frame_size = 8;  /* minimum */
     ctx->layout.total_frame_size = frame_size;
