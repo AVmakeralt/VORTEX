@@ -194,7 +194,10 @@ bool vtx_install_method(vtx_code_cache_t *cache,
                          uint32_t dep_shape_count,
                          vtx_arena_t *arena,
                          vtx_poly_ic_t **poly_ics,
-                         uint32_t poly_ic_count);
+                         uint32_t poly_ic_count,
+                         const vtx_jit_frame_layout_t *frame_layout,
+                         const vtx_bc_pc_map_entry_t *bc_pc_map,
+                         uint32_t bc_pc_map_count);
 
 /**
  * Uninstall a method: mark it as not compiled and free its metadata.

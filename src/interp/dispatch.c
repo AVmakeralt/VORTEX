@@ -2637,6 +2637,17 @@ dispatch_done:
                  * method entry point (which re-runs the prologue and
                  * clobbers the OSR-transferred values). If no entry is
                  * found, fall back to whole-method re-enter. */
+                /* Only attempt OSR if we have a bc_pc_map entry for the
+                 * loop header. Without it, vtx_osr_up would use the
+                 * method entry point (which re-runs the prologue and
+                 * clobbers the OSR-transferred values). If no entry is
+                 * found, fall back to whole-method re-enter.
+                 *
+                 * Note: T1 baseline compilation populates bc_pc_map.
+                 * T2/T3 (graph IR) does not — it uses the side_table
+                 * for deopt instead. So OSR at loop headers only works
+                 * for T1-compiled methods. For T2/T3, OSR falls back
+                 * to whole-method re-enter (correct but slower). */
                 bool has_osr_entry = false;
                 if (cc.bc_pc_map != NULL && cc.bc_pc_map_count > 0) {
                     for (uint32_t i = 0; i < cc.bc_pc_map_count; i++) {

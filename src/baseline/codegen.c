@@ -3624,33 +3624,21 @@ vtx_compiled_code_t *vtx_baseline_compile(const vtx_method_desc_t *method,
             NULL, 0,  /* no dependency type info for baseline JIT */
             NULL, 0,  /* no dependency shape info for baseline JIT */
             ctx.arena,
-            ctx.poly_ics, ctx.poly_ic_count);
+            ctx.poly_ics, ctx.poly_ic_count,
+            &ctx.layout,           /* frame_layout for OSR */
+            ctx.pc_map,            /* bc_pc_map for OSR */
+            ctx.pc_map_count);     /* bc_pc_map_count */
         if (installed) {
             /* Code is now in the cache; set entry_point to the installed code.
              * Do NOT set result->code to the cache memory — it's not malloc'd
              * and must not be freed by vtx_compiled_code_destroy().
-             * The side_table ownership was transferred to the compiled_method. */
+             * The side_table ownership was transferred to the compiled_method.
+             * frame_layout and bc_pc_map were stored by vtx_install_method
+             * BEFORE the atomic compiled_code store, so OSR can use them
+             * without a race. */
             result->code = NULL;
             result->entry_point = method->compiled_code;
             result->side_table = NULL; /* ownership transferred to cache */
-
-            /* Store frame_layout and bc_pc_map in the compiled_method
-             * so OSR can set up the JIT frame correctly. Without these,
-             * vtx_osr_up can't find the OSR entry point or frame layout.
-             *
-             * Note: there's a race here — method->compiled_code is set
-             * inside vtx_install_method BEFORE this store runs. The main
-             * thread may see compiled_code != NULL and attempt OSR before
-             * frame_layout is stored. The OSR path handles this by
-             * recomputing the layout via vtx_frame_layout_compute if
-             * cm->frame_layout.max_locals == 0. */
-            vtx_compiled_method_t *cm = vtx_method_registry_get(
-                ctx.registry, ctx.method_id);
-            if (cm != NULL) {
-                cm->frame_layout = ctx.layout;
-                cm->bc_pc_map = result->bc_pc_map;
-                cm->bc_pc_map_count = result->bc_pc_map_count;
-            }
         } else {
             /* Installation failed — fall back to malloc+memcpy */
             result->code = (uint8_t *)malloc(result->code_size);

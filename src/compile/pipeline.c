@@ -1570,7 +1570,9 @@ int vtx_pipeline_run(vtx_graph_t *graph,
             result->reloc_table, /* reloc_table — fixes #19: external calls now applied */
             NULL, 0, NULL, 0,  /* dep_type_ids, dep_shape_ids */
             config->install_arena ? config->install_arena : arena,
-            NULL, 0  /* poly_ics */
+            NULL, 0,  /* poly_ics */
+            NULL,     /* frame_layout — T2/T3 doesn't use T1's layout */
+            NULL, 0   /* bc_pc_map — T2/T3 uses side_table for deopt, not bc_pc_map */
         );
         if (installed) {
             /* Code is now installed in the cache and method->compiled_code

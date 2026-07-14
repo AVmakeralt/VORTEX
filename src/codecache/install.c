@@ -134,7 +134,10 @@ bool vtx_install_method(vtx_code_cache_t *cache,
                          uint32_t dep_shape_count,
                          vtx_arena_t *arena,
                          vtx_poly_ic_t **poly_ics,
-                         uint32_t poly_ic_count)
+                         uint32_t poly_ic_count,
+                         const vtx_jit_frame_layout_t *frame_layout,
+                         const vtx_bc_pc_map_entry_t *bc_pc_map,
+                         uint32_t bc_pc_map_count)
 {
     if (!cache || !method || !code || code_size == 0) return false;
 
@@ -219,15 +222,35 @@ bool vtx_install_method(vtx_code_cache_t *cache,
         }
     }
 
+    /* Store frame_layout and bc_pc_map BEFORE the atomic compiled_code
+     * store. OSR needs these to set up the JIT frame at the loop header.
+     * If they're missing when the main thread sees compiled_code != NULL,
+     * OSR falls back to whole-method re-enter (slower but correct). */
+    if (frame_layout != NULL) {
+        cm->frame_layout = *frame_layout;
+    }
+    if (bc_pc_map != NULL && bc_pc_map_count > 0) {
+        /* Deep-copy the bc_pc_map so it outlives the compile arena */
+        cm->bc_pc_map = (vtx_bc_pc_map_entry_t *)malloc(
+            bc_pc_map_count * sizeof(vtx_bc_pc_map_entry_t));
+        if (cm->bc_pc_map != NULL) {
+            memcpy(cm->bc_pc_map, bc_pc_map,
+                   bc_pc_map_count * sizeof(vtx_bc_pc_map_entry_t));
+            cm->bc_pc_map_count = bc_pc_map_count;
+        }
+    }
+
     /* Register the method */
     if (vtx_method_registry_add(registry, cm) != 0) {
+        free(cm->bc_pc_map);
         free(cm);
         return false;
     }
 
     /* Update the method's code pointer with release store.
-     * This ensures that all writes to the code and metadata are
-     * visible to other threads before they see the new code pointer. */
+     * This ensures that all writes to the code and metadata (including
+     * frame_layout and bc_pc_map above) are visible to other threads
+     * before they see the new code pointer. */
     __atomic_store_n(&method->compiled_code, code_mem, __ATOMIC_RELEASE);
 
     (void)arena;
