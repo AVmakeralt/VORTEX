@@ -33,7 +33,7 @@ const vtx_node_opcode_info_t vtx_node_opcode_table[VTX_NODE_OP_COUNT] = {
     OP_INFO(Switch,         VTX_NF_CONTROL | VTX_NF_DATA, 2),   /* control + index */
     OP_INFO(LoopBegin,      VTX_NF_CONTROL, 1),
     OP_INFO(LoopEnd,        VTX_NF_CONTROL, 1),
-    OP_INFO(Return,         VTX_NF_CONTROL | VTX_NF_DATA, 2),   /* control + optional value */
+    OP_INFO(Return,         VTX_NF_CONTROL | VTX_NF_DATA | VTX_NF_SIDE_EFFECT, 2), /* control + value — has side effect (returns to caller) */
     OP_INFO(Unwind,         VTX_NF_CONTROL | VTX_NF_DATA | VTX_NF_SIDE_EFFECT, 2),
     OP_INFO(Catch,          VTX_NF_CONTROL, 1),
     OP_INFO(Province,       VTX_NF_CONTROL, 0),

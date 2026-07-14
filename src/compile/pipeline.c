@@ -1406,6 +1406,19 @@ int vtx_pipeline_run(vtx_graph_t *graph,
             run_dce_pass(graph, 1, &stats.dce_time_ns, false);
         }
 
+        /* Re-schedule: the rep_infer pass inserted new UnboxInt/BoxInt
+         * nodes that need block assignments. The old schedule is stale. */
+        vtx_schedule_destroy(&schedule);
+        memset(&schedule, 0, sizeof(schedule));
+        if (vtx_schedule_run(graph, arena, &schedule) != 0) {
+            fprintf(stderr, "[pipeline] re-scheduling after rep_infer failed\n");
+            result->stats = stats;
+            return -1;
+        }
+        if (result->schedule) {
+            memcpy(result->schedule, &schedule, sizeof(vtx_schedule_t));
+        }
+
         if (verify_between_passes(graph, config, "RepInfer") != 0) {
             result->stats = stats;
             return -1;
