@@ -363,6 +363,9 @@ static int compile_callback(uint32_t method_id, vtx_compile_tier_t tier, void *c
          * phase transitions and proactively compile hot methods. */
         config.markov = ctx->markov;
 
+        /* Wire the profiler so block layout can use branch probability data. */
+        config.profiler = ctx->profiler;
+
         /* Wire the callee lookup so the inliner can actually inline.
          * Without this, callee_lookup=NULL and the GBDT model computes
          * scores but never inlines anything.

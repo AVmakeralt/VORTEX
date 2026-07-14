@@ -198,6 +198,7 @@ vtx_pipeline_config_t vtx_pipeline_config_t2(void)
     cfg.shared_gbdt_model = NULL;
     cfg.owns_gbdt_model   = false;
     cfg.run_midtier       = false;
+    cfg.run_block_layout  = true;   /* profile-guided block layout */
     cfg.markov            = NULL;
     return cfg;
 }
@@ -240,6 +241,7 @@ vtx_pipeline_config_t vtx_pipeline_config_t3(void)
     cfg.shared_gbdt_model = NULL;
     cfg.owns_gbdt_model   = false;
     cfg.run_midtier       = false;
+    cfg.run_block_layout  = true;   /* profile-guided block layout */
     cfg.markov            = NULL;
     return cfg;
 }
@@ -1517,6 +1519,36 @@ int vtx_pipeline_run(vtx_graph_t *graph,
             result->stats = stats;
             return -1;
         }
+    }
+
+    /* ================================================================== */
+    /* Phase 9.8: Profile-Guided Block Layout                              */
+    /*                                                                    */
+    /* Reorders basic blocks so that hot paths fall through (no branch    */
+    /* needed) and cold paths are pushed to the end. Uses branch          */
+    /* probability data from the profiler to decide which successor is    */
+    /* "hot". This improves I-cache locality for hot code paths.          */
+    /*                                                                    */
+    /* Runs after all IR passes (which may add/remove/reorder blocks)     */
+    /* and before lowering (which emits code in block-index order).       */
+    /* ================================================================== */
+    if (config->run_block_layout) {
+        int64_t layout_start = now_ns();
+        uint32_t blocks_reordered = vtx_block_layout_run(
+            &schedule, graph,
+            config->profiler,  /* may be NULL — falls back to heuristic */
+            config->method);
+        stats.block_layout_time_ns = elapsed_ns(layout_start);
+
+        if (result->schedule) {
+            memcpy(result->schedule, &schedule, sizeof(vtx_schedule_t));
+        }
+
+        if (verify_between_passes(graph, config, "BlockLayout") != 0) {
+            result->stats = stats;
+            return -1;
+        }
+        (void)blocks_reordered;  /* could log for debugging */
     }
 
     /* ================================================================== */

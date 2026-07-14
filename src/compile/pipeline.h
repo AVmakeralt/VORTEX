@@ -34,6 +34,7 @@
 #include "sota/loop_spec.h"
 #include "sota/markov.h"
 #include "midtier/midtier.h"
+#include "midtier/block_layout.h"
 #include "lower/isel.h"
 #include "lower/regalloc.h"
 #include "lower/emit.h"
@@ -66,6 +67,7 @@ typedef struct {
     bool run_loop_spec;         /* run loop specialization/vectorization */
     bool run_vectorize;         /* actually emit SIMD instructions for vectorizable loops */
     bool run_midtier;           /* run mid-tier type specialization (T1.5) */
+    bool run_block_layout;      /* profile-guided block layout (T2/T3) */
     int  gvn_iterations;        /* Max GVN iterations */
     int  sccp_iterations;       /* Max SCCP iterations */
     int  dce_iterations;        /* Max DCE iterations */
@@ -96,6 +98,10 @@ typedef struct {
      * after compilation and proactively compiles methods that will
      * be hot in the next phase. */
     vtx_markov_t     *markov;
+
+    /* Profiler for branch probability data (used by block layout).
+     * If NULL, block layout falls back to a heuristic (succ[0] = taken). */
+    const vtx_profiler_t *profiler;
 
     /* Code installation: when these are provided, the pipeline will
      * automatically install the compiled code into the code cache
@@ -150,6 +156,7 @@ typedef struct {
     int64_t  inlining_time_ns;
     int64_t  loop_spec_time_ns;
     int64_t  schedule_time_ns;
+    int64_t  block_layout_time_ns;
     int64_t  lowering_time_ns;
 } vtx_pipeline_stats_t;
 
