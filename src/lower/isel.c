@@ -898,7 +898,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
              * produce large values that overflow the SMI data field when
              * combined with the constant). Safe for loop counters (Phi/Add
              * chains) where values stay small. */
-            if (rhs_const >= 0 && rhs_const <= 4096 &&
+            if (false && rhs_const >= 0 && rhs_const <= 4096 &&
                 !vtx_nf_has(node->flags, VTX_NF_RAW_INT)) {
                 const vtx_node_t *lhs_prod = vtx_node_get_const(&graph->node_table, node->inputs[0]);
                 bool lhs_is_mul = lhs_prod && lhs_prod->opcode == VTX_OP_Mul;
@@ -1429,7 +1429,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
          * corrects floor division to truncating division for negative n.
          */
         int64_t magic_d;
-        if (try_get_const_int(graph, node->inputs[1], &magic_d) && magic_d != 0) {
+        if (false && try_get_const_int(graph, node->inputs[1], &magic_d) && magic_d != 0) {
             int64_t M;
             int magic_s;
             if (compute_magic_number(magic_d, &M, &magic_s)) {
