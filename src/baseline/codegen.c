@@ -3009,20 +3009,36 @@ static void compile_array_load(vtx_compile_ctx_t *ctx)
     bguard.stack_depth = ctx->stack_depth + 2;
     vtx_guard_emit_bounds_check(buf, idx_reg, VTX_REG_R11, bguard, &ctx->guards);
 
-    /* Load element: RAX = [R10 + header_size + (index+1)*8] */
-    /* Compute offset: header_size + 8 + index*8 = header_size + 8*(1+index) */
-    /* Use: lea r12, [r10 + header_size + 8 + idx_reg*8] */
-    /* Then: mov rax, [r12] */
-    emit_add_reg_imm32(buf, idx_reg, 1);
-    emit_shl_reg_imm8(buf, idx_reg, 3);
+    /* Load element: RAX = [raw_ptr + header_size + (1+index)*8]
+     *   fields[0] = length at header_size
+     *   fields[1] = element[0] at header_size + 8
+     *   fields[1+index] at header_size + (1+index)*8
+     *
+     * Compute the element address in R10 directly:
+     *   R10 = raw_ptr + header_size + 8  (base of elements)
+     *   RDI = index * 8                  (byte offset)
+     *   R10 += RDI                       (element address)
+     *   RAX = [R10]                      (load)
+     *
+     * Bug fix: The old code added +1 to the index AND +8 to R10, causing
+     * an off-by-one that loaded fields[index+2] instead of fields[index+1].
+     * It also used a SIB byte for [R10+RDI] which was fragile.
+     * Simplified to a direct add + load. */
+    emit_shl_reg_imm8(buf, idx_reg, 3);    /* idx_reg = index * 8 */
     emit_add_reg_imm32(buf, VTX_REG_R10, (int32_t)VTX_HEAP_OBJECT_HEADER_SIZE + 8);
+    /* R10 = raw_ptr + header_size + 8 = &fields[1] */
 
-    /* RAX = [R10 + idx_reg] */
+    /* R10 += idx_reg (element address)
+     * ADD r/m64, r64: opcode 0x01, modrm(reg=source, rm=dest)
+     * emit_rex64(buf, reg, rm) sets REX.R for reg, REX.B for rm */
+    emit_rex64(buf, idx_reg, VTX_REG_R10);
+    vtx_code_buffer_emit_byte(buf, 0x01); /* ADD r/m64, r64 */
+    vtx_code_buffer_emit_byte(buf, modrm(3, idx_reg, VTX_REG_R10));
+
+    /* RAX = [R10] */
     emit_rex64(buf, VTX_REG_RAX, VTX_REG_R10);
     vtx_code_buffer_emit_byte(buf, 0x8B);
-    vtx_code_buffer_emit_byte(buf, modrm(0, VTX_REG_RAX, (vtx_reg_t)4)); /* rm=4 signals SIB */
-    /* SIB byte: [R10 + idx_reg*1] */
-    vtx_code_buffer_emit_byte(buf, sib(0, idx_reg, VTX_REG_R10));
+    vtx_code_buffer_emit_byte(buf, modrm(0, VTX_REG_RAX, VTX_REG_R10));
 
     /* Push result */
     emit_stack_push(ctx);
@@ -3068,15 +3084,22 @@ static void compile_array_store(vtx_compile_ctx_t *ctx)
     bguard.stack_depth = ctx->stack_depth + 3;
     vtx_guard_emit_bounds_check(buf, idx_reg, VTX_REG_R11, bguard, &ctx->guards);
 
-    /* Store: [R10 + header_size + (index+1)*8] = value (R12) */
-    emit_add_reg_imm32(buf, idx_reg, 1);
-    emit_shl_reg_imm8(buf, idx_reg, 3);
+    /* Store: [raw_ptr + header_size + (1+index)*8] = value (R12)
+     * Same fix as compile_array_load: remove the +1 on index (the +8
+     * on R10 already accounts for fields[1] being the first element). */
+    emit_shl_reg_imm8(buf, idx_reg, 3);    /* idx_reg = index * 8 */
     emit_add_reg_imm32(buf, VTX_REG_R10, (int32_t)VTX_HEAP_OBJECT_HEADER_SIZE + 8);
 
+    /* R10 += idx_reg (element address)
+     * emit_rex64(buf, reg, rm): reg=idx_reg (source), rm=R10 (dest) */
+    emit_rex64(buf, idx_reg, VTX_REG_R10);
+    vtx_code_buffer_emit_byte(buf, 0x01); /* ADD r/m64, r64 */
+    vtx_code_buffer_emit_byte(buf, modrm(3, idx_reg, VTX_REG_R10));
+
+    /* [R10] = R12 */
     emit_rex64(buf, VTX_REG_R12, VTX_REG_R10);
     vtx_code_buffer_emit_byte(buf, 0x89); /* MOV r/m64, r64 */
-    vtx_code_buffer_emit_byte(buf, modrm(0, VTX_REG_R12, (vtx_reg_t)4)); /* rm=4 signals SIB */
-    vtx_code_buffer_emit_byte(buf, sib(0, idx_reg, VTX_REG_R10));
+    vtx_code_buffer_emit_byte(buf, modrm(0, VTX_REG_R12, VTX_REG_R10));
 }
 
 static void compile_array_length(vtx_compile_ctx_t *ctx)

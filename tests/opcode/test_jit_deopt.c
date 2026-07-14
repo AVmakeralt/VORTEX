@@ -409,12 +409,7 @@ int main(void) {
     test_jit_simple_add(&arena, &ts, &gc);
     test_jit_loop_equivalence(&arena, &ts, &gc);
     test_jit_field_access(&arena, &ts, &gc);
-    /* TODO: Array access crashes due to deopt stub / guard interaction.
-     * The untag and frame size fixes resolved the field access crash,
-     * but array access still segfaults in the deopt stub path. The
-     * bounds check guard appears to fire spuriously or the deopt stub
-     * has a register-save issue. Needs further investigation. */
-    /* test_jit_array_access(&arena, &ts, &gc); */
+    test_jit_array_access(&arena, &ts, &gc);
     test_jit_call_runtime(&arena, &ts, &gc);
 
     vtx_gc_destroy(&gc);

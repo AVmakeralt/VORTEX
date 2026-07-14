@@ -335,8 +335,15 @@ void vtx_guard_emit_bounds_check(vtx_code_buffer_t *buf,
      *   jae deopt
      */
 
-    /* cmp index_reg, length_reg */
-    emit_rex_w(buf, index_reg, length_reg);
+    /* cmp index_reg, length_reg
+     * CMP r/m64, r64 (opcode 0x39): modrm.reg = length_reg (source),
+     * modrm.rm = index_reg (destination).
+     * emit_rex_w(buf, reg, rm) sets REX.R for reg, REX.B for rm.
+     * Bug fix: parameters were swapped — emit_rex_w(buf, index_reg, length_reg)
+     * set REX.R for index_reg and REX.B for length_reg, which is backwards.
+     * With length_reg=R11, this caused CMP to use RBX (not R11) as the source,
+     * comparing garbage values and causing spurious deopt/crash. */
+    emit_rex_w(buf, length_reg, index_reg);
     vtx_code_buffer_emit_byte(buf, 0x39); /* CMP r/m64, r64 */
     vtx_code_buffer_emit_byte(buf, make_modrm(3, length_reg, index_reg));
 
