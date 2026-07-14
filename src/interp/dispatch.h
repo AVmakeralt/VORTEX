@@ -98,6 +98,14 @@ typedef struct {
      * context (instead of deep inside the computed-goto dispatch loop). */
     bool                jit_reenter_pending;
 
+    /* OSR (On-Stack Replacement) up: set by the dispatch loop at backward
+     * branches when compiled_code is available. The dispatch loop returns,
+     * and vtx_interp_run calls vtx_osr_up to transfer execution to the
+     * JIT code at the loop header (not the method entry). This avoids
+     * re-executing the method prologue. */
+    bool                osr_pending;
+    uint32_t            osr_loop_header_pc;
+
     /* Pending exception (VTX_VALUE_UNDEFINED if none) */
     vtx_value_t         exception;
 

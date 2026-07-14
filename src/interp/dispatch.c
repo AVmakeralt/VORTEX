@@ -1572,17 +1572,23 @@ dispatch_VT_OP_GOTO:
              * OSR transfers the current interpreter frame to a compiled
              * frame at the loop back-edge. The compiled code picks up
              * execution from the loop header, skipping the already-
-             * executed portion of the method. */
+             * executed portion of the method.
+             *
+             * We set the osr_pending flag and exit the dispatch loop.
+             * vtx_interp_run (the caller) will call vtx_osr_up from a
+             * clean stack context — the inline asm trampoline in vtx_osr_up
+             * never returns (it jumps to JIT code), so we can't call it
+             * from deep inside the computed-goto dispatch loop. */
             if (frame->method != NULL) {
                 void *cc = __atomic_load_n(&frame->method->compiled_code,
                                               __ATOMIC_ACQUIRE);
                 if (cc != NULL && interp->compile_ctx != NULL) {
-                    /* JIT compiled code is available. Set a flag and return
-                     * from the dispatch loop. The caller (main_new.c)
-                     * will call the JIT entry point from a clean stack
-                     * context, avoiding stack alignment issues from calling
-                     * deep inside the dispatch loop's computed-goto machinery. */
-                    interp->jit_reenter_pending = true;
+                    /* JIT compiled code is available. Set OSR pending with
+                     * the loop header PC (the backward-branch target).
+                     * vtx_interp_run will call vtx_osr_up to transfer
+                     * execution to the JIT at the loop header. */
+                    interp->osr_pending = true;
+                    interp->osr_loop_header_pc = target_pc; /* loop header = backward-branch target */
                     interp->running = false;
                     goto dispatch_done;
                 }
@@ -2580,6 +2586,97 @@ dispatch_VT_OP_CALL_RUNTIME:
 dispatch_done:
     /* Sync sp back to frame so the frame state is consistent */
     SYNC_SP();
+
+    /* ===================================================================
+     * OSR UP: If the dispatch loop set osr_pending at a backward branch,
+     * transfer execution to the JIT code at the loop header. This is
+     * true On-Stack Replacement — we enter the JIT at the loop header
+     * (not the method entry), avoiding re-execution of the prologue.
+     *
+     * vtx_osr_up uses an inline asm trampoline that never returns (it
+     * jumps to JIT code). If it succeeds, the JIT code runs and its RET
+     * returns to the caller of vtx_interp_run. If it fails, we fall
+     * through and return the current result.
+     * =================================================================== */
+    if (interp->osr_pending) {
+        interp->osr_pending = false;
+        uint32_t osr_pc = interp->osr_loop_header_pc;
+
+        /* Look up the compiled method from the registry to get the
+         * bc_pc_map and frame_layout needed by vtx_osr_up. */
+        if (interp->compile_ctx != NULL &&
+            interp->compile_ctx->method_registry != NULL &&
+            method->vtable_index < interp->compile_ctx->method_registry->capacity) {
+            vtx_compiled_method_t *cm = vtx_method_registry_get(
+                interp->compile_ctx->method_registry, method->vtable_index);
+            if (cm != NULL && cm->code_start != NULL) {
+                /* If frame_layout wasn't stored yet (race with compile thread),
+                 * recompute it from the method descriptor. */
+                vtx_jit_frame_layout_t layout;
+                if (cm->frame_layout.max_locals > 0) {
+                    layout = cm->frame_layout;
+                } else {
+                    layout = vtx_frame_layout_compute(method);
+                }
+                /* Build a vtx_compiled_code_t from the compiled_method */
+                vtx_compiled_code_t cc;
+                memset(&cc, 0, sizeof(cc));
+                cc.entry_point = cm->code_start;
+                cc.code = cm->code_start;
+                cc.code_size = cm->code_size;
+                cc.frame_layout = layout;
+                cc.bc_pc_map = cm->bc_pc_map;
+                cc.bc_pc_map_count = cm->bc_pc_map_count;
+                cc.method_id = cm->method_id;
+                cc.stack_slots = layout.max_stack;
+                cc.local_slots = layout.max_locals;
+                cc.side_table = cm->side_table;
+
+                /* Only attempt OSR if we have a bc_pc_map entry for the
+                 * loop header. Without it, vtx_osr_up would use the
+                 * method entry point (which re-runs the prologue and
+                 * clobbers the OSR-transferred values). If no entry is
+                 * found, fall back to whole-method re-enter. */
+                bool has_osr_entry = false;
+                if (cc.bc_pc_map != NULL && cc.bc_pc_map_count > 0) {
+                    for (uint32_t i = 0; i < cc.bc_pc_map_count; i++) {
+                        if (cc.bc_pc_map[i].bytecode_pc == osr_pc) {
+                            has_osr_entry = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (!has_osr_entry) {
+                    /* No OSR entry for this loop header — fall back to
+                     * whole-method re-enter (JIT from method entry). */
+                    interp->jit_reenter_pending = true;
+                } else {
+
+                /* Build a vtx_interp_frame_t from the current frame */
+                vtx_interp_frame_t osr_frame;
+                memset(&osr_frame, 0, sizeof(osr_frame));
+                osr_frame.method_id = method->vtable_index;
+                osr_frame.bytecode_pc = osr_pc;
+                osr_frame.locals = frame->locals;
+                osr_frame.local_count = frame->locals_count;
+                osr_frame.stack = frame->operand_stack;
+                osr_frame.stack_top = (uint32_t)frame->stack_top;
+                osr_frame.stack_capacity = (uint32_t)frame->stack_capacity;
+                osr_frame.osr_active = false;
+
+                /* Attempt OSR up — if successful, this never returns.
+                 * If it fails, fall back to JIT re-enter (whole-method). */
+                bool osr_ok = vtx_osr_up(&osr_frame, method->vtable_index,
+                                          &cc, osr_pc);
+                if (!osr_ok) {
+                    interp->jit_reenter_pending = true;
+                }
+                } /* end else (has_osr_entry) */
+            }
+        }
+    }
+
     /* Undefine macros local to this function */
 #undef DISPATCH
 #undef ADVANCE_PC
