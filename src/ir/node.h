@@ -130,6 +130,10 @@ typedef enum {
     VTX_OP_VectorAdd,     /* vector add */
     VTX_OP_VectorMul,     /* vector multiply */
 
+    /* ---- Representation transitions (explicit unbox/box) ---- */
+    VTX_OP_UnboxInt,      /* TaggedInt → RawInt64 (emit SHL+SAR) */
+    VTX_OP_BoxInt,        /* RawInt64 → TaggedInt (emit AND+SHL+OR) */
+
     /* ---- Total ---- */
     VTX_NODE_OP_COUNT
 } vtx_node_opcode_t;

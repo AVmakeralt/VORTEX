@@ -68,6 +68,7 @@ typedef struct {
     bool run_vectorize;         /* actually emit SIMD instructions for vectorizable loops */
     bool run_midtier;           /* run mid-tier type specialization (T1.5) */
     bool run_block_layout;      /* profile-guided block layout (T2/T3) */
+    bool run_rep_infer;         /* representation inference (UnboxInt/BoxInt) */
     int  gvn_iterations;        /* Max GVN iterations */
     int  sccp_iterations;       /* Max SCCP iterations */
     int  dce_iterations;        /* Max DCE iterations */

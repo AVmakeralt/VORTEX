@@ -108,6 +108,10 @@ const vtx_node_opcode_info_t vtx_node_opcode_table[VTX_NODE_OP_COUNT] = {
     OP_INFO(VectorStore,    VTX_NF_MEMORY | VTX_NF_SIDE_EFFECT, 4), /* memory + base + index + value */
     OP_INFO(VectorAdd,      VTX_NF_DATA, 2),   /* vec_a + vec_b */
     OP_INFO(VectorMul,      VTX_NF_DATA, 2),   /* vec_a * vec_b */
+
+    /* Representation transitions — pure data, 1 input, 1 output */
+    OP_INFO(UnboxInt,       VTX_NF_DATA | VTX_NF_RAW_INT, 1), /* tagged SMI → raw int64 */
+    OP_INFO(BoxInt,         VTX_NF_DATA, 1),                 /* raw int64 → tagged SMI */
 };
 
 #undef OP_INFO

@@ -49,6 +49,7 @@
 /* vtx_versioned_cache_t is now properly declared via pipeline.h → versioned.h */
 #include "ir/loop_unroll.h"
 #include "ir/smi_tag_elision.h"
+#include "ir/rep_infer.h"
 #include "guard/hoist.h"
 #include "guard/merge.h"
 #include "deopt/frame_state.h"
@@ -199,6 +200,7 @@ vtx_pipeline_config_t vtx_pipeline_config_t2(void)
     cfg.owns_gbdt_model   = false;
     cfg.run_midtier       = false;
     cfg.run_block_layout  = true;   /* profile-guided block layout */
+    cfg.run_rep_infer     = false;  /* disabled — needs debugging of BoxInt insertion */
     cfg.markov            = NULL;
     return cfg;
 }
@@ -242,6 +244,7 @@ vtx_pipeline_config_t vtx_pipeline_config_t3(void)
     cfg.owns_gbdt_model   = false;
     cfg.run_midtier       = false;
     cfg.run_block_layout  = true;   /* profile-guided block layout */
+    cfg.run_rep_infer     = false;  /* disabled — needs debugging of BoxInt insertion */
     cfg.markov            = NULL;
     return cfg;
 }
@@ -1381,6 +1384,32 @@ int vtx_pipeline_run(vtx_graph_t *graph,
          * overhead and enable more instruction-level parallelism.
          * (audit #3: wire loop unrolling) */
         vtx_loop_unroll_run(graph, &schedule, arena, 2);
+    }
+
+    /* ================================================================== */
+    /* Phase 8.5: Representation Inference                                */
+    /*                                                                    */
+    /* Inserts explicit UnboxInt/BoxInt nodes around arithmetic chains     */
+    /* to eliminate per-op SMI tag/untag overhead. Runs after LICM and    */
+    /* loop unrolling (so the full loop body is visible) and before        */
+    /* scheduling (so the new nodes are placed correctly).                 */
+    /* ================================================================== */
+    if (config->run_rep_infer) {
+        int64_t ri_start = now_ns();
+        uint32_t ri_inserted = vtx_rep_infer_run(graph, arena);
+        stats.block_layout_time_ns += elapsed_ns(ri_start); /* reuse stats field */
+        (void)ri_inserted;
+
+        /* Run a quick DCE to clean up dead nodes from UnboxInt(BoxInt(x))
+         * simplification */
+        if (config->run_dce) {
+            run_dce_pass(graph, 1, &stats.dce_time_ns, false);
+        }
+
+        if (verify_between_passes(graph, config, "RepInfer") != 0) {
+            result->stats = stats;
+            return -1;
+        }
     }
 
     /* ================================================================== */

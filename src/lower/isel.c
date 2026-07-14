@@ -2282,6 +2282,50 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         break;
     }
 
+    /* ---- Representation transitions ---- */
+    case VTX_OP_UnboxInt: {
+        /* Tagged SMI → Raw int64
+         * Emit: MOV dst, src; SHL dst, 13; SAR dst, 16
+         * This is the same sequence as emit_smi_untag, but as an
+         * explicit IR node so GVN/SCCP can reason about it. */
+        if (node->input_count < 1) return -1;
+        ensure_node_vreg(stream, node->inputs[0], arena);
+        uint32_t src = vtx_isel_node_vreg(stream, node->inputs[0]);
+        uint32_t dst = ensure_node_vreg(stream, node_id, arena);
+        if (src == VTX_VREG_INVALID) return -1;
+        stream->uses_smi = true;
+        if (dst != src)
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, src, node_id), arena);
+        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, dst, 13, node_id), arena);
+        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, dst, 16, node_id), arena);
+        break;
+    }
+
+    case VTX_OP_BoxInt: {
+        /* Raw int64 → Tagged SMI
+         * Emit: AND dst, DATA_MASK; SHL dst, 3; OR dst, HEADER
+         * Same as emit_smi_retag but as an explicit node. */
+        if (node->input_count < 1) return -1;
+        ensure_node_vreg(stream, node->inputs[0], arena);
+        uint32_t src = vtx_isel_node_vreg(stream, node->inputs[0]);
+        uint32_t dst = ensure_node_vreg(stream, node_id, arena);
+        if (src == VTX_VREG_INVALID) return -1;
+        stream->uses_smi = true;
+        if (dst != src)
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, src, node_id), arena);
+        /* AND dst, DATA_MASK */
+        vtx_inst_t and_inst = make_ri_inst(VTX_X86_AND, dst,
+                                            (int64_t)VTX_NAN_DATA_MASK, node_id);
+        and_inst.flags |= VTX_INST_FLAG_NO_COALESCE;
+        vtx_isel_emit_inst(block, and_inst, arena);
+        /* SHL dst, 3 */
+        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, dst, 3, node_id), arena);
+        /* OR dst, HEADER */
+        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_OR, dst,
+                                                stream->smi_scratch_vreg, node_id), arena);
+        break;
+    }
+
     /* ---- Memory ---- */
     case VTX_OP_Load: {
         if (node->input_count < 1) return -1;
