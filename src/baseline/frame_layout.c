@@ -20,10 +20,19 @@ vtx_jit_frame_layout_t vtx_frame_layout_compute(const vtx_method_desc_t *method)
     }
 
     /* Spill slots: values beyond the first VTX_EXPR_REG_COUNT that won't
-     * fit in registers. If max_stack <= VTX_EXPR_REG_COUNT, no spills. */
+     * fit in registers. If max_stack <= VTX_EXPR_REG_COUNT, no spills.
+     *
+     * However, the deopt stub needs spill slots to save expr-stack registers
+     * (RAX, RCX, RDX, RBX) when a guard fires. It needs up to 4 spill slots
+     * (one per register) at depth >= 4. If max_spills < 4, the deopt stub's
+     * SAVE_REG macro hits an assertion ("no spill/local slot for register save").
+     * Ensure at least 4 spill slots for deopt. */
     layout.max_spills = 0;
     if (layout.max_stack > VTX_EXPR_REG_COUNT) {
         layout.max_spills = layout.max_stack - VTX_EXPR_REG_COUNT;
+    }
+    if (layout.max_spills < VTX_EXPR_REG_COUNT) {
+        layout.max_spills = VTX_EXPR_REG_COUNT;
     }
 
     /* locals_base = -8 (local[0] at RBP-8).
