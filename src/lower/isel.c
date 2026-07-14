@@ -34,6 +34,7 @@
 
 #include "lower/isel.h"
 #include "ir/graph.h"
+#include "ir/schedule.h"
 #include "compile/safepoint.h"
 #include "runtime/object.h"
 #include "runtime/helpers.h"
@@ -721,7 +722,8 @@ static bool emit_mul_by_constant(vtx_inst_stream_t *stream, vtx_inst_block_t *bl
 /* ========================================================================== */
 
 static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
-                        const vtx_graph_t *graph, vtx_nodeid_t node_id,
+                        const vtx_graph_t *graph, const vtx_schedule_t *schedule,
+                        uint32_t sched_block_idx, vtx_nodeid_t node_id,
                         vtx_arena_t *arena)
 {
     const vtx_node_t *node = vtx_node_get_const(&graph->node_table, node_id);
@@ -2616,6 +2618,31 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
     /* ---- Control flow ---- */
     case VTX_OP_If: {
+        /* Look up the branch target block from the schedule.
+         *
+         * The If node's method_index stores the branch target bytecode PC
+         * (set by the graph builder). We scan the schedule's blocks for one
+         * whose Region node has a matching bytecode_pc. This gives us the
+         * exact target block index, which we store in the JCC instruction.
+         *
+         * This replaces the old resolve_branch_targets heuristic that
+         * guessed the target based on block position (b+1). That heuristic
+         * broke when block layout reordered blocks. */
+        uint32_t target_block = 0;  /* default fallback */
+        if (schedule != NULL) {
+            uint32_t target_pc = node->method_index;
+            for (uint32_t sb = 0; sb < schedule->count; sb++) {
+                vtx_nodeid_t reg_id = schedule->blocks[sb].region_node;
+                if (reg_id < graph->node_table.count) {
+                    const vtx_node_t *reg_n = vtx_node_get_const(
+                        &graph->node_table, reg_id);
+                    if (reg_n && reg_n->bytecode_pc == target_pc) {
+                        target_block = sb;
+                        break;
+                    }
+                }
+            }
+        }
         uint32_t cond_vreg = VTX_VREG_INVALID;
         vtx_nodeid_t cond_node_id = VTX_NODEID_INVALID;
         const vtx_node_t *cond_node = NULL;
@@ -2648,9 +2675,25 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             } else {
                 jcc_cond = (node->cond != VTX_COND_NEVER) ? node->cond : VTX_COND_NE;
             }
-            vtx_inst_t jcc = make_branch_inst(VTX_X86_JCC, 0, jcc_cond, node_id);
+            vtx_inst_t jcc = make_branch_inst(VTX_X86_JCC, target_block, jcc_cond, node_id);
             jcc.flags |= VTX_INST_FLAG_FUSED;
             vtx_isel_emit_inst(block, jcc, arena);
+            /* Emit fallthrough JMP to the not-taken successor.
+             * The not-taken successor is the one that is NOT the JCC target.
+             * The emit phase's peephole optimizes this away if the
+             * not-taken successor is at b+1 (next block in layout). */
+            if (schedule != NULL && sched_block_idx < schedule->count) {
+                const vtx_schedule_block_t *sblk = &schedule->blocks[sched_block_idx];
+                for (uint32_t s = 0; s < sblk->succ_count; s++) {
+                    if (sblk->succ_blocks[s] != target_block) {
+                        vtx_inst_t fall_jmp = make_branch_inst(VTX_X86_JMP,
+                            sblk->succ_blocks[s], VTX_COND_ALWAYS, node_id);
+                        fall_jmp.flags |= VTX_INST_FLAG_TARGET_SET;
+                        vtx_isel_emit_inst(block, fall_jmp, arena);
+                        break;
+                    }
+                }
+            }
             break;
         }
 
@@ -2664,9 +2707,22 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             vtx_isel_emit_inst(block, cmp, arena);
         }
         vtx_cond_t jcc_cond = (node->cond != VTX_COND_NEVER) ? node->cond : VTX_COND_NE;
-        vtx_inst_t jcc = make_branch_inst(VTX_X86_JCC, 0, jcc_cond, node_id);
+        vtx_inst_t jcc = make_branch_inst(VTX_X86_JCC, target_block, jcc_cond, node_id);
         jcc.flags |= VTX_INST_FLAG_FUSED;
         vtx_isel_emit_inst(block, jcc, arena);
+        /* Emit fallthrough JMP to the not-taken successor (same as above). */
+        if (schedule != NULL && sched_block_idx < schedule->count) {
+            const vtx_schedule_block_t *sblk = &schedule->blocks[sched_block_idx];
+            for (uint32_t s = 0; s < sblk->succ_count; s++) {
+                if (sblk->succ_blocks[s] != target_block) {
+                    vtx_inst_t fall_jmp = make_branch_inst(VTX_X86_JMP,
+                        sblk->succ_blocks[s], VTX_COND_ALWAYS, node_id);
+                    fall_jmp.flags |= VTX_INST_FLAG_TARGET_SET;
+                    vtx_isel_emit_inst(block, fall_jmp, arena);
+                    break;
+                }
+            }
+        }
         break;
     }
 
@@ -3717,19 +3773,19 @@ static void resolve_branch_targets(vtx_inst_stream_t *stream,
             if (inst->opnd_kinds[0] != VTX_OPND_LABEL) continue;
 
             if (inst->opcode == VTX_X86_JMP && sched_blk->succ_count > 0) {
-                inst->operands[0] = sched_blk->succ_blocks[0];
-            } else if (inst->opcode == VTX_X86_JCC) {
-                if (sched_blk->succ_count >= 2) {
-                    uint32_t next_block = b + 1;
-                    if (sched_blk->succ_blocks[0] == next_block) {
-                        inst->operands[0] = sched_blk->succ_blocks[1];
-                    } else {
-                        inst->operands[0] = sched_blk->succ_blocks[0];
-                    }
-                } else if (sched_blk->succ_count > 0) {
+                /* Only resolve JMP targets that weren't set by the isel.
+                 * Goto JMPs have target=0 and no TARGET_SET flag.
+                 * If fallthrough JMPs have TARGET_SET flag — don't override. */
+                if (!(inst->flags & VTX_INST_FLAG_TARGET_SET)) {
                     inst->operands[0] = sched_blk->succ_blocks[0];
                 }
             }
+            /* JCC targets are now set by the isel directly via
+             * make_branch_inst(VTX_X86_JCC, target_block, ...).
+             * The isel looks up the target block from the If node's
+             * method_index (branch target PC) by matching Region
+             * bytecode_pc values. This is correct regardless of block
+             * layout order — no b+1 heuristic needed. */
         }
     }
 }
@@ -3853,7 +3909,7 @@ vtx_inst_stream_t *vtx_isel_select(const vtx_schedule_t *schedule,
 
         for (uint32_t n = 0; n < sched_blk->node_count; n++) {
             vtx_nodeid_t node_id = sched_blk->nodes[n];
-            if (select_node(stream, inst_blk, graph, node_id, arena) != 0) {
+            if (select_node(stream, inst_blk, graph, schedule, b, node_id, arena) != 0) {
                 const vtx_node_t *dbg_node = vtx_node_get_const(&graph->node_table, node_id);
                 if (dbg_node) {
                     fprintf(stderr, "ISEL FAIL on N%u (%s), input_count=%u, inputs:",

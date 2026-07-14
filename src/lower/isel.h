@@ -316,6 +316,7 @@ typedef struct {
 #define VTX_INST_FLAG_VALUE_GUARD   (1u << 23) /* value speculation guard — constant fold via guard page */
 #define VTX_INST_FLAG_NO_TEST      (1u << 24) /* CMP must NOT be peephole-converted to TEST (NaN-boxed SMI operand) */
 #define VTX_INST_FLAG_NO_COALESCE  (1u << 25) /* MOV must NOT be coalesced — destination is modified in-place by later SHL/SAR/AND/OR */
+#define VTX_INST_FLAG_TARGET_SET  (1u << 26) /* branch target is explicitly set by isel — don't override in resolve_branch_targets */
 
 typedef struct {
     vtx_x86_opcode_t opcode;

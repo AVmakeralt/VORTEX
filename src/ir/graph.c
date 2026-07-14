@@ -767,6 +767,11 @@ static int create_block_entry(vtx_graph_t *graph, vtx_block_info_t *blocks,
     vtx_nodeid_t region = vtx_node_create(nt, region_op);
     if (region == VTX_NODEID_INVALID) return -1;
     block->region_node = region;
+    /* Store the block's starting bytecode PC on the Region node so isel
+     * can look up the target block for conditional branches by matching
+     * the If node's method_index (branch target PC) against Region PCs. */
+    vtx_node_t *region_n = vtx_node_get(nt, region);
+    if (region_n) region_n->bytecode_pc = block->start_pc;
 
     /* Connect predecessor control outputs as Region inputs.
      *
@@ -1216,6 +1221,7 @@ static int process_instruction(vtx_graph_t *graph, vtx_block_info_t *block,
         if (if_node == VTX_NODEID_INVALID) return -1;
         vtx_node_t *n = vtx_node_get(nt, if_node);
         n->cond = (op == VT_OP_IF_TRUE) ? VTX_COND_NE : VTX_COND_EQ;
+        n->method_index = operand; /* store branch target PC for isel */
         /* Control input */
         vtx_node_add_input(nt, if_node, block->control_node);
         block->control_node = if_node;
@@ -2005,6 +2011,7 @@ int vtx_graph_build(vtx_graph_t *graph,
                 if (if_n == VTX_NODEID_INVALID) return -1;
                 vtx_node_t *n = vtx_node_get(&graph->node_table, if_n);
                 n->cond = (op == VT_OP_IF_TRUE) ? VTX_COND_NE : VTX_COND_EQ;
+                n->method_index = operand; /* store branch target PC for isel */
                 vtx_node_add_input(&graph->node_table, if_n, block->control_node);
                 vtx_node_add_input(&graph->node_table, if_n, cond);
                 block->control_node = if_n;
