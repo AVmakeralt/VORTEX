@@ -505,3 +505,36 @@ target_link_libraries(test_stress_integration PRIVATE
     pthread
 )
 add_test(NAME test_stress_integration COMMAND test_stress_integration)
+
+# ---- Opcode tests (B4-B8 patches + extras) ----
+# test_opcodes_b4_b8: Validates B4 (InstanceOf), B5 (IsNull), B6 (NewArray),
+#   B7 (CallStatic), B8 (CallVirtual) bugfixes, plus NEW, LOAD_FIELD/STORE_FIELD,
+#   ARRAY_LOAD/STORE/LENGTH, THROW/CATCH.
+# Built with the manual build script at /home/z/my-project/scripts/build_opcode_test.sh
+# when cmake is unavailable.
+add_executable(test_opcodes_b4_b8
+    opcode/test_opcodes_b4_b8.c
+)
+target_link_libraries(test_opcodes_b4_b8 PRIVATE
+    vortex_test_framework
+    vortex_interp
+    vortex_ir
+    vortex_runtime
+    vortex_baseline
+    vortex_trace
+    vortex_region
+    vortex_pea
+    vortex_deopt
+    vortex_inliner
+    vortex_profile
+    vortex_lower
+    vortex_codecache
+    vortex_compile
+    vortex_guard
+    vortex_midtier
+    vortex_sota
+    vortex_common
+    m
+    pthread
+)
+add_test(NAME test_opcodes_b4_b8 COMMAND test_opcodes_b4_b8)
