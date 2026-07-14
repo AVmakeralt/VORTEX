@@ -897,12 +897,20 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             /* Only use fast path when lhs is NOT a Mul result (Mul can
              * produce large values that overflow the SMI data field when
              * combined with the constant). Safe for loop counters (Phi/Add
-             * chains) where values stay small. */
-            if (false && rhs_const >= 0 && rhs_const <= 4096 &&
+             * chains) where values stay small.
+             *
+             * CRITICAL: Also check that the lhs INPUT is not RAW_INT.
+             * If the lhs is raw (unboxed from a previous op in a RAW_INT
+             * chain), the fast path would add c*8 to a raw value,
+             * producing a result without the SMI header. This was the
+             * root cause of the unrolled4 crash: chained Adds where
+             * intermediate values lost their tags. */
+            if (rhs_const >= 0 && rhs_const <= 4096 &&
                 !vtx_nf_has(node->flags, VTX_NF_RAW_INT)) {
                 const vtx_node_t *lhs_prod = vtx_node_get_const(&graph->node_table, node->inputs[0]);
                 bool lhs_is_mul = lhs_prod && lhs_prod->opcode == VTX_OP_Mul;
-                if (!lhs_is_mul) {
+                bool lhs_is_raw = lhs_prod && vtx_nf_has(lhs_prod->flags, VTX_NF_RAW_INT);
+                if (!lhs_is_mul && !lhs_is_raw) {
                     int64_t c_shifted = rhs_const * 8;
                     if (dst != lhs_vreg) {
                         vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_vreg, node_id), arena);
@@ -1429,6 +1437,10 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
          * corrects floor division to truncating division for negative n.
          */
         int64_t magic_d;
+        /* Magic-number division disabled: IMUL_FULL clobbers RAX/RDX and
+         * the regalloc doesn't process CLOBBER flags to kill live intervals.
+         * When two IDIVs are in sequence, the second's CQO clobbers RDX
+         * while the first's result is still live. Fall through to CQO+IDIV. */
         if (false && try_get_const_int(graph, node->inputs[1], &magic_d) && magic_d != 0) {
             int64_t M;
             int magic_s;
