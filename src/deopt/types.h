@@ -4,6 +4,15 @@
 #include <stdint.h>
 #include "runtime/type_system.h"
 
+/* Forward declaration — vtx_side_table_t is defined in deopt/side_table.h.
+ * We forward-declare it here (with the typedef) so that vtx_deopt_info_t
+ * can use the proper typedef'd pointer type instead of the anonymous
+ * struct tag. The old code used `struct vtx_side_table *` which is a
+ * DIFFERENT type from `vtx_side_table_t *` (which is `typedef struct
+ * vtx_side_table_struct vtx_side_table_t`). This type mismatch was
+ * hidden by -Wno-incompatible-pointer-types. */
+typedef struct vtx_side_table_struct vtx_side_table_t;
+
 /**
  * VORTEX Deopt — Shared Deopt Type Definitions
  *
@@ -29,7 +38,7 @@ typedef struct {
     /* Side table for deopt: maps native PC → FrameState + live registers.
      * Set at install time so the deopt handler can find it from the
      * deopt_info pointer in the JIT frame header. */
-    struct vtx_side_table   *side_table;
+    vtx_side_table_t        *side_table;
 } vtx_deopt_info_t;
 
 #endif /* VORTEX_DEOPT_TYPES_H */

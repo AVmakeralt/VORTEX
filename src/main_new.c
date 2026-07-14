@@ -3057,8 +3057,8 @@ int main(int argc, char *argv[])
          * pre-compiled continuations when a guard fails. */
         compile_ctx.deoptless_table_capacity = 256;
         compile_ctx.deoptless_table_count = 256;
-        compile_ctx.deoptless_tables = (struct vtx_deoptless_table **)
-            calloc(compile_ctx.deoptless_table_capacity, sizeof(struct vtx_deoptless_table *));
+        compile_ctx.deoptless_tables = (vtx_deoptless_table_t **)
+            calloc(compile_ctx.deoptless_table_capacity, sizeof(vtx_deoptless_table_t *));
 
         /* Create and wire threadpool for background compilation.
          * P11 fix: In deterministic mode, use 1 worker thread for

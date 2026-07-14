@@ -88,7 +88,7 @@ typedef struct {
  * The side table: a sorted array of entries mapping native PC offsets
  * to FrameState indices and register maps.
  */
-typedef struct {
+typedef struct vtx_side_table_struct {
     vtx_side_table_entry_t *entries;       /* sorted array of entries */
     uint32_t                entry_count;
     uint32_t                entry_capacity;

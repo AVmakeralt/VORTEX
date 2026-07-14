@@ -109,7 +109,7 @@ struct vtx_deoptless_version {
 /**
  * Per-method version table: tracks all continuation versions for a method.
  */
-typedef struct {
+typedef struct vtx_deoptless_table_struct {
     uint32_t                 method_id;
     vtx_deoptless_version_t *versions;        /* linked list of versions */
     uint32_t                 version_count;   /* number of active versions */

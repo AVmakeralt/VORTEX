@@ -25,16 +25,20 @@
 #include "interp/profiler.h"     /* for vtx_profiler_t, vtx_profile_data_t */
 #include "sota/markov.h"         /* for vtx_markov_t */
 
-/* Forward declarations */
-struct vtx_code_cache;
-struct vtx_method_registry;
-struct vtx_arena;
-struct vtx_orchestrator;
-struct vtx_spec_version_manager;
-struct vtx_deopt_coord;
-struct vtx_versioned_cache;
-struct vtx_safepoint_manager;
-struct vtx_deoptless_table;
+/* Forward declarations — use typedefs from the actual headers.
+ * The old code used `struct vtx_foo *` forward declarations, but the
+ * actual types are `typedef struct { ... } vtx_foo_t;` (anonymous struct
+ * tags). This made `struct vtx_foo *` and `vtx_foo_t *` DIFFERENT types,
+ * hidden by -Wno-incompatible-pointer-types. Fix: include the headers
+ * so we use the real typedef'd pointer types. */
+#include "codecache/cache.h"          /* vtx_code_cache_t */
+#include "codecache/install.h"        /* vtx_method_registry_t */
+#include "runtime/arena.h"            /* vtx_arena_t */
+#include "compile/orchestrator.h"     /* vtx_orchestrator_t */
+#include "compile/spec_versioning.h"  /* vtx_spec_version_manager_t */
+#include "deopt/coordinator.h"        /* vtx_deopt_coord_t */
+#include "codecache/versioned.h"      /* vtx_versioned_cache_t */
+#include "runtime/safepoint_manager.h" /* vtx_safepoint_manager_t */
 
 /**
  * VORTEX Compilation Request
@@ -60,20 +64,20 @@ struct vtx_deoptless_table;
  */
 typedef struct {
     vtx_threadpool_t             *threadpool;
-    struct vtx_code_cache        *code_cache;
-    struct vtx_method_registry   *method_registry;
-    struct vtx_arena             *global_arena;
-    struct vtx_orchestrator      *orchestrator;
-    struct vtx_spec_version_manager *spec_version_mgr;  /* argument-type specialization */
-    struct vtx_deopt_coord       *deopt_coord;  /* deopt rate limiting / batching */
-    struct vtx_versioned_cache   *versioned_cache;  /* N+1 versioning + safe reclamation */
-    struct vtx_safepoint_manager *safepoint_mgr;  /* multi-threaded safepoint manager */
+    vtx_code_cache_t             *code_cache;
+    vtx_method_registry_t        *method_registry;
+    vtx_arena_t                  *global_arena;
+    vtx_orchestrator_t           *orchestrator;
+    vtx_spec_version_manager_t   *spec_version_mgr;  /* argument-type specialization */
+    vtx_deopt_coord_t            *deopt_coord;  /* deopt rate limiting / batching */
+    vtx_versioned_cache_t        *versioned_cache;  /* N+1 versioning + safe reclamation */
+    vtx_safepoint_manager_t      *safepoint_mgr;  /* multi-threaded safepoint manager */
 
     /* Deoptless continuation tables: per-method array indexed by method_id.
      * Each entry tracks continuation versions for a method. When a guard
      * fails, the deopt handler checks if a deoptless continuation exists
      * and jumps to it instead of deoptimizing to the interpreter. */
-    struct vtx_deoptless_table  **deoptless_tables;
+    vtx_deoptless_table_t       **deoptless_tables;
     uint32_t                      deoptless_table_count;
     uint32_t                      deoptless_table_capacity;
 

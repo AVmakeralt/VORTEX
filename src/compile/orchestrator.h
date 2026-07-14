@@ -25,9 +25,7 @@
 #include "profile/data.h"
 #include "profile/phase_partition.h"
 #include "inliner/feedback.h"
-
-/* Forward declaration */
-struct vtx_deoptless_table;
+#include "deopt/deoptless.h"  /* vtx_deoptless_table_t */
 
 #ifdef VORTEX_ENABLE_SOTA
 #include "sota/markov.h"
@@ -98,7 +96,7 @@ struct vtx_deoptless_table;
 /* Orchestrator state                                                           */
 /* ========================================================================== */
 
-typedef struct {
+typedef struct vtx_orchestrator_struct {
     /* References to subsystems (not owned by orchestrator) */
 #ifdef VORTEX_ENABLE_SOTA
     vtx_markov_t              *markov;           /* phase transition predictor */
@@ -130,7 +128,7 @@ typedef struct {
      * The orchestrator checks these periodically for methods that
      * have accumulated enough failed guards to warrant continuation
      * compilation. */
-    struct vtx_deoptless_table **deoptless_tables;
+    vtx_deoptless_table_t      **deoptless_tables;
     uint32_t                     deoptless_table_count;
 
     /* Background thread state */
@@ -160,7 +158,7 @@ typedef struct {
      * atomically by compile/decision.c. See decision.h for the API. */
     uint64_t                   decision_submit_counts[8 /* VTX_DECISION_REASON_COUNT */];
     uint64_t                   decision_deopt_count;
-} vtx_orchestrator_t;
+} vtx_orchestrator_t;  /* struct vtx_orchestrator_struct */
 
 /* ========================================================================== */
 /* Lifecycle                                                                   */

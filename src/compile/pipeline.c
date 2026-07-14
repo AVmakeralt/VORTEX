@@ -46,10 +46,7 @@
 
 /* Forward declarations from codecache/versioned.h (can't include directly
  * due to vtx_code_version_t struct conflict with compile/version.h) */
-struct vtx_versioned_cache;
-uint32_t vtx_versioned_cache_install(struct vtx_versioned_cache *vc,
-                                      uint32_t method_id,
-                                      void *code_ptr, uint32_t code_size);
+/* vtx_versioned_cache_t is now properly declared via pipeline.h → versioned.h */
 #include "ir/loop_unroll.h"
 #include "ir/smi_tag_elision.h"
 #include "guard/hoist.h"

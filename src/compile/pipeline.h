@@ -43,16 +43,14 @@
 #include "runtime/arena.h"
 #include "interp/type_feedback.h"
 #include "vortex_config.h"
+#include "compile/orchestrator.h"     /* vtx_orchestrator_t */
+#include "codecache/versioned.h"      /* vtx_versioned_cache_t */
+#include "deopt/deoptless.h"          /* vtx_deoptless_table_t */
 
 /* Callee graph lookup callback for inlining.
  * Given a method_index (from the call node), returns the callee's SoN graph
  * or NULL if the callee is not available for inlining. */
 typedef const vtx_graph_t *(*vtx_callee_lookup_fn)(uint32_t method_index, void *context);
-
-/* Forward declarations */
-struct vtx_orchestrator;
-struct vtx_versioned_cache;
-struct vtx_deoptless_table;
 
 /* Pipeline configuration */
 typedef struct {
@@ -115,18 +113,18 @@ typedef struct {
      * (feedback-directed inlining), and the phase-reactive version manager
      * — collectively ~5 SOTA subsystems that were previously dead code
      * because no one called on_compile_done. */
-    struct vtx_orchestrator     *orchestrator;
+    vtx_orchestrator_t          *orchestrator;
 
     /* Versioned code cache. If non-NULL, the pipeline registers each
      * installed method version with the versioned cache after install.
      * This enables N+1 versioning (old versions kept alive until no
      * thread references them) and safe hot-swap recompilation. */
-    struct vtx_versioned_cache  *versioned_cache;
+    vtx_versioned_cache_t       *versioned_cache;
 
     /* Deoptless continuation tables: array indexed by method_id. The
      * pipeline creates a table for each compiled method so the deopt
      * handler can look up continuation versions. */
-    struct vtx_deoptless_table **deoptless_tables;
+    vtx_deoptless_table_t      **deoptless_tables;
     uint32_t                     deoptless_table_count;
     uint32_t                     deoptless_table_capacity;
 } vtx_pipeline_config_t;
