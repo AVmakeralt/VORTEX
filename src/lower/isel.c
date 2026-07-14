@@ -913,17 +913,23 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             (void)rhs_const;
         }
 
-        /* Perf 2: SMI fast path for Add(Var, Var) — no untag/retag needed.
+        /* Perf 2: SMI fast path for Add(Var, Var) — DISABLED.
          *
-         * SMI(a) + SMI(b) = 2*HEADER | ((a+b)<<3)
-         * SMI(a+b) = HEADER | ((a+b)<<3)
-         * So: SMI(a+b) = SMI(a) + SMI(b) - HEADER
+         * The formula SMI(a+b) = SMI(a) + SMI(b) - HEADER is mathematically
+         * correct but breaks in 64-bit arithmetic when both operands are
+         * negative. The intermediate sum SMI(a) + SMI(b) = 2*HEADER + (a+b)<<3
+         * can overflow past bit 63, causing a carry from the data field into
+         * the header bits. The subsequent SUB HEADER doesn't fix this because
+         * the carry already corrupted the header.
          *
-         * This is 3 instructions (MOV + ADD + SUB) vs 10 (untag both + add + retag).
-         * Safe when a+b doesn't overflow the 48-bit SMI data field.
+         * Example: SMI(-3) + SMI(-3) = 0x7FFF...E8 + 0x7FFF...E8 = 0xFFFF...D0
+         * (wraps past 2^64). Then - HEADER = 0x8007...D0 instead of the
+         * correct SMI(-6) = 0x7FFF...D0.
          *
-         * Skip if either input is RAW_INT (handled below) or float-typed. */
-        if (!vtx_nf_has(node->flags, VTX_NF_RAW_INT) && node->type != VTX_TYPE_Float) {
+         * Same borrow-from-header bug as Sub (audit #3 above). Disabled
+         * until a range check can prove no overflow. Fall through to the
+         * safe untag→add→retag path below. */
+        if (false && !vtx_nf_has(node->flags, VTX_NF_RAW_INT) && node->type != VTX_TYPE_Float) {
             const vtx_node_t *lhs_n = vtx_node_get_const(&graph->node_table, node->inputs[0]);
             const vtx_node_t *rhs_n = vtx_node_get_const(&graph->node_table, node->inputs[1]);
             bool lhs_raw = lhs_n && vtx_nf_has(lhs_n->flags, VTX_NF_RAW_INT);
@@ -1070,14 +1076,13 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             (void)rhs_const;
         }
 
-        /* Perf 2: SMI fast path for Sub(Var, Var) — no untag/retag needed.
+        /* Perf 2: SMI fast path for Sub(Var, Var) — DISABLED.
          *
-         * SMI(a) - SMI(b) = (a-b)<<3  (headers cancel)
-         * SMI(a-b) = HEADER | ((a-b)<<3)
-         * So: SMI(a-b) = SMI(a) - SMI(b) + HEADER
-         *
-         * 3 instructions (MOV + SUB + ADD) vs 10 (untag both + sub + retag). */
-        if (!vtx_nf_has(node->flags, VTX_NF_RAW_INT) && node->type != VTX_TYPE_Float) {
+         * Same borrow-from-header bug as Add(Var,Var) above. The formula
+         * SMI(a-b) = SMI(a) - SMI(b) + HEADER breaks when the subtraction
+         * causes a borrow from the data field into the header bits.
+         * Disabled until a range check can prove no borrow. */
+        if (false && !vtx_nf_has(node->flags, VTX_NF_RAW_INT) && node->type != VTX_TYPE_Float) {
             const vtx_node_t *lhs_n = vtx_node_get_const(&graph->node_table, node->inputs[0]);
             const vtx_node_t *rhs_n = vtx_node_get_const(&graph->node_table, node->inputs[1]);
             bool lhs_raw = lhs_n && vtx_nf_has(lhs_n->flags, VTX_NF_RAW_INT);

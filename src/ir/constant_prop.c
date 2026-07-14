@@ -851,26 +851,32 @@ uint32_t vtx_constant_prop_run(vtx_graph_t *graph)
 
         /* Only simplify if: no TOP inputs, at least one non-top input,
          * and all non-top inputs agree. */
-        /* BUGFIX: Don't simplify Phis that have back-edge inputs.
-         * A loop Phi has inputs [forward, Region, back_edge]. The back_edge
-         * input is from a node inside the loop body, whose value changes
-         * each iteration. Even if all non-TOP inputs currently agree,
-         * the back-edge input may change in future iterations. Simplifying
-         * the Phi to a single value would lose the loop-carried dependency.
+        /* BUGFIX: Don't simplify loop Phis.
+         * A loop Phi (in a LoopBegin block) has inputs [forward, back_edge].
+         * The back-edge input is from a node inside the loop body (typically
+         * a Sub or Add), whose value changes each iteration. Even if all
+         * non-TOP inputs currently agree, the back-edge input may change
+         * in future iterations.
          *
-         * Check if this Phi has a back-edge input by looking for inputs
-         * that are Phis (merge point Phis) or nodes from loop bodies. */
+         * Old check: only looked for Phi inputs — but the back-edge input
+         * is typically a Sub/Add node, NOT a Phi. This caused loop Phis to
+         * be incorrectly simplified to constants, producing wrong results
+         * (e.g., mul5(7) gave 112 instead of 35 because the counter was
+         * replaced with constant 5 and the loop never terminated).
+         *
+         * Fix: check if the Phi's control input is a LoopBegin node.
+         * If so, the Phi is a loop-carried value and must NOT be simplified. */
         bool has_back_edge = false;
         for (uint32_t j = 0; j < node->input_count; j++) {
             vtx_nodeid_t inp = node->inputs[j];
             if (inp == VTX_NODEID_INVALID || inp >= node_count) continue;
             const vtx_node_t *inp_node = vtx_node_get_const(nt, inp);
-            if (inp_node != NULL && vtx_nf_has(inp_node->flags, VTX_NF_CONTROL)) continue;
-            /* Check if this input is itself a Phi (merge point) — indicates
-             * a loop-carried value that changes each iteration */
-            if (inp_node != NULL && inp_node->opcode == VTX_OP_Phi) {
-                has_back_edge = true;
-                break;
+            if (inp_node != NULL && vtx_nf_has(inp_node->flags, VTX_NF_CONTROL)) {
+                /* This is the control input — check if it's a LoopBegin */
+                if (inp_node->opcode == VTX_OP_LoopBegin) {
+                    has_back_edge = true;
+                    break;
+                }
             }
         }
 
