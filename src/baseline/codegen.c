@@ -3271,6 +3271,45 @@ static void compile_typeof(vtx_compile_ctx_t *ctx)
     emit_mov_reg_reg64(buf, VTX_REG_RAX, VTX_REG_R12);
 }
 
+/* Compile CALL_RUNTIME: pops 1 arg from the stack, calls the runtime
+ * builtin identified by the operand (func_id), and pushes the result.
+ * The runtime builtin signature is:
+ *   vtx_value_t vtx_runtime_builtin_call(uint32_t func_id, vtx_value_t arg)
+ * System V ABI: RDI = func_id, RSI = arg, return in RAX. */
+static void compile_call_runtime(vtx_compile_ctx_t *ctx, uint16_t func_id)
+{
+    vtx_code_buffer_t *buf = &ctx->buf;
+
+    /* TOS (in RAX) is the argument. Move to RSI. */
+    emit_mov_reg_reg64(buf, VTX_REG_RSI, VTX_REG_RAX);
+    emit_stack_pop(ctx);
+
+    /* Save caller-saved registers that hold expr stack state */
+    emit_push(buf, VTX_REG_RCX);
+    emit_push(buf, VTX_REG_RDX);
+    emit_push(buf, VTX_REG_RBX);
+
+    /* Load func_id into RDI */
+    emit_mov_reg_imm32(buf, VTX_REG_RDI, (uint32_t)func_id);
+
+    /* Load function pointer and call */
+    extern vtx_value_t vtx_runtime_builtin_call(uint32_t, vtx_value_t);
+    emit_mov_reg_imm64(buf, VTX_REG_RAX,
+        (uint64_t)(uintptr_t)vtx_runtime_builtin_call);
+    emit_call_reg(buf, VTX_REG_RAX);
+
+    /* Save result to R12 (callee-saved, survives pop) */
+    emit_mov_reg_reg64(buf, VTX_REG_R12, VTX_REG_RAX);
+
+    emit_pop(buf, VTX_REG_RBX);
+    emit_pop(buf, VTX_REG_RDX);
+    emit_pop(buf, VTX_REG_RCX);
+
+    /* Push result onto expr stack */
+    emit_stack_push(ctx);
+    emit_mov_reg_reg64(buf, VTX_REG_RAX, VTX_REG_R12);
+}
+
 /* ========================================================================== */
 /* Main compilation loop                                                       */
 /* ========================================================================== */
@@ -3496,6 +3535,9 @@ vtx_compiled_code_t *vtx_baseline_compile(const vtx_method_desc_t *method,
             break;
         case VT_OP_TYPEOF:
             compile_typeof(&ctx);
+            break;
+        case VT_OP_CALL_RUNTIME:
+            compile_call_runtime(&ctx, operand);
             break;
         default:
             /* Unknown opcode — emit trap */

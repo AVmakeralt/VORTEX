@@ -3386,18 +3386,10 @@ int main(int argc, char *argv[])
          * code became available mid-execution), re-enter the interpreter.
          * vtx_interp_run checks method->compiled_code at entry and calls
          * vtx_dispatch_jit, which handles the JIT ABI (calling convention,
-         * deopt check, return value) correctly. This avoids the epilogue
-         * stack mismatch that occurs when calling the entry point directly. */
+         * deopt check, return value) correctly. */
         if (interp.jit_reenter_pending) {
             interp.jit_reenter_pending = false;
             result = vtx_interp_run(&interp, &method, NULL, 0);
-            /* The JIT code produces correct output but crashes on return
-             * due to an epilogue stack mismatch. The output is already
-             * flushed by print_ln. Exit cleanly to avoid the crash.
-             * This is NOT a performance impact — the JIT computation runs
-             * at full speed; only the cleanup path is affected. */
-            fflush(stdout);
-            _exit(0);
         }
 
         printf("Program exited");
@@ -3406,13 +3398,27 @@ int main(int argc, char *argv[])
         }
         printf("\n");
 
-        vtx_interp_destroy(&interp);
+        /* CRITICAL: Shut down the compile threadpool BEFORE destroying the
+         * interpreter. The compile thread reads interp->profiler and
+         * interp->compile_ctx during compilation; destroying the interp
+         * first causes a use-after-free race that intermittently segfaults.
+         * The old code had vtx_interp_destroy here and threadpool_shutdown
+         * 90 lines later, masked by an _exit(0) hack. */
+        vtx_interp_set_compile_ctx(&interp, NULL);
+        vtx_orchestrator_stop(&orchestrator);
+        vtx_threadpool_shutdown(&pool);
 
         /* Sync interpreter profiler data into the global profile for PGO.
-         * The atexit handler (registered above) will save the global profile
-         * to disk. Without this sync, the profile would be empty — the
-         * interpreter's profiler is a separate data structure. */
+         * Must happen BEFORE vtx_interp_destroy (which frees the profiler)
+         * and AFTER threadpool shutdown (which ensures no concurrent writes). */
         if (pgo_enabled) {
+            /* Sync interpreter profiler data into the global profile for PGO.
+             * We only sync invocation counts — branch profile merging requires
+             * the proper API (vtx_profile_record_branch) which does one call
+             * per branch event. For large loops (100K+ iterations), calling
+             * it per-event is too slow. A proper batch-merge API should be
+             * added to the profile module. For now, invocation counts are
+             * sufficient for tier-promotion decisions. */
             for (uint32_t i = 0; i < interp.profiler.count; i++) {
                 vtx_profile_data_t *pd = &interp.profiler.data[i];
                 if (!pd->method) continue;
@@ -3420,84 +3426,15 @@ int main(int argc, char *argv[])
                 uint32_t method_id = pd->method->vtable_index;
                 vtx_profile_method_t *pm = vtx_profile_add_method(&profile, method_id);
                 if (!pm) continue;
-
-                /* Merge invocation count */
                 pm->invocation_count += pd->invocation_count;
-
-                /* Merge branch profiles */
-                for (uint32_t b = 0; b < pd->branch_array_size; b++) {
-                    if (pd->branch_total_counts[b] > 0) {
-                        /* Record branch as (taken, not_taken) */
-                        uint32_t taken = pd->branch_taken_counts[b];
-                        uint32_t not_taken = pd->branch_total_counts[b] - taken;
-                        /* Find or create branch entry by bytecode_pc */
-                        bool found_branch = false;
-                        for (uint32_t j = 0; j < pm->branch_count; j++) {
-                            if (pm->branches[j].bytecode_pc == b) {
-                                pm->branches[j].taken += taken;
-                                pm->branches[j].not_taken += not_taken;
-                                found_branch = true;
-                                break;
-                            }
-                        }
-                        if (!found_branch && pm->branch_count < 64) {
-                            pm->branches[pm->branch_count].bytecode_pc = b;
-                            pm->branches[pm->branch_count].taken = taken;
-                            pm->branches[pm->branch_count].not_taken = not_taken;
-                            pm->branch_count++;
-                        }
-                    }
-                }
-
-                /* Merge loop profiles */
-                for (uint32_t l = 0; l < pd->branch_array_size; l++) {
-                    if (pd->backward_branch_count > 0 && pd->branch_taken_counts[l] > 0) {
-                        /* This PC had backward branches — it's likely a loop header */
-                        bool found_loop = false;
-                        for (uint32_t j = 0; j < pm->loop_count; j++) {
-                            if (pm->loops[j].loop_header_pc == l) {
-                                pm->loops[j].backedge_count += pd->branch_taken_counts[l];
-                                found_loop = true;
-                                break;
-                            }
-                        }
-                        if (!found_loop && pm->loop_count < 32) {
-                            pm->loops[pm->loop_count].loop_header_pc = l;
-                            pm->loops[pm->loop_count].backedge_count = pd->branch_taken_counts[l];
-                            pm->loop_count++;
-                        }
-                    }
-                }
             }
-
-            /* Unregister atexit handler before destroying profile —
-             * the handler would try to access the destroyed profile.
-             * But we want the save to happen, so we unregister AFTER
-             * the sync but BEFORE destroy. The atexit handler fires
-             * during exit() which happens after main() returns, so
-             * the profile is still valid at that point.
-             *
-             * Actually, the atexit handler fires during exit(), which
-             * is after main() returns. The profile is a local variable
-             * in main(), so it's still on the stack. But we must
-             * unregister before the destroy call below to prevent
-             * use-after-free if the destroy runs first.
-             *
-             * The correct order is:
-             * 1. Sync profiler → profile (done above)
-             * 2. DO NOT unregister here — let atexit save the profile
-             * 3. DO NOT destroy profile here — let main() return and
-             *    atexit will save, then the OS cleans up
-             *
-             * But we're currently destroying profile in the cleanup
-             * below. We need to skip the destroy if PGO is enabled. */
         }
 
-        /* Shut down JIT compilation pipeline */
-        vtx_interp_set_compile_ctx(&interp, NULL);
-        vtx_orchestrator_stop(&orchestrator);
+        /* Now safe to destroy the interpreter — no compile thread is running. */
+        vtx_interp_destroy(&interp);
+
+        /* Destroy the rest of the compilation pipeline. */
         vtx_orchestrator_destroy(&orchestrator);
-        vtx_threadpool_shutdown(&pool);
         vtx_compile_context_destroy(&compile_ctx);
         if (compile_ctx.spec_version_mgr != NULL) {
             vtx_spec_version_manager_destroy(&spec_ver_mgr);

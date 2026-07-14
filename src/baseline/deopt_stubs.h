@@ -168,6 +168,12 @@ void vtx_deopt_set_interp_entry(vtx_interp_entry_t entry);
  */
 vtx_interp_entry_t vtx_deopt_get_interp_entry(void);
 
+/* Wrapper for vtx_interp_run that reads the global interp pointer and
+ * current_frame. The deopt handler calls the entry point as void(*)(void),
+ * so we can't pass vtx_interp_run directly (it takes 4 args).
+ * This wrapper is defined in interp/dispatch.c. */
+void vtx_deopt_interp_entry_wrapper(void);
+
 /* ========================================================================== */
 /* Deopt runtime                                                               */
 /* ========================================================================== */

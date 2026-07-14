@@ -585,6 +585,29 @@ void vtx_interp_set_deopt_pc(vtx_frame_t *frame, uint32_t pc)
     }
 }
 
+/* Deopt entry wrapper: the deopt stub calls the entry point as
+ * void(*)(void) (vtx_interp_entry_t). We can't pass vtx_interp_run
+ * directly because it takes 4 args. This wrapper reads the global
+ * interp pointer and current_frame to reconstruct the call.
+ *
+ * The deopt handler has already:
+ *   1. Set the_interp->current_frame to the reconstructed frame
+ *   2. Called vtx_interp_set_deopt_pc to set deopt_resume_pc/pending
+ * So we just need to call vtx_interp_run with the right args. */
+void vtx_deopt_interp_entry_wrapper(void)
+{
+    extern vtx_interp_t *vtx_get_current_interp(void);
+    vtx_interp_t *interp = vtx_get_current_interp();
+    if (interp == NULL || interp->current_frame == NULL) {
+        /* Nothing we can do — abort */
+        abort();
+    }
+    const vtx_method_desc_t *method = interp->current_frame->method;
+    /* deopt_resume_pending is already set — vtx_interp_run will
+     * check it before JIT dispatch and run the interpreter. */
+    vtx_interp_run(interp, method, NULL, 0);
+}
+
 vtx_value_t vtx_interp_run(vtx_interp_t *interp,
                             const vtx_method_desc_t *method,
                             vtx_value_t *args,
@@ -595,11 +618,31 @@ vtx_value_t vtx_interp_run(vtx_interp_t *interp,
 
     /* B1 fix: Wire the deopt entry point so guard failures can deoptimize
      * instead of crashing. g_interp_entry is set once and checked by the
-     * deopt stub — without this, every guard failure segfaults. */
+     * deopt stub — without this, every guard failure segfaults.
+     *
+     * We use vtx_deopt_interp_entry_wrapper (defined below) instead of
+     * &vtx_interp_run directly, because the deopt stub calls the entry
+     * point as void(*)(void) — vtx_interp_run takes 4 args and would
+     * read garbage from registers if called through that typedef. */
     if (vtx_deopt_get_interp_entry() == NULL) {
-        vtx_deopt_set_interp_entry((vtx_interp_entry_t)&vtx_interp_run);
+        vtx_deopt_set_interp_entry(vtx_deopt_interp_entry_wrapper);
     }
 
+    /* ===================================================================
+     * DEOPT RESUME: If the deopt handler set up a frame with a specific
+     * resume PC, we MUST run the interpreter — NOT the JIT. The old code
+     * checked compiled_code first, which caused the deopt handler to
+     * re-enter the JIT (which immediately hit the same guard/trap again,
+     * looping until stack overflow → SIGSEGV).
+     * =================================================================== */
+    if (interp->deopt_resume_pending) {
+        /* Deopt resume takes priority over JIT dispatch. */
+        method = interp->current_frame->method;
+        args = NULL;
+        arg_count = 0;
+        /* Fall through to the interpreter dispatch loop below, which
+         * checks deopt_resume_pending again at line ~786 and sets pc. */
+    } else
     /* ===================================================================
      * JIT DISPATCH: If the method has been compiled, call JIT code
      * directly instead of falling through to the interpreter.

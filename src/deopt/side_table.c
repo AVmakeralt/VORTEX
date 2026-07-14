@@ -21,12 +21,8 @@
 
 vtx_side_table_t *vtx_side_table_build(vtx_arena_t *arena)
 {
-    vtx_side_table_t *table;
-    if (arena) {
-        table = vtx_arena_alloc(arena, sizeof(vtx_side_table_t));
-    } else {
-        table = calloc(1, sizeof(vtx_side_table_t));
-    }
+    (void)arena;  /* struct is always malloc'd so it outlives the arena */
+    vtx_side_table_t *table = calloc(1, sizeof(vtx_side_table_t));
     if (!table) return NULL;
 
     memset(table, 0, sizeof(*table));
@@ -35,7 +31,7 @@ vtx_side_table_t *vtx_side_table_build(vtx_arena_t *arena)
     table->entries = calloc(table->entry_capacity,
                              sizeof(vtx_side_table_entry_t));
     if (!table->entries) {
-        if (!arena) free(table);
+        free(table);
         return NULL;
     }
     table->entry_count = 0;
@@ -45,7 +41,7 @@ vtx_side_table_t *vtx_side_table_build(vtx_arena_t *arena)
                                   sizeof(vtx_frame_state_t *));
     if (!table->frame_states) {
         free(table->entries);
-        if (!arena) free(table);
+        free(table);
         return NULL;
     }
     table->frame_state_count = 0;
@@ -64,8 +60,9 @@ void vtx_side_table_destroy(vtx_side_table_t *table)
     free(table->entries);
     free(table->frame_states);
 
-    /* Note: we don't free 'table' itself because it might be arena-allocated.
-     * The caller is responsible for knowing whether to free the table struct. */
+    /* The table struct is always malloc'd (see vtx_side_table_build),
+     * so we free it here. */
+    free(table);
 }
 
 /* ========================================================================== */
