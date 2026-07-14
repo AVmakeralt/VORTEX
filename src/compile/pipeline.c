@@ -198,7 +198,7 @@ vtx_pipeline_config_t vtx_pipeline_config_t2(void)
     cfg.shared_gbdt_model = NULL;
     cfg.owns_gbdt_model   = false;
     cfg.run_midtier       = false;
-    cfg.run_block_layout  = true;   /* profile-guided block layout */
+    cfg.run_block_layout  = false;  /* disabled — breaks JCC fallthrough convention */
     cfg.markov            = NULL;
     return cfg;
 }
@@ -241,7 +241,7 @@ vtx_pipeline_config_t vtx_pipeline_config_t3(void)
     cfg.shared_gbdt_model = NULL;
     cfg.owns_gbdt_model   = false;
     cfg.run_midtier       = false;
-    cfg.run_block_layout  = true;   /* profile-guided block layout */
+    cfg.run_block_layout  = false;  /* disabled — breaks JCC fallthrough convention */
     cfg.markov            = NULL;
     return cfg;
 }

@@ -98,36 +98,61 @@ uint32_t vtx_block_layout_run(vtx_schedule_t *schedule,
     while (placed_count < n) {
         const vtx_schedule_block_t *blk = &schedule->blocks[current];
 
-        /* Find the hottest unplaced successor */
+        /* Find the hottest unplaced successor.
+         *
+         * IMPORTANT: resolve_branch_targets in isel.c assumes that for JCC
+         * blocks, the "not-taken" (fallthrough) successor is at position b+1
+         * in the layout. If we reorder blocks and place the taken successor
+         * at b+1, the JCC condition and fallthrough become inconsistent,
+         * causing the branch to go the wrong way.
+         *
+         * Fix: for blocks with 2 successors (conditional branches), place
+         * the COLD successor (not-taken / fallthrough) next. The hot
+         * successor becomes the branch target. This preserves the
+         * resolve_branch_targets convention: succ[0]=taken=branch target,
+         * succ[1]=not-taken=fallthrough at b+1.
+         *
+         * For blocks with 1 successor (unconditional GOTO), place the
+         * successor next (fallthrough, no branch needed). */
         uint32_t best_succ = UINT32_MAX;
         double best_prob = -1.0;
 
-        if (blk->succ_count > 0) {
-            /* Get branch probability for this block */
+        if (blk->succ_count == 1) {
+            /* Unconditional — place the single successor next */
+            uint32_t succ = blk->succ_blocks[0];
+            if (succ < n && !placed[succ]) {
+                best_succ = succ;
+            }
+        } else if (blk->succ_count == 2) {
+            /* Conditional branch — place the COLD successor next (fallthrough).
+             * The hot successor will be reached via JCC.
+             * This preserves the resolve_branch_targets convention. */
             double branch_prob = get_branch_probability(
                 schedule, graph, profiler, method, current);
 
-            /* succ_blocks[0] is typically the "true" / taken branch
-             * succ_blocks[1] is the "false" / not-taken branch
-             * (for If nodes with 2 successors) */
+            /* succ[0] = taken (hot), succ[1] = not-taken (cold).
+             * Place succ[1] (cold) as fallthrough at b+1. */
             for (uint32_t s = 0; s < blk->succ_count; s++) {
                 uint32_t succ = blk->succ_blocks[s];
                 if (succ >= n || placed[succ]) continue;
 
-                /* Probability of taking this successor:
-                 * For s=0 (taken): branch_prob
-                 * For s=1 (not-taken): 1.0 - branch_prob
-                 * For s>1: equal split (rare, switch-like) */
-                double succ_prob;
-                if (blk->succ_count == 2) {
-                    succ_prob = (s == 0) ? branch_prob : (1.0 - branch_prob);
-                } else {
-                    succ_prob = 1.0 / (double)blk->succ_count;
-                }
-
-                if (succ_prob > best_prob) {
+                /* For s=0 (taken/hot): prob = branch_prob
+                 * For s=1 (not-taken/cold): prob = 1.0 - branch_prob
+                 * We want the COLD successor as fallthrough, so pick the
+                 * one with LOWER probability. */
+                double succ_prob = (s == 0) ? branch_prob : (1.0 - branch_prob);
+                if (best_succ == UINT32_MAX || succ_prob < best_prob) {
                     best_prob = succ_prob;
                     best_succ = succ;
+                }
+            }
+        } else if (blk->succ_count > 2) {
+            /* Switch-like — just pick the first unplaced successor */
+            for (uint32_t s = 0; s < blk->succ_count; s++) {
+                uint32_t succ = blk->succ_blocks[s];
+                if (succ < n && !placed[succ]) {
+                    best_succ = succ;
+                    break;
                 }
             }
         }
