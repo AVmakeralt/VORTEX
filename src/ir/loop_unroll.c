@@ -197,7 +197,7 @@ uint32_t vtx_loop_unroll_run(vtx_graph_t *graph,
                               uint32_t factor)
 {
     if (!graph || !schedule || !arena) return 0;
-    if (factor < 2 || factor > 4) return 0;
+    if (factor != 2) return 0;  /* only factor=2 is supported */
 
     uint32_t unrolled = 0;
 
@@ -207,7 +207,6 @@ uint32_t vtx_loop_unroll_run(vtx_graph_t *graph,
         if (loop->dead || loop->opcode != VTX_OP_LoopBegin) continue;
 
         uint32_t loop_depth = 0;
-        /* Find the loop depth from the schedule */
         for (uint32_t b = 0; b < schedule->count; b++) {
             if (schedule->blocks[b].region_node == i) {
                 loop_depth = schedule->blocks[b].loop_depth;
@@ -215,263 +214,269 @@ uint32_t vtx_loop_unroll_run(vtx_graph_t *graph,
             }
         }
 
-        /* Count body nodes — skip if too large */
         uint32_t body_count = count_body_nodes(graph, schedule, loop_depth, i);
         if (body_count == 0 || body_count > VTX_UNROLL_MAX_BODY) continue;
 
-        /* Find the LoopEnd (back-edge) */
+        /* Find LoopEnd */
         vtx_nodeid_t loop_end_id = VTX_NODEID_INVALID;
         for (uint32_t j = 0; j < graph->node_table.count; j++) {
             vtx_node_t *n = &graph->node_table.nodes[j];
             if (n->dead || n->opcode != VTX_OP_LoopEnd) continue;
             for (uint32_t k = 0; k < n->input_count; k++) {
-                if (n->inputs[k] == i) {
-                    loop_end_id = j;
-                    break;
-                }
+                if (n->inputs[k] == i) { loop_end_id = j; break; }
             }
             if (loop_end_id != VTX_NODEID_INVALID) break;
         }
         if (loop_end_id == VTX_NODEID_INVALID) continue;
 
-        /* Find the loop's Phis (loop-carried values).
-         * Each Phi has inputs: [initial_value, LoopBegin, back_edge_value]
-         * We need to know which Phi input is the back-edge value so we can
-         * replace it with the last copy's output. */
+        /* Find loop Phis and their back-edge values */
         uint32_t phi_count = 0;
-        vtx_nodeid_t phi_nodes[32];
-        uint32_t phi_backedge_input_idx[32]; /* which input index is the back-edge */
+        vtx_nodeid_t phi_ids[32];
+        uint32_t phi_be_idx[32];
+        vtx_nodeid_t phi_be_val[32];  /* the back-edge value node ID */
         for (uint32_t j = 0; j < graph->node_table.count && phi_count < 32; j++) {
             vtx_node_t *n = &graph->node_table.nodes[j];
             if (!is_loop_phi(n, i)) continue;
-            phi_nodes[phi_count] = j;
-
-            /* Find the back-edge input: the input that is NOT the initial
-             * value and NOT the LoopBegin control input. The back-edge
-             * value is a data input that comes from the loop body. */
-            phi_backedge_input_idx[phi_count] = UINT32_MAX;
+            phi_ids[phi_count] = j;
+            phi_be_idx[phi_count] = UINT32_MAX;
+            phi_be_val[phi_count] = VTX_NODEID_INVALID;
             for (uint32_t k = 0; k < n->input_count; k++) {
                 vtx_nodeid_t inp = n->inputs[k];
-                if (inp == i) continue; /* skip LoopBegin control input */
+                if (inp == i) continue;
                 if (inp >= graph->node_table.count) continue;
                 vtx_node_t *inp_node = &graph->node_table.nodes[inp];
-                /* The back-edge value is a body node (or a Phi from this
-                 * loop). The initial value is from outside the loop. */
                 if (is_loop_body_node(inp, graph, schedule, loop_depth, i) ||
                     is_loop_phi(inp_node, i)) {
-                    phi_backedge_input_idx[phi_count] = k;
+                    phi_be_idx[phi_count] = k;
+                    phi_be_val[phi_count] = inp;
                     break;
                 }
             }
             phi_count++;
         }
-        if (phi_count == 0) continue; /* no loop-carried values? skip */
-
-        /* Check that all Phis have a found back-edge input */
+        if (phi_count == 0) continue;
         bool all_phis_ok = true;
         for (uint32_t p = 0; p < phi_count; p++) {
-            if (phi_backedge_input_idx[p] == UINT32_MAX) {
-                all_phis_ok = false;
-                break;
-            }
+            if (phi_be_idx[p] == UINT32_MAX) { all_phis_ok = false; break; }
         }
         if (!all_phis_ok) continue;
 
-        /* Find the exit If. If we can't find a clean single-exit loop,
-         * skip unrolling — the body replication would be incorrect
-         * without duplicating the exit condition. */
+        /* Find exit If */
         vtx_nodeid_t exit_if = find_exit_if(graph, i, schedule, loop_depth);
         if (exit_if == VTX_NODEID_INVALID) continue;
 
-        /* === Collect body nodes ===
-         * Body nodes are all nodes in the loop body EXCEPT:
-         *   - The LoopBegin itself
-         *   - The Phis (loop-carried, handled separately)
-         *   - The LoopEnd (control, not duplicated)
-         *   - Proj nodes (control projections, handled with the If)
-         * We duplicate data nodes and the If node. */
+        /* Find the exit If's Proj nodes (true=continue, false=exit) */
+        vtx_nodeid_t proj_true = VTX_NODEID_INVALID;   /* feeds LoopEnd (continue) */
+        vtx_nodeid_t proj_false = VTX_NODEID_INVALID;  /* feeds exit Region */
+        vtx_nodeid_t exit_region = VTX_NODEID_INVALID;  /* the Region that false-Proj feeds */
+        for (uint32_t j = 0; j < graph->node_table.count; j++) {
+            vtx_node_t *n = &graph->node_table.nodes[j];
+            if (n->dead || n->opcode != VTX_OP_Proj) continue;
+            if (n->input_count < 1 || n->inputs[0] != exit_if) continue;
+            /* This Proj belongs to the exit If */
+            if (n->local_index == 0) {
+                /* True projection (continue) — feeds LoopEnd */
+                proj_true = j;
+            } else {
+                /* False projection (exit) — feeds exit Region */
+                proj_false = j;
+                /* Find the Region it feeds */
+                for (uint32_t u = 0; u < n->use_count; u++) {
+                    vtx_use_entry_t *use = &n->uses[u];
+                    if (use->user_id >= graph->node_table.count) continue;
+                    vtx_node_t *user = &graph->node_table.nodes[use->user_id];
+                    if (user->opcode == VTX_OP_Region) {
+                        exit_region = use->user_id;
+                        break;
+                    }
+                }
+            }
+        }
+        if (proj_true == VTX_NODEID_INVALID || proj_false == VTX_NODEID_INVALID) continue;
+
+        /* Collect body data nodes (exclude control/phi/proj/region/goto nodes) */
         uint32_t body_node_count = 0;
         vtx_nodeid_t body_nodes[VTX_UNROLL_MAX_BODY];
         for (uint32_t j = 0; j < graph->node_table.count && body_node_count < VTX_UNROLL_MAX_BODY; j++) {
-            if (j == i) continue; /* skip LoopBegin */
-            if (j == loop_end_id) continue; /* skip LoopEnd */
-            if (j == exit_if) continue; /* skip exit If (handled separately) */
+            if (j == i || j == loop_end_id || j == exit_if) continue;
             vtx_node_t *n = &graph->node_table.nodes[j];
             if (n->dead) continue;
             if (n->opcode == VTX_OP_Phi || n->opcode == VTX_OP_Proj ||
                 n->opcode == VTX_OP_Region || n->opcode == VTX_OP_LoopBegin ||
-                n->opcode == VTX_OP_LoopEnd) continue;
+                n->opcode == VTX_OP_LoopEnd || n->opcode == VTX_OP_Goto ||
+                n->opcode == VTX_OP_If) continue;
             if (!is_loop_body_node(j, graph, schedule, loop_depth, i)) continue;
             body_nodes[body_node_count++] = j;
         }
-
         if (body_node_count == 0) continue;
 
-        /* === Create (factor-1) copies of the body ===
-         * For each copy, we create new nodes and build a mapping from
-         * original node IDs to copy node IDs. The copy's inputs are
-         * rewired: body node inputs reference the previous copy's
-         * corresponding node, and Phi inputs reference the previous
-         * copy's output (or the original Phi for copy 0). */
-
-        /* mapping[orig_id] = new_id for the current copy.
-         * Allocated on the arena, sized to node_table.count. */
+        /* === Phase 1: Copy body data nodes ===
+         * Build a mapping: orig_id → copy_id.
+         * For the copy's inputs, replace loop Phi references with the
+         * Phi's back-edge value (the original body's output). This makes
+         * the copy compute iteration i+1's values from iteration i's outputs. */
         uint32_t map_size = graph->node_table.count;
         vtx_nodeid_t *mapping = (vtx_nodeid_t *)vtx_arena_alloc(
             arena, map_size * sizeof(vtx_nodeid_t));
         if (!mapping) continue;
         for (uint32_t m = 0; m < map_size; m++) mapping[m] = VTX_NODEID_INVALID;
 
-        /* For each copy (1 to factor-1): */
-        for (uint32_t copy = 1; copy < factor; copy++) {
-            /* Clear mapping for this copy */
-            for (uint32_t m = 0; m < map_size; m++) mapping[m] = VTX_NODEID_INVALID;
+        for (uint32_t b = 0; b < body_node_count; b++) {
+            vtx_nodeid_t new_id = copy_body_node(graph, body_nodes[b]);
+            if (new_id == VTX_NODEID_INVALID) goto skip_loop;
+            mapping[body_nodes[b]] = new_id;
+        }
 
-            /* Create copies of all body data nodes */
-            for (uint32_t b = 0; b < body_node_count; b++) {
-                vtx_nodeid_t orig_id = body_nodes[b];
-                vtx_nodeid_t new_id = copy_body_node(graph, orig_id);
-                if (new_id == VTX_NODEID_INVALID) {
-                    /* Allocation failure — abort this loop's unrolling */
-                    goto skip_loop;
+        /* Rewire copied body node inputs */
+        for (uint32_t b = 0; b < body_node_count; b++) {
+            vtx_nodeid_t orig_id = body_nodes[b];
+            vtx_nodeid_t new_id = mapping[orig_id];
+            vtx_node_t *orig_node = &graph->node_table.nodes[orig_id];
+            for (uint32_t inp = 0; inp < orig_node->input_count; inp++) {
+                vtx_nodeid_t orig_inp = orig_node->inputs[inp];
+                if (orig_inp == VTX_NODEID_INVALID) {
+                    vtx_node_add_input(&graph->node_table, new_id, VTX_NODEID_INVALID);
+                    continue;
                 }
-                mapping[orig_id] = new_id;
-            }
-
-            /* Copy the exit If node */
-            vtx_nodeid_t orig_if = exit_if;
-            vtx_nodeid_t new_if = copy_body_node(graph, orig_if);
-            if (new_if == VTX_NODEID_INVALID) goto skip_loop;
-            mapping[orig_if] = new_if;
-
-            /* Rewire inputs for all copied nodes.
-             * For each copied node, look at the original's inputs:
-             *   - If the input is a body node that was copied → use mapping
-             *   - If the input is a loop Phi → use the previous copy's
-             *     output for this Phi (or the original Phi for copy 0...
-             *     but we ARE copy 0's successor, so "previous" = original)
-             *   - If the input is a control/memory node from outside the
-             *     loop (e.g., LoopBegin, entry memory) → keep as-is
-             *   - If the input is a Constant/Parameter → keep as-is */
-            for (uint32_t b = 0; b < body_node_count; b++) {
-                vtx_nodeid_t orig_id = body_nodes[b];
-                vtx_nodeid_t new_id = mapping[orig_id];
-                vtx_node_t *orig_node = &graph->node_table.nodes[orig_id];
-                vtx_node_t *new_node = vtx_node_get(&graph->node_table, new_id);
-                if (!new_node) continue;
-
-                for (uint32_t inp = 0; inp < orig_node->input_count; inp++) {
-                    vtx_nodeid_t orig_inp = orig_node->inputs[inp];
-                    if (orig_inp == VTX_NODEID_INVALID) {
-                        vtx_node_add_input(&graph->node_table, new_id, VTX_NODEID_INVALID);
-                        continue;
-                    }
-
-                    /* Is this input a body node that was copied? */
-                    if (orig_inp < map_size && mapping[orig_inp] != VTX_NODEID_INVALID) {
-                        vtx_node_add_input(&graph->node_table, new_id, mapping[orig_inp]);
-                        continue;
-                    }
-
-                    /* Is this input a loop Phi? */
-                    if (orig_inp < graph->node_table.count &&
-                        is_loop_phi(&graph->node_table.nodes[orig_inp], i)) {
-                        /* For copy 1, the Phi's "previous output" is the
-                         * original Phi itself (copy 0 = original body).
-                         * For copy 2+, the previous copy produced a value
-                         * that we need to track. We use a per-Phi mapping
-                         * of "current value" which starts as the original
-                         * Phi and updates to each copy's output.
-                         *
-                         * For simplicity, we store the "current value for
-                         * this Phi" in the Phi's value_number field
-                         * (temporarily, cleared after unrolling).
-                         *
-                         * But we haven't set that up yet. For copy 1,
-                         * use the original Phi. For copy 2+, we'd need
-                         * the previous copy's output for this Phi — but
-                         * we don't have a mapping for Phi nodes since
-                         * we skip them.
-                         *
-                         * Solution: for the first copy (copy==1), reference
-                         * the original Phi. For subsequent copies, we need
-                         * to track what the previous copy's body produced
-                         * as the new value for each Phi. We do this by
-                         * looking at what the original body produces for
-                         * each Phi's back-edge, and finding the copied
-                         * version of that node. */
-                        if (copy == 1) {
-                            /* First copy: reference the original Phi */
-                            vtx_node_add_input(&graph->node_table, new_id, orig_inp);
-                        } else {
-                            /* Subsequent copies: reference the previous
-                             * copy's version of the back-edge value.
-                             * The back-edge value for this Phi is a body
-                             * node — find its ID and use the previous
-                             * copy's mapping. But we've already cleared
-                             * the mapping for THIS copy...
-                             *
-                             * We need to keep the previous copy's mapping
-                             * alive. Let's use a separate array. */
-                            /* TODO: implement multi-copy chain. For now,
-                             * only factor=2 is fully supported. */
-                            vtx_node_add_input(&graph->node_table, new_id, orig_inp);
-                        }
-                        continue;
-                    }
-
-                    /* Input is from outside the loop (Constant, Parameter,
-                     * LoopBegin control, entry memory) — keep as-is */
-                    vtx_node_add_input(&graph->node_table, new_id, orig_inp);
+                /* If input is a copied body node → use the copy */
+                if (orig_inp < map_size && mapping[orig_inp] != VTX_NODEID_INVALID) {
+                    vtx_node_add_input(&graph->node_table, new_id, mapping[orig_inp]);
+                    continue;
                 }
-            }
-
-            /* Rewire the copied If's inputs (same logic as body nodes) */
-            {
-                vtx_nodeid_t new_if_id = mapping[exit_if];
-                vtx_node_t *orig_if_node = &graph->node_table.nodes[exit_if];
-                vtx_node_t *new_if_node = vtx_node_get(&graph->node_table, new_if_id);
-                if (new_if_node) {
-                    for (uint32_t inp = 0; inp < orig_if_node->input_count; inp++) {
-                        vtx_nodeid_t orig_inp = orig_if_node->inputs[inp];
-                        if (orig_inp == VTX_NODEID_INVALID) continue;
-                        if (orig_inp < map_size && mapping[orig_inp] != VTX_NODEID_INVALID) {
-                            vtx_node_add_input(&graph->node_table, new_if_id, mapping[orig_inp]);
-                        } else if (orig_inp < graph->node_table.count &&
-                                   is_loop_phi(&graph->node_table.nodes[orig_inp], i)) {
-                            vtx_node_add_input(&graph->node_table, new_if_id, orig_inp);
-                        } else {
-                            vtx_node_add_input(&graph->node_table, new_if_id, orig_inp);
-                        }
-                    }
-                }
-            }
-
-            /* For the LAST copy, update the Phi back-edge inputs to
-             * reference the last copy's output instead of the original
-             * back-edge value. */
-            if (copy == factor - 1) {
+                /* If input is a loop Phi → use the Phi's back-edge value
+                 * (the original body's output for that loop-carried variable).
+                 * This is the KEY fix: the copy reads the previous iteration's
+                 * result, not the Phi (which holds the current iteration's value). */
+                bool found_phi = false;
                 for (uint32_t p = 0; p < phi_count; p++) {
-                    vtx_nodeid_t phi_id = phi_nodes[p];
-                    uint32_t be_idx = phi_backedge_input_idx[p];
-                    vtx_nodeid_t orig_back_val = graph->node_table.nodes[phi_id].inputs[be_idx];
+                    if (phi_ids[p] == orig_inp) {
+                        vtx_node_add_input(&graph->node_table, new_id, phi_be_val[p]);
+                        found_phi = true;
+                        break;
+                    }
+                }
+                if (found_phi) continue;
+                /* External input (Constant, Parameter, memory) — keep as-is */
+                vtx_node_add_input(&graph->node_table, new_id, orig_inp);
+            }
+        }
 
-                    /* If the back-edge value is a body node, use the last copy's version */
-                    if (orig_back_val < map_size && mapping[orig_back_val] != VTX_NODEID_INVALID) {
-                        vtx_node_replace_input(&graph->node_table, phi_id, be_idx,
-                                               mapping[orig_back_val]);
+        /* === Phase 2: Copy the exit If ===
+         * The copy's control input is the original If's true-Proj (the
+         * "continue" path). The copy's data input is the copied Cmp. */
+        vtx_nodeid_t new_if = copy_body_node(graph, exit_if);
+        if (new_if == VTX_NODEID_INVALID) goto skip_loop;
+        mapping[exit_if] = new_if;
+
+        {
+            vtx_node_t *orig_if_node = &graph->node_table.nodes[exit_if];
+            for (uint32_t inp = 0; inp < orig_if_node->input_count; inp++) {
+                vtx_nodeid_t orig_inp = orig_if_node->inputs[inp];
+                if (orig_inp == VTX_NODEID_INVALID) continue;
+                /* Control input: use original If's true-Proj */
+                if (orig_inp == proj_true) {
+                    vtx_node_add_input(&graph->node_table, new_if, proj_true);
+                    continue;
+                }
+                /* Data input: use copied body node if available */
+                if (orig_inp < map_size && mapping[orig_inp] != VTX_NODEID_INVALID) {
+                    vtx_node_add_input(&graph->node_table, new_if, mapping[orig_inp]);
+                    continue;
+                }
+                /* Loop Phi → back-edge value */
+                bool found_phi = false;
+                for (uint32_t p = 0; p < phi_count; p++) {
+                    if (phi_ids[p] == orig_inp) {
+                        vtx_node_add_input(&graph->node_table, new_if, phi_be_val[p]);
+                        found_phi = true;
+                        break;
+                    }
+                }
+                if (found_phi) continue;
+                /* External — keep as-is */
+                vtx_node_add_input(&graph->node_table, new_if, orig_inp);
+            }
+        }
+
+        /* === Phase 3: Create Proj nodes for the copied If ===
+         * Proj_true_copy (local_index=0, cond=NE) → feeds LoopEnd
+         * Proj_false_copy (local_index=1, cond=EQ) → feeds exit merge Region */
+        vtx_nodeid_t new_proj_true = vtx_node_create(&graph->node_table, VTX_OP_Proj);
+        vtx_nodeid_t new_proj_false = vtx_node_create(&graph->node_table, VTX_OP_Proj);
+        if (new_proj_true == VTX_NODEID_INVALID || new_proj_false == VTX_NODEID_INVALID)
+            goto skip_loop;
+
+        {
+            vtx_node_t *pt = vtx_node_get(&graph->node_table, new_proj_true);
+            pt->local_index = 0;
+            pt->cond = VTX_COND_NE;
+            vtx_node_add_input(&graph->node_table, new_proj_true, new_if);
+
+            vtx_node_t *pf = vtx_node_get(&graph->node_table, new_proj_false);
+            pf->local_index = 1;
+            pf->cond = VTX_COND_EQ;
+            vtx_node_add_input(&graph->node_table, new_proj_false, new_if);
+        }
+
+        /* === Phase 4: Rewire LoopEnd ===
+         * The LoopEnd's input was the original true-Proj. Replace it with
+         * the copy's true-Proj. The back-edge now goes through the copy. */
+        {
+            vtx_node_t *le = &graph->node_table.nodes[loop_end_id];
+            for (uint32_t k = 0; k < le->input_count; k++) {
+                if (le->inputs[k] == proj_true) {
+                    vtx_node_replace_input(&graph->node_table, loop_end_id, k,
+                                           new_proj_true);
+                    break;
+                }
+            }
+        }
+
+        /* === Phase 5: Create exit merge Region ===
+         * New Region merges: [original false-Proj, copy's false-Proj].
+         * The original exit Region's input that pointed at the original
+         * false-Proj is replaced with this new merge Region. */
+        vtx_nodeid_t merge_region = VTX_NODEID_INVALID;
+        if (exit_region != VTX_NODEID_INVALID) {
+            merge_region = vtx_node_create(&graph->node_table, VTX_OP_Region);
+            if (merge_region != VTX_NODEID_INVALID) {
+                vtx_node_add_input(&graph->node_table, merge_region, proj_false);
+                vtx_node_add_input(&graph->node_table, merge_region, new_proj_false);
+
+                /* Rewire the exit Region: replace the original false-Proj
+                 * input with the merge Region */
+                vtx_node_t *er = &graph->node_table.nodes[exit_region];
+                for (uint32_t k = 0; k < er->input_count; k++) {
+                    if (er->inputs[k] == proj_false) {
+                        vtx_node_replace_input(&graph->node_table,
+                                               exit_region, k, merge_region);
+                        break;
                     }
                 }
             }
         }
 
-        /* Mark the loop as unrolled with the given factor. The isel can
-         * use this to adjust loop-carried value handling if needed. */
-        loop->value_number = -(int32_t)factor;
+        /* === Phase 6: Rewrite Phi back-edges ===
+         * Each Phi's back-edge value is replaced with the copy's version
+         * of that value. The copy computed iteration i+1's result; the
+         * Phi's back-edge now points at it, so the next loop iteration
+         * starts from i+2 (for factor=2). */
+        for (uint32_t p = 0; p < phi_count; p++) {
+            vtx_nodeid_t orig_back_val = phi_be_val[p];
+            if (orig_back_val < map_size && mapping[orig_back_val] != VTX_NODEID_INVALID) {
+                vtx_node_replace_input(&graph->node_table, phi_ids[p],
+                                       phi_be_idx[p], mapping[orig_back_val]);
+            }
+        }
+
+        /* Mark the loop as unrolled (re-fetch pointer — node table may
+         * have been realloc'd by vtx_node_create calls above) */
+        vtx_node_t *loop_fresh = vtx_node_get(&graph->node_table, i);
+        if (loop_fresh) loop_fresh->value_number = -(int32_t)factor;
         unrolled = 1;
 
     skip_loop:
-        (void)0; /* label target */
+        (void)0;
     }
 
     return unrolled;
