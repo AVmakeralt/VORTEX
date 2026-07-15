@@ -61,7 +61,11 @@ static void emit_cmp_mem_imm32(vtx_code_buffer_t *buf, vtx_reg_t base,
      */
     emit_rex_if_needed(buf, (vtx_reg_t)7, base);
 
-    if (offset == 0 && (base & 7) != VTX_REG_RBP && (base & 7) != VTX_REG_R13) {
+    /* Bug #2 fix: VTX_REG_R13 = 13, but (base & 7) can only produce 0-7.
+     * The old check (base & 7) != VTX_REG_R13 was always true.
+     * RBP=5 and R13=13 both have (reg & 7) == 5, so checking (base & 7) != 5
+     * catches both RBP and R13 correctly. */
+    if (offset == 0 && (base & 7) != (VTX_REG_RBP & 7)) {
         /* No displacement needed (but RBP/R13 always need disp8) */
         vtx_code_buffer_emit_byte(buf, 0x81); /* CMP r/m32, imm32 */
         vtx_code_buffer_emit_byte(buf, make_modrm(0, 7, base));

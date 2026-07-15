@@ -202,134 +202,134 @@ static const vtx_tree_spec_t default_tree_specs[VTX_GBDT_DEFAULT_TREE_COUNT] = {
 
     /* Tree 0: Very small callee → strong positive */
     { F_CALLEE_SIZE, 0.10f,
-      F_IS_HOT, 0.5f,   F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0,
+      F_IS_HOT, 0.5f,   F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, 
       {0.18f, 0.08f, -0.02f, -0.08f}, 2 },
 
     /* Tree 1: Small callee + monomorphic → positive */
     { F_CALLEE_SIZE, 0.20f,
-      F_TYPE_CERTAINTY, 0.7f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0,
+      F_TYPE_CERTAINTY, 0.7f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, 
       {0.15f, 0.03f, -0.04f, -0.10f}, 2 },
 
     /* Tree 2: Large callee → negative */
     { F_CALLEE_SIZE, 0.50f,
-      F_CALL_DEPTH, 0.3f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0,
+      F_CALL_DEPTH, 0.3f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, 
       {0.02f, -0.05f, -0.10f, -0.18f}, 2 },
 
     /* Tree 3: Small callee + high frequency → positive (depth 3) */
     { F_CALLEE_SIZE, 0.15f,
       F_FREQUENCY, 0.3f, F_FREQUENCY, 0.1f,
-      F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0,
+      F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, 
       {0.05f, 0.12f, -0.02f, 0.02f, -0.05f, -0.08f, -0.02f, -0.12f}, 3 },
 
     /* Tree 4: Medium callee + constant args → slight positive */
     { F_CALLEE_SIZE, 0.40f,
-      F_CONST_ARG_RATIO, 0.5f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0,
+      F_CONST_ARG_RATIO, 0.5f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, 
       {0.08f, 0.02f, -0.03f, -0.08f}, 2 },
 
     /* Tree 5: Large caller + small callee → beneficial to inline */
     { F_CALLER_SIZE, 0.50f,
-      F_CALLEE_SIZE, 0.20f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0,
+      F_CALLEE_SIZE, 0.20f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, 
       {0.03f, 0.10f, -0.03f, -0.06f}, 2 },
 
     /* ---- Group 2: Call frequency features (trees 6-11) ---- */
 
     /* Tree 6: Hot + monomorphic → strong positive */
     { F_IS_HOT, 0.5f,
-      F_TYPE_CERTAINTY, 0.8f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0,
+      F_TYPE_CERTAINTY, 0.8f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, 
       {0.15f, 0.05f, -0.02f, -0.08f}, 2 },
 
     /* Tree 7: Hot + small → positive */
     { F_IS_HOT, 0.5f,
-      F_CALLEE_SIZE, 0.30f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0,
+      F_CALLEE_SIZE, 0.30f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, 
       {0.12f, 0.04f, -0.04f, -0.10f}, 2 },
 
     /* Tree 8: Not hot → negative */
     { F_IS_HOT, 0.5f,
-      F_CALLEE_SIZE, 0.15f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0,
+      F_CALLEE_SIZE, 0.15f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, 
       {-0.02f, -0.08f, 0.03f, -0.03f}, 2 },
 
     /* Tree 9: Very high frequency (depth 3) → positive with refinement */
     { F_FREQUENCY, 0.50f,
       F_CALLEE_SIZE, 0.30f, F_CALLEE_SIZE, 0.15f,
-      F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0,
+      F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, 
       {0.03f, 0.10f, 0.02f, 0.06f, -0.04f, -0.02f, -0.06f, -0.10f}, 3 },
 
     /* Tree 10: Moderate frequency + monomorphic → slight positive */
     { F_FREQUENCY, 0.15f,
-      F_TYPE_CERTAINTY, 0.6f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0,
+      F_TYPE_CERTAINTY, 0.6f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, 
       {0.08f, 0.02f, -0.02f, -0.06f}, 2 },
 
     /* Tree 11: Low frequency → negative */
     { F_FREQUENCY, 0.05f,
-      F_CALLEE_SIZE, 0.30f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0,
+      F_CALLEE_SIZE, 0.30f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, 
       {0.02f, -0.04f, -0.08f, -0.12f}, 2 },
 
     /* ---- Group 3: Receiver type certainty (trees 12-17) ---- */
 
     /* Tree 12: Monomorphic + small → strong positive */
     { F_TYPE_CERTAINTY, 0.8f,
-      F_CALLEE_SIZE, 0.20f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0,
+      F_CALLEE_SIZE, 0.20f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, 
       {0.18f, 0.06f, 0.03f, -0.04f}, 2 },
 
     /* Tree 13: Monomorphic + hot → positive */
     { F_TYPE_CERTAINTY, 0.8f,
-      F_IS_HOT, 0.5f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0,
+      F_IS_HOT, 0.5f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, 
       {0.14f, 0.04f, 0.02f, -0.05f}, 2 },
 
     /* Tree 14: Megamorphic → negative */
     { F_TYPE_CERTAINTY, 0.2f,
-      F_CALLEE_SIZE, 0.40f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0,
+      F_CALLEE_SIZE, 0.40f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, 
       {-0.04f, -0.10f, 0.02f, -0.02f}, 2 },
 
     /* Tree 15: Polymorphic + small → slight positive (depth 3) */
     { F_TYPE_CERTAINTY, 0.5f,
       F_CALLEE_SIZE, 0.25f, F_IS_HOT, 0.5f,
-      F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0,
+      F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, 
       {0.06f, 0.02f, 0.01f, -0.02f, -0.04f, -0.06f, -0.02f, -0.08f}, 3 },
 
     /* Tree 16: Monomorphic + constant args → positive */
     { F_TYPE_CERTAINTY, 0.7f,
-      F_CONST_ARG_RATIO, 0.4f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0,
+      F_CONST_ARG_RATIO, 0.4f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, 
       {0.10f, 0.03f, 0.02f, -0.04f}, 2 },
 
     /* Tree 17: Megamorphic + virtual calls → negative (depth 3) */
     { F_TYPE_CERTAINTY, 0.3f,
       F_CALLS_VIRTUAL, 0.5f, F_CALLEE_SIZE, 0.40f,
-      F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0,
+      F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, 
       {-0.02f, -0.06f, -0.04f, -0.08f, 0.01f, -0.02f, 0.02f, -0.03f}, 3 },
 
     /* ---- Group 4: Penalty features (trees 18-23) ---- */
 
     /* Tree 18: Deep call depth → negative */
     { F_CALL_DEPTH, 0.40f,
-      F_CALLEE_SIZE, 0.30f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0,
+      F_CALLEE_SIZE, 0.30f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, 
       {0.02f, -0.06f, -0.10f, -0.18f}, 2 },
 
     /* Tree 19: High deopt rate → strong negative */
     { F_DEOPT_RATE, 0.03f,
-      F_CALLEE_SIZE, 0.30f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0,
+      F_CALLEE_SIZE, 0.30f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, 
       {0.02f, -0.06f, -0.10f, -0.20f}, 2 },
 
     /* Tree 20: Deep + has loops → negative (depth 3) */
     { F_CALL_DEPTH, 0.50f,
       F_HAS_LOOPS, 0.5f, F_CALLEE_SIZE, 0.30f,
-      F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0,
+      F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, 
       {0.01f, -0.03f, -0.05f, -0.08f, -0.03f, -0.06f, -0.08f, -0.14f}, 3 },
 
     /* Tree 21: High deopt + allocates → negative */
     { F_DEOPT_RATE, 0.05f,
-      F_ALLOCATES, 0.5f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0,
+      F_ALLOCATES, 0.5f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, 
       {-0.02f, -0.08f, -0.04f, -0.14f}, 2 },
 
     /* Tree 22: Too many previous inlines → negative */
     { F_INLINE_HISTORY, 0.30f,
-      F_CALL_DEPTH, 0.40f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0,
+      F_CALL_DEPTH, 0.40f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, 
       {0.02f, -0.04f, -0.08f, -0.15f}, 2 },
 
     /* Tree 23: Deep + large callee → very negative (depth 3) */
     { F_CALL_DEPTH, 0.50f,
       F_CALLEE_SIZE, 0.40f, F_DEOPT_RATE, 0.03f,
-      F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0,
+      F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, 
       {0.01f, -0.04f, -0.06f, -0.10f, -0.05f, -0.08f, -0.12f, -0.18f}, 3 },
 
     /* ---- Group 5: Combinations and secondary features (trees 24-29) ---- */
@@ -337,35 +337,35 @@ static const vtx_tree_spec_t default_tree_specs[VTX_GBDT_DEFAULT_TREE_COUNT] = {
     /* Tree 24: Hot + small + monomorphic → very positive (depth 3) */
     { F_IS_HOT, 0.5f,
       F_CALLEE_SIZE, 0.20f, F_TYPE_CERTAINTY, 0.7f,
-      F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0,
+      F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, 
       {0.08f, 0.14f, 0.04f, 0.08f, -0.04f, -0.02f, -0.06f, -0.04f}, 3 },
 
     /* Tree 25: Cold + large → very negative (depth 3) */
     { F_IS_HOT, 0.5f,
       F_CALLEE_SIZE, 0.50f, F_TYPE_CERTAINTY, 0.3f,
-      F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0,
+      F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, 
       {-0.02f, -0.06f, -0.08f, -0.12f, -0.04f, -0.06f, -0.08f, -0.14f}, 3 },
 
     /* Tree 26: Try/catch + virtual → slight negative */
     { F_HAS_TRY_CATCH, 0.5f,
-      F_CALLS_VIRTUAL, 0.5f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0,
+      F_CALLS_VIRTUAL, 0.5f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, 
       {-0.02f, -0.06f, 0.02f, -0.02f}, 2 },
 
     /* Tree 27: Allocates + hot → neutral/slight positive */
     { F_ALLOCATES, 0.5f,
-      F_IS_HOT, 0.5f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0,
+      F_IS_HOT, 0.5f, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, 
       {-0.04f, 0.04f, -0.06f, 0.02f}, 2 },
 
     /* Tree 28: Has loops + hot → neutral (inlining loop bodies can help) */
     { F_HAS_LOOPS, 0.5f,
       F_IS_HOT, 0.5f, F_CALLEE_SIZE, 0.30f,
-      F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0,
+      F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, 
       {-0.03f, 0.03f, -0.05f, 0.02f, -0.06f, -0.02f, -0.08f, -0.03f}, 3 },
 
     /* Tree 29: Constant args + no virtual → positive (specialization opportunity) */
     { F_CONST_ARG_RATIO, 0.5f,
       F_CALLS_VIRTUAL, 0.5f, F_CALLEE_SIZE, 0.30f,
-      F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0,
+      F_NONE, 0, F_NONE, 0, F_NONE, 0, F_NONE, 0, 
       {0.08f, 0.04f, 0.06f, 0.02f, -0.02f, -0.04f, -0.04f, -0.08f}, 3 },
 };
 

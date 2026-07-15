@@ -751,7 +751,13 @@ static vtx_reg_t emit_stack_pop(vtx_compile_ctx_t *ctx)
      * This was the T1 spill-path register clobber bug: the old RBX value
      * was overwritten by the spill load before RDX could inherit it,
      * causing incorrect values in the expression stack at runtime. */
-    if (new_depth >= 0) emit_mov_reg_reg64(&ctx->buf, VTX_REG_RAX, VTX_REG_RCX);
+    /* Bug #6 fix: new_depth is uint32_t so (>= 0) is always true.
+     * The intent is: always shift RAX→RCX (new TOS), then conditionally
+     * shift deeper registers. Changed first check to >= 1 to match the
+     * pattern of the subsequent checks. Actually, the first mov (RAX→RCX)
+     * should always happen after a pop2 (the old TOS moves to TOS-1), so
+     * just emit it unconditionally. */
+    emit_mov_reg_reg64(&ctx->buf, VTX_REG_RAX, VTX_REG_RCX);  /* always: old TOS → TOS-1 */
     if (new_depth >= 1) emit_mov_reg_reg64(&ctx->buf, VTX_REG_RCX, VTX_REG_RDX);
     if (new_depth >= 2) emit_mov_reg_reg64(&ctx->buf, VTX_REG_RDX, VTX_REG_RBX);
 
