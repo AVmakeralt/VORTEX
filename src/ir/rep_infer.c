@@ -10,11 +10,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Check if an opcode is integer arithmetic that benefits from RAW_INT. */
+/* Check if an opcode is integer arithmetic that benefits from RAW_INT.
+ * Note: Div and Mod are excluded because IDIV uses fixed RAX/RDX
+ * registers which conflict with the RAW_INT path's register handling.
+ * The isel's Div/Mod paths already handle untagging internally. */
 static bool is_arith_opcode(vtx_node_opcode_t op) {
     return op == VTX_OP_Add || op == VTX_OP_Sub ||
-           op == VTX_OP_Mul || op == VTX_OP_Div ||
-           op == VTX_OP_Mod || op == VTX_OP_Neg;
+           op == VTX_OP_Mul || op == VTX_OP_Neg;
 }
 
 /* Cmp is NOT marked as RAW_INT because its output is a boolean
@@ -64,7 +66,9 @@ static bool consumer_needs_tagged(vtx_node_opcode_t op) {
            op == VTX_OP_Guard ||
            op == VTX_OP_DeoptGuard ||
            op == VTX_OP_LoadIndexed ||
-           op == VTX_OP_NewArray;
+           op == VTX_OP_NewArray ||
+           op == VTX_OP_Div ||   /* Div/Mod not in is_arith_opcode, need tagged */
+           op == VTX_OP_Mod;
 }
 
 /* Check if a consumer can accept RAW_INT input (arithmetic or comparison). */

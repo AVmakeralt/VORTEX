@@ -200,7 +200,7 @@ vtx_pipeline_config_t vtx_pipeline_config_t2(void)
     cfg.owns_gbdt_model   = false;
     cfg.run_midtier       = false;
     cfg.run_block_layout  = true;   /* profile-guided block layout */
-    cfg.run_rep_infer     = false;  /* disabled — hangs on non-SMI input, needs debugging */
+    cfg.run_rep_infer     = true;   /* representation inference (UnboxInt/BoxInt) */
     cfg.markov            = NULL;
     return cfg;
 }
@@ -244,7 +244,7 @@ vtx_pipeline_config_t vtx_pipeline_config_t3(void)
     cfg.owns_gbdt_model   = false;
     cfg.run_midtier       = false;
     cfg.run_block_layout  = true;   /* profile-guided block layout */
-    cfg.run_rep_infer     = false;  /* disabled — hangs on non-SMI input, needs debugging */
+    cfg.run_rep_infer     = true;   /* representation inference (UnboxInt/BoxInt) */
     cfg.markov            = NULL;
     return cfg;
 }
@@ -1398,25 +1398,27 @@ int vtx_pipeline_run(vtx_graph_t *graph,
         int64_t ri_start = now_ns();
         uint32_t ri_inserted = vtx_rep_infer_run(graph, arena);
         stats.block_layout_time_ns += elapsed_ns(ri_start); /* reuse stats field */
-        (void)ri_inserted;
 
-        /* Run a quick DCE to clean up dead nodes from UnboxInt(BoxInt(x))
-         * simplification */
-        if (config->run_dce) {
+        /* Run DCE only if rep_infer actually inserted nodes */
+        if (ri_inserted > 0 && config->run_dce) {
             run_dce_pass(graph, 1, &stats.dce_time_ns, false);
         }
 
-        /* Re-schedule: the rep_infer pass inserted new UnboxInt/BoxInt
-         * nodes that need block assignments. The old schedule is stale. */
-        vtx_schedule_destroy(&schedule);
-        memset(&schedule, 0, sizeof(schedule));
-        if (vtx_schedule_run(graph, arena, &schedule) != 0) {
-            fprintf(stderr, "[pipeline] re-scheduling after rep_infer failed\n");
-            result->stats = stats;
-            return -1;
-        }
-        if (result->schedule) {
-            memcpy(result->schedule, &schedule, sizeof(vtx_schedule_t));
+        /* Only re-schedule if rep_infer actually inserted new nodes.
+         * If no nodes were inserted (e.g., SCCP folded everything),
+         * the old schedule is still valid and re-scheduling risks
+         * introducing ordering bugs. */
+        if (ri_inserted > 0) {
+            vtx_schedule_destroy(&schedule);
+            memset(&schedule, 0, sizeof(schedule));
+            if (vtx_schedule_run(graph, arena, &schedule) != 0) {
+                fprintf(stderr, "[pipeline] re-scheduling after rep_infer failed\n");
+                result->stats = stats;
+                return -1;
+            }
+            if (result->schedule) {
+                memcpy(result->schedule, &schedule, sizeof(vtx_schedule_t));
+            }
         }
 
         if (verify_between_passes(graph, config, "RepInfer") != 0) {

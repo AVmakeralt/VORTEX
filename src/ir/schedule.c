@@ -1296,51 +1296,32 @@ int vtx_schedule_run(vtx_graph_t *graph, vtx_arena_t *arena, vtx_schedule_t *sch
                     if (inp == VTX_NODEID_INVALID || inp >= node_count) continue;
                     if (schedule->node_block[inp] != bi) continue;
 
-                    /* Skip back-edge inputs (Phi with loop-carried value).
-                     *
-                     * BUGFIX: The old code skipped ALL Phi inputs, which
-                     * meant non-loop Phis (merge point Phis inside the same
-                     * block) were also skipped. This caused nodes that use
-                     * merge Phis to be scheduled before the Phis, leading
-                     * to "vreg=INVALID" errors in the isel.
-                     *
-                     * Fix: Only skip loop header Phis (Phis in a different
-                     * block than the current node). For Phis in the SAME
-                     * block (merge point Phis), don't skip — they must be
-                     * scheduled before nodes that use them.
-                     *
-                     * However, we must be careful: a node in Block 0 may use
-                     * a Phi from Block 3 (cross-block use via a merged value).
-                     * The node_block check above already ensures we only
-                     * consider inputs IN THIS BLOCK, so we only need to
-                     * skip cross-block Phis. But the node_block check is
-                     * redundant with the Phi check — if the input is in a
-                     * different block, the node_block check already skipped it.
-                     *
-                     * The real issue: we skip ALL same-block Phis, but
-                     * same-block Phis ARE the dependency we need to check.
-                     * Remove the skip entirely for same-block Phis. */
                     vtx_node_t *inp_node = &nt->nodes[inp];
                     if (inp_node->opcode == VTX_OP_Phi) {
-                        /* Only skip if the Phi is in a DIFFERENT block */
                         if (schedule->node_block[inp] != bi) continue;
-                        /* Same-block Phi: don't skip — must be before us */
                     }
 
                     /* Find position of inp in this block */
+                    bool swapped = false;
                     for (uint32_t k = i + 1; k < blk->node_count; k++) {
                         if (blk->nodes[k] == inp) {
-                            /* Swap: move inp before nid */
-                            /* Actually, we need to move nid after inp.
-                             * Remove nid from position i and re-insert after k. */
+                            /* Move nid from position i to after position k.
+                             * Shift positions i..k-1 one step right. */
                             for (uint32_t m = i; m < k; m++) {
                                 blk->nodes[m] = blk->nodes[m + 1];
                             }
                             blk->nodes[k] = nid;
                             sorted = false;
+                            swapped = true;
                             break;
                         }
                     }
+                    /* After a swap, nid has moved to a new position.
+                     * Stop checking its other inputs — the outer while
+                     * loop will re-process this block. Continuing to
+                     * check inputs with the stale position i corrupts
+                     * the node list (causes duplicates and missing nodes). */
+                    if (swapped) break;
                 }
             }
         }
