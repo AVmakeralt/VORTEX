@@ -1606,10 +1606,14 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             idiv_inst.flags = VTX_INST_FLAG_CLOBBER_RAX | VTX_INST_FLAG_CLOBBER_RDX;
             vtx_isel_emit_inst(block, idiv_inst, arena);
 
-            /* RAX has the raw quotient. Copy to fresh vreg, retag, map dst. */
+            /* RAX has the raw quotient. Copy to fresh vreg.
+             * Only retag if NOT RAW_INT (rep_infer may have marked this
+             * node as raw — in that case, BoxInt handles the retag). */
             uint32_t div_dst = vtx_isel_alloc_vreg(stream, arena);
             vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, div_dst, rax_vreg, node_id), arena);
-            emit_smi_retag(stream, block, div_dst, node_id, arena);
+            if (!vtx_nf_has(node->flags, VTX_NF_RAW_INT)) {
+                emit_smi_retag(stream, block, div_dst, node_id, arena);
+            }
             vtx_isel_map_node_vreg(stream, node_id, div_dst, arena);
             (void)rdx_vreg;
         }
@@ -1735,13 +1739,14 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             idiv_inst.flags = VTX_INST_FLAG_CLOBBER_RAX | VTX_INST_FLAG_CLOBBER_RDX;
             vtx_isel_emit_inst(block, idiv_inst, arena);
 
-            /* RDX has the raw remainder. Copy to fresh vreg, retag, map dst.
-             * BUGFIX: Don't retag in-place — the fixed rdx_vreg may be spilled
-             * and the spill slot can collide with other vregs. Moving to a
-             * fresh vreg ensures the result is in a normal register. */
+            /* RDX has the raw remainder. Copy to fresh vreg.
+             * Only retag if NOT RAW_INT (rep_infer may have marked this
+             * node as raw — in that case, BoxInt handles the retag). */
             uint32_t mod_dst = vtx_isel_alloc_vreg(stream, arena);
             vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, mod_dst, rdx_vreg, node_id), arena);
-            emit_smi_retag(stream, block, mod_dst, node_id, arena);
+            if (!vtx_nf_has(node->flags, VTX_NF_RAW_INT)) {
+                emit_smi_retag(stream, block, mod_dst, node_id, arena);
+            }
             vtx_isel_map_node_vreg(stream, node_id, mod_dst, arena);
             (void)rax_vreg;
         }
@@ -2303,8 +2308,10 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
     case VTX_OP_BoxInt: {
         /* Raw int64 → Tagged SMI
-         * Emit: AND dst, DATA_MASK; SHL dst, 3; OR dst, HEADER
-         * Same as emit_smi_retag but as an explicit node. */
+         * Emit: AND dst, smi_mask_vreg; SHL dst, 3; OR dst, smi_scratch_vreg
+         * Uses the pre-loaded mask register (R11) because the 48-bit
+         * DATA_MASK (0x0000FFFFFFFFFFFF) doesn't fit in a sign-extended
+         * imm32. This is the same approach as emit_smi_retag. */
         if (node->input_count < 1) return -1;
         ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t src = vtx_isel_node_vreg(stream, node->inputs[0]);
@@ -2313,14 +2320,14 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         stream->uses_smi = true;
         if (dst != src)
             vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, src, node_id), arena);
-        /* AND dst, DATA_MASK */
-        vtx_inst_t and_inst = make_ri_inst(VTX_X86_AND, dst,
-                                            (int64_t)VTX_NAN_DATA_MASK, node_id);
+        /* AND dst, smi_mask_vreg (R11 = 0x0000FFFFFFFFFFFF) */
+        vtx_inst_t and_inst = make_rr_inst(VTX_X86_AND, dst,
+                                            stream->smi_mask_vreg, node_id);
         and_inst.flags |= VTX_INST_FLAG_NO_COALESCE;
         vtx_isel_emit_inst(block, and_inst, arena);
         /* SHL dst, 3 */
         vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, dst, 3, node_id), arena);
-        /* OR dst, HEADER */
+        /* OR dst, smi_scratch_vreg (R10 = 0x7FF8000000000000) */
         vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_OR, dst,
                                                 stream->smi_scratch_vreg, node_id), arena);
         break;
