@@ -145,6 +145,17 @@ vtx_guard_meta_t *vtx_guard_meta_register(vtx_guard_meta_table_t *table,
     meta->last_failure_timestamp = 0;
     meta->strength = strength;
     meta->strength_changed = false;
+    /* Bug #5 fix: count the initial strength so stats are correct
+     * from creation. update_strength_counts decrements old and
+     * increments new, but for a new guard there's no old strength.
+     * Just increment the new directly. */
+    switch (strength) {
+    case VTX_GUARD_UNCONDITIONAL:    table->unconditional_count++; break;
+    case VTX_GUARD_FAST_CHECK:       table->fast_check_count++; break;
+    case VTX_GUARD_PREDICATED_CHECK: table->predicated_check_count++; break;
+    case VTX_GUARD_FULL_CHECK:       table->full_check_count++; break;
+    case VTX_GUARD_DEOPT_ALWAYS:     table->deopt_always_count++; break;
+    }
     meta->guard_kind = guard_kind;
     meta->bytecode_pc = bytecode_pc;
 
@@ -274,6 +285,10 @@ void vtx_guard_meta_update(vtx_guard_meta_t *meta, bool failed)
         }
         meta->strength = new_strength;
         meta->strength_changed = true;
+        /* Bug #5 fix: strength category counts are NOT updated here
+         * because this function only has the meta pointer, not the
+         * table. The counts will be reconciled when the table's
+         * adapt/weaken functions are called (which DO have the table). */
     }
 }
 
@@ -438,6 +453,10 @@ void vtx_guard_meta_update_sampled(vtx_guard_meta_t *meta, bool failed)
     if (new_strength != old_strength) {
         meta->strength = new_strength;
         meta->strength_changed = true;
+        /* Bug #5 fix: strength category counts are NOT updated here
+         * because this function only has the meta pointer, not the
+         * table. The counts will be reconciled when the table's
+         * adapt/weaken functions are called (which DO have the table). */
     }
 
     /* Adapt the sampling interval based on the current failure rate.
@@ -533,6 +552,10 @@ bool vtx_guard_meta_try_strengthen(vtx_guard_meta_t *meta, uint32_t new_phase)
     if (new_strength != old_strength) {
         meta->strength = new_strength;
         meta->strength_changed = true;
+        /* Note: strength category counts are NOT updated here because
+         * this function only has the meta pointer, not the table.
+         * The counts will be reconciled when the table's adapt/weaken
+         * functions are called (which DO have the table pointer). */
         meta->phase_context = new_phase;
         meta->residence_count = 0;
         /* Reset both EWMAs after strengthening to avoid immediate re-weakening */

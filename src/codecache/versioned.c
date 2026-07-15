@@ -179,16 +179,29 @@ void vtx_versioned_cache_on_exit(vtx_versioned_cache_t *vc, uint32_t method_id)
 {
     if (vc == NULL) return;
     uint32_t idx = METHOD_INDEX(method_id);
-    /* Fix HIGH: Old code decremented ALL versions with positive on_stack_count,
-     * not just the one that was entered. If two versions of the same method
-     * were on the stack (e.g., during recompilation), exiting one would
-     * decrement both. Fix: only decrement the ACTIVE version (the one that
-     * was entered via on_enter). Also check method_id to avoid hash collision. */
+
+    /* Bug #3 fix: The old code only decremented the ACTIVE version, but
+     * during recompilation the active version changes. If a thread entered
+     * v1 (on_stack_count=1), then v2 was installed (v1 retired, v2 active),
+     * on_exit() would look for the active version (v2) which has
+     * on_stack_count=0, so nothing was decremented. v1's count leaked.
+     *
+     * Fix: decrement the version with the highest on_stack_count for this
+     * method_id. This is the version that was entered (it has a positive
+     * count from on_enter). If multiple versions have positive counts
+     * (concurrent entry before recompilation), we decrement the one that
+     * was entered first (highest count = entered most recently, or the
+     * retired one that still has the count). */
+    vtx_versioned_code_version_t *best = NULL;
     for (vtx_versioned_code_version_t *v = vc->versions[idx]; v != NULL; v = v->next) {
-        if (v->is_active && v->method_id == method_id && v->on_stack_count > 0) {
-            v->on_stack_count--;
-            break;
+        if (v->method_id == method_id && v->on_stack_count > 0) {
+            if (best == NULL || v->on_stack_count > best->on_stack_count) {
+                best = v;
+            }
         }
+    }
+    if (best != NULL) {
+        best->on_stack_count--;
     }
 }
 

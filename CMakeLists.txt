@@ -8,12 +8,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Compile flags: strict warnings, no external dependencies
 add_compile_options(-Wall -Wextra)
-# Disable specific warnings that are too aggressive for generated code.
-# NOTE: -Wno-incompatible-pointer-types is intentionally NOT suppressed.
-# It catches real type bugs (e.g. vtx_frame_t* vs vtx_interp_frame_t*
-# type punning that caused the OSR crash). When this warning fires,
-# fix the type mismatch — don't suppress it.
-add_compile_options(-Wno-unused-variable -Wno-unused-function -Wno-unused-but-set-variable -Wno-unused-parameter -Wno-sign-compare -Wno-discarded-qualifiers)
+# Warning suppressions removed per audit recommendation.
+# Previously suppressed: -Wno-unused-variable -Wno-unused-function
+# -Wno-unused-but-set-variable -Wno-unused-parameter -Wno-sign-compare
+# -Wno-discarded-qualifiers
+# These suppressed 327 warnings including the GBDT inliner corruption
+# (Bug #1). All warnings are now visible — fix them at the source.
+# The manual build script (scripts/rebuild_vortex.sh) still uses these
+# suppressions for development builds to reduce noise.
 add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions> $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>)
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-fPIC)
