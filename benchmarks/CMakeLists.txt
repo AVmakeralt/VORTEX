@@ -85,6 +85,7 @@ add_executable(bench_t2
     bench_t2.c
 )
 target_link_libraries(bench_t2 PRIVATE
+    -Wl,--start-group
     vortex_compile
     vortex_codecache
     vortex_lower
@@ -103,6 +104,7 @@ target_link_libraries(bench_t2 PRIVATE
     vortex_profile
     vortex_assembler
     vortex_common
+    -Wl,--end-group
     m
     pthread
 )
@@ -113,6 +115,7 @@ add_executable(bench_scimark
     bench_scimark.c
 )
 target_link_libraries(bench_scimark PRIVATE
+    -Wl,--start-group
     vortex_compile
     vortex_codecache
     vortex_lower
@@ -131,6 +134,7 @@ target_link_libraries(bench_scimark PRIVATE
     vortex_profile
     vortex_assembler
     vortex_common
+    -Wl,--end-group
     m
     pthread
 )

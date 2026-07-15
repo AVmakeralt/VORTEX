@@ -58,6 +58,7 @@ add_library(vortex_ir STATIC
     ir/strength_reduce.c
     ir/loop_unroll.c
     ir/smi_tag_elision.c
+    ir/rep_infer.c
 )
 target_include_directories(vortex_ir PUBLIC ${VORTEX_INCLUDE_DIRS})
 target_link_libraries(vortex_ir PUBLIC vortex_common)
@@ -206,6 +207,7 @@ endif()
 # Mid-Tier JIT T1.5
 add_library(vortex_midtier STATIC
     midtier/midtier.c
+    midtier/block_layout.c
 )
 target_include_directories(vortex_midtier PUBLIC ${VORTEX_INCLUDE_DIRS})
 target_link_libraries(vortex_midtier PUBLIC vortex_ir vortex_interp vortex_lower vortex_deopt)

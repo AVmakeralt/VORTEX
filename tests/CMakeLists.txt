@@ -83,6 +83,7 @@ add_executable(test_zero_cost_deopt
     unit/test_zero_cost_deopt.c
 )
 target_link_libraries(test_zero_cost_deopt PRIVATE
+-Wl,--start-group
     vortex_test_framework
     -Wl,--start-group
     vortex_guard
@@ -100,6 +101,7 @@ target_link_libraries(test_zero_cost_deopt PRIVATE
     -Wl,--end-group
     m
     pthread
+-Wl,--end-group
 )
 add_test(NAME test_zero_cost_deopt COMMAND test_zero_cost_deopt)
 
@@ -108,6 +110,7 @@ add_executable(test_p2_features
     unit/test_p2_features.c
 )
 target_link_libraries(test_p2_features PRIVATE
+-Wl,--start-group
     vortex_test_framework
     -Wl,--start-group
     vortex_guard
@@ -125,6 +128,7 @@ target_link_libraries(test_p2_features PRIVATE
     -Wl,--end-group
     m
     pthread
+-Wl,--end-group
 )
 add_test(NAME test_p2_features COMMAND test_p2_features)
 
@@ -133,6 +137,7 @@ add_executable(test_smi_arith
     unit/test_smi_arith.c
 )
 target_link_libraries(test_smi_arith PRIVATE
+-Wl,--start-group
     vortex_test_framework
     -Wl,--start-group
     vortex_baseline
@@ -154,6 +159,7 @@ target_link_libraries(test_smi_arith PRIVATE
     -Wl,--end-group
     m
     pthread
+-Wl,--end-group
 )
 add_test(NAME test_smi_arith COMMAND test_smi_arith)
 
@@ -164,6 +170,7 @@ add_executable(test_interp_basics
     integration/test_interp_basics.c
 )
 target_link_libraries(test_interp_basics PRIVATE
+-Wl,--start-group
     vortex_test_framework
     -Wl,--start-group
     vortex_compile
@@ -181,6 +188,7 @@ target_link_libraries(test_interp_basics PRIVATE
     -Wl,--end-group
     m
     pthread
+-Wl,--end-group
 )
 add_test(NAME test_interp_basics COMMAND test_interp_basics)
 
@@ -189,6 +197,7 @@ add_executable(test_jit_e2e
     integration/test_jit_e2e.c
 )
 target_link_libraries(test_jit_e2e PRIVATE
+-Wl,--start-group
     vortex_test_framework
     -Wl,--start-group
     vortex_baseline
@@ -210,6 +219,7 @@ target_link_libraries(test_jit_e2e PRIVATE
     -Wl,--end-group
     m
     pthread
+-Wl,--end-group
 )
 add_test(NAME test_jit_e2e COMMAND test_jit_e2e)
 
@@ -246,6 +256,7 @@ add_executable(test_tier_equivalence
     integration/test_tier_equivalence.c
 )
 target_link_libraries(test_tier_equivalence PRIVATE
+-Wl,--start-group
     vortex_test_framework
     -Wl,--start-group
     vortex_baseline
@@ -268,6 +279,7 @@ target_link_libraries(test_tier_equivalence PRIVATE
     -Wl,--end-group
     m
     pthread
+-Wl,--end-group
 )
 add_test(NAME test_tier_equivalence COMMAND test_tier_equivalence)
 set_tests_properties(test_tier_equivalence PROPERTIES TIMEOUT 120)
@@ -469,6 +481,7 @@ add_executable(test_stress_compile_lower
     stress/test_stress_compile_lower.c
 )
 target_link_libraries(test_stress_compile_lower PRIVATE
+-Wl,--start-group
     vortex_test_framework
     vortex_compile
     vortex_inliner
@@ -484,6 +497,7 @@ target_link_libraries(test_stress_compile_lower PRIVATE
     vortex_interp
     vortex_baseline
     m
+-Wl,--end-group
 )
 add_test(NAME test_stress_compile_lower COMMAND test_stress_compile_lower)
 
@@ -516,6 +530,7 @@ add_executable(test_opcodes_b4_b8
     opcode/test_opcodes_b4_b8.c
 )
 target_link_libraries(test_opcodes_b4_b8 PRIVATE
+-Wl,--start-group
     vortex_test_framework
     vortex_interp
     vortex_ir
@@ -536,5 +551,6 @@ target_link_libraries(test_opcodes_b4_b8 PRIVATE
     vortex_common
     m
     pthread
+-Wl,--end-group
 )
 add_test(NAME test_opcodes_b4_b8 COMMAND test_opcodes_b4_b8)
