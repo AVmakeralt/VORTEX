@@ -19,18 +19,17 @@ vtx_jit_frame_layout_t vtx_frame_layout_compute(const vtx_method_desc_t *method)
         layout.max_stack = scanned_max_stack;
     }
 
-    /* Spill slots: values beyond the first VTX_EXPR_REG_COUNT that won't
-     * fit in registers. If max_stack <= VTX_EXPR_REG_COUNT, no spills.
+    /* Spill slots: the deopt stub saves expr-stack registers (RAX, RCX, RDX,
+     * RBX) at spill indices spilled_count..spilled_count+3, where
+     * spilled_count = depth - VTX_EXPR_REG_COUNT. So the max spill index
+     * is (max_stack - VTX_EXPR_REG_COUNT) + VTX_EXPR_REG_COUNT - 1 = max_stack - 1.
+     * We need max_spills >= max_stack to cover both normal spills and the
+     * deopt register save area. Also ensure at least VTX_EXPR_REG_COUNT
+     * for functions with max_stack <= 4.
      *
-     * However, the deopt stub needs spill slots to save expr-stack registers
-     * (RAX, RCX, RDX, RBX) when a guard fires. It needs up to 4 spill slots
-     * (one per register) at depth >= 4. If max_spills < 4, the deopt stub's
-     * SAVE_REG macro hits an assertion ("no spill/local slot for register save").
-     * Ensure at least 4 spill slots for deopt. */
-    layout.max_spills = 0;
-    if (layout.max_stack > VTX_EXPR_REG_COUNT) {
-        layout.max_spills = layout.max_stack - VTX_EXPR_REG_COUNT;
-    }
+     * Bug #4a fix: old code used max(max_stack - 4, 4) which under-reserved
+     * when depth > 4 (spilled_count + 3 >= max_spills → assert failure). */
+    layout.max_spills = layout.max_stack;
     if (layout.max_spills < VTX_EXPR_REG_COUNT) {
         layout.max_spills = VTX_EXPR_REG_COUNT;
     }

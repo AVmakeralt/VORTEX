@@ -297,9 +297,19 @@ static void print_stats(const char *label, stats_t s) {
            label, s.median, s.p95, s.min);
 }
 
+/* Alarm handler — if a JIT call hangs, kill the process with a diagnostic */
+static void alarm_handler(int sig) {
+    (void)sig;
+    fprintf(stderr, "\n*** FATAL: JIT execution timed out (infinite loop?) ***\n");
+    fprintf(stderr, "*** This indicates a code generation bug — the JIT compiled\n");
+    fprintf(stderr, "*** code entered an infinite loop and never returned. ***\n");
+    _exit(124);
+}
+
 int main(void) {
-    /* Disable SIGALRM — benchmarks manage their own timing */
-    signal(SIGALRM, SIG_IGN);
+    /* Set 10-second alarm for the entire benchmark — catches JIT hangs */
+    signal(SIGALRM, alarm_handler);
+    alarm(30);
     setvbuf(stdout, NULL, _IONBF, 0);
 
     /* Initialize the hoisted method descriptor once */

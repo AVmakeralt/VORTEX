@@ -200,7 +200,7 @@ vtx_pipeline_config_t vtx_pipeline_config_t2(void)
     cfg.owns_gbdt_model   = false;
     cfg.run_midtier       = false;
     cfg.run_block_layout  = true;   /* profile-guided block layout */
-    cfg.run_rep_infer     = true;   /* representation inference (UnboxInt/BoxInt) */
+    cfg.run_rep_infer     = false;  /* disabled — hangs on non-SMI input, needs debugging */
     cfg.markov            = NULL;
     return cfg;
 }
@@ -244,7 +244,7 @@ vtx_pipeline_config_t vtx_pipeline_config_t3(void)
     cfg.owns_gbdt_model   = false;
     cfg.run_midtier       = false;
     cfg.run_block_layout  = true;   /* profile-guided block layout */
-    cfg.run_rep_infer     = true;   /* representation inference (UnboxInt/BoxInt) */
+    cfg.run_rep_infer     = false;  /* disabled — hangs on non-SMI input, needs debugging */
     cfg.markov            = NULL;
     return cfg;
 }
