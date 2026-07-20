@@ -60,7 +60,7 @@ ctest --output-on-failure
 
 ## Provenance
 
-This codebase was originally written by a human developer and substantially
+This codebase was originally written by a human developer and
 modified by an AI assistant (GLM/Z.ai) for bug fixes, performance improvements,
 and feature additions. Modified files carry an "AI-MODIFIED CODE" banner.
 See commit history for detailed change descriptions.
