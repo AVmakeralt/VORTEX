@@ -21,8 +21,8 @@ make -j$(nproc)
 ```
 
 This produces:
-- `src/vortex` — main executable (runs .vtbc bytecode files or self-test)
-- `benchmarks/bench_t2` — T2 JIT benchmark suite
+- `src/vortex` main executable (runs .vtbc bytecode files or self-test)
+- `benchmarks/bench_t2` T2 JIT benchmark suite
 - Various test binaries in `tests/`
 
 ## Running
@@ -56,9 +56,7 @@ ctest --output-on-failure
 - **Concurrent compilation** — pthread threadpool + orchestrator + safepoints
 - **Hand-written x86-64 emitter** (~5K LOC, REX/ModR-M/SIB per Intel SDM)
 
-## Documentation
 
-See `roadmap.md` for the full architecture specification (897 lines).
 
 ## Provenance
 
