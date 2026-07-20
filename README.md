@@ -54,7 +54,7 @@ ctest --output-on-failure
 - **Loop unrolling** (factor=2) with proper control-flow threading
 - **Deoptimization** OSR up/down, deoptless continuations, side tables
 - **Concurrent compilation** pthread threadpool + orchestrator + safepoints
-- **Hand-written x86-64 emitter** (~5K LOC, REX/ModR-M/SIB per Intel SDM)
+- **Hand-written x86-64 emitter** (5K LOC, REX/ModR-M/SIB per Intel SDM)
 
 
 
