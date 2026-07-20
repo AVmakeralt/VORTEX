@@ -686,6 +686,25 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
         result->vreg_to_spill[v] = VTX_NO_SPILL;
     }
 
+    /* Set vreg_to_phys_count and vreg_to_spill_count NOW (before the linear
+     * scan) so that eviction code paths can correctly check bounds when
+     * updating vreg_to_phys for evicted intervals.
+     *
+     * BUGFIX (n_sq nested loop hang): Previously, these counts were set at
+     * the END of vtx_regalloc_run. But the linear scan (which runs BEFORE
+     * the end) evicts intervals and tries to update vreg_to_phys via:
+     *   if (active[j]->vreg < result->vreg_to_phys_count) { ... }
+     * With count=0 during the scan, the check always fails, and vreg_to_phys
+     * for evicted vregs is NEVER reset to 0xFF. The stale register assignment
+     * remains, causing the apply function to use a register that has been
+     * reassigned to another vreg. For n_sq, vreg 12 (i) was evicted by
+     * vreg 19 (fixed RAX), but vreg_to_phys[12] stayed at RAX. Later, vreg 24
+     * (inner If cond) was also assigned RAX. Result: both vreg 12 and vreg 24
+     * mapped to RAX, corrupting the loop variable i and causing an infinite
+     * loop. */
+    result->vreg_to_phys_count = vreg_count;
+    result->vreg_to_spill_count = vreg_count;
+
     /* Active list: intervals currently assigned to physical registers.
      *
      * BUGFIX (regalloc audit B): Use valid_count (actual number of intervals
@@ -1147,8 +1166,8 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
     result->frame_size = frame_size;
     result->spill_count = next_spill_slot;
 
-    result->vreg_to_phys_count = vreg_count;
-    result->vreg_to_spill_count = vreg_count;
+    /* vreg_to_phys_count and vreg_to_spill_count were already set before
+     * the linear scan (see comment above). */
 
     return result;
 }
