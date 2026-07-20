@@ -49,11 +49,11 @@ ctest --output-on-failure
 
 - **Sea-of-Nodes IR** with ~60 opcodes and 14 optimization passes
 - **Partial Escape Analysis** with cross-object scalar replacement
-- **Representation inference** — explicit UnboxInt/BoxInt nodes for SMI tag elision
+- **Representation inference** explicit UnboxInt/BoxInt nodes for SMI tag elision
 - **Profile-guided block layout** using branch probability data
 - **Loop unrolling** (factor=2) with proper control-flow threading
-- **Deoptimization** — OSR up/down, deoptless continuations, side tables
-- **Concurrent compilation** — pthread threadpool + orchestrator + safepoints
+- **Deoptimization** OSR up/down, deoptless continuations, side tables
+- **Concurrent compilation** pthread threadpool + orchestrator + safepoints
 - **Hand-written x86-64 emitter** (~5K LOC, REX/ModR-M/SIB per Intel SDM)
 
 
