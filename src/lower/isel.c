@@ -1833,7 +1833,13 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             } else {
                 /* Variable shift: use shift_dst so dst is NOT involved in
                  * the SHL (avoids dst==RCX conflict with CL count). */
-                uint32_t cnt_untagged = vtx_isel_alloc_vreg(stream, arena);
+                /* Force cnt_untagged to RCX so the regalloc keeps shift_dst
+                 * OUT of RCX. Without this, shift_dst could be assigned to
+                 * RCX, and the emitter's `MOV RCX, count` would overwrite
+                 * shift_dst before the SHL r0, CL fires, producing
+                 * `count << count` instead of `value << count`.
+                 * (Bug: t2_shl_basic, t2_shr_basic in test_smi_arith) */
+                uint32_t cnt_untagged = vtx_isel_alloc_vreg_fixed(stream, arena, 1 /* RCX */);
                 emit_smi_untag(stream, block, cnt_untagged, cnt_vreg, node_id, arena);
 
                 uint32_t shift_dst = vtx_isel_alloc_vreg(stream, arena);
@@ -1882,7 +1888,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
                 vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHR, dst,
                                    cnt_node->constval.as.int_val, node_id), arena);
             } else {
-                uint32_t cnt_untagged = vtx_isel_alloc_vreg(stream, arena);
+                uint32_t cnt_untagged = vtx_isel_alloc_vreg_fixed(stream, arena, 1 /* RCX */);
                 emit_smi_untag(stream, block, cnt_untagged, cnt_vreg, node_id, arena);
 
                 uint32_t shift_dst = vtx_isel_alloc_vreg(stream, arena);
@@ -1931,7 +1937,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
                 vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, dst,
                                    cnt_node->constval.as.int_val, node_id), arena);
             } else {
-                uint32_t cnt_untagged = vtx_isel_alloc_vreg(stream, arena);
+                uint32_t cnt_untagged = vtx_isel_alloc_vreg_fixed(stream, arena, 1 /* RCX */);
                 emit_smi_untag(stream, block, cnt_untagged, cnt_vreg, node_id, arena);
 
                 uint32_t shift_dst = vtx_isel_alloc_vreg(stream, arena);

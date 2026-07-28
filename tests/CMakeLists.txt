@@ -58,11 +58,24 @@ add_executable(test_bugfixes
     unit/test_bugfixes.c
 )
 target_link_libraries(test_bugfixes PRIVATE
+    -Wl,--start-group
     vortex_test_framework
     vortex_ir
     vortex_interp
     vortex_runtime
+    vortex_baseline
+    vortex_compile
+    vortex_lower
+    vortex_codecache
+    vortex_deopt
+    vortex_guard
+    vortex_profile
+    vortex_inliner
+    vortex_pea
+    vortex_midtier
+    -Wl,--end-group
     m
+    pthread
 )
 add_test(NAME test_bugfixes COMMAND test_bugfixes)
 
@@ -323,11 +336,24 @@ add_executable(test_regalloc_upgrade
     unit/test_regalloc_upgrade.c
 )
 target_link_libraries(test_regalloc_upgrade PRIVATE
+    -Wl,--start-group
     vortex_test_framework
     vortex_lower
+    vortex_compile
     vortex_ir
     vortex_runtime
+    vortex_interp
+    vortex_baseline
+    vortex_deopt
+    vortex_codecache
+    vortex_guard
+    vortex_profile
+    vortex_inliner
+    vortex_pea
+    vortex_midtier
+    -Wl,--end-group
     m
+    pthread
 )
 add_test(NAME test_regalloc_upgrade COMMAND test_regalloc_upgrade)
 
