@@ -3347,13 +3347,110 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
     }
 
     case VTX_OP_Switch:
-    case VTX_OP_Unwind:
-    case VTX_OP_Catch:
     case VTX_OP_Province:
     case VTX_OP_MemBar:
     case VTX_OP_Initialize:
     case VTX_OP_InitializeKlass:
         break;
+
+    case VTX_OP_Unwind: {
+        /* VTX_OP_Unwind is the IR node for bytecode VT_OP_THROW.
+         * Inputs: [0] = control, [1] = exception value (data).
+         *
+         * Lower to: CALL vtx_runtime_throw(exception_value)
+         *   - Move exception value to RDI (System V AMD64 first arg)
+         *   - CALL vtx_runtime_throw
+         *   - After the call, emit RET (the throw may return if no catch
+         *     handler is found and the uncaught handler returns; in that
+         *     case we exit the JIT function).
+         *
+         * The runtime throw function walks the interpreter frame chain
+         * looking for a matching catch handler. If found, it unwinds to
+         * that frame and the interpreter dispatches to the handler.
+         * If not found, it calls the uncaught exception handler.
+         *
+         * Note: This implementation correctly handles throws that
+         * propagate to caller interpreter frames. Throws to catch
+         * handlers within the same JIT-compiled method require
+         * additional infrastructure (synthetic frame registration)
+         * and are not yet supported — the throw will propagate up
+         * to the caller's interpreter frame. */
+        extern void vtx_runtime_throw(vtx_value_t exc);
+        uint32_t exc_vreg = VTX_VREG_INVALID;
+        for (uint32_t i = 0; i < node->input_count; i++) {
+            const vtx_node_t *inp = vtx_node_get_const(&graph->node_table, node->inputs[i]);
+            if (inp && vtx_nf_has(inp->flags, VTX_NF_DATA)) {
+                exc_vreg = vtx_isel_node_vreg(stream, node->inputs[i]);
+                break;
+            }
+        }
+
+        /* RDI = exception value */
+        uint32_t rdi_preg = vtx_isel_alloc_vreg_fixed(stream, arena, 7 /* RDI */);
+        if (exc_vreg != VTX_VREG_INVALID) {
+            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, rdi_preg, exc_vreg, node_id), arena);
+        } else {
+            /* No exception value — throw undefined */
+            vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_MOV, rdi_preg, 0, node_id), arena);
+        }
+
+        /* CALL vtx_runtime_throw */
+        vtx_inst_t call_inst;
+        memset(&call_inst, 0, sizeof(call_inst));
+        call_inst.opcode = VTX_X86_CALL;
+        call_inst.opnd_kinds[0] = VTX_OPND_IMM;
+        call_inst.imm = (int64_t)(uintptr_t)vtx_runtime_throw;
+        call_inst.flags = VTX_INST_FLAG_HAS_IMM | VTX_INST_FLAG_IS_CALL |
+                          VTX_INST_FLAG_CLOBBER_RAX | VTX_INST_FLAG_CLOBBER_RCX |
+                          VTX_INST_FLAG_CLOBBER_RDX | VTX_INST_FLAG_CLOBBER_RSI |
+                          VTX_INST_FLAG_CLOBBER_RDI | VTX_INST_FLAG_CLOBBER_R8 |
+                          VTX_INST_FLAG_CLOBBER_R9 | VTX_INST_FLAG_CLOBBER_R10 |
+                          VTX_INST_FLAG_CLOBBER_R11;
+        call_inst.source_node = node_id;
+        vtx_isel_emit_inst(block, call_inst, arena);
+
+        /* After throw, emit RET. If the throw was caught by an interpreter
+         * frame, the runtime transferred control there and this RET is
+         * unreachable. If not caught, the uncaught handler ran and may
+         * have aborted; if it returned, we exit the JIT function. */
+        vtx_inst_t ret_inst;
+        memset(&ret_inst, 0, sizeof(ret_inst));
+        ret_inst.opcode = VTX_X86_RET;
+        ret_inst.source_node = node_id;
+        vtx_isel_emit_inst(block, ret_inst, arena);
+        break;
+    }
+
+    case VTX_OP_Catch: {
+        /* VTX_OP_Catch is the IR node for bytecode VT_OP_CATCH.
+         * In the interpreter, CATCH sets the catch_handler_pc for the
+         * frame and pushes undefined as a placeholder for the exception
+         * variable.
+         *
+         * In T2, we don't have a frame-level catch_handler_pc. The catch
+         * handler is reached via unwinding from a throw, which transfers
+         * to the interpreter. So the JIT-compiled catch handler is
+         * typically not reached via throw.
+         *
+         * The Catch node's value (which subsequent code may use as the
+         * exception variable) should be the caught exception. Since the
+         * JIT-compiled catch handler isn't reached via throw, we just
+         * map the Catch node to a constant VTX_VALUE_UNDEFINED.
+         *
+         * If the catch handler IS reached (e.g., fall-through after a
+         * try block completes without throwing), the exception variable
+         * is undefined, which is correct. */
+        uint32_t dst = ensure_node_vreg(stream, node_id, arena);
+        /* Load VTX_VALUE_UNDEFINED into dst.
+         * VTX_VALUE_UNDEFINED = VTX_NAN_BOX_HEADER | VTX_TAG_UNDEFINED
+         * We use the smi_scratch_vreg (R10 = HEADER) and OR in the tag. */
+        stream->uses_smi = true;
+        /* MOV dst, R10 (HEADER) */
+        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, stream->smi_scratch_vreg, node_id), arena);
+        /* OR dst, TAG_UNDEFINED (immediate) */
+        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_OR, dst, VTX_TAG_UNDEFINED, node_id), arena);
+        break;
+    }
 
     default:
         break;
