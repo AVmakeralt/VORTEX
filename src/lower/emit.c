@@ -4041,8 +4041,33 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
     case VTX_X86_MOVQ_R64_XMM:
         r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
         r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
-        if (r0 != 0xFF && r1 != 0xFF)
+        if (r0 != 0xFF && r1 != 0xFF) {
             vtx_x86_emit_movq_r64_xmm(e, r0, r1);
+        } else if (r0 != 0xFF && r1 == 0xFF) {
+            /* XMM source spilled — load from spill slot to XMM temp, then MOVQ */
+            uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+            if (slot1 != VTX_NO_SPILL) {
+                emit_spill_load_xmm(e, slot1, VTX_SPILL_XMM_TMP, ra);
+                vtx_x86_emit_movq_r64_xmm(e, r0, VTX_SPILL_XMM_TMP);
+            }
+        } else if (r0 == 0xFF && r1 != 0xFF) {
+            /* GPR dst spilled — MOVQ to a GPR temp, then store to spill slot */
+            uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+            if (slot0 != VTX_NO_SPILL) {
+                /* Use RAX as temp (it's caller-saved, safe to clobber here) */
+                vtx_x86_emit_movq_r64_xmm(e, 0, r1);
+                emit_spill_store(e, slot0, 0, ra);
+            }
+        } else {
+            /* Both spilled */
+            uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+            uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+            if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
+                emit_spill_load_xmm(e, slot1, VTX_SPILL_XMM_TMP, ra);
+                vtx_x86_emit_movq_r64_xmm(e, 0, VTX_SPILL_XMM_TMP);
+                emit_spill_store(e, slot0, 0, ra);
+            }
+        }
         break;
 
     case VTX_X86_BSWAP:

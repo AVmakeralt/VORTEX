@@ -84,6 +84,13 @@ typedef enum {
     VTX_OP_CmpF,           /* float compare */
     VTX_OP_CmpD,           /* double compare */
 
+    /* ---- Data: float arithmetic (SSE2) ---- */
+    VTX_OP_AddF,           /* float add  (ADDSD) */
+    VTX_OP_SubF,           /* float sub  (SUBSD) */
+    VTX_OP_MulF,           /* float mul  (MULSD) */
+    VTX_OP_DivF,           /* float div  (DIVSD) */
+    VTX_OP_NegF,           /* float neg  (XORPS with sign mask) */
+
     /* ---- Data: min/max ---- */
     VTX_OP_Min,            /* takes two inputs, returns minimum */
     VTX_OP_Max,            /* takes two inputs, returns maximum */

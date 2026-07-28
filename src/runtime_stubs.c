@@ -649,6 +649,48 @@ void vtx_runtime_monitor_exit(vtx_value_t obj)
 /* ========================================================================== */
 
 /*
+ * Float arithmetic runtime helpers.
+ *
+ * These are called by T2-compiled code for float arithmetic (FADD/FSUB/FMUL/
+ * FDIV). They take NaN-boxed values, extract the doubles, do the arithmetic,
+ * and re-box the result.
+ *
+ * This is correct but slower than inline SSE2. Future optimization: emit
+ * inline ADDSD/SUBSD/MULSD/DIVSD with proper XMM regalloc support.
+ */
+vtx_value_t vtx_runtime_float_add(vtx_value_t a, vtx_value_t b)
+{
+    double da = vtx_double_value(a);
+    double db = vtx_double_value(b);
+    return vtx_make_double(da + db);
+}
+
+vtx_value_t vtx_runtime_float_sub(vtx_value_t a, vtx_value_t b)
+{
+    double da = vtx_double_value(a);
+    double db = vtx_double_value(b);
+    return vtx_make_double(da - db);
+}
+
+vtx_value_t vtx_runtime_float_mul(vtx_value_t a, vtx_value_t b)
+{
+    double da = vtx_double_value(a);
+    double db = vtx_double_value(b);
+    return vtx_make_double(da * db);
+}
+
+vtx_value_t vtx_runtime_float_div(vtx_value_t a, vtx_value_t b)
+{
+    double da = vtx_double_value(a);
+    double db = vtx_double_value(b);
+    return vtx_make_double(da / db);
+}
+
+/* ========================================================================== */
+/* Exception throwing                                                          */
+/* ========================================================================== */
+
+/*
  * vtx_runtime_throw — Walk the stack looking for a catch handler.
  *
  * If found, unwind to that frame and resume at the handler PC.

@@ -1887,29 +1887,10 @@ int vtx_graph_build(vtx_graph_t *graph,
 
             /* ---- Float arithmetic ---- */
             case VT_OP_FADD: case VT_OP_FSUB: case VT_OP_FMUL: case VT_OP_FDIV: {
-                if (sp < 2) return -1; /* stack underflow: float arith */
-                vtx_nodeid_t b = op_stack[--sp];
-                vtx_nodeid_t a = op_stack[--sp];
-                vtx_node_opcode_t ir_op;
-                switch (op) {
-                case VT_OP_FADD: ir_op = VTX_OP_Add; break;
-                case VT_OP_FSUB: ir_op = VTX_OP_Sub; break;
-                case VT_OP_FMUL: ir_op = VTX_OP_Mul; break;
-                case VT_OP_FDIV: ir_op = VTX_OP_Div; break;
-                default: ir_op = VTX_OP_Add; break;
-                }
-                result = vtx_node_create(&graph->node_table, ir_op);
-                if (result == VTX_NODEID_INVALID) return -1;
-                vtx_node_t *n = vtx_node_get(&graph->node_table, result);
-                n->type = VTX_TYPE_Float;
-                vtx_node_add_input(&graph->node_table, result, a);
-                vtx_node_add_input(&graph->node_table, result, b);
-                op_stack[sp++] = result;
-                /* Exception edge: FDIV can throw (e.g. floating-point exception) */
-                if (ir_op == VTX_OP_Div) {
-                    if (emit_exception_edge(graph, block, result) != 0) return -1;
-                }
-                break;
+                /* T2 doesn't yet support float arithmetic correctly.
+                 * Return an error so the caller falls back to T0 (interpreter),
+                 * which handles floats correctly. */
+                return -1;
             }
 
             /* ---- Bitwise / unary ---- */

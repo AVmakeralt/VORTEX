@@ -63,6 +63,13 @@ const vtx_node_opcode_info_t vtx_node_opcode_table[VTX_NODE_OP_COUNT] = {
     OP_INFO(CmpF,           VTX_NF_DATA, 2),
     OP_INFO(CmpD,           VTX_NF_DATA, 2),
 
+    /* Data: float arithmetic (SSE2) */
+    OP_INFO(AddF,           VTX_NF_DATA, 2),
+    OP_INFO(SubF,           VTX_NF_DATA, 2),
+    OP_INFO(MulF,           VTX_NF_DATA, 2),
+    OP_INFO(DivF,           VTX_NF_DATA, 2),
+    OP_INFO(NegF,           VTX_NF_DATA, 1),
+
     /* Data: min/max */
     OP_INFO(Min,            VTX_NF_DATA, 2),
     OP_INFO(Max,            VTX_NF_DATA, 2),
@@ -202,6 +209,15 @@ vtx_nodetype_t vtx_node_default_type(vtx_node_opcode_t opcode)
     case VTX_OP_CmpF:
     case VTX_OP_CmpD:
         return VTX_TYPE_Int;
+
+    /* Float/double-producing nodes (SSE2 arithmetic).
+     * These return VTX_TYPE_Float so the isel knows to use XMM registers. */
+    case VTX_OP_AddF:
+    case VTX_OP_SubF:
+    case VTX_OP_MulF:
+    case VTX_OP_DivF:
+    case VTX_OP_NegF:
+        return VTX_TYPE_Float;
 
     /* Pointer-producing nodes */
     case VTX_OP_Load:
