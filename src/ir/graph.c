@@ -1887,10 +1887,25 @@ int vtx_graph_build(vtx_graph_t *graph,
 
             /* ---- Float arithmetic ---- */
             case VT_OP_FADD: case VT_OP_FSUB: case VT_OP_FMUL: case VT_OP_FDIV: {
-                /* T2 doesn't yet support float arithmetic correctly.
-                 * Return an error so the caller falls back to T0 (interpreter),
-                 * which handles floats correctly. */
-                return -1;
+                if (sp < 2) return -1; /* stack underflow: float arith */
+                vtx_nodeid_t b = op_stack[--sp];
+                vtx_nodeid_t a = op_stack[--sp];
+                vtx_node_opcode_t ir_op;
+                switch (op) {
+                case VT_OP_FADD: ir_op = VTX_OP_AddF; break;
+                case VT_OP_FSUB: ir_op = VTX_OP_SubF; break;
+                case VT_OP_FMUL: ir_op = VTX_OP_MulF; break;
+                case VT_OP_FDIV: ir_op = VTX_OP_DivF; break;
+                default: ir_op = VTX_OP_AddF; break;
+                }
+                result = vtx_node_create(&graph->node_table, ir_op);
+                if (result == VTX_NODEID_INVALID) return -1;
+                vtx_node_t *n = vtx_node_get(&graph->node_table, result);
+                n->type = VTX_TYPE_Float;
+                vtx_node_add_input(&graph->node_table, result, a);
+                vtx_node_add_input(&graph->node_table, result, b);
+                op_stack[sp++] = result;
+                break;
             }
 
             /* ---- Bitwise / unary ---- */

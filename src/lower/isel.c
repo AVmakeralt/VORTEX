@@ -763,6 +763,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
         vtx_inst_t inst;
         memset(&inst, 0, sizeof(inst));
+        inst.opcode = VTX_X86_MOV;
         inst.opnd_kinds[0] = VTX_OPND_VREG;
         inst.operands[0] = dst;
         inst.opnd_kinds[1] = VTX_OPND_IMM;
@@ -775,19 +776,15 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             uint64_t smi_val = VTX_NAN_BOX_HEADER
                              | (((uint64_t)raw & 0x0000FFFFFFFFFFFFULL) << 3)
                              | 0ULL; /* VTX_TAG_SMI = 0 */
-            inst.opcode = VTX_X86_MOV;
             inst.imm = (int64_t)smi_val;
         } else if (node->constval.kind == VTX_TYPE_Ptr) {
-            inst.opcode = VTX_X86_MOV;
             inst.imm = (int64_t)(uintptr_t)node->constval.as.ptr_val;
         } else if (node->constval.kind == VTX_TYPE_Float) {
-            /* Store the raw bits of the double as an immediate.
-             * Note: T2 currently rejects float methods at graph build time,
-             * so this path is only reached for non-arithmetic float usage
-             * (e.g., loading a float constant that's returned directly). */
+            /* Float constant: store the raw double bits as an immediate in
+             * a GPR vreg. Float arithmetic is lowered to runtime calls which
+             * take NaN-boxed values in GPRs, so float constants stay in GPRs. */
             union { double d; uint64_t u; } cvt;
             cvt.d = node->constval.as.float_val;
-            inst.opcode = VTX_X86_MOV;
             inst.imm = (int64_t)cvt.u;
         } else {
             /* Void/undefined constants: emit SMI(0) as a safe default.
@@ -804,7 +801,6 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
              * representation of the integer 0. Emitting it here ensures
              * that even if the void constant is not removed by DCE, it
              * won't corrupt the value system. */
-            inst.opcode = VTX_X86_MOV;
             inst.imm = (int64_t)VTX_NAN_BOX_HEADER;  /* SMI(0) */
         }
         inst.flags = VTX_INST_FLAG_HAS_IMM;
@@ -2139,13 +2135,14 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         uint32_t rhs_vreg = vtx_isel_node_vreg(stream, node->inputs[1]);
         if (lhs_vreg == VTX_VREG_INVALID || rhs_vreg == VTX_VREG_INVALID) return -1;
 
-        /* Call the runtime helper:
+        /* Call the runtime helper (same pattern as CallRuntime):
          *   RDI = lhs (NaN-boxed value)
          *   RSI = rhs (NaN-boxed value)
          *   RAX = result (NaN-boxed value)
          *
          * The runtime helper extracts the doubles, does the arithmetic,
-         * and re-boxes the result. */
+         * and re-boxes the result. Float values stay in GPRs throughout —
+         * no XMM register allocation involved. */
         extern vtx_value_t vtx_runtime_float_add(vtx_value_t a, vtx_value_t b);
         extern vtx_value_t vtx_runtime_float_sub(vtx_value_t a, vtx_value_t b);
         extern vtx_value_t vtx_runtime_float_mul(vtx_value_t a, vtx_value_t b);
@@ -2160,13 +2157,21 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         default: helper = (void *)vtx_runtime_float_add; break;
         }
 
-        /* RDI = lhs */
+        /* RDI = lhs
+         * Mark NO_COALESCE so the regalloc doesn't coalesce RDI with lhs_vreg
+         * (which would extend lhs_vreg's live range across the call and
+         * conflict with RDI being clobbered by the call). */
         uint32_t rdi_preg = vtx_isel_alloc_vreg_fixed(stream, arena, 7 /* RDI */);
-        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, rdi_preg, lhs_vreg, node_id), arena);
+        vtx_inst_t mov_rdi = make_rr_inst(VTX_X86_MOV, rdi_preg, lhs_vreg, node_id);
+        mov_rdi.flags |= VTX_INST_FLAG_NO_COALESCE;
+        vtx_isel_emit_inst(block, mov_rdi, arena);
 
-        /* RSI = rhs */
+        /* RSI = rhs
+         * Same NO_COALESCE reason. */
         uint32_t rsi_preg = vtx_isel_alloc_vreg_fixed(stream, arena, 6 /* RSI */);
-        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, rsi_preg, rhs_vreg, node_id), arena);
+        vtx_inst_t mov_rsi = make_rr_inst(VTX_X86_MOV, rsi_preg, rhs_vreg, node_id);
+        mov_rsi.flags |= VTX_INST_FLAG_NO_COALESCE;
+        vtx_isel_emit_inst(block, mov_rsi, arena);
 
         /* CALL helper */
         vtx_inst_t call_inst;
@@ -2183,11 +2188,19 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         call_inst.source_node = node_id;
         vtx_isel_emit_inst(block, call_inst, arena);
 
-        /* Map the AddF result directly to RAX (the call's return register).
-         * Same pattern as CallRuntime — the result vreg IS RAX, so
-         * subsequent uses read from RAX directly. */
-        uint32_t rax_result = vtx_isel_alloc_vreg_fixed(stream, arena, 0 /* RAX */);
-        vtx_isel_map_node_vreg(stream, node_id, rax_result, arena);
+        /* Allocate the result as a NON-fixed vreg and map the node to it.
+         * Then emit "MOV result_vreg, RAX" to move the call result into
+         * a normally-allocated vreg. This avoids the fixed-RAX-vreg
+         * problem where the regalloc doesn't track RAX liveness across
+         * the call (the call clobbers RAX, so a fixed RAX vreg has no
+         * interval covering the call site). */
+        uint32_t dst = ensure_node_vreg(stream, node_id, arena);
+        /* Use the official alloc_vreg_fixed for RAX. The regalloc will
+         * allocate RAX to this vreg. We then emit MOV dst, rax_vreg. */
+        uint32_t rax_preg = vtx_isel_alloc_vreg_fixed(stream, arena, 0 /* RAX */);
+        vtx_inst_t mov_result = make_rr_inst(VTX_X86_MOV, dst, rax_preg, node_id);
+        mov_result.flags |= VTX_INST_FLAG_NO_COALESCE;
+        vtx_isel_emit_inst(block, mov_result, arena);
         break;
     }
 
@@ -2952,11 +2965,18 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
                 uint32_t val_vreg = vtx_isel_node_vreg(stream, node->inputs[i]);
                 if (val_vreg != VTX_VREG_INVALID) {
                     uint32_t rax_vreg = vtx_isel_alloc_vreg_fixed(stream, arena, 0);
-                    /* Float arithmetic is lowered to runtime calls, so float
-                     * values stay in GPRs (NaN-boxed). A GPR MOV is correct
-                     * for both int and float return values. */
-                    vtx_isel_emit_inst(block,
-                        make_rr_inst(VTX_X86_MOV, rax_vreg, val_vreg, node_id), arena);
+                    /* Mark NO_COALESCE so the Return's MOV RAX, val_vreg isn't
+                     * coalesced with val_vreg (which would extend val_vreg's
+                     * live range to include RAX, but val_vreg is already dead
+                     * at the Return — coalescing is safe but might cause the
+                     * regalloc to put val_vreg in RAX, which is fine).
+                     *
+                     * Actually, NOT marking NO_COALESCE lets the coalescer
+                     * merge val_vreg with RAX when val_vreg is dead after
+                     * this MOV — which is the desired optimization (the value
+                     * ends up in RAX without an explicit MOV). */
+                    vtx_inst_t mov_ret = make_rr_inst(VTX_X86_MOV, rax_vreg, val_vreg, node_id);
+                    vtx_isel_emit_inst(block, mov_ret, arena);
                 }
                 break;
             }
