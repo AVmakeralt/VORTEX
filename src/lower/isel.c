@@ -745,21 +745,12 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
          * XORPS xmm, xmm zeros the entire 128-bit register, which gives
          * us +0.0 in the low 64 bits. This is shorter and faster than
          * loading a 64-bit immediate. The register renamer handles
-         * XOR zeroing for free on modern CPUs.
-         */
-        if (node->constval.kind == VTX_TYPE_Float && node->constval.as.float_val == 0.0) {
-            vtx_inst_t xorps;
-            memset(&xorps, 0, sizeof(xorps));
-            xorps.opcode = VTX_X86_XORPS;
-            xorps.opnd_kinds[0] = VTX_OPND_VREG;
-            xorps.operands[0] = dst;
-            xorps.opnd_kinds[1] = VTX_OPND_VREG;
-            xorps.operands[1] = dst;
-            xorps.flags = VTX_INST_FLAG_IS_SSE;
-            xorps.source_node = node_id;
-            vtx_isel_emit_inst(block, xorps, arena);
-            break;
-        }
+        /* Float zero optimization (XORPS) is DISABLED because float arithmetic
+         * is lowered to runtime calls that take NaN-boxed values in GPRs.
+         * XORPS zeros an XMM register, but we need the raw double bits (0x0
+         * for 0.0) in a GPR. The generic MOV imm path below handles this
+         * correctly: MOV dst, 0 puts 0x0000000000000000 in a GPR, which is
+         * the correct NaN-boxed representation of 0.0 (raw non-NaN double). */
 
         vtx_inst_t inst;
         memset(&inst, 0, sizeof(inst));
@@ -2188,18 +2179,30 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         call_inst.source_node = node_id;
         vtx_isel_emit_inst(block, call_inst, arena);
 
-        /* Allocate the result as a NON-fixed vreg and map the node to it.
-         * Then emit "MOV result_vreg, RAX" to move the call result into
-         * a normally-allocated vreg. This avoids the fixed-RAX-vreg
-         * problem where the regalloc doesn't track RAX liveness across
-         * the call (the call clobbers RAX, so a fixed RAX vreg has no
-         * interval covering the call site). */
+        /* Emit "MOV dst_vreg, RAX" where RAX is a PREG (physical register),
+         * NOT a VREG. This is the key fix:
+         *
+         * The CALL instruction doesn't define any vreg in the regalloc's
+         * view (its operand[0] is IMM, not VREG). So a fixed-RAX vreg
+         * allocated after the call has no definition → invalid interval
+         * → gets fallback-spilled → the result is lost.
+         *
+         * By using PREG for the source (RAX=0), the regalloc doesn't need
+         * to track it. The dst vreg is properly defined (operand[0] of MOV).
+         * The emitter sees r1=0 (RAX) and emits either:
+         *   - MOV dst_reg, RAX (if dst gets a register)
+         *   - MOV [spill_slot], RAX (if dst is spilled)
+         * Both are correct — RAX holds the call result. */
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
-        /* Use the official alloc_vreg_fixed for RAX. The regalloc will
-         * allocate RAX to this vreg. We then emit MOV dst, rax_vreg. */
-        uint32_t rax_preg = vtx_isel_alloc_vreg_fixed(stream, arena, 0 /* RAX */);
-        vtx_inst_t mov_result = make_rr_inst(VTX_X86_MOV, dst, rax_preg, node_id);
-        mov_result.flags |= VTX_INST_FLAG_NO_COALESCE;
+        vtx_inst_t mov_result;
+        memset(&mov_result, 0, sizeof(mov_result));
+        mov_result.opcode = VTX_X86_MOV;
+        mov_result.opnd_kinds[0] = VTX_OPND_VREG;
+        mov_result.operands[0] = dst;
+        mov_result.opnd_kinds[1] = VTX_OPND_PREG;  /* RAX as physical register */
+        mov_result.operands[1] = 0;                 /* RAX = register 0 */
+        mov_result.flags = VTX_INST_FLAG_NO_COALESCE;
+        mov_result.source_node = node_id;
         vtx_isel_emit_inst(block, mov_result, arena);
         break;
     }
