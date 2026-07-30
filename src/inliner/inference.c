@@ -50,6 +50,12 @@
 /* A depth-3 tree has at most 15 nodes (7 internal + 8 leaves).
  * We use a compact tree builder to construct the default model. */
 
+/* Sentinel for unused split slots in tree specs (depth < 3).
+ * MUST NOT equal VTX_GBDT_LEAF_MARKER (0xFFFF) — otherwise
+ * build_split() creates a phantom leaf that traverse_tree() returns 0.0 from,
+ * silently killing half the model. */
+#define F_NONE 0xFFFE
+
 /* Helper: add a leaf node, return its index within the tree-local array */
 static uint32_t build_leaf(vtx_gbdt_node_t *nodes, uint32_t *pos, float value)
 {
@@ -63,10 +69,26 @@ static uint32_t build_leaf(vtx_gbdt_node_t *nodes, uint32_t *pos, float value)
 }
 
 /* Helper: add a split node, return its index.
- * Children must be set after they are created. */
+ * Children must be set after they are created.
+ *
+ * BUGFIX (sentinel collision): If feature == F_NONE, emit a LEAF instead
+ * of a split. Previously, F_NONE was 0xFFFF == VTX_GBDT_LEAF_MARKER, so
+ * build_split() created a node that traverse_tree() mistook for a leaf
+ * with value 0.0 — silently killing 10/10 depth-3 trees and the right
+ * half of all 20 depth-2 trees. Now F_NONE is 0xFFFE (distinct from the
+ * leaf marker), and build_split() checks for it explicitly.
+ *
+ * The leaf_value_if_none parameter provides the leaf value to use when
+ * the split is unused (F_NONE). This should be the average of the two
+ * would-be children's leaf values, which is the optimal constant
+ * prediction for that subtree. */
 static uint32_t build_split(vtx_gbdt_node_t *nodes, uint32_t *pos,
-                             uint16_t feature, float threshold)
+                             uint16_t feature, float threshold,
+                             float leaf_value_if_none)
 {
+    if (feature == F_NONE) {
+        return build_leaf(nodes, pos, leaf_value_if_none);
+    }
     uint32_t idx = (*pos)++;
     nodes[idx].feature_index = feature;
     nodes[idx].threshold     = threshold;
@@ -114,17 +136,20 @@ static uint32_t build_tree_from_spec(vtx_gbdt_node_t *base,
 
     if (spec->depth == 1) {
         /* Root + 2 leaves */
-        uint32_t root = build_split(base, &pos, spec->f0, spec->t0);
+        uint32_t root = build_split(base, &pos, spec->f0, spec->t0, 0.0f);
         uint32_t left = build_leaf(base, &pos, spec->leaves[0]);
         uint32_t right = build_leaf(base, &pos, spec->leaves[1]);
         base[root].left_child  = (int32_t)left;
         base[root].right_child = (int32_t)right;
         node_count = 3;
     } else if (spec->depth == 2) {
-        /* Root + 2 internal + 4 leaves */
-        uint32_t root = build_split(base, &pos, spec->f0, spec->t0);
-        uint32_t n1   = build_split(base, &pos, spec->f1, spec->t1);
-        uint32_t n2   = build_split(base, &pos, spec->f2, spec->t2);
+        /* Root + 2 internal + 4 leaves.
+         * If f2 == F_NONE, n2 becomes a leaf (average of leaves[2] and leaves[3]).
+         * The extra leaf nodes (l2, l3) are still emitted but unreachable. */
+        uint32_t root = build_split(base, &pos, spec->f0, spec->t0, 0.0f);
+        uint32_t n1   = build_split(base, &pos, spec->f1, spec->t1, 0.0f);
+        uint32_t n2   = build_split(base, &pos, spec->f2, spec->t2,
+                                     (spec->leaves[2] + spec->leaves[3]) * 0.5f);
         uint32_t l0   = build_leaf(base, &pos, spec->leaves[0]);
         uint32_t l1   = build_leaf(base, &pos, spec->leaves[1]);
         uint32_t l2   = build_leaf(base, &pos, spec->leaves[2]);
@@ -137,14 +162,21 @@ static uint32_t build_tree_from_spec(vtx_gbdt_node_t *base,
         base[n2].right_child   = (int32_t)l3;
         node_count = 7;
     } else {
-        /* Full depth 3: root + 2 internal + 4 internal + 8 leaves = 15 nodes */
-        uint32_t root = build_split(base, &pos, spec->f0, spec->t0);
-        uint32_t n1   = build_split(base, &pos, spec->f1, spec->t1);
-        uint32_t n2   = build_split(base, &pos, spec->f2, spec->t2);
-        uint32_t n3   = build_split(base, &pos, spec->f3, spec->t3);
-        uint32_t n4   = build_split(base, &pos, spec->f4, spec->t4);
-        uint32_t n5   = build_split(base, &pos, spec->f5, spec->t5);
-        uint32_t n6   = build_split(base, &pos, spec->f6, spec->t6);
+        /* Full depth 3: root + 2 internal + 4 internal + 8 leaves = 15 nodes.
+         * If any of f2..f6 == F_NONE, that node becomes a leaf (average of
+         * its would-be children's leaf values). */
+        uint32_t root = build_split(base, &pos, spec->f0, spec->t0, 0.0f);
+        uint32_t n1   = build_split(base, &pos, spec->f1, spec->t1, 0.0f);
+        uint32_t n2   = build_split(base, &pos, spec->f2, spec->t2,
+                                     (spec->leaves[4]+spec->leaves[5]+spec->leaves[6]+spec->leaves[7]) * 0.25f);
+        uint32_t n3   = build_split(base, &pos, spec->f3, spec->t3,
+                                     (spec->leaves[0] + spec->leaves[1]) * 0.5f);
+        uint32_t n4   = build_split(base, &pos, spec->f4, spec->t4,
+                                     (spec->leaves[2] + spec->leaves[3]) * 0.5f);
+        uint32_t n5   = build_split(base, &pos, spec->f5, spec->t5,
+                                     (spec->leaves[4] + spec->leaves[5]) * 0.5f);
+        uint32_t n6   = build_split(base, &pos, spec->f6, spec->t6,
+                                     (spec->leaves[6] + spec->leaves[7]) * 0.5f);
         uint32_t l0   = build_leaf(base, &pos, spec->leaves[0]);
         uint32_t l1   = build_leaf(base, &pos, spec->leaves[1]);
         uint32_t l2   = build_leaf(base, &pos, spec->leaves[2]);
@@ -194,8 +226,7 @@ static uint32_t build_tree_from_spec(vtx_gbdt_node_t *base,
 #define F_DEOPT_RATE     13
 #define F_INLINE_HISTORY 14
 
-/* Leaf marker for unused depth-3 nodes (depth < 3 uses fewer nodes) */
-#define F_NONE 0xFFFF
+/* (F_NONE is defined above, before build_split) */
 
 static const vtx_tree_spec_t default_tree_specs[VTX_GBDT_DEFAULT_TREE_COUNT] = {
     /* ---- Group 1: Callee size features (trees 0-5) ---- */

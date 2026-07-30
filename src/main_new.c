@@ -722,12 +722,15 @@ static int run_self_test(void)
         memset(&model, 0, sizeof(model));
         vtx_gbdt_load_default_model(&model);
 
-        /* Test with a favorable feature vector:
-         * small callee, high frequency, monomorphic receiver */
+        /* Test with a favorable feature vector (normalized [0,1]):
+         * small callee (0.01), hot call site (0.13), monomorphic,
+         * callee is hot, has loops, no allocations, no virtual calls */
         vtx_inline_features_t features = {0};
-        features.features[0] = 50.0;    /* callee_size: small */
-        features.features[2] = 10000.0; /* call_site_frequency: hot */
-        features.features[10] = 1.0;    /* receiver_type_certainty: monomorphic */
+        features.features[0] = 0.01;   /* callee_size: small (50/4096) */
+        features.features[2] = 0.13;   /* call_site_frequency: hot */
+        features.features[5] = 1.0;    /* callee_is_hot: yes */
+        features.features[6] = 1.0;    /* callee_has_loops: yes */
+        features.features[10] = 1.0;   /* receiver_type_certainty: monomorphic */
 
         double score = vtx_gbdt_infer(&model, &features);
 
