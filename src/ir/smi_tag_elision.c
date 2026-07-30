@@ -76,8 +76,9 @@ static bool can_produce_raw_int(vtx_node_opcode_t op) {
      * the elision pass to insert retag instructions at Phi boundaries
      * when a Phi has both RAW_INT and non-RAW_INT consumers. Without
      * that, a raw int value leaks through the Phi to a consumer that
-     * expects a tagged SMI (e.g. CallRuntime/print_ln), producing
-     * garbage output. This is a future optimization — see Perf 2. */
+     * expects a tagged SMI (e.g. Cmp in a loop condition), producing
+     * wrong results or crashes. This is a future optimization — see
+     * the analysis in the frontend audit. */
     default:
         return false;
     }

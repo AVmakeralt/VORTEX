@@ -167,6 +167,7 @@ typedef struct vtx_live_interval {
     bool     is_fixed;     /* true if vreg is fixed to a physical register */
     uint8_t  fixed_reg;    /* the fixed physical register (if is_fixed) */
     bool     is_spilled;   /* true if this interval was spilled */
+    bool     is_remat;     /* true if vreg is a constant (rematerializable) */
     uint32_t use_count;    /* number of uses of this vreg (for spill cost) */
     uint32_t loop_depth;   /* estimated loop nesting depth (for spill cost) */
     uint32_t coalesce_src; /* vreg this was coalesced from (VTX_VREG_INVALID = none) */
@@ -188,6 +189,18 @@ typedef struct {
     /* Mapping: vreg → spill slot index (VTX_NO_SPILL = not spilled) */
     uint32_t *vreg_to_spill;       /* array indexed by vreg */
     uint32_t  vreg_to_spill_count;
+
+    /* Rematerialization: vreg → immediate value (for constant vregs).
+     * If vreg_is_remat[v] is true, the vreg's defining instruction is a
+     * MOV vreg, imm. When the emitter needs to load this vreg from a spill
+     * slot, it can instead re-emit the MOV imm (rematerialize), avoiding
+     * the stack access entirely.
+     *
+     * This is set during regalloc by scanning the defining instruction of
+     * each spilled vreg. Only MOV imm instructions qualify. */
+    bool     *vreg_is_remat;       /* array indexed by vreg */
+    int64_t  *vreg_remat_imm;      /* the immediate value to re-emit */
+    uint32_t  vreg_remat_count;
 
     /* Total number of spill slots used */
     uint32_t  spill_count;

@@ -90,6 +90,7 @@ static vtx_live_interval_t *compute_live_intervals(vtx_inst_stream_t *stream,
         intervals[v].is_fixed = false;
         intervals[v].fixed_reg = 0xFF;
         intervals[v].is_spilled = false;
+        intervals[v].is_remat = false;
         intervals[v].use_count = 0;
         intervals[v].loop_depth = 0;
         intervals[v].coalesce_src = VTX_VREG_INVALID;
@@ -382,12 +383,24 @@ static int cmp_intervals_by_start(const void *a, const void *b)
 /**
  * Compute the spill cost for an interval.
  * Higher cost = less desirable to spill.
- * Cost = use_count * (10 ^ loop_depth) — values in loops are much more
- * expensive to spill because every spill/reload is executed per iteration.
+ *
+ * Priority-based spilling:
+ *   - Rematerializable constants (is_remat): cost = 1 (cheapest to spill —
+ *     re-emit MOV imm instead of stack load)
+ *   - Zero-use intervals: cost = 0 (dead, spill immediately)
+ *   - All others: cost = use_count * (10 ^ loop_depth)
+ *
+ * This ensures constants are spilled FIRST (they're free to reload via
+ * rematerialization), while memory-loaded values and computed results
+ * are kept in registers as long as possible.
  */
 static uint64_t compute_spill_cost(const vtx_live_interval_t *interval)
 {
     if (interval->use_count == 0) return 0;
+    /* Rematerializable constants have the lowest spill cost.
+     * Spilling them costs nothing — the emitter re-emits MOV imm
+     * instead of loading from the stack. */
+    if (interval->is_remat) return 1;
     uint64_t cost = interval->use_count;
     /* Multiply by 10 for each level of loop nesting */
     for (uint32_t d = 0; d < interval->loop_depth; d++) {
@@ -576,6 +589,7 @@ vtx_live_interval_t *vtx_regalloc_split_interval(vtx_live_interval_t *interval,
     second->is_fixed = interval->is_fixed;
     second->fixed_reg = interval->fixed_reg;
     second->is_spilled = false;
+    second->is_remat = interval->is_remat;
     second->use_count = 0;                  /* will be counted separately */
     second->loop_depth = interval->loop_depth;
     second->coalesce_src = VTX_VREG_INVALID;
@@ -704,6 +718,47 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
      * loop. */
     result->vreg_to_phys_count = vreg_count;
     result->vreg_to_spill_count = vreg_count;
+
+    /* Allocate rematerialization tables.
+     * Scan the instruction stream for MOV vreg, imm definitions and record
+     * the immediate value. When a rematerializable vreg is spilled, the
+     * emitter can re-emit the MOV imm instead of loading from the stack.
+     *
+     * A vreg qualifies for rematerialization if its ONLY definition is a
+     * MOV vreg, imm instruction (HAS_IMM flag set, no MEM operand). This
+     * covers:
+     *   - SMI-tagged integer constants (MOV vreg, smi_val)
+     *   - Float constants (MOV vreg, raw_double_bits)
+     *   - Pointer constants (MOV vreg, ptr_val)
+     *   - Void/undefined constants (MOV vreg, SMI(0)) */
+    result->vreg_is_remat = (bool *)vtx_arena_alloc(arena, vreg_count);
+    result->vreg_remat_imm = (int64_t *)vtx_arena_alloc(arena, vreg_count * sizeof(int64_t));
+    result->vreg_remat_count = vreg_count;
+    if (result->vreg_is_remat && result->vreg_remat_imm) {
+        memset(result->vreg_is_remat, 0, vreg_count);
+        memset(result->vreg_remat_imm, 0, vreg_count * sizeof(int64_t));
+        /* Scan for MOV imm definitions */
+        for (uint32_t b = 0; b < stream->block_count; b++) {
+            vtx_inst_block_t *blk = &stream->blocks[b];
+            for (uint32_t i = 0; i < blk->inst_count; i++) {
+                vtx_inst_t *inst = &blk->insts[i];
+                if (inst->opcode == VTX_X86_MOV &&
+                    (inst->flags & VTX_INST_FLAG_HAS_IMM) &&
+                    !(inst->flags & VTX_INST_FLAG_HAS_MEM) &&
+                    inst->opnd_kinds[0] == VTX_OPND_VREG) {
+                    uint32_t vreg = inst->operands[0];
+                    if (vreg < vreg_count) {
+                        result->vreg_is_remat[vreg] = true;
+                        result->vreg_remat_imm[vreg] = inst->imm;
+                        /* Also mark the live interval for priority-based spilling */
+                        if (vreg < interval_count) {
+                            intervals[vreg].is_remat = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     /* Active list: intervals currently assigned to physical registers.
      *
