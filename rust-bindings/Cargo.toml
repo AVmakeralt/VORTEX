@@ -1,20 +1,13 @@
 [package]
 name = "vortex-jit"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 description = "Rust bindings for the VORTEX JIT compiler — a profile-guided optimizing JIT with input-shape-keyed profiles, phase partitioning, ensemble aggregation, T1 code persistence, and append-only crash-safe profile patching."
 license = "MIT"
 repository = "https://github.com/AVmakeralt/VORTEX"
 keywords = ["jit", "compiler", "pgo", "bytecode", "vm"]
 categories = ["compilers", "api-bindings"]
-include = [
-    "Cargo.toml",
-    "build.rs",
-    "wrapper.h",
-    "src/**",
-    "../src/**",
-    "../build/vortex_config.h",
-]
+include = ["Cargo.toml", "build.rs", "wrapper.h", "src/**", "../src/**", "../build/vortex_config.h"]
 
 [lib]
 name = "vortex"
@@ -32,12 +25,7 @@ optional = true
 
 [features]
 default = []
-# Use bindgen at build time (requires libclang). If not enabled,
-# pre-generated bindings in src/bindings.rs are used.
 runtime-bindgen = ["bindgen"]
-# Enable SOTA features (Markov, phase prediction, KL-divergence recomp, FDI)
 sota = []
-# Enable assertions (debug builds)
 assertions = []
-# Enable verification mode
 verify = []

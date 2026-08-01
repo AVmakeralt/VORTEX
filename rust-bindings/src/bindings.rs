@@ -199,23 +199,6 @@ pub const VTX_DEOPT_GLOBAL_FAIL_THRESHOLD: u32 = 10000;
 pub const VTX_DEOPT_COORD_MAX_SITES: u32 = 4096;
 pub const VTX_VERSIONED_CACHE_MAX_METHODS: u32 = 4096;
 pub const VTX_VERSIONED_CACHE_MAX_RETIRED: u32 = 8;
-pub const VTX_CODE_BUFFER_INITIAL_CAPACITY: u32 = 4096;
-pub const VTX_POLY_IC_SIZE: u32 = 4;
-pub const VTX_POLY_IC_TYPE_IDS_OFFSET: u32 = 0;
-pub const VTX_POLY_IC_TARGETS_OFFSET: u32 = 16;
-pub const VTX_POLY_IC_COUNT_OFFSET: u32 = 48;
-pub const VTX_POLY_IC_ENTRY_SIZE_TYPE: u32 = 4;
-pub const VTX_POLY_IC_ENTRY_SIZE_TARGET: u32 = 8;
-pub const VTX_DEP_SET_INITIAL_CAPACITY: u32 = 8;
-pub const VTX_INVERTED_INDEX_CAPACITY: u32 = 256;
-pub const VTX_GUARD_DEP_INITIAL_CAPACITY: u32 = 16;
-pub const VTX_PROFILE_MAGIC: u32 = 1448038996;
-pub const VTX_PROFILE_VERSION: u32 = 2;
-pub const VTX_PROFILE_HASH_SIZE: u32 = 32;
-pub const VTX_T1_CACHE_MAGIC: u32 = 1448039473;
-pub const VTX_T1_CACHE_VERSION: u32 = 1;
-pub const VTX_T1_CACHE_MAX_METHODS: u32 = 4096;
-pub const VTX_T1_CACHE_MAX_CODE_SIZE: u32 = 16777216;
 pub const VTX_GBDT_MAX_TREES: u32 = 100;
 pub const VTX_GBDT_MAX_DEPTH: u32 = 5;
 pub const VTX_GBDT_DEFAULT_TREE_COUNT: u32 = 30;
@@ -290,6 +273,23 @@ pub const VTX_XMM_ALL_MASK: u32 = 65535;
 pub const VTX_XMM_ALLOCATABLE_MASK: u32 = 16383;
 pub const VTX_EMIT_INITIAL_CAPACITY: u32 = 4096;
 pub const VTX_GUARD_DESC_INITIAL_CAPACITY: u32 = 32;
+pub const VTX_CODE_BUFFER_INITIAL_CAPACITY: u32 = 4096;
+pub const VTX_POLY_IC_SIZE: u32 = 4;
+pub const VTX_POLY_IC_TYPE_IDS_OFFSET: u32 = 0;
+pub const VTX_POLY_IC_TARGETS_OFFSET: u32 = 16;
+pub const VTX_POLY_IC_COUNT_OFFSET: u32 = 48;
+pub const VTX_POLY_IC_ENTRY_SIZE_TYPE: u32 = 4;
+pub const VTX_POLY_IC_ENTRY_SIZE_TARGET: u32 = 8;
+pub const VTX_DEP_SET_INITIAL_CAPACITY: u32 = 8;
+pub const VTX_INVERTED_INDEX_CAPACITY: u32 = 256;
+pub const VTX_GUARD_DEP_INITIAL_CAPACITY: u32 = 16;
+pub const VTX_PROFILE_MAGIC: u32 = 1448038996;
+pub const VTX_PROFILE_VERSION: u32 = 2;
+pub const VTX_PROFILE_HASH_SIZE: u32 = 32;
+pub const VTX_T1_CACHE_MAGIC: u32 = 1448039473;
+pub const VTX_T1_CACHE_VERSION: u32 = 1;
+pub const VTX_T1_CACHE_MAX_METHODS: u32 = 4096;
+pub const VTX_T1_CACHE_MAX_CODE_SIZE: u32 = 16777216;
 pub const VTX_ENSEMBLE_MAX_RUNS: u32 = 5;
 pub const VTX_ENSEMBLE_MIN_RUNS: u32 = 2;
 pub const VTX_ENSEMBLE_MIN_SAMPLES: u32 = 1000;
@@ -313,34 +313,16 @@ pub union __atomic_wide_counter {
     pub __value32: __atomic_wide_counter__bindgen_ty_1,
 }
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct __atomic_wide_counter__bindgen_ty_1 {
     pub __low: ::std::os::raw::c_uint,
     pub __high: ::std::os::raw::c_uint,
-}
-impl Default for __atomic_wide_counter {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct __pthread_internal_list {
     pub __prev: *mut __pthread_internal_list,
     pub __next: *mut __pthread_internal_list,
-}
-impl Default for __pthread_internal_list {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 pub type __pthread_list_t = __pthread_internal_list;
 #[repr(C)]
@@ -355,15 +337,6 @@ pub struct __pthread_mutex_s {
     pub __elision: ::std::os::raw::c_short,
     pub __list: __pthread_list_t,
 }
-impl Default for __pthread_mutex_s {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct __pthread_cond_s {
@@ -376,15 +349,6 @@ pub struct __pthread_cond_s {
     pub __unused_initialized_1: ::std::os::raw::c_uint,
     pub __unused_initialized_2: ::std::os::raw::c_uint,
 }
-impl Default for __pthread_cond_s {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 pub type pthread_t = ::std::os::raw::c_ulong;
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -393,30 +357,12 @@ pub union pthread_mutex_t {
     pub __size: [::std::os::raw::c_char; 40usize],
     pub __align: ::std::os::raw::c_long,
 }
-impl Default for pthread_mutex_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub union pthread_cond_t {
     pub __data: __pthread_cond_s,
     pub __size: [::std::os::raw::c_char; 48usize],
     pub __align: ::std::os::raw::c_longlong,
-}
-impl Default for pthread_cond_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 #[doc = " VORTEX Arena Allocator\n\n Region-based allocator used throughout the compiler pipeline.\n Each compilation gets its own arena; when compilation finishes,\n the entire arena is freed. No individual free — only wholesale reset.\n\n Pages are allocated via mmap and tracked in a singly-linked list.\n Allocations are 16-byte aligned within each page."]
 pub type vtx_arena_page_t = vtx_arena_page;
@@ -427,30 +373,12 @@ pub struct vtx_arena_page {
     pub size: usize,
     pub used: usize,
 }
-impl Default for vtx_arena_page {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct vtx_arena_t {
     pub first_page: *mut vtx_arena_page_t,
     pub current_page: *mut vtx_arena_page_t,
     pub total_allocated: usize,
-}
-impl Default for vtx_arena_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Initialize an arena with its initial 64KB page.\n Returns 0 on success, -1 on failure (mmap error)."]
@@ -475,7 +403,7 @@ extern "C" {
 pub type vtx_value_t = u64;
 #[doc = " Heap object layout:\n\n   +-------------------+\n   | type_id   (4)     |  Type descriptor index\n   | gc_mark   (1)     |  GC mark bit\n   | gc_age    (1)     |  Number of young-gen collections survived\n   | gc_pinned (1)     |  1 if pinned (cannot be moved by GC)\n   | gc_remembered (1) |  1 if in old gen remembered set\n   | size      (4)     |  Total size in bytes including this header\n   | shape_id  (4)     |  Shape/layout fingerprint\n   | field_count (4)   |  Number of fields following this header\n   +-------------------+\n   | fields[0]  (8)    |  Field 0 (tagged value)\n   | fields[1]  (8)    |  Field 1\n   | ...               |\n   +-------------------+\n\n The header is padded to 8-byte alignment. Fields are vtx_value_t (8 bytes each)."]
 #[repr(C)]
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct vtx_heap_object_t {
     pub type_id: u32,
     pub gc_mark: u8,
@@ -581,15 +509,6 @@ pub struct vtx_opcode_info_t {
     pub has_operand: bool,
     pub operand_size: u8,
 }
-impl Default for vtx_opcode_info_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[doc = " A bytecode module: code + constant pool."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -600,15 +519,6 @@ pub struct vtx_bytecode_t {
     pub constant_count: u32,
     pub max_locals: u16,
     pub max_stack: u16,
-}
-impl Default for vtx_bytecode_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Read the opcode at the given PC."]
@@ -653,15 +563,6 @@ pub struct vtx_field_desc_t {
     pub type_: vtx_typeid_t,
     pub offset: u32,
 }
-impl Default for vtx_field_desc_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct vtx_method_desc_t {
@@ -673,15 +574,6 @@ pub struct vtx_method_desc_t {
     pub arg_count: u32,
     pub method_symbol_id: u32,
     pub is_virtual: bool,
-}
-impl Default for vtx_method_desc_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 pub type vtx_type_desc_t = vtx_type_desc;
 #[repr(C)]
@@ -701,30 +593,12 @@ pub struct vtx_type_desc {
     pub interface_count: u32,
     pub interfaces: *mut vtx_typeid_t,
 }
-impl Default for vtx_type_desc {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct vtx_symbol_t {
     pub name: *const ::std::os::raw::c_char,
     pub hash: u32,
     pub length: u32,
-}
-impl Default for vtx_symbol_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -735,15 +609,6 @@ pub struct vtx_symbol_table_t {
     pub hash_buckets: *mut u32,
     pub hash_bucket_count: u32,
 }
-impl Default for vtx_symbol_table_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct vtx_type_system_t {
@@ -752,15 +617,6 @@ pub struct vtx_type_system_t {
     pub capacity: u32,
     pub shape_counter: vtx_shapeid_t,
     pub symbol_table: vtx_symbol_table_t,
-}
-impl Default for vtx_type_system_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Initialize the type system with the root Object type pre-registered.\n Returns 0 on success, -1 on failure."]
@@ -875,15 +731,6 @@ pub struct vtx_ic_entry_t {
     pub typeid_: vtx_typeid_t,
     pub method: *const vtx_method_desc_t,
 }
-impl Default for vtx_ic_entry_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct vtx_inline_cache_t {
@@ -891,15 +738,6 @@ pub struct vtx_inline_cache_t {
     pub entries: [vtx_ic_entry_t; 5usize],
     pub count: u32,
     pub lock: ::std::os::raw::c_int,
-}
-impl Default for vtx_inline_cache_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Initialize an inline cache to empty monomorphic state."]
@@ -937,15 +775,6 @@ pub struct vtx_semi_space_t {
     pub current: *mut u8,
     pub size: usize,
 }
-impl Default for vtx_semi_space_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 pub type vtx_free_node_t = vtx_free_node;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -959,15 +788,6 @@ pub struct vtx_free_node {
     pub size_high: u32,
     pub next: *mut vtx_free_node_t,
 }
-impl Default for vtx_free_node {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct vtx_old_gen_t {
@@ -976,31 +796,13 @@ pub struct vtx_old_gen_t {
     pub used: usize,
     pub free_list: *mut vtx_free_node_t,
 }
-impl Default for vtx_old_gen_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct vtx_remembered_entry_t {
     pub obj: *mut vtx_heap_object_t,
 }
-impl Default for vtx_remembered_entry_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_root_entry_t {
     pub value: vtx_value_t,
 }
@@ -1043,15 +845,6 @@ pub struct vtx_gc_t {
     pub heap_size: usize,
     pub safepoint_mgr: *mut ::std::os::raw::c_void,
     pub jit_root_scan_fn: ::std::option::Option<unsafe extern "C" fn(gc: *mut vtx_gc_t)>,
-}
-impl Default for vtx_gc_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Initialize the garbage collector. Requires a type_system for\n object size/field layout information.\n The mode parameter selects the GC strategy.\n Returns 0 on success, -1 on failure."]
@@ -1282,15 +1075,6 @@ pub struct vtx_safepoint_thread_t {
     pub safepoint_count: u32,
     pub total_wait_ns: u64,
 }
-impl Default for vtx_safepoint_thread_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct vtx_safepoint_manager_t {
@@ -1306,15 +1090,6 @@ pub struct vtx_safepoint_manager_t {
     pub safepointed_count: u32,
     pub total_safepoints: u64,
     pub total_wait_ns: u64,
-}
-impl Default for vtx_safepoint_manager_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     pub fn vtx_safepoint_manager_init(
@@ -1370,15 +1145,6 @@ pub struct vtx_frame {
     pub catch_type: vtx_typeid_t,
     pub exception: vtx_value_t,
 }
-impl Default for vtx_frame {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[doc = " A single 256KB block in the frame stack. Blocks are chained together\n to allow the frame stack to grow beyond a single block."]
 pub type vtx_frame_block_t = vtx_frame_block;
 #[repr(C)]
@@ -1389,15 +1155,6 @@ pub struct vtx_frame_block {
     pub used: usize,
     pub prev: *mut vtx_frame_block_t,
 }
-impl Default for vtx_frame_block {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[doc = " The frame stack is a chain of pre-allocated memory blocks from which\n frames are carved out sequentially. This avoids malloc in the dispatch loop.\n When a block is full, a new block is allocated and becomes the current block.\n When the top frame is destroyed, if the current block is empty, it is\n freed and the previous block becomes current."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -1405,15 +1162,6 @@ pub struct vtx_frame_stack_t {
     pub current: *mut vtx_frame_block_t,
     pub block_size: usize,
     pub block_count: u32,
-}
-impl Default for vtx_frame_stack_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Initialize the frame stack allocator.\n Allocates the first 256KB block.\n Returns 0 on success, -1 on failure."]
@@ -1447,7 +1195,7 @@ pub const vtx_compile_tier_t_VT_TIER_T3: vtx_compile_tier_t = 3;
 #[doc = " VORTEX Profiling Counters\n\n Per-method profile data collected by the interpreter (T0).\n Used to make compilation tier decisions and feed the optimizer.\n\n All counters are saturating — they never overflow."]
 pub type vtx_compile_tier_t = ::std::os::raw::c_uint;
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_tier_up_state_t {
     pub tier_up_counter: i32,
     pub compilation_requested: bool,
@@ -1458,15 +1206,6 @@ pub struct vtx_tier_up_state_t {
 pub struct vtx_call_site_profile_t {
     pub entries: [vtx_ic_entry_t; 4usize],
     pub count: u32,
-}
-impl Default for vtx_call_site_profile_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 #[doc = " Per-method profiling data."]
 #[repr(C)]
@@ -1486,15 +1225,6 @@ pub struct vtx_profile_data_t {
     pub deopt_count: u32,
     pub tier_up: vtx_tier_up_state_t,
 }
-impl Default for vtx_profile_data_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct vtx_profiler_t {
@@ -1508,24 +1238,6 @@ pub struct vtx_profiler_t {
 pub struct vtx_profiler_t__bindgen_ty_1 {
     pub method: *const vtx_method_desc_t,
     pub pd: *mut vtx_profile_data_t,
-}
-impl Default for vtx_profiler_t__bindgen_ty_1 {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
-impl Default for vtx_profiler_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Initialize the profiler.\n Returns 0 on success, -1 on failure."]
@@ -1687,34 +1399,34 @@ extern "C" {
 }
 #[doc = " A call site observation: receiver type and result type."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_tf_call_observation_t {
     pub receiver_typeid: vtx_typeid_t,
     pub result_typeid: vtx_typeid_t,
 }
 #[doc = " A field access observation: holder shape and value type."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_tf_field_observation_t {
     pub holder_shapeid: vtx_shapeid_t,
     pub value_typeid: vtx_typeid_t,
 }
 #[doc = " A branch observation: taken or not taken."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_tf_branch_observation_t {
     pub taken: bool,
 }
 #[doc = " A single (type_id, count) entry in the per-type frequency table.\n Tracks how many times a specific receiver type was observed at a call site."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_type_freq_entry_t {
     pub type_id: vtx_typeid_t,
     pub count: u32,
 }
 #[doc = " Per-type frequency distribution for a single call site.\n Enables accurate KL divergence computation for recompilation decisions.\n Without this, the KL divergence is meaningless because uniform weights\n are used (each observed type gets equal weight regardless of actual\n frequency)."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_type_freq_t {
     pub entries: [vtx_type_freq_entry_t; 8usize],
     pub entry_count: u32,
@@ -1722,7 +1434,7 @@ pub struct vtx_type_freq_t {
 }
 #[doc = " A stable-type signature: the tuple (receiver_type, arg1_type, ..., result_type)\n observed at a call site. When all types in the signature have been stable\n for VTX_TYPE_STABILITY_WINDOW consecutive observations, the site is marked\n as hyper-stable and receives a single composite guard."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_type_signature_t {
     pub types: [vtx_typeid_t; 8usize],
     pub slot_count: u32,
@@ -1731,7 +1443,7 @@ pub struct vtx_type_signature_t {
 }
 #[doc = " Call site feedback: circular buffer of call observations."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_tf_call_site_t {
     pub observations: [vtx_tf_call_observation_t; 32usize],
     pub write_index: u8,
@@ -1741,7 +1453,7 @@ pub struct vtx_tf_call_site_t {
 }
 #[doc = " Field access feedback: circular buffer of field observations."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_tf_field_site_t {
     pub observations: [vtx_tf_field_observation_t; 32usize],
     pub write_index: u8,
@@ -1752,7 +1464,7 @@ pub struct vtx_tf_field_site_t {
 }
 #[doc = " Branch feedback: circular buffer of branch observations."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_tf_branch_site_t {
     pub observations: [vtx_tf_branch_observation_t; 32usize],
     pub write_index: u8,
@@ -1768,15 +1480,6 @@ pub struct vtx_type_feedback_t {
     pub field_site_count: u32,
     pub branch_sites: *mut vtx_tf_branch_site_t,
     pub branch_site_count: u32,
-}
-impl Default for vtx_type_feedback_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Initialize the type feedback collector with the given maximum\n number of sites for each category.\n Returns 0 on success, -1 on failure."]
@@ -1914,15 +1617,6 @@ pub struct vtx_compile_task_t {
     pub arg: *mut ::std::os::raw::c_void,
     pub arena: *mut vtx_arena_t,
 }
-impl Default for vtx_compile_task_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct vtx_priority_queue_t {
@@ -1935,15 +1629,6 @@ pub struct vtx_priority_queue_t {
     pub total_pushed: u64,
     pub total_popped: u64,
     pub max_queue_depth: u64,
-}
-impl Default for vtx_priority_queue_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Initialize the priority queue.\n Returns 0 on success, -1 on failure."]
@@ -1999,15 +1684,6 @@ pub struct vtx_worker_t {
     pub current_method: u32,
     pub current_tier: vtx_compile_tier_t,
 }
-impl Default for vtx_worker_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[doc = " Compilation callback: invoked by worker threads when a task has\n method_id set but task_fn is NULL. The callback looks up the method,\n runs the pipeline, and installs the compiled code.\n\n @param method_id  Method to compile\n @param tier       Compilation tier\n @param context    User-provided context (e.g. compile context)\n @return           0 on success, -1 on failure"]
 pub type vtx_compile_callback_t = ::std::option::Option<
     unsafe extern "C" fn(
@@ -2030,15 +1706,6 @@ pub struct vtx_threadpool_t {
     pub total_tasks_completed: u64,
     pub total_tasks_submitted: u64,
     pub total_compile_time_ns: u64,
-}
-impl Default for vtx_threadpool_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Initialize the thread pool with the given number of worker threads.\n Creates worker threads and starts them waiting for tasks.\n\n @param pool        Thread pool to initialize\n @param num_threads Number of worker threads (0 = use VORTEX_COMPILE_THREADS)\n @return            0 on success, -1 on failure"]
@@ -2088,7 +1755,7 @@ extern "C" {
     pub fn vtx_threadpool_is_shutdown(pool: *const vtx_threadpool_t) -> bool;
 }
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_phase_desc_t {
     pub phase_id: u32,
     pub dominant_method_ids: [u32; 8usize],
@@ -2109,15 +1776,6 @@ pub struct vtx_markov_t {
     pub current_phase_method_calls: [u32; 256usize],
     pub current_phase_total_calls: u64,
     pub min_observations: u32,
-}
-impl Default for vtx_markov_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     pub fn vtx_markov_init(mk: *mut vtx_markov_t) -> ::std::os::raw::c_int;
@@ -2161,19 +1819,10 @@ pub struct vtx_code_segment {
     pub free_capacity: u32,
 }
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_code_segment__bindgen_ty_1 {
     pub offset: u32,
     pub size: u32,
-}
-impl Default for vtx_code_segment {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -2183,15 +1832,6 @@ pub struct vtx_code_cache {
     pub segment_count: u32,
     pub total_size: u64,
     pub max_size: u64,
-}
-impl Default for vtx_code_cache {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 pub type vtx_code_cache_t = vtx_code_cache;
 extern "C" {
@@ -2265,18 +1905,9 @@ pub struct vtx_deopt_info_t {
     pub stack_depth_map: *mut u32,
     pub side_table: *mut vtx_side_table_t,
 }
-impl Default for vtx_deopt_info_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[doc = " Describes the layout of a compiled method's stack frame.\n All offsets are relative to RBP. Negative offsets point below RBP\n (locals and spills), positive offsets point above RBP (header).\n\n The total_frame_size is the number of bytes to subtract from RSP\n during prologue (locals + spills, not including the 4 pushed header values\n and the saved RBP which are handled by push instructions)."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_jit_frame_layout_t {
     pub max_locals: u32,
     pub max_stack: u32,
@@ -2319,30 +1950,12 @@ pub struct vtx_guard_info_t {
     pub expected_value: u64,
     pub branch_offset: i32,
 }
-impl Default for vtx_guard_info_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct vtx_guard_array_t {
     pub guards: *mut vtx_guard_info_t,
     pub count: u32,
     pub capacity: u32,
-}
-impl Default for vtx_guard_array_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Initialize a guard array.\n Returns 0 on success, -1 on failure."]
@@ -2526,24 +2139,6 @@ pub union vtx_constval_t__bindgen_ty_1 {
     pub float_val: f64,
     pub ptr_val: *mut ::std::os::raw::c_void,
 }
-impl Default for vtx_constval_t__bindgen_ty_1 {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
-impl Default for vtx_constval_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 pub const vtx_cond_t_VTX_COND_EQ: vtx_cond_t = 0;
 pub const vtx_cond_t_VTX_COND_NE: vtx_cond_t = 1;
 pub const vtx_cond_t_VTX_COND_LT: vtx_cond_t = 2;
@@ -2559,7 +2154,7 @@ pub const vtx_cond_t_VTX_COND_NEVER: vtx_cond_t = 11;
 pub type vtx_cond_t = ::std::os::raw::c_uint;
 #[doc = " Use-def list: nodes that reference this node as an input.\n This is the inverse of the inputs array. For each node N that\n has N->inputs[i] == this->id, there is a use entry (N, i).\n\n This enables O(K) traversal of a node's users (where K is the\n number of users) instead of O(N²) scanning of all nodes."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_use_entry {
     pub user_id: vtx_nodeid_t,
     pub input_index: u32,
@@ -2592,30 +2187,12 @@ pub struct vtx_node_t {
     pub dead: bool,
     pub mark: bool,
 }
-impl Default for vtx_node_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct vtx_node_opcode_info_t {
     pub name: *const ::std::os::raw::c_char,
     pub default_flags: vtx_node_flags_t,
     pub fixed_inputs: u32,
-}
-impl Default for vtx_node_opcode_info_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -2624,15 +2201,6 @@ pub struct vtx_node_table_t {
     pub count: u32,
     pub capacity: u32,
     pub next_id: vtx_nodeid_t,
-}
-impl Default for vtx_node_table_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Initialize a node table with initial capacity.\n Returns 0 on success, -1 on failure (allocation error)."]
@@ -2797,12 +2365,12 @@ extern "C" {
 }
 #[doc = " Represents the state of a single monitor (lock) held at a deopt point.\n The monitor_object is a NodeID that evaluates to the locked object."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_monitor_state_t {
     pub monitor_object: vtx_nodeid_t,
 }
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_exception_state_t {
     pub handler_pc: u32,
     pub catch_type: vtx_typeid_t,
@@ -2823,15 +2391,6 @@ pub struct vtx_frame_state {
     pub exception: vtx_exception_state_t,
     pub caller: *mut vtx_frame_state_t,
     pub relock_needed: bool,
-}
-impl Default for vtx_frame_state {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Create a FrameState allocated from the given arena.\n Allocates locals and stack arrays from the arena.\n Returns NULL on allocation failure.\n\n @param arena      Arena to allocate from\n @param pc         Bytecode PC at the deopt point\n @param method_id  Method identifier\n @param local_count Number of local variable slots\n @param stack_count Number of operand stack slots"]
@@ -2867,7 +2426,7 @@ extern "C" {
 }
 #[doc = " A single entry in the register map: which register holds which NodeID.\n The register number is architecture-specific (e.g., RAX=0, RCX=1, etc.\n on x86-64)."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_reg_map_entry_t {
     pub register_number: u32,
     pub node_id: vtx_nodeid_t,
@@ -2882,15 +2441,6 @@ pub struct vtx_side_table_entry_t {
     pub register_map_count: u32,
     pub flags: u32,
 }
-impl Default for vtx_side_table_entry_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[doc = " The side table: a sorted array of entries mapping native PC offsets\n to FrameState indices and register maps."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -2901,15 +2451,6 @@ pub struct vtx_side_table_struct {
     pub frame_states: *mut *mut vtx_frame_state_t,
     pub frame_state_count: u32,
     pub frame_state_capacity: u32,
-}
-impl Default for vtx_side_table_struct {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Build a new side table. If arena is non-NULL, entries are allocated from it.\n If arena is NULL, entries are allocated with malloc.\n Returns a new side table, or NULL on failure."]
@@ -3009,30 +2550,12 @@ pub struct vtx_deopt_stub_t {
     pub stack_depth: u32,
     pub frame_state_index: u32,
 }
-impl Default for vtx_deopt_stub_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct vtx_deopt_stub_array_t {
     pub stubs: *mut vtx_deopt_stub_t,
     pub count: u32,
     pub capacity: u32,
-}
-impl Default for vtx_deopt_stub_array_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Initialize a deopt stub array.\n Returns 0 on success, -1 on failure."]
@@ -3061,15 +2584,6 @@ pub struct vtx_deopt_context_t {
     pub code_start: *mut u8,
     pub method_id: u32,
     pub stub_array: *mut vtx_deopt_stub_array_t,
-}
-impl Default for vtx_deopt_context_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Generate deopt stubs for all guards in the guard array.\n\n For each guard, emits a deopt stub after the main method code.\n Patches the guard's conditional jump to point to the stub.\n\n Each stub performs:\n   1. Save all expression stack registers (RAX, RCX, RDX, RBX) to\n      their spill slots in the JIT frame.\n   2. Set up the interpreter frame pointer from the JIT frame's\n      caller RBP slot.\n   3. Store the bytecode PC (deopt continuation) into a well-known\n      location that the interpreter reads on entry.\n   4. Copy locals from the JIT frame to the interpreter frame.\n   5. Reconstruct the interpreter operand stack from the saved\n      register values and spill slots.\n   6. Jump to the interpreter dispatch loop entry point.\n\n @param ctx  Deopt context with all necessary references\n @return     Number of stubs generated, or -1 on failure"]
@@ -3108,7 +2622,7 @@ extern "C" {
 }
 #[doc = " Configuration for tier-aware deoptimization (Proposal #5).\n When a deopt stub is entered, it checks whether a lower-tier compiled\n version exists before falling back to the interpreter."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_deopt_tier_config_t {
     pub prefer_lower_tier: bool,
     pub require_same_frame_layout: bool,
@@ -3117,7 +2631,7 @@ pub struct vtx_deopt_tier_config_t {
 pub type vtx_poly_ic_t = vtx_poly_ic;
 #[doc = " VORTEX Code Cache — Shared Compiled Code Type Definitions\n\n This header contains the canonical definition of vtx_compiled_code_t,\n which is used by both the baseline JIT code generator and the deopt/OSR\n subsystems."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_bc_pc_map_entry_t {
     pub bytecode_pc: u32,
     pub native_offset: u32,
@@ -3146,15 +2660,6 @@ pub struct vtx_compiled_code_t {
     pub stack_slots: u32,
     pub local_slots: u32,
 }
-impl Default for vtx_compiled_code_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 pub const vtx_reloc_kind_t_VTX_RELOC_REL32: vtx_reloc_kind_t = 0;
 pub const vtx_reloc_kind_t_VTX_RELOC_ABS64: vtx_reloc_kind_t = 1;
 pub const vtx_reloc_kind_t_VTX_RELOC_RIP_REL32: vtx_reloc_kind_t = 2;
@@ -3171,30 +2676,12 @@ pub struct vtx_reloc_t {
     pub addend: i32,
     pub is_external: bool,
 }
-impl Default for vtx_reloc_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct vtx_reloc_table_t {
     pub entries: *mut vtx_reloc_t,
     pub count: u32,
     pub capacity: u32,
-}
-impl Default for vtx_reloc_table_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Initialize a relocation table.\n Returns 0 on success, -1 on failure."]
@@ -3267,7 +2754,7 @@ extern "C" {
 }
 #[doc = " Per-method state for the clock (Second Chance) eviction algorithm.\n The use_bit is set when the method is called (touch) and cleared\n by the clock hand during eviction scanning. Methods with a cleared\n use_bit are eviction candidates."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_clock_state_t {
     pub clock_hand: u32,
     pub use_bit: bool,
@@ -3300,15 +2787,6 @@ pub struct vtx_compiled_method {
     pub bc_pc_map_count: u32,
     pub next: *mut vtx_compiled_method_t,
 }
-impl Default for vtx_compiled_method {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct vtx_method_registry {
@@ -3318,15 +2796,6 @@ pub struct vtx_method_registry {
     pub capacity_mask: u32,
     pub clock_hand: u32,
     pub malloc_allocated: bool,
-}
-impl Default for vtx_method_registry {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 pub type vtx_method_registry_t = vtx_method_registry;
 extern "C" {
@@ -3400,7 +2869,7 @@ extern "C" {
 }
 #[doc = " Records the receiver types observed at a single call site.\n Up to VTX_POLY_LIMIT types are stored; once exceeded the site is megamorphic."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_callsite_profile_t {
     pub types: [vtx_typeid_t; 4usize],
     pub count: u32,
@@ -3408,7 +2877,7 @@ pub struct vtx_callsite_profile_t {
 }
 #[doc = " Records taken / not-taken counts for a single branch bytecode PC.\n Both counters use saturating increment."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_branch_profile_t {
     pub bytecode_pc: u32,
     pub taken: u64,
@@ -3416,7 +2885,7 @@ pub struct vtx_branch_profile_t {
 }
 #[doc = " Records the shape IDs observed at a single field access site.\n Up to VTX_POLY_LIMIT shapes are stored; once exceeded the site is megamorphic."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_field_profile_t {
     pub field_offset: u32,
     pub shapes: [vtx_shapeid_t; 4usize],
@@ -3425,7 +2894,7 @@ pub struct vtx_field_profile_t {
 }
 #[doc = " Records the back-edge count for a single loop (identified by its header PC)."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_loop_profile_t {
     pub loop_header_pc: u32,
     pub backedge_count: u64,
@@ -3453,18 +2922,9 @@ pub struct vtx_profile_method {
     pub loop_count: u32,
     pub loop_capacity: u32,
 }
-impl Default for vtx_profile_method {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[doc = " A directed edge in the method call graph: caller → callee with frequency."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_call_edge_t {
     pub caller_method_id: u32,
     pub callee_method_id: u32,
@@ -3472,7 +2932,7 @@ pub struct vtx_call_edge_t {
 }
 #[doc = " A directed edge in the phase transition graph.\n Represents a transition from one phase (SCC) to another."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_phase_transition_t {
     pub from_phase_id: u32,
     pub to_phase_id: u32,
@@ -3492,15 +2952,6 @@ pub struct vtx_profile_global_t {
     pub phase_transition_count: u32,
     pub phase_transition_capacity: u32,
     pub phase_graph: *mut vtx_phase_graph,
-}
-impl Default for vtx_profile_global_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Initialize a global profile structure. Allocates initial arrays.\n Returns 0 on success, -1 on failure."]
@@ -3631,15 +3082,6 @@ pub struct vtx_phase_t {
     pub total_frequency: u64,
     pub is_significant: bool,
 }
-impl Default for vtx_phase_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[doc = " The phase graph: the result of phase detection.\n Contains the list of phases and the transitions between them."]
 pub type vtx_phase_graph_t = vtx_phase_graph;
 #[repr(C)]
@@ -3653,15 +3095,6 @@ pub struct vtx_phase_graph {
     pub transition_capacity: u32,
     pub method_to_phase: *mut u32,
     pub method_to_phase_capacity: u32,
-}
-impl Default for vtx_phase_graph {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Detect phases from the call graph in the global profile.\n Returns a newly allocated phase graph (caller must free with\n vtx_phase_graph_destroy), or NULL on failure.\n\n Algorithm:\n   1. Build adjacency lists from the call edges in the profile.\n   2. Run Tarjan's SCC algorithm.\n   3. For each SCC, compute total invocation frequency.\n   4. Mark SCCs as significant if they meet the thresholds.\n   5. Phase transitions = inter-SCC edges between significant SCCs."]
@@ -3700,15 +3133,6 @@ pub struct vtx_phase_profile_entry_t {
     pub last_transition_ns: u64,
     pub valid: bool,
 }
-impl Default for vtx_phase_profile_entry_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[doc = " Phase-aware profile partition manager.\n\n Owns N per-phase profile globals and tracks which one is currently\n \"active\" (i.e., the one the interpreter is recording to and the\n orchestrator is reading from for recomp decisions).\n\n Lifecycle:\n   1. init()  — creates the default phase (VTX_PHASE_NONE) and makes\n                it active.\n   2. transition(new_phase) — saves the current active phase's stats,\n                              creates the new phase if needed, makes it\n                              active.\n   3. get_active() — returns the currently-active profile (used by\n                     the recording path and the orchestrator).\n   4. destroy() — destroys all per-phase profiles."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -3719,15 +3143,6 @@ pub struct vtx_phase_partition_t {
     pub active_index: u32,
     pub total_transitions: u64,
     pub total_phase_creations: u64,
-}
-impl Default for vtx_phase_partition_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Initialize the partition manager.\n\n Creates the default phase (phase_id == VTX_PHASE_NONE) and makes it\n active. The default phase is where all recording goes until the first\n explicit transition.\n\n Returns 0 on success, -1 on failure."]
@@ -3816,15 +3231,6 @@ pub struct vtx_block_info_t {
     pub exit_stack: *mut vtx_nodeid_t,
     pub exit_sp: i32,
 }
-impl Default for vtx_block_info_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct vtx_graph_t {
@@ -3837,15 +3243,6 @@ pub struct vtx_graph_t {
     pub blocks: *mut vtx_block_info_t,
     pub block_count: u32,
     pub block_capacity: u32,
-}
-impl Default for vtx_graph_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Initialize an empty graph. Creates the node table and Start node.\n Returns 0 on success, -1 on failure."]
@@ -3877,7 +3274,7 @@ extern "C" {
     pub fn vtx_graph_print(graph: *const vtx_graph_t);
 }
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_inline_features_t {
     pub features: [f64; 15usize],
 }
@@ -3894,15 +3291,6 @@ pub struct vtx_inline_context_t {
     pub callee_invocation_count: u64,
     pub caller_node_count: u32,
     pub callee_graph: *const vtx_graph_t,
-}
-impl Default for vtx_inline_context_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Extract features for a call site.\n\n @param graph    The caller's SoN graph\n @param call_node The call node (CallStatic/CallVirtual/CallInterface) NodeID\n @param profile  Global profile data (may be NULL if no profiling available)\n @param context  Additional context for extraction\n @return         Populated feature vector"]
@@ -3946,15 +3334,6 @@ pub struct vtx_inline_decision_t {
     pub deopt_count: u64,
     pub decision_timestamp: u64,
 }
-impl Default for vtx_inline_decision_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct vtx_inline_feedback_t {
@@ -3964,15 +3343,6 @@ pub struct vtx_inline_feedback_t {
     pub profitable_count: u32,
     pub unprofitable_count: u32,
     pub unknown_count: u32,
-}
-impl Default for vtx_inline_feedback_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Initialize a feedback tracker.\n Returns 0 on success, -1 on failure."]
@@ -4052,15 +3422,6 @@ pub struct vtx_deoptless_version {
     pub original_jcc_disp: i32,
     pub is_patched: bool,
 }
-impl Default for vtx_deoptless_version {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[doc = " Per-method version table: tracks all continuation versions for a method."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -4075,15 +3436,6 @@ pub struct vtx_deoptless_table_struct {
     pub failed_guard_capacity: u32,
     pub decision_vector_hash: u64,
     pub compiled_profile_hash: u64,
-}
-impl Default for vtx_deoptless_table_struct {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 #[doc = " Per-method version table: tracks all continuation versions for a method."]
 pub type vtx_deoptless_table_t = vtx_deoptless_table_struct;
@@ -4187,7 +3539,7 @@ extern "C" {
 }
 #[doc = " A snapshot of the currently executing methods, used to match\n against known phases."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_phase_signature_t {
     pub method_ids: [u32; 10usize],
     pub count: u32,
@@ -4206,15 +3558,6 @@ pub struct vtx_sota_phase_t {
     pub predictions_correct: u32,
     pub predictions_wrong: u32,
     pub hits_in_current_prediction: u32,
-}
-impl Default for vtx_sota_phase_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Initialize the phase prediction system.\n If phase_graph is non-NULL, it is used for predictions (takes ownership).\n If NULL, predictions are disabled until a graph is loaded.\n\n @param phase       Phase prediction state to initialize\n @param phase_graph Phase graph from previous run (may be NULL)\n @param arena       Arena for allocations\n @return            0 on success, -1 on failure"]
@@ -4311,15 +3654,6 @@ pub struct vtx_code_version {
     pub is_deoptless: bool,
     pub deoptless_guard_id: u32,
 }
-impl Default for vtx_code_version {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[doc = " Per-method version chain: linked list of versions from oldest to newest."]
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -4329,15 +3663,6 @@ pub struct vtx_method_versions_t {
     pub oldest: *mut vtx_code_version_t,
     pub version_count: u32,
     pub method_mutex: pthread_mutex_t,
-}
-impl Default for vtx_method_versions_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -4351,15 +3676,6 @@ pub struct vtx_version_manager_t {
     pub total_versions_invalidated: u32,
     pub total_versions_freed: u32,
     pub arena: *mut vtx_arena_t,
-}
-impl Default for vtx_version_manager_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Initialize the version manager.\n\n @param manager Version manager to initialize\n @param arena   Arena for allocating version structures\n @return        0 on success, -1 on failure"]
@@ -4450,7 +3766,7 @@ extern "C" {
 }
 #[doc = " VORTEX SOTA — Continuous Background Recompilation\n\n Monitors profile data in real-time and triggers recompilation when\n type profiles diverge from the assumptions used during the previous\n compilation.\n\n The key metric is KL divergence (Kullback-Leibler) between the\n type profile at compilation time and the current type profile.\n When KL divergence exceeds VTX_PROFILE_DIVERGENCE_THRESHOLD (0.5),\n the method is queued for recompilation with updated profile data.\n\n The new version is compiled in the background and installed at the\n next safe point, with zero pause to the executing application.\n\n KL divergence measures how much information is lost when using the\n old profile to approximate the current profile. A value of 0 means\n identical distributions; values > 0.5 indicate significant divergence.\n\n Formula:\n   KL(P || Q) = Σ P(i) * ln(P(i) / Q(i))\n where P = current profile, Q = compilation-time profile\n\n Smoothing: to avoid ln(0), we add a small epsilon (1e-6) to both\n P(i) and Q(i) before computing the ratio."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_recomp_check_t {
     pub should_recompile: bool,
     pub kl_divergence: f64,
@@ -4458,7 +3774,7 @@ pub struct vtx_recomp_check_t {
     pub method_id: u32,
 }
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_recomp_queue_entry_t {
     pub method_id: u32,
     pub kl_divergence: f64,
@@ -4473,7 +3789,7 @@ pub struct vtx_recomp_snapshot {
 pub type vtx_recomp_snapshot_t = vtx_recomp_snapshot;
 #[doc = " Per-method hysteresis state for KL-divergence recompilation.\n\n Without hysteresis, the orchestrator fires recomp on every divergent\n sample. A workload that oscillates between two phases causes the same\n method to be recompiled repeatedly — thrashing.\n\n Hysteresis requires VTX_RECOMP_HYSTERESIS_CONSECUTIVE consecutive\n divergent samples before triggering recompilation. A non-divergent\n sample resets the counter to zero.\n\n The state is keyed by method_id and stored in a small hash table\n inside vtx_sota_recomp_t. Lookups are O(1) amortized."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_recomp_hysteresis_t {
     pub method_id: u32,
     pub consecutive_divergent: u32,
@@ -4501,15 +3817,6 @@ pub struct vtx_sota_recomp_t {
     pub total_recompilations_triggered: u64,
     pub total_false_positives: u64,
     pub total_hysteresis_blocks: u64,
-}
-impl Default for vtx_sota_recomp_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Initialize the recompilation monitor.\n Returns 0 on success, -1 on failure."]
@@ -4654,15 +3961,6 @@ pub struct vtx_fdi_method_record_t {
     pub best_version_id: u32,
     pub best_version_score: f64,
 }
-impl Default for vtx_fdi_method_record_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct vtx_sota_fdi_t {
@@ -4673,15 +3971,6 @@ pub struct vtx_sota_fdi_t {
     pub total_recompilations: u32,
     pub total_methods_improved: u32,
     pub total_methods_worse: u32,
-}
-impl Default for vtx_sota_fdi_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Initialize the FDI system.\n\n @param fdi      FDI state to initialize\n @param feedback Inline feedback tracker (not owned, must outlive FDI)\n @return         0 on success, -1 on failure"]
@@ -4769,15 +4058,6 @@ pub struct vtx_phase_version_entry_t {
     pub reactivate_count: u64,
     pub is_valid: bool,
 }
-impl Default for vtx_phase_version_entry_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[doc = " Per-method phase-version registry.\n Tracks parked versions for each execution phase of a single method.\n\n The entries array is a fixed-size open-addressing table with linear\n probing. Phase hash collisions are handled by chaining to the next\n free slot. The table is deliberately small (16 entries) because:\n   1. Most methods have 2-4 distinct phases\n   2. Parked versions consume memory, so we cap the total\n   3. Linear scan over 16 entries is faster than a hash table for\n      these sizes"]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -4789,15 +4069,6 @@ pub struct vtx_phase_version_registry_t {
     pub total_reactivations: u32,
     pub total_recompilations: u32,
     pub total_evictions: u32,
-}
-impl Default for vtx_phase_version_registry_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 #[doc = " Global phase-reactive version manager.\n\n Manages per-method registries and enforces a global code budget for\n parked versions. When the budget is exceeded, the least recently parked\n versions are evicted first (LRU policy based on park_time_ns).\n\n Thread safety: all operations on the manager are protected by the\n manager_mutex. Individual version state transitions are additionally\n protected by the version manager's per-method mutex."]
 #[repr(C)]
@@ -4812,15 +4083,6 @@ pub struct vtx_phase_react_manager_t {
     pub total_parked_versions: u32,
     pub total_reactivated_versions: u32,
     pub total_evicted_versions: u32,
-}
-impl Default for vtx_phase_react_manager_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Initialize the phase-reactive version manager.\n\n @param mgr         Manager to initialize\n @param code_budget Total bytes of code that may be parked before\n                    eviction kicks in. Use VTX_PHASE_REACT_DEFAULT_CODE_BUDGET\n                    for the default (8 MB).\n @return            0 on success, -1 on failure"]
@@ -4931,15 +4193,6 @@ pub struct vtx_orchestrator_struct {
     pub decision_submit_counts: [u64; 8usize],
     pub decision_deopt_count: u64,
 }
-impl Default for vtx_orchestrator_struct {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 pub type vtx_orchestrator_t = vtx_orchestrator_struct;
 extern "C" {
     #[doc = " Initialize the runtime orchestrator.\n\n All subsystem pointers are stored but NOT owned — the caller must\n ensure they remain valid for the lifetime of the orchestrator.\n Any pointer may be NULL to disable that particular wiring.\n\n @param orch         Orchestrator to initialize\n @param markov       Markov chain (may be NULL)\n @param phase        Phase detector (may be NULL)\n @param recomp       Recomp monitor (may be NULL)\n @param fdi          FDI tracker (may be NULL)\n @param threadpool   Compilation threadpool (may be NULL)\n @param phase_react  Phase-reactive manager (may be NULL)\n @param type_feedback Runtime type feedback (may be NULL)\n @param profile      Global profile data (may be NULL)\n @param inline_feedback Inline feedback tracker (may be NULL)\n @return             0 on success, -1 on failure"]
@@ -5026,7 +4279,7 @@ extern "C" {
 }
 #[doc = " A type signature for method versioning: the concrete types observed\n at each argument position.\n\n Named vtx_spec_type_sig_t to avoid collision with vtx_type_signature_t\n in interp/type_feedback.h, which tracks call-site receiver+result types\n for composite guard optimization. This structure tracks argument types\n for method-level versioning decisions.\n\n The signature_hash is an FNV-1a hash of arg_types, consistent with\n the hash functions used in deopt/deoptless.c and compile/phase_react.c.\n It enables O(1) signature comparison in the dispatch hot path."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_spec_type_sig_t {
     pub arg_types: [u32; 4usize],
     pub arg_count: u32,
@@ -5048,15 +4301,6 @@ pub struct vtx_spec_version {
     pub guard_id: u32,
     pub next: *mut vtx_spec_version_t,
 }
-impl Default for vtx_spec_version {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[doc = " Per-method spec version registry.\n\n Tracks all type-specialized versions for a single method, plus\n per-argument type profiling data used to decide which type\n signatures are worth creating versions for.\n\n The arg_profiles array tracks the top 4 types observed at each\n argument position with their frequencies. This data drives the\n decision of whether to create a new specialized version:\n   - If a type's frequency >= VTX_SPEC_VERSION_FREQUENCY_THRESHOLD\n     and total observations >= VTX_SPEC_VERSION_MIN_OBSERVATIONS,\n     that type is a candidate for specialization.\n   - The combination of specialized types across arguments forms\n     the signature for the new version.\n\n Statistics track the dispatch efficiency: how often calls hit a\n specialized version (direct_hits) vs. fall through to the generic\n fallback (generic_fallbacks)."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -5072,20 +4316,11 @@ pub struct vtx_spec_version_registry_t {
     pub generic_fallbacks: u64,
 }
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_spec_version_registry_t__bindgen_ty_1 {
     pub top_type_ids: [u32; 4usize],
     pub top_frequencies: [f64; 4usize],
     pub total_observations: u64,
-}
-impl Default for vtx_spec_version_registry_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 #[doc = " A loop version: a clone of a loop body with specific type assumptions.\n\n The key insight is that the type guard moves OUTSIDE the loop.\n Instead of checking the type on every iteration, we check once\n before entering the loop and execute the type-specialized loop body.\n\n For a loop that iterates N times:\n   - Without versioning: N type checks inside the loop\n   - With versioning:    1 type check before the loop\n   - Savings:            (N-1) type checks eliminated\n\n The guard_id identifies the pre-loop guard that checks:\n   - The loop items are all of item_type_id\n   - (Optionally) the loop trip count matches the expected range\n\n If the pre-loop guard fails, execution falls through to the\n generic (unversioned) loop."]
 #[repr(C)]
@@ -5099,15 +4334,6 @@ pub struct vtx_loop_version_t {
     pub execution_count: u64,
     pub is_active: bool,
 }
-impl Default for vtx_loop_version_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[doc = " Per-loop version registry.\n\n Tracks all type-specialized versions for a single loop.\n The versions array is dynamically growing (unlike method registries\n which use linked lists) because the number of loop versions is\n typically small (1-3) and array access is faster for dispatch."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -5118,15 +4344,6 @@ pub struct vtx_loop_version_registry_t {
     pub version_count: u32,
     pub version_capacity: u32,
     pub active_version: u32,
-}
-impl Default for vtx_loop_version_registry_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 #[doc = " Global method versioning manager.\n\n Manages per-method registries for type-specialized versioning (2B)\n and per-loop registries for loop versioning (2C). The manager\n provides thread-safe access to all registries via a single mutex.\n\n Loop versioning registries are stored in a separate array indexed\n by a combined (method_id, loop_header_pc) key. In practice, most\n methods have 0-2 hot loops, so a flat array with linear scan is\n efficient. A hash table could be used if this becomes a bottleneck.\n\n The loop_versioning_stats field tracks the aggregate impact of\n loop versioning: how many loops have been versioned, how many\n type guards were hoisted out of loops, and the estimated total\n number of per-iteration type checks eliminated."]
 #[repr(C)]
@@ -5145,20 +4362,11 @@ pub struct vtx_spec_version_manager_t {
     pub total_direct_dispatches: u32,
 }
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_spec_version_manager_t__bindgen_ty_1 {
     pub total_loops_versioned: u32,
     pub guards_hoisted: u32,
     pub estimated_checks_saved: u64,
-}
-impl Default for vtx_spec_version_manager_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Initialize the spec version manager.\n\n Allocates the registries array with VTX_SPEC_VERSION_INITIAL_CAPACITY\n entries and initializes the global mutex.\n\n @param mgr  Manager to initialize\n @return     0 on success, -1 on failure"]
@@ -5277,15 +4485,6 @@ pub struct vtx_deopt_site_limiter_t {
     pub total_failures: u64,
     pub first_failure_ns: u64,
 }
-impl Default for vtx_deopt_site_limiter_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 extern "C" {
     pub fn vtx_deopt_site_init(
         sl: *mut vtx_deopt_site_limiter_t,
@@ -5317,15 +4516,6 @@ pub struct vtx_deopt_batcher_t {
     pub batch_start_ns: u64,
     pub total_batches: u64,
     pub total_deopts_coalesced: u64,
-}
-impl Default for vtx_deopt_batcher_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     pub fn vtx_deopt_batcher_init(
@@ -5360,15 +4550,6 @@ pub struct vtx_deopt_budget_t {
     pub budget_exceeded: bool,
     pub total_deopts: u64,
     pub suppress_start_ns: u64,
-}
-impl Default for vtx_deopt_budget_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     pub fn vtx_deopt_budget_init(
@@ -5414,15 +4595,6 @@ pub struct vtx_deopt_coord_t {
     pub total_full_deopts: u64,
     pub total_suppressed: u64,
     pub total_batches_flushed: u64,
-}
-impl Default for vtx_deopt_coord_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     pub fn vtx_deopt_coord_init(
@@ -5471,15 +4643,6 @@ pub struct vtx_versioned_code_version {
     pub retire_time_ns: u64,
     pub next: *mut vtx_versioned_code_version_t,
 }
-impl Default for vtx_versioned_code_version {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct vtx_versioned_cache_t {
@@ -5490,15 +4653,6 @@ pub struct vtx_versioned_cache_t {
     pub total_retired: u32,
     pub total_compactions: u64,
     pub total_force_frees: u64,
-}
-impl Default for vtx_versioned_cache_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     pub fn vtx_versioned_cache_init(
@@ -5583,15 +4737,6 @@ pub struct vtx_compile_context_t {
     pub tier_decision:
         ::std::option::Option<unsafe extern "C" fn(execution_count: u64) -> vtx_compile_tier_t>,
 }
-impl Default for vtx_compile_context_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 extern "C" {
     #[doc = " Initialize the compilation context.\n All pointers are stored but NOT owned.\n Returns 0 on success, -1 on failure."]
     pub fn vtx_compile_context_init(ctx: *mut vtx_compile_context_t) -> ::std::os::raw::c_int;
@@ -5643,15 +4788,6 @@ pub struct vtx_method_ic_storage_t {
     pub ics: *mut vtx_inline_cache_t,
     pub count: u32,
 }
-impl Default for vtx_method_ic_storage_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[doc = " The interpreter state."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -5676,15 +4812,6 @@ pub struct vtx_interp_t {
     pub method_ics: *mut vtx_method_ic_storage_t,
     pub method_ic_count: u32,
     pub method_ic_capacity: u32,
-}
-impl Default for vtx_interp_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Initialize the interpreter.\n Builds the dispatch table, initializes the frame stack,\n profiler, and type feedback collector.\n Returns 0 on success, -1 on failure."]
@@ -5730,183 +4857,6 @@ extern "C" {
     #[doc = " Set the compilation context on the interpreter.\n When set, the interpreter will request JIT compilation for hot\n methods via vtx_request_compilation(). This is the wiring that\n connects the interpreter's hot-code detection to the JIT pipeline.\n\n Must be called after vtx_interp_init() and before vtx_interp_run().\n The ctx pointer is stored but NOT owned by the interpreter."]
     pub fn vtx_interp_set_compile_ctx(interp: *mut vtx_interp_t, ctx: *mut vtx_compile_context_t);
 }
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct vtx_runtime_t {
-    pub type_system: vtx_type_system_t,
-    pub gc: vtx_gc_t,
-    pub interp: *mut vtx_interp_t,
-    pub code_cache: vtx_code_cache_t,
-    pub method_registry: vtx_method_registry_t,
-    pub arena: vtx_arena_t,
-    pub orchestrator: *mut vtx_orchestrator_t,
-    pub threadpool: *mut vtx_threadpool_t,
-    pub initialized: ::std::os::raw::c_int,
-}
-impl Default for vtx_runtime_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
-extern "C" {
-    pub fn vtx_runtime_create(rt: *mut vtx_runtime_t) -> ::std::os::raw::c_int;
-}
-extern "C" {
-    pub fn vtx_runtime_destroy(rt: *mut vtx_runtime_t);
-}
-extern "C" {
-    pub fn vtx_runtime_run(rt: *mut vtx_runtime_t, bc: *const vtx_bytecode_t) -> vtx_value_t;
-}
-extern "C" {
-    pub fn vtx_runtime_run_with_args(
-        rt: *mut vtx_runtime_t,
-        bc: *const vtx_bytecode_t,
-        args: *const vtx_value_t,
-        arg_count: u32,
-    ) -> vtx_value_t;
-}
-extern "C" {
-    pub fn vtx_runtime_interp(rt: *mut vtx_runtime_t) -> *mut vtx_interp_t;
-}
-extern "C" {
-    pub fn vtx_runtime_type_system(rt: *mut vtx_runtime_t) -> *mut vtx_type_system_t;
-}
-extern "C" {
-    pub fn vtx_runtime_gc(rt: *mut vtx_runtime_t) -> *mut vtx_gc_t;
-}
-extern "C" {
-    pub fn vtx_runtime_code_cache(rt: *mut vtx_runtime_t) -> *mut vtx_code_cache_t;
-}
-extern "C" {
-    pub fn vtx_runtime_compile_ctx(rt: *mut vtx_runtime_t) -> *mut vtx_compile_context_t;
-}
-extern "C" {
-    pub fn vtx_runtime_start_threadpool(
-        rt: *mut vtx_runtime_t,
-        nthreads: u32,
-    ) -> ::std::os::raw::c_int;
-}
-extern "C" {
-    pub fn vtx_runtime_stop_threadpool(rt: *mut vtx_runtime_t);
-}
-extern "C" {
-    pub fn vtx_bytecode_load(
-        path: *const ::std::os::raw::c_char,
-        arena: *mut vtx_arena_t,
-    ) -> *mut vtx_bytecode_t;
-}
-extern "C" {
-    #[doc = " Emit code to increment the method invocation counter.\n\n Generated code:\n   1. Load profile_data pointer from [RBP + VTX_FRAME_PROFILE_DATA_OFFSET]\n   2. Increment invocation_count (saturating at UINT64_MAX)\n      inc qword ptr [profile_data + VTX_PD_INVOCATION_COUNT_OFFSET]\n      ; or: add qword ptr [...], 1 + jno skip + mov qword ptr [...], UINT64_MAX\n\n @param buf           Code buffer to emit into\n @param profile_data  If non-NULL, can be used for direct address;\n                      if NULL, load from frame"]
-    pub fn vtx_instrument_emit_invocation_increment(
-        buf: *mut vtx_code_buffer_t,
-        profile_data: *mut vtx_profile_data_t,
-    );
-}
-extern "C" {
-    #[doc = " Emit code to record the receiver type at a call site.\n\n This records the TypeID of the receiver in the call site's type\n profile array. The profile data is used by the T2 optimizer for\n speculative inlining and inline cache optimization.\n\n Generated code:\n   1. Load profile_data pointer from frame\n   2. Compute call_site_types[call_site_pc] address\n   3. Load the current count of type observations\n   4. If count < VTX_POLY_LIMIT, store the new TypeID at entries[count]\n   5. Increment count (saturating)\n\n @param buf           Code buffer to emit into\n @param profile_data  Profile data structure (may be NULL)\n @param call_site_pc  Bytecode PC of the call site\n @param receiver_reg  Register holding the receiver value (tagged)\n @param typeid_reg    Register holding the TypeID to record\n                      (if VTX_REG_NONE, will extract from receiver_reg)"]
-    pub fn vtx_instrument_emit_call_type_record(
-        buf: *mut vtx_code_buffer_t,
-        profile_data: *mut vtx_profile_data_t,
-        call_site_pc: u32,
-        receiver_reg: vtx_reg_t,
-        typeid_reg: vtx_reg_t,
-    );
-}
-extern "C" {
-    #[doc = " Emit code to record a branch outcome.\n\n This increments both the taken count (if taken) and the total count\n for the branch at the given bytecode PC.\n\n Generated code:\n   1. Load profile_data pointer from frame\n   2. Increment branch_total_counts[branch_pc] (saturating at UINT32_MAX)\n   3. If taken, increment branch_taken_counts[branch_pc]\n\n @param buf           Code buffer to emit into\n @param profile_data  Profile data structure (may be NULL)\n @param branch_pc     Bytecode PC of the branch instruction\n @param taken         True if the branch is taken, false otherwise\n                      (the JIT knows this at compile time for unconditional\n                       branches; for conditional, emit on the taken path)"]
-    pub fn vtx_instrument_emit_branch_record(
-        buf: *mut vtx_code_buffer_t,
-        profile_data: *mut vtx_profile_data_t,
-        branch_pc: u32,
-        taken: bool,
-    );
-}
-extern "C" {
-    #[doc = " Emit code to increment the backward branch counter.\n Used at loop back-edges to track loop iteration counts.\n\n Generated code:\n   1. Load profile_data pointer from frame\n   2. Increment backward_branch_count (saturating at UINT64_MAX)\n\n @param buf           Code buffer to emit into\n @param profile_data  Profile data structure (may be NULL)"]
-    pub fn vtx_instrument_emit_backward_branch_increment(
-        buf: *mut vtx_code_buffer_t,
-        profile_data: *mut vtx_profile_data_t,
-    );
-}
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct vtx_code_buffer {
-    pub bytes: *mut u8,
-    pub position: u32,
-    pub capacity: u32,
-}
-impl Default for vtx_code_buffer {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
-extern "C" {
-    #[doc = " Initialize a code buffer with the given initial capacity.\n Returns 0 on success, -1 on failure."]
-    pub fn vtx_code_buffer_init(
-        buf: *mut vtx_code_buffer_t,
-        initial_capacity: u32,
-    ) -> ::std::os::raw::c_int;
-}
-extern "C" {
-    #[doc = " Destroy a code buffer and free its memory."]
-    pub fn vtx_code_buffer_destroy(buf: *mut vtx_code_buffer_t);
-}
-extern "C" {
-    #[doc = " Ensure the buffer has at least `needed` bytes of free space.\n Reallocates if necessary.\n Returns 0 on success, -1 on failure."]
-    pub fn vtx_code_buffer_ensure_capacity(
-        buf: *mut vtx_code_buffer_t,
-        needed: u32,
-    ) -> ::std::os::raw::c_int;
-}
-#[doc = " Records a forward branch that needs to be patched once the target\n position is known. Used for GOTO, IF_TRUE, IF_FALSE targets."]
-#[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
-pub struct vtx_branch_fixup_t {
-    pub patch_position: u32,
-    pub source_offset: u32,
-    pub target_bc_pc: u16,
-    pub is_32bit: bool,
-}
-#[doc = " Polymorphic inline cache for virtual/interface dispatch.\n\n Each CALL_VIRTUAL / CALL_INTERFACE site gets its own IC.\n The emitted machine code probes the type_ids array; on a hit,\n it calls the corresponding target directly.  On a miss, it\n falls through to the runtime helper which updates the IC.\n\n Layout (designed for cache-friendly access from emitted code):\n   offset  0: type_ids[0..3]  — 4 × uint32_t = 16 bytes, contiguous\n   offset 16: targets[0..3]   — 4 × void*    = 32 bytes, contiguous\n   offset 48: count            — uint32_t\n   offset 52: misses           — uint32_t"]
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct vtx_poly_ic {
-    pub type_ids: [u32; 4usize],
-    pub targets: [*mut ::std::os::raw::c_void; 4usize],
-    pub count: u32,
-    pub misses: u32,
-}
-impl Default for vtx_poly_ic {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
-extern "C" {
-    #[doc = " Destroy a compiled code struct and free all associated memory.\n Does NOT free the code buffer itself (that's managed by the code cache)."]
-    pub fn vtx_compiled_code_destroy(code: *mut vtx_compiled_code_t);
-}
-extern "C" {
-    #[doc = " Compile a method using the baseline JIT.\n\n Performs a single pass over the bytecode, emitting x86-64 machine code\n for each instruction. Guards are emitted for potentially speculative\n operations. Profiling instrumentation is inserted at key points.\n Deopt stubs are generated after the main code.\n\n If both cache and registry are non-NULL, the compiled code is installed\n into the code cache via vtx_install_method() which handles allocation,\n mprotect, and atomic code pointer updates. Otherwise, the code is\n malloc'd and the caller must handle installation.\n\n @param method       The method to compile\n @param profile_data Profile data for this method (may be NULL for first compilation)\n @param arena        Arena for temporary allocations during compilation\n @param cache        Code cache for proper code installation (may be NULL)\n @param registry     Method registry for code installation (may be NULL)\n @return             Compiled code struct, or NULL on failure"]
-    pub fn vtx_baseline_compile(
-        method: *const vtx_method_desc_t,
-        profile_data: *mut vtx_profile_data_t,
-        arena: *mut vtx_arena_t,
-        cache: *mut vtx_code_cache_t,
-        registry: *mut vtx_method_registry_t,
-    ) -> *mut vtx_compiled_code_t;
-}
 extern "C" {
     #[doc = " Run GVN on the graph. Modifies the graph in place.\n Returns the number of nodes eliminated."]
     pub fn vtx_gvn_run(graph: *mut vtx_graph_t) -> u32;
@@ -5933,15 +4883,6 @@ pub type vtx_lattice_tag_t = ::std::os::raw::c_uint;
 pub struct vtx_lattice_val_t {
     pub tag: vtx_lattice_tag_t,
     pub value: vtx_constval_t,
-}
-impl Default for vtx_lattice_val_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     pub fn vtx_lattice_meet(a: vtx_lattice_val_t, b: vtx_lattice_val_t) -> vtx_lattice_val_t;
@@ -5976,15 +4917,6 @@ pub struct vtx_schedule_block_t {
     pub df_count: u32,
     pub df_capacity: u32,
 }
-impl Default for vtx_schedule_block_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct vtx_schedule_t {
@@ -5993,15 +4925,6 @@ pub struct vtx_schedule_t {
     pub capacity: u32,
     pub node_block: *mut u32,
     pub node_block_count: u32,
-}
-impl Default for vtx_schedule_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Run the scheduler on the graph. Produces a schedule structure.\n The arena is used for temporary allocations during scheduling.\n\n Returns 0 on success, -1 on failure. The caller must free the\n schedule with vtx_schedule_destroy."]
@@ -6042,7 +4965,7 @@ extern "C" {
 }
 #[doc = " VORTEX Bounds Check Elimination\n\n Eliminates redundant array bounds check guards using range analysis\n and induction variable analysis.\n A bounds check is redundant if:\n   - The index's range is provably within the array length\n   - A dominating guard already proves the same condition\n   - (NEW) Induction variable analysis proves the index is within\n     bounds across all loop iterations\n\n Algorithm:\n   1. Run induction variable analysis to identify IVs and their ranges\n   2. Walk the schedule and find all Guard nodes that are bounds checks\n      (Guard(i < len) or Guard(i >= 0 && i < len))\n   3. Build a range analysis: for each node, compute [min, max] range\n   4. After Guard(i < len), constrain i's max to len-1\n   5. After Guard(i >= 0), constrain i's min to 0\n   6. If a subsequent Guard(i < len) sees i in range [0, len-1], eliminate it\n   7. Also eliminate dominated guards: if Guard(i < len) at block B1\n      dominates Guard(i < len) at block B2 with the same len, the dominated\n      guard is redundant\n   8. (NEW) If the index is an IV whose range is provably within [0, len),\n      eliminate the guard"]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_range_t {
     pub min: i64,
     pub max: i64,
@@ -6053,15 +4976,6 @@ pub struct vtx_range_t {
 pub struct vtx_range_table_t {
     pub ranges: *mut vtx_range_t,
     pub count: u32,
-}
-impl Default for vtx_range_table_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Eliminate redundant bounds check guards using range analysis.\n\n @param graph    The Sea-of-Nodes graph\n @param schedule The schedule (provides block order and dominance)\n @param arena    Arena allocator for temporary data\n\n @return Number of guards eliminated, or -1 on error"]
@@ -6098,386 +5012,6 @@ extern "C" {
     ) -> bool;
 }
 extern "C" {
-    #[doc = " Strength reduction pass: replaces expensive ops with cheaper equivalents\n when the divisor/multiplier is a power of two.\n\n   Mul(x, 2^k)  → Shl(x, k)\n   Div(x, 1)    → x\n   Mul(x, 1)    → x\n   Mul(x, 0)    → 0\n\n Note: Div(x, 2^k) → Shr(x, k) and Mod(x, 2^k) → And(x, 2^k-1) are\n NOT applied because C's / and % truncate toward zero, while SAR and\n AND round toward -infinity. This causes mismatches for negative\n dividends. A future fix can add range analysis to prove non-negativity.\n\n @param graph  The IR graph\n @return       Number of nodes replaced"]
-    pub fn vtx_strength_reduce_run(graph: *mut vtx_graph_t) -> u32;
-}
-extern "C" {
-    #[doc = " Unroll loops by duplicating their body.\n\n Conservative implementation: only unrolls small loops (<= 20 body nodes)\n with a single back-edge. The actual body replication is a future\n enhancement — currently just marks the loop with the unroll factor.\n\n @param graph     The IR graph\n @param schedule  The schedule (for loop structure)\n @param arena     Arena for allocations\n @param factor    Unroll factor (2, 3, or 4)\n @return          Number of loops unrolled"]
-    pub fn vtx_loop_unroll_run(
-        graph: *mut vtx_graph_t,
-        schedule: *const vtx_schedule_t,
-        arena: *mut vtx_arena_t,
-        factor: u32,
-    ) -> u32;
-}
-extern "C" {
-    #[doc = " SMI tag elision pass: marks straight-line arithmetic chains as RAW_INT\n so the isel skips per-op untag/retag. One untag at chain entry, one\n retag at chain exit, instead of untag+retag per op.\n\n @param graph  The IR graph\n @return       Number of nodes marked RAW_INT"]
-    pub fn vtx_smi_tag_elision_run(graph: *mut vtx_graph_t) -> u32;
-}
-extern "C" {
-    #[doc = " Run representation inference on the graph.\n\n Inserts UnboxInt nodes before arithmetic chains and BoxInt nodes at\n chain exits. Marks arithmetic nodes as RAW_INT so the isel emits\n raw arithmetic instead of per-op untag/retag.\n\n @param graph   The IR graph (modified in-place)\n @param arena   Arena for temporary allocations\n @return        Number of UnboxInt/BoxInt nodes inserted"]
-    pub fn vtx_rep_infer_run(graph: *mut vtx_graph_t, arena: *mut vtx_arena_t) -> u32;
-}
-extern "C" {
-    #[doc = " Evict methods using the clock (second chance) algorithm until the\n cache is under the max size. O(1) amortized per eviction.\n\n @param cache       Code cache\n @param registry    Method registry\n @param current_ts  Current global timestamp (monotonically increasing)\n @return            Number of methods evicted, or -1 on failure"]
-    pub fn vtx_evict_lru(
-        cache: *mut vtx_code_cache_t,
-        registry: *mut vtx_method_registry_t,
-        current_ts: u64,
-    ) -> ::std::os::raw::c_int;
-}
-extern "C" {
-    #[doc = " Update the use bit for a method (clock eviction touch).\n Called when a method is invoked. Sets the use_bit so the clock\n algorithm gives the method a \"second chance\" during eviction.\n The timestamp is also updated every VTX_LRU_UPDATE_INTERVAL calls\n for diagnostics.\n\n @param method  The compiled method\n @param ts      Current global timestamp"]
-    pub fn vtx_evict_touch(method: *mut vtx_compiled_method_t, ts: u64);
-}
-extern "C" {
-    #[doc = " Find the next eviction candidate using the clock (second chance)\n algorithm. O(1) amortized per call.\n Returns the method, or NULL if the registry is empty."]
-    pub fn vtx_evict_find_lru(registry: *mut vtx_method_registry_t) -> *mut vtx_compiled_method_t;
-}
-extern "C" {
-    #[doc = " Evict a specific method from the cache.\n\n @param cache     Code cache\n @param registry  Method registry\n @param method    The method to evict\n @return          0 on success, -1 on failure"]
-    pub fn vtx_evict_method(
-        cache: *mut vtx_code_cache_t,
-        registry: *mut vtx_method_registry_t,
-        method: *mut vtx_compiled_method_t,
-    ) -> ::std::os::raw::c_int;
-}
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct vtx_dep_set_t {
-    pub method_ids: *mut u32,
-    pub count: u32,
-    pub capacity: u32,
-}
-impl Default for vtx_dep_set_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
-#[doc = " A guard-level dependency: maps (TypeID, guard_id) instead of just TypeID.\n This enables fine-grained invalidation that only patches affected guards\n rather than invalidating entire methods."]
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct vtx_guard_dep_t {
-    pub type_id: u32,
-    pub guard_id: u32,
-    pub method_id: u32,
-    pub guard_branch_offset: u32,
-    pub code_start: *mut u8,
-}
-impl Default for vtx_guard_dep_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
-pub type vtx_guard_dep_entry_t = vtx_guard_dep_entry;
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct vtx_guard_dep_entry {
-    pub type_id: u32,
-    pub deps: *mut vtx_guard_dep_t,
-    pub dep_count: u32,
-    pub dep_capacity: u32,
-    pub next: *mut vtx_guard_dep_entry_t,
-}
-impl Default for vtx_guard_dep_entry {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct vtx_guard_dep_index_t {
-    pub buckets: [*mut vtx_guard_dep_entry_t; 256usize],
-    pub entry_count: u32,
-    pub arena: *mut vtx_arena_t,
-}
-impl Default for vtx_guard_dep_index_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
-#[doc = " Inverted index: TypeID → set of methods.\n Implemented as a hash table for O(1) average lookup."]
-pub type vtx_index_entry_t = vtx_index_entry;
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct vtx_index_entry {
-    pub key: u64,
-    pub dep_set: vtx_dep_set_t,
-    pub next: *mut vtx_index_entry_t,
-}
-impl Default for vtx_index_entry {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct vtx_inverted_index_t {
-    pub buckets: [*mut vtx_index_entry_t; 256usize],
-    pub entry_count: u32,
-    pub arena: *mut vtx_arena_t,
-}
-impl Default for vtx_inverted_index_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
-extern "C" {
-    #[doc = " Initialize the inverted index."]
-    pub fn vtx_inverted_index_init(
-        index: *mut vtx_inverted_index_t,
-        arena: *mut vtx_arena_t,
-    ) -> ::std::os::raw::c_int;
-}
-extern "C" {
-    #[doc = " Destroy the inverted index."]
-    pub fn vtx_inverted_index_destroy(index: *mut vtx_inverted_index_t);
-}
-extern "C" {
-    #[doc = " Add a dependency: method `method_id` depends on `typeid`."]
-    pub fn vtx_inverted_index_add(
-        index: *mut vtx_inverted_index_t,
-        typeid_: u64,
-        method_id: u32,
-    ) -> ::std::os::raw::c_int;
-}
-extern "C" {
-    #[doc = " Add a shape dependency: method `method_id` depends on `shapeid`."]
-    pub fn vtx_inverted_index_add_shape(
-        index: *mut vtx_inverted_index_t,
-        shapeid: u32,
-        method_id: u32,
-    ) -> ::std::os::raw::c_int;
-}
-extern "C" {
-    #[doc = " Remove a method from all dependency sets.\n Call this when a method is uninstalled or invalidated."]
-    pub fn vtx_inverted_index_remove_method(
-        index: *mut vtx_inverted_index_t,
-        method_id: u32,
-    ) -> ::std::os::raw::c_int;
-}
-extern "C" {
-    #[doc = " Look up the set of methods that depend on `typeid`.\n Returns the dep set, or NULL if no methods depend on this type."]
-    pub fn vtx_inverted_index_lookup(
-        index: *mut vtx_inverted_index_t,
-        typeid_: u64,
-    ) -> *const vtx_dep_set_t;
-}
-extern "C" {
-    #[doc = " Invalidate all methods that depend on the given TypeID.\n\n This is called when a class is loaded or redefined. All compiled\n methods whose guards reference this TypeID are found via the\n inverted index, marked as not-compiled, and their metadata is freed.\n\n @param typeid_    The TypeID that triggered invalidation\n @param cache      Code cache\n @param registry   Method registry\n @param index      Inverted index\n @return           Number of methods invalidated, or -1 on failure"]
-    pub fn vtx_invalidate_dependencies(
-        typeid_: u64,
-        cache: *mut vtx_code_cache_t,
-        registry: *mut vtx_method_registry_t,
-        index: *mut vtx_inverted_index_t,
-    ) -> ::std::os::raw::c_int;
-}
-extern "C" {
-    #[doc = " Invalidate all methods that depend on the given ShapeID.\n\n Called when an object's shape changes (e.g., property added/removed).\n\n @param shapeid    The ShapeID that triggered invalidation\n @param cache      Code cache\n @param registry   Method registry\n @param index      Inverted index\n @return           Number of methods invalidated, or -1 on failure"]
-    pub fn vtx_invalidate_shape(
-        shapeid: vtx_shapeid_t,
-        cache: *mut vtx_code_cache_t,
-        registry: *mut vtx_method_registry_t,
-        index: *mut vtx_inverted_index_t,
-    ) -> ::std::os::raw::c_int;
-}
-extern "C" {
-    #[doc = " Register a method's dependencies in the inverted index.\n Called during method installation.\n\n @param index      Inverted index\n @param method     The compiled method\n @return           0 on success, -1 on failure"]
-    pub fn vtx_invalidate_register(
-        index: *mut vtx_inverted_index_t,
-        method: *const vtx_compiled_method_t,
-    ) -> ::std::os::raw::c_int;
-}
-extern "C" {
-    pub fn vtx_guard_dep_index_init(
-        index: *mut vtx_guard_dep_index_t,
-        arena: *mut vtx_arena_t,
-    ) -> ::std::os::raw::c_int;
-}
-extern "C" {
-    pub fn vtx_guard_dep_index_destroy(index: *mut vtx_guard_dep_index_t);
-}
-extern "C" {
-    pub fn vtx_guard_dep_index_add(
-        index: *mut vtx_guard_dep_index_t,
-        type_id: u32,
-        guard_id: u32,
-        method_id: u32,
-        guard_branch_offset: u32,
-        code_start: *mut u8,
-    ) -> ::std::os::raw::c_int;
-}
-extern "C" {
-    pub fn vtx_guard_dep_index_lookup(
-        index: *mut vtx_guard_dep_index_t,
-        type_id: u32,
-        out_count: *mut u32,
-    ) -> *const vtx_guard_dep_t;
-}
-extern "C" {
-    #[doc = " Fine-grained invalidation: only patch guards that depend on the\n changed TypeID, leaving other guards in the method active.\n\n For each guard that depends on typeid_:\n   1. Patch the guard's JCC in the compiled code to jump to a deopt stub\n   2. The method's other guards remain active\n   3. No recompilation is needed unless all guards are invalidated\n\n This avoids the \"nuclear option\" of invalidating entire methods.\n\n @param typeid_   The TypeID that triggered invalidation\n @param index     Guard-level dependency index\n @param cache     Code cache (for deopt stub allocation)\n @return          Number of guards patched, or -1 on failure"]
-    pub fn vtx_invalidate_guard_fine_grained(
-        typeid_: u32,
-        index: *mut vtx_guard_dep_index_t,
-        cache: *mut vtx_code_cache_t,
-    ) -> ::std::os::raw::c_int;
-}
-extern "C" {
-    #[doc = " Compute SHA-256 hash of bytecode data for version gating.\n Implemented in sha256.c (public domain, FIPS 180-4)."]
-    pub fn vtx_profile_compute_bytecode_hash(bytecode: *const u8, len: usize, hash: *mut u8);
-}
-extern "C" {
-    #[doc = " Save global profile data to a binary file.\n Returns true on success, false on failure.\n The file is written atomically (write to temp, then rename).\n File permissions are set to 0600 (owner read/write only).\n\n @param global         The profile data to save\n @param filename       Output filename\n @param bytecode_hash  SHA-256 hash of the bytecode this profile was\n                       collected against. Stored in the header so that\n                       a profile from a different bytecode version is\n                       automatically rejected on load. May be NULL to\n                       skip the hash (not recommended for production)."]
-    pub fn vtx_profile_save(
-        global: *const vtx_profile_global_t,
-        filename: *const ::std::os::raw::c_char,
-        bytecode_hash: *const u8,
-    ) -> bool;
-}
-extern "C" {
-    #[doc = " Load global profile data from a binary file.\n If the file's version doesn't match VTX_PROFILE_VERSION, the file is ignored\n and false is returned. If the CRC32 doesn't match, false is returned.\n If expected_hash is non-NULL and the stored bytecode hash doesn't match,\n false is returned (profile is from a different bytecode version).\n On success, the loaded data is MERGED into the existing global profile\n (existing data is preserved and augmented with loaded data).\n Returns true on success, false on failure."]
-    pub fn vtx_profile_load(
-        global: *mut vtx_profile_global_t,
-        filename: *const ::std::os::raw::c_char,
-        expected_hash: *const u8,
-    ) -> bool;
-}
-extern "C" {
-    #[doc = " Register an atexit handler that saves the profile to the given filename.\n The global pointer is captured at registration time.\n Returns 0 on success, -1 on failure."]
-    pub fn vtx_profile_register_atexit(
-        global: *mut vtx_profile_global_t,
-        filename: *const ::std::os::raw::c_char,
-        bytecode_hash: *const u8,
-    ) -> ::std::os::raw::c_int;
-}
-extern "C" {
-    #[doc = " Unregister the atexit handler. Clears the stored global pointer\n so the atexit handler will not attempt to access a destroyed global.\n Must be called before destroying the registered global."]
-    pub fn vtx_profile_unregister_atexit();
-}
-#[doc = " A single method's persisted T1 code descriptor.\n\n This is the on-disk format. The code itself is in the code blob at\n `code_offset`."]
-#[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
-pub struct vtx_t1_persist_method_t {
-    pub method_id: u32,
-    pub code_offset: u32,
-    pub code_size: u32,
-    pub entry_offset: u32,
-    pub stack_slots: u32,
-    pub local_slots: u32,
-    pub reloc_count: u32,
-}
-#[doc = " A single persisted relocation entry."]
-#[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
-pub struct vtx_t1_persist_reloc_t {
-    pub kind: u32,
-    pub offset: u32,
-    pub target_offset: u32,
-    pub target_address: u64,
-    pub addend: i32,
-}
-extern "C" {
-    #[doc = " Save a collection of T1 compiled methods to a T1 cache file.\n\n @param filename       Output filename\n @param bytecode_hash  SHA-256 hash of the bytecode (for version gating)\n @param methods        Array of compiled code pointers (T1 only)\n @param method_count   Number of methods\n @return               true on success, false on failure"]
-    pub fn vtx_t1_cache_save(
-        filename: *const ::std::os::raw::c_char,
-        bytecode_hash: *const u8,
-        methods: *mut *const vtx_compiled_code_t,
-        method_count: u32,
-    ) -> bool;
-}
-#[doc = " Loaded T1 cache: an mmap'd code blob with per-method descriptors.\n\n The code blob is mmap'd as PROT_READ|PROT_EXEC. Method entry points\n are computed as (code_base + entry_offset)."]
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct vtx_t1_cache_t {
-    pub bytecode_hash: [u8; 32usize],
-    pub method_count: u32,
-    pub total_code_size: u32,
-    pub methods: *mut vtx_t1_persist_method_t,
-    pub method_reloc_offsets: *mut u32,
-    pub relocs: *mut vtx_t1_persist_reloc_t,
-    pub reloc_count: u32,
-    pub code_base: *mut ::std::os::raw::c_void,
-    pub code_map_size: usize,
-    pub code_fd: ::std::os::raw::c_int,
-    pub load_time_ns: u64,
-    pub relocations_applied: bool,
-}
-impl Default for vtx_t1_cache_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
-extern "C" {
-    #[doc = " Load a T1 cache file, mmap the code, and apply relocations.\n\n If the file's bytecode hash doesn't match `expected_hash`, the load\n fails (returns false). If the CRC doesn't match, the load fails.\n\n On success, the caller can call vtx_t1_cache_get_entry() to get the\n native entry point for any method in the cache.\n\n @param cache          Cache structure to populate (caller allocates)\n @param filename       T1 cache file path\n @param expected_hash  Expected bytecode hash (for version gating)\n @return               true on success, false on failure (bad magic,\n                       version mismatch, CRC failure, hash mismatch,\n                       or relocation error)"]
-    pub fn vtx_t1_cache_load(
-        cache: *mut vtx_t1_cache_t,
-        filename: *const ::std::os::raw::c_char,
-        expected_hash: *const u8,
-    ) -> bool;
-}
-extern "C" {
-    #[doc = " Get the native entry point for a method in the loaded T1 cache.\n\n Returns NULL if the method is not in the cache.\n\n @param cache      Loaded T1 cache\n @param method_id  Method to look up\n @return           Native entry point, or NULL"]
-    pub fn vtx_t1_cache_get_entry(
-        cache: *const vtx_t1_cache_t,
-        method_id: u32,
-    ) -> *mut ::std::os::raw::c_void;
-}
-extern "C" {
-    #[doc = " Check if a method is present in the loaded T1 cache."]
-    pub fn vtx_t1_cache_has_method(cache: *const vtx_t1_cache_t, method_id: u32) -> bool;
-}
-extern "C" {
-    #[doc = " Destroy a loaded T1 cache: unmap the code blob and free descriptors."]
-    pub fn vtx_t1_cache_destroy(cache: *mut vtx_t1_cache_t);
-}
-extern "C" {
-    #[doc = " Get T1 cache statistics.\n\n @param cache             Loaded T1 cache\n @param method_count      Out: number of methods in cache\n @param code_size         Out: total native code size\n @param load_time_ns      Out: time spent loading\n @param relocations       Out: number of relocations applied"]
-    pub fn vtx_t1_cache_stats(
-        cache: *const vtx_t1_cache_t,
-        method_count: *mut u32,
-        code_size: *mut u32,
-        load_time_ns: *mut u64,
-        relocations: *mut u32,
-    );
-}
-extern "C" {
-    #[doc = " Build the T1 cache filename for a given bytecode hash.\n\n Format: <dir>/<hash_hex>.t1c\n\n @param dir         Profile directory\n @param hash_hex    Bytecode hash as 32-char hex string\n @param out         Output buffer\n @param out_size    Size of output buffer\n @return            0 on success, -1 on overflow"]
-    pub fn vtx_t1_cache_filename(
-        dir: *const ::std::os::raw::c_char,
-        hash_hex: *const ::std::os::raw::c_char,
-        out: *mut ::std::os::raw::c_char,
-        out_size: usize,
-    ) -> ::std::os::raw::c_int;
-}
-extern "C" {
     #[doc = " Verify the graph integrity. Returns true if all checks pass.\n\n When VORTEX_ENABLE_VERIFY is not defined, this function returns true\n without doing any work."]
     pub fn vtx_verify_graph(graph: *const vtx_graph_t) -> bool;
 }
@@ -6503,15 +5037,6 @@ pub struct vtx_escape_map_t {
     pub alloc_count: u32,
     pub alloc_capacity: u32,
 }
-impl Default for vtx_escape_map_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[doc = " The dataflow state for one basic block: a snapshot of the escape map\n at block entry and exit. The transfer function walks the block's nodes\n and updates the exit state based on how each node uses allocations."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -6520,15 +5045,6 @@ pub struct vtx_pea_block_state_t {
     pub exit_state: *mut vtx_escape_state_t,
     pub state_count: u32,
     pub entry_changed: bool,
-}
-impl Default for vtx_pea_block_state_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 #[doc = " The result of running PEA on a graph. Contains the final escape state\n for every allocation, plus the per-block dataflow states for use by\n downstream transforms (cross-object SR, materialization, virtual objects).\n\n All memory is arena-allocated; destroy by freeing the arena."]
 #[repr(C)]
@@ -6542,15 +5058,6 @@ pub struct vtx_pea_analysis_t {
     pub arg_escape_count: u32,
     pub global_escape_count: u32,
     pub iterations: u32,
-}
-impl Default for vtx_pea_analysis_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Run flow-sensitive partial escape analysis on the graph.\n\n Algorithm:\n   1. Identify all allocation nodes in the graph.\n   2. Initialize all allocations to NoEscape.\n   3. Build per-block entry/exit state arrays.\n   4. Iterate using a reverse-postorder worklist:\n      a. For each block, compute entry state as join of predecessor exit states.\n      b. Apply the transfer function: walk each node, update escape states.\n      c. If exit state changed, add successors to the worklist.\n   5. Stop at fixed point (no state changes).\n\n The analysis result is allocated from the given arena.\n Returns the analysis result, or NULL on failure.\n\n @param graph  The SoN graph to analyze\n @param arena  Arena for allocating the result\n @return       Analysis result, or NULL on failure"]
@@ -6599,15 +5106,6 @@ pub struct vtx_alloc_edge {
     pub next: *mut vtx_alloc_edge_t,
     pub rev_next: *mut vtx_alloc_edge_t,
 }
-impl Default for vtx_alloc_edge {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[doc = " The allocation graph: maps each allocation to the list of outgoing\n edges (field stores from this allocation to other allocations)."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -6620,15 +5118,6 @@ pub struct vtx_alloc_graph_t {
     pub reverse_edges: *mut *mut vtx_alloc_edge_t,
     pub reverse_array_size: u32,
 }
-impl Default for vtx_alloc_graph_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[doc = " For each allocation, the effective escape state after cross-object\n analysis. This may be lower than the raw escape state from the\n base analysis: an ArgEscape or GlobalEscape object may have effective\n NoEscape if its only escape path goes through a container field that\n is never read at the escape point."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -6638,18 +5127,9 @@ pub struct vtx_effective_escape_t {
     pub scalar_fields: *mut u32,
     pub scalar_field_count: u32,
 }
-impl Default for vtx_effective_escape_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[doc = " Maps a (allocation, field_offset) pair to the NodeID of the scalar\n local variable that replaces the field access. Used to rewrite\n LoadField/StoreField nodes."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_sr_mapping_t {
     pub alloc_id: vtx_nodeid_t,
     pub field_offset: u32,
@@ -6665,15 +5145,6 @@ pub struct vtx_cross_sr_result_t {
     pub allocs_replaced: u32,
     pub field_accesses_rewritten: u32,
     pub edges_analyzed: u32,
-}
-impl Default for vtx_cross_sr_result_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Run cross-object scalar replacement on the graph.\n\n This transforms the graph in place:\n   - Creates scalar local variable nodes for each field of\n     scalar-replaceable allocations\n   - Rewrites LoadField/StoreField accesses to use the locals\n   - Removes allocation nodes for fully scalar-replaced objects\n\n @param graph    The SoN graph (modified in place)\n @param analysis The escape analysis result from vtx_pea_run()\n @param arena    Arena for allocating temporary data\n @return         Result structure, or NULL on failure"]
@@ -6715,15 +5186,6 @@ pub struct vtx_virtual_obj_t {
     pub field_count: u32,
     pub field_capacity: u32,
 }
-impl Default for vtx_virtual_obj_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct vtx_virtual_result_t {
@@ -6737,15 +5199,6 @@ pub struct vtx_virtual_result_t {
     pub non_virtual_count: u32,
     pub phis_resolved: u32,
     pub field_accesses_rewritten: u32,
-}
-impl Default for vtx_virtual_result_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Run virtual object tracking on the graph.\n\n This pass:\n   1. Classifies each NoEscape allocation as virtual\n   2. Tracks virtual objects through Phi nodes\n   3. Rewrites all field accesses to virtual objects as local variable access\n   4. Eliminates allocation nodes for virtual objects\n\n Must run after escape analysis and before materialization (materialization\n handles objects that need to become non-virtual at escape/deopt points).\n\n @param graph    The SoN graph (modified in place)\n @param analysis The escape analysis result\n @param arena    Arena for allocating temporary data\n @return         Virtual tracking result, or NULL on failure"]
@@ -6790,15 +5243,6 @@ pub struct vtx_materialize_point_t {
     pub materialized_obj_id: vtx_nodeid_t,
     pub predecessor_control: vtx_nodeid_t,
 }
-impl Default for vtx_materialize_point_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct vtx_materialize_result_t {
@@ -6808,15 +5252,6 @@ pub struct vtx_materialize_result_t {
     pub objects_materialized: u32,
     pub fields_stored: u32,
     pub deopt_points_handled: u32,
-}
-impl Default for vtx_materialize_result_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Run the materialization pass on the graph.\n\n Scans for deopt points and escape points that reference scalar-replaced\n objects, and inserts NewObject + StoreField nodes to reify those objects.\n\n This pass must run AFTER cross-object scalar replacement, so it can\n identify which objects were scalar-replaced and what their field values\n are.\n\n @param graph          The SoN graph (modified in place — new nodes inserted)\n @param analysis       The escape analysis result\n @param virtual_result The virtual object tracking result (may be NULL if\n                       virtual pass was not run; when provided, field values\n                       are read from virtual field maps instead of dead\n                       StoreField nodes)\n @param arena          Arena for allocating temporary data\n @return               Materialization result, or NULL on failure"]
@@ -6844,7 +5279,7 @@ extern "C" {
 }
 #[doc = " A single node in a GBDT tree. Internal nodes test a feature against\n a threshold; leaf nodes contribute a value to the prediction sum.\n\n Types are chosen for compactness:\n   uint16_t feature_index: 15 features, 0xFFFF = leaf marker\n   float    threshold:     sufficient precision for normalized [0,1] features\n   int16_t  left_child:    indices within a tree (< 32768 nodes per tree)\n   int16_t  right_child:   same\n   float    leaf_value:    small values summed across trees"]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_gbdt_node_t {
     pub feature_index: u16,
     pub threshold: f32,
@@ -6853,7 +5288,7 @@ pub struct vtx_gbdt_node_t {
     pub leaf_value: f32,
 }
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_gbdt_tree_desc_t {
     pub root_index: u32,
     pub node_count: u32,
@@ -6869,15 +5304,6 @@ pub struct vtx_gbdt_model_t {
     pub max_depth: u32,
     pub init_score: f64,
     pub owns_nodes: bool,
-}
-impl Default for vtx_gbdt_model_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Initialize an empty GBDT model.\n Returns 0 on success, -1 on failure."]
@@ -6914,7 +5340,7 @@ pub type vtx_callee_lookup_fn = ::std::option::Option<
 >;
 #[doc = " VORTEX ML Inliner — Inlining Transform\n\n Performs the actual inlining of a callee graph into a caller graph\n at a specific call site. The transform follows the Sea-of-Nodes\n inlining algorithm:\n\n   1. Clone the callee's SoN subgraph into the caller's node table\n   2. Replace Parameter nodes in the clone with the call's argument nodes\n   3. Replace Return nodes in the clone with Phi nodes merging into the caller\n   4. Thread the callee's memory chain into the caller's memory chain\n   5. Add FrameState at the inlined entry point for deoptimization\n   6. Run GVN on the inlined subgraph to eliminate redundancies\n\n The caller graph is modified in place. The callee graph is NOT modified.\n\n Important: After inlining, the caller may need DCE and re-scheduling.\n The transform does NOT run these passes automatically — the caller\n must schedule them."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_inline_result_t {
     pub success: bool,
     pub nodes_added: u32,
@@ -6925,7 +5351,7 @@ pub struct vtx_inline_result_t {
 }
 #[doc = " Result of a chain inlining operation.\n Tracks the cumulative statistics across all levels of inlining."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_chain_inline_result_t {
     pub chain_depth: u32,
     pub cumulative_node_count: u32,
@@ -6986,17 +5412,8 @@ pub struct vtx_loop_spec_result_t {
     pub vector_width: u32,
     pub peel_count: u32,
 }
-impl Default for vtx_loop_spec_result_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_sota_loop_spec_t {
     pub loops_checked: u32,
     pub loops_vectorized: u32,
@@ -7031,7 +5448,7 @@ extern "C" {
 }
 #[doc = " Result of a loop unrolling analysis."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_loop_unroll_result_t {
     pub can_unroll: bool,
     pub unroll_factor: u32,
@@ -7074,7 +5491,7 @@ extern "C" {
 }
 #[doc = " VORTEX Mid-Tier (T1.5) — Type-Specialized Compilation\n\n Between the baseline T1 and the optimizing T2, the mid-tier provides\n type-specialized compilation with minimal analysis. This reduces warmup\n time by 3-5x compared to waiting for T2 compilation.\n\n Key differences from T1 (baseline):\n   - Uses type feedback to specialize operations (e.g., \"this is always int\")\n   - Eliminates type checks for monomorphic call sites\n   - Inline caches are pre-populated from type feedback\n\n Key differences from T2 (optimizing):\n   - No PEA / escape analysis / scalar replacement\n   - No inlining of non-trivial methods\n   - No LICM / bounds check elimination\n   - Compilation is ~10x faster than T2"]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_midtier_config_t {
     pub use_type_feedback: bool,
     pub inline_max_size: u32,
@@ -7091,15 +5508,6 @@ pub struct vtx_midtier_result_t {
     pub code_size: u32,
     pub guards_inserted: u32,
     pub sites_specialized: u32,
-}
-impl Default for vtx_midtier_result_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     pub fn vtx_midtier_config_default() -> vtx_midtier_config_t;
@@ -7270,7 +5678,7 @@ pub const vtx_opnd_kind_t_VTX_OPND_LABEL: vtx_opnd_kind_t = 5;
 pub const vtx_opnd_kind_t_VTX_OPND_SPILL: vtx_opnd_kind_t = 6;
 pub type vtx_opnd_kind_t = ::std::os::raw::c_uint;
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_x86_memop_t {
     pub base_vreg: u32,
     pub index_vreg: u32,
@@ -7292,15 +5700,6 @@ pub struct vtx_inst_t {
     pub source_node: vtx_nodeid_t,
     pub native_offset: u32,
 }
-impl Default for vtx_inst_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct vtx_inst_block_t {
@@ -7308,15 +5707,6 @@ pub struct vtx_inst_block_t {
     pub inst_count: u32,
     pub inst_capacity: u32,
     pub block_id: u32,
-}
-impl Default for vtx_inst_block_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -7333,15 +5723,6 @@ pub struct vtx_inst_stream_t {
     pub smi_mask_vreg: u32,
     pub uses_smi: bool,
     pub schedule: *const vtx_schedule_t,
-}
-impl Default for vtx_inst_stream_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Select x86-64 instructions from the scheduled SoN graph.\n\n Walks each block in the schedule, mapping each SoN node to x86-64\n instructions. Value-producing nodes are assigned virtual registers.\n Guard/DeoptGuard nodes emit compare + conditional jump instructions.\n\n @param schedule  The scheduled SoN graph\n @param arena     Arena for allocations (node_to_vreg, blocks, instructions)\n @return          Instruction stream, or NULL on failure"]
@@ -7410,15 +5791,6 @@ pub struct vtx_live_range {
     pub spill_slot: u32,
     pub next: *mut vtx_live_range,
 }
-impl Default for vtx_live_range {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 pub type vtx_live_range_t = vtx_live_range;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -7441,15 +5813,6 @@ pub struct vtx_live_interval {
     pub split_parent: *mut vtx_live_interval,
     pub split_child: *mut vtx_live_interval,
 }
-impl Default for vtx_live_interval {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 pub type vtx_live_interval_t = vtx_live_interval;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -7467,15 +5830,6 @@ pub struct vtx_regalloc_result_t {
     pub interval_count: u32,
     pub intervals: *mut vtx_live_interval_t,
     pub is_leaf: bool,
-}
-impl Default for vtx_regalloc_result_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Run the linear scan register allocator on the instruction stream.\n\n Computes live intervals, assigns physical registers, and inserts\n spill/fill code as needed.\n\n @param stream  The instruction stream (with virtual registers)\n @param arena   Arena for allocations\n @return        Register allocation result, or NULL on failure"]
@@ -7562,24 +5916,6 @@ pub struct vtx_x86_emit_t__bindgen_ty_1 {
     pub ref_offsets: *mut u32,
     pub count: u32,
     pub capacity: u32,
-}
-impl Default for vtx_x86_emit_t__bindgen_ty_1 {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
-impl Default for vtx_x86_emit_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Initialize the emitter with an initial buffer capacity.\n Returns 0 on success, -1 on failure."]
@@ -8125,30 +6461,12 @@ pub struct vtx_guard_desc_t {
     pub is_value_guard: bool,
     pub expected_value: u64,
 }
-impl Default for vtx_guard_desc_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct vtx_guard_desc_array_t {
     pub guards: *mut vtx_guard_desc_t,
     pub count: u32,
     pub capacity: u32,
-}
-impl Default for vtx_guard_desc_array_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Initialize a guard descriptor array."]
@@ -8265,17 +6583,8 @@ pub struct vtx_pipeline_config_t {
     pub deoptless_table_count: u32,
     pub deoptless_table_capacity: u32,
 }
-impl Default for vtx_pipeline_config_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_pipeline_stats_t {
     pub gvn_nodes_merged: u32,
     pub sccp_constants_propagated: u32,
@@ -8310,15 +6619,6 @@ pub struct vtx_compile_result_t {
     pub native_size: u32,
     pub side_table: *mut vtx_side_table_t,
     pub reloc_table: *mut vtx_reloc_table_t,
-}
-impl Default for vtx_compile_result_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     pub fn vtx_pipeline_config_t1() -> vtx_pipeline_config_t;
@@ -8356,6 +6656,474 @@ extern "C" {
 }
 extern "C" {
     pub fn vtx_compile_result_destroy(result: *mut vtx_compile_result_t);
+}
+extern "C" {
+    #[doc = " Emit code to increment the method invocation counter.\n\n Generated code:\n   1. Load profile_data pointer from [RBP + VTX_FRAME_PROFILE_DATA_OFFSET]\n   2. Increment invocation_count (saturating at UINT64_MAX)\n      inc qword ptr [profile_data + VTX_PD_INVOCATION_COUNT_OFFSET]\n      ; or: add qword ptr [...], 1 + jno skip + mov qword ptr [...], UINT64_MAX\n\n @param buf           Code buffer to emit into\n @param profile_data  If non-NULL, can be used for direct address;\n                      if NULL, load from frame"]
+    pub fn vtx_instrument_emit_invocation_increment(
+        buf: *mut vtx_code_buffer_t,
+        profile_data: *mut vtx_profile_data_t,
+    );
+}
+extern "C" {
+    #[doc = " Emit code to record the receiver type at a call site.\n\n This records the TypeID of the receiver in the call site's type\n profile array. The profile data is used by the T2 optimizer for\n speculative inlining and inline cache optimization.\n\n Generated code:\n   1. Load profile_data pointer from frame\n   2. Compute call_site_types[call_site_pc] address\n   3. Load the current count of type observations\n   4. If count < VTX_POLY_LIMIT, store the new TypeID at entries[count]\n   5. Increment count (saturating)\n\n @param buf           Code buffer to emit into\n @param profile_data  Profile data structure (may be NULL)\n @param call_site_pc  Bytecode PC of the call site\n @param receiver_reg  Register holding the receiver value (tagged)\n @param typeid_reg    Register holding the TypeID to record\n                      (if VTX_REG_NONE, will extract from receiver_reg)"]
+    pub fn vtx_instrument_emit_call_type_record(
+        buf: *mut vtx_code_buffer_t,
+        profile_data: *mut vtx_profile_data_t,
+        call_site_pc: u32,
+        receiver_reg: vtx_reg_t,
+        typeid_reg: vtx_reg_t,
+    );
+}
+extern "C" {
+    #[doc = " Emit code to record a branch outcome.\n\n This increments both the taken count (if taken) and the total count\n for the branch at the given bytecode PC.\n\n Generated code:\n   1. Load profile_data pointer from frame\n   2. Increment branch_total_counts[branch_pc] (saturating at UINT32_MAX)\n   3. If taken, increment branch_taken_counts[branch_pc]\n\n @param buf           Code buffer to emit into\n @param profile_data  Profile data structure (may be NULL)\n @param branch_pc     Bytecode PC of the branch instruction\n @param taken         True if the branch is taken, false otherwise\n                      (the JIT knows this at compile time for unconditional\n                       branches; for conditional, emit on the taken path)"]
+    pub fn vtx_instrument_emit_branch_record(
+        buf: *mut vtx_code_buffer_t,
+        profile_data: *mut vtx_profile_data_t,
+        branch_pc: u32,
+        taken: bool,
+    );
+}
+extern "C" {
+    #[doc = " Emit code to increment the backward branch counter.\n Used at loop back-edges to track loop iteration counts.\n\n Generated code:\n   1. Load profile_data pointer from frame\n   2. Increment backward_branch_count (saturating at UINT64_MAX)\n\n @param buf           Code buffer to emit into\n @param profile_data  Profile data structure (may be NULL)"]
+    pub fn vtx_instrument_emit_backward_branch_increment(
+        buf: *mut vtx_code_buffer_t,
+        profile_data: *mut vtx_profile_data_t,
+    );
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct vtx_code_buffer {
+    pub bytes: *mut u8,
+    pub position: u32,
+    pub capacity: u32,
+}
+extern "C" {
+    #[doc = " Initialize a code buffer with the given initial capacity.\n Returns 0 on success, -1 on failure."]
+    pub fn vtx_code_buffer_init(
+        buf: *mut vtx_code_buffer_t,
+        initial_capacity: u32,
+    ) -> ::std::os::raw::c_int;
+}
+extern "C" {
+    #[doc = " Destroy a code buffer and free its memory."]
+    pub fn vtx_code_buffer_destroy(buf: *mut vtx_code_buffer_t);
+}
+extern "C" {
+    #[doc = " Ensure the buffer has at least `needed` bytes of free space.\n Reallocates if necessary.\n Returns 0 on success, -1 on failure."]
+    pub fn vtx_code_buffer_ensure_capacity(
+        buf: *mut vtx_code_buffer_t,
+        needed: u32,
+    ) -> ::std::os::raw::c_int;
+}
+#[doc = " Records a forward branch that needs to be patched once the target\n position is known. Used for GOTO, IF_TRUE, IF_FALSE targets."]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct vtx_branch_fixup_t {
+    pub patch_position: u32,
+    pub source_offset: u32,
+    pub target_bc_pc: u16,
+    pub is_32bit: bool,
+}
+#[doc = " Polymorphic inline cache for virtual/interface dispatch.\n\n Each CALL_VIRTUAL / CALL_INTERFACE site gets its own IC.\n The emitted machine code probes the type_ids array; on a hit,\n it calls the corresponding target directly.  On a miss, it\n falls through to the runtime helper which updates the IC.\n\n Layout (designed for cache-friendly access from emitted code):\n   offset  0: type_ids[0..3]  — 4 × uint32_t = 16 bytes, contiguous\n   offset 16: targets[0..3]   — 4 × void*    = 32 bytes, contiguous\n   offset 48: count            — uint32_t\n   offset 52: misses           — uint32_t"]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct vtx_poly_ic {
+    pub type_ids: [u32; 4usize],
+    pub targets: [*mut ::std::os::raw::c_void; 4usize],
+    pub count: u32,
+    pub misses: u32,
+}
+extern "C" {
+    #[doc = " Destroy a compiled code struct and free all associated memory.\n Does NOT free the code buffer itself (that's managed by the code cache)."]
+    pub fn vtx_compiled_code_destroy(code: *mut vtx_compiled_code_t);
+}
+extern "C" {
+    #[doc = " Compile a method using the baseline JIT.\n\n Performs a single pass over the bytecode, emitting x86-64 machine code\n for each instruction. Guards are emitted for potentially speculative\n operations. Profiling instrumentation is inserted at key points.\n Deopt stubs are generated after the main code.\n\n If both cache and registry are non-NULL, the compiled code is installed\n into the code cache via vtx_install_method() which handles allocation,\n mprotect, and atomic code pointer updates. Otherwise, the code is\n malloc'd and the caller must handle installation.\n\n @param method       The method to compile\n @param profile_data Profile data for this method (may be NULL for first compilation)\n @param arena        Arena for temporary allocations during compilation\n @param cache        Code cache for proper code installation (may be NULL)\n @param registry     Method registry for code installation (may be NULL)\n @return             Compiled code struct, or NULL on failure"]
+    pub fn vtx_baseline_compile(
+        method: *const vtx_method_desc_t,
+        profile_data: *mut vtx_profile_data_t,
+        arena: *mut vtx_arena_t,
+        cache: *mut vtx_code_cache_t,
+        registry: *mut vtx_method_registry_t,
+    ) -> *mut vtx_compiled_code_t;
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct vtx_runtime_t {
+    pub type_system: vtx_type_system_t,
+    pub gc: vtx_gc_t,
+    pub interp: *mut vtx_interp_t,
+    pub code_cache: vtx_code_cache_t,
+    pub method_registry: vtx_method_registry_t,
+    pub arena: vtx_arena_t,
+    pub orchestrator: *mut vtx_orchestrator_t,
+    pub threadpool: *mut vtx_threadpool_t,
+    pub compile_ctx: *mut vtx_compile_context_t,
+    pub initialized: ::std::os::raw::c_int,
+    pub use_jit: ::std::os::raw::c_int,
+    pub hot_threshold: u32,
+}
+extern "C" {
+    pub fn vtx_runtime_create(rt: *mut vtx_runtime_t) -> ::std::os::raw::c_int;
+}
+extern "C" {
+    pub fn vtx_runtime_destroy(rt: *mut vtx_runtime_t);
+}
+extern "C" {
+    pub fn vtx_runtime_enable_jit(rt: *mut vtx_runtime_t, nthreads: u32) -> ::std::os::raw::c_int;
+}
+extern "C" {
+    pub fn vtx_runtime_run(rt: *mut vtx_runtime_t, bc: *const vtx_bytecode_t) -> vtx_value_t;
+}
+extern "C" {
+    pub fn vtx_runtime_run_with_args(
+        rt: *mut vtx_runtime_t,
+        bc: *const vtx_bytecode_t,
+        args: *const vtx_value_t,
+        arg_count: u32,
+    ) -> vtx_value_t;
+}
+extern "C" {
+    pub fn vtx_runtime_compile(
+        rt: *mut vtx_runtime_t,
+        method: *mut vtx_method_desc_t,
+        tier: ::std::os::raw::c_int,
+    ) -> ::std::os::raw::c_int;
+}
+extern "C" {
+    pub fn vtx_runtime_interp(rt: *mut vtx_runtime_t) -> *mut vtx_interp_t;
+}
+extern "C" {
+    pub fn vtx_runtime_type_system(rt: *mut vtx_runtime_t) -> *mut vtx_type_system_t;
+}
+extern "C" {
+    pub fn vtx_runtime_gc(rt: *mut vtx_runtime_t) -> *mut vtx_gc_t;
+}
+extern "C" {
+    pub fn vtx_runtime_code_cache(rt: *mut vtx_runtime_t) -> *mut vtx_code_cache_t;
+}
+extern "C" {
+    pub fn vtx_runtime_compile_ctx(rt: *mut vtx_runtime_t) -> *mut vtx_compile_context_t;
+}
+extern "C" {
+    pub fn vtx_bytecode_load(path: *const ::std::os::raw::c_char) -> *mut vtx_bytecode_t;
+}
+extern "C" {
+    #[doc = " Strength reduction pass: replaces expensive ops with cheaper equivalents\n when the divisor/multiplier is a power of two.\n\n   Mul(x, 2^k)  → Shl(x, k)\n   Div(x, 1)    → x\n   Mul(x, 1)    → x\n   Mul(x, 0)    → 0\n\n Note: Div(x, 2^k) → Shr(x, k) and Mod(x, 2^k) → And(x, 2^k-1) are\n NOT applied because C's / and % truncate toward zero, while SAR and\n AND round toward -infinity. This causes mismatches for negative\n dividends. A future fix can add range analysis to prove non-negativity.\n\n @param graph  The IR graph\n @return       Number of nodes replaced"]
+    pub fn vtx_strength_reduce_run(graph: *mut vtx_graph_t) -> u32;
+}
+extern "C" {
+    #[doc = " Unroll loops by duplicating their body.\n\n Conservative implementation: only unrolls small loops (<= 20 body nodes)\n with a single back-edge. The actual body replication is a future\n enhancement — currently just marks the loop with the unroll factor.\n\n @param graph     The IR graph\n @param schedule  The schedule (for loop structure)\n @param arena     Arena for allocations\n @param factor    Unroll factor (2, 3, or 4)\n @return          Number of loops unrolled"]
+    pub fn vtx_loop_unroll_run(
+        graph: *mut vtx_graph_t,
+        schedule: *const vtx_schedule_t,
+        arena: *mut vtx_arena_t,
+        factor: u32,
+    ) -> u32;
+}
+extern "C" {
+    #[doc = " SMI tag elision pass: marks straight-line arithmetic chains as RAW_INT\n so the isel skips per-op untag/retag. One untag at chain entry, one\n retag at chain exit, instead of untag+retag per op.\n\n @param graph  The IR graph\n @return       Number of nodes marked RAW_INT"]
+    pub fn vtx_smi_tag_elision_run(graph: *mut vtx_graph_t) -> u32;
+}
+extern "C" {
+    #[doc = " Run representation inference on the graph.\n\n Inserts UnboxInt nodes before arithmetic chains and BoxInt nodes at\n chain exits. Marks arithmetic nodes as RAW_INT so the isel emits\n raw arithmetic instead of per-op untag/retag.\n\n @param graph   The IR graph (modified in-place)\n @param arena   Arena for temporary allocations\n @return        Number of UnboxInt/BoxInt nodes inserted"]
+    pub fn vtx_rep_infer_run(graph: *mut vtx_graph_t, arena: *mut vtx_arena_t) -> u32;
+}
+extern "C" {
+    #[doc = " Evict methods using the clock (second chance) algorithm until the\n cache is under the max size. O(1) amortized per eviction.\n\n @param cache       Code cache\n @param registry    Method registry\n @param current_ts  Current global timestamp (monotonically increasing)\n @return            Number of methods evicted, or -1 on failure"]
+    pub fn vtx_evict_lru(
+        cache: *mut vtx_code_cache_t,
+        registry: *mut vtx_method_registry_t,
+        current_ts: u64,
+    ) -> ::std::os::raw::c_int;
+}
+extern "C" {
+    #[doc = " Update the use bit for a method (clock eviction touch).\n Called when a method is invoked. Sets the use_bit so the clock\n algorithm gives the method a \"second chance\" during eviction.\n The timestamp is also updated every VTX_LRU_UPDATE_INTERVAL calls\n for diagnostics.\n\n @param method  The compiled method\n @param ts      Current global timestamp"]
+    pub fn vtx_evict_touch(method: *mut vtx_compiled_method_t, ts: u64);
+}
+extern "C" {
+    #[doc = " Find the next eviction candidate using the clock (second chance)\n algorithm. O(1) amortized per call.\n Returns the method, or NULL if the registry is empty."]
+    pub fn vtx_evict_find_lru(registry: *mut vtx_method_registry_t) -> *mut vtx_compiled_method_t;
+}
+extern "C" {
+    #[doc = " Evict a specific method from the cache.\n\n @param cache     Code cache\n @param registry  Method registry\n @param method    The method to evict\n @return          0 on success, -1 on failure"]
+    pub fn vtx_evict_method(
+        cache: *mut vtx_code_cache_t,
+        registry: *mut vtx_method_registry_t,
+        method: *mut vtx_compiled_method_t,
+    ) -> ::std::os::raw::c_int;
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct vtx_dep_set_t {
+    pub method_ids: *mut u32,
+    pub count: u32,
+    pub capacity: u32,
+}
+#[doc = " A guard-level dependency: maps (TypeID, guard_id) instead of just TypeID.\n This enables fine-grained invalidation that only patches affected guards\n rather than invalidating entire methods."]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct vtx_guard_dep_t {
+    pub type_id: u32,
+    pub guard_id: u32,
+    pub method_id: u32,
+    pub guard_branch_offset: u32,
+    pub code_start: *mut u8,
+}
+pub type vtx_guard_dep_entry_t = vtx_guard_dep_entry;
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct vtx_guard_dep_entry {
+    pub type_id: u32,
+    pub deps: *mut vtx_guard_dep_t,
+    pub dep_count: u32,
+    pub dep_capacity: u32,
+    pub next: *mut vtx_guard_dep_entry_t,
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct vtx_guard_dep_index_t {
+    pub buckets: [*mut vtx_guard_dep_entry_t; 256usize],
+    pub entry_count: u32,
+    pub arena: *mut vtx_arena_t,
+}
+#[doc = " Inverted index: TypeID → set of methods.\n Implemented as a hash table for O(1) average lookup."]
+pub type vtx_index_entry_t = vtx_index_entry;
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct vtx_index_entry {
+    pub key: u64,
+    pub dep_set: vtx_dep_set_t,
+    pub next: *mut vtx_index_entry_t,
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct vtx_inverted_index_t {
+    pub buckets: [*mut vtx_index_entry_t; 256usize],
+    pub entry_count: u32,
+    pub arena: *mut vtx_arena_t,
+}
+extern "C" {
+    #[doc = " Initialize the inverted index."]
+    pub fn vtx_inverted_index_init(
+        index: *mut vtx_inverted_index_t,
+        arena: *mut vtx_arena_t,
+    ) -> ::std::os::raw::c_int;
+}
+extern "C" {
+    #[doc = " Destroy the inverted index."]
+    pub fn vtx_inverted_index_destroy(index: *mut vtx_inverted_index_t);
+}
+extern "C" {
+    #[doc = " Add a dependency: method `method_id` depends on `typeid`."]
+    pub fn vtx_inverted_index_add(
+        index: *mut vtx_inverted_index_t,
+        typeid_: u64,
+        method_id: u32,
+    ) -> ::std::os::raw::c_int;
+}
+extern "C" {
+    #[doc = " Add a shape dependency: method `method_id` depends on `shapeid`."]
+    pub fn vtx_inverted_index_add_shape(
+        index: *mut vtx_inverted_index_t,
+        shapeid: u32,
+        method_id: u32,
+    ) -> ::std::os::raw::c_int;
+}
+extern "C" {
+    #[doc = " Remove a method from all dependency sets.\n Call this when a method is uninstalled or invalidated."]
+    pub fn vtx_inverted_index_remove_method(
+        index: *mut vtx_inverted_index_t,
+        method_id: u32,
+    ) -> ::std::os::raw::c_int;
+}
+extern "C" {
+    #[doc = " Look up the set of methods that depend on `typeid`.\n Returns the dep set, or NULL if no methods depend on this type."]
+    pub fn vtx_inverted_index_lookup(
+        index: *mut vtx_inverted_index_t,
+        typeid_: u64,
+    ) -> *const vtx_dep_set_t;
+}
+extern "C" {
+    #[doc = " Invalidate all methods that depend on the given TypeID.\n\n This is called when a class is loaded or redefined. All compiled\n methods whose guards reference this TypeID are found via the\n inverted index, marked as not-compiled, and their metadata is freed.\n\n @param typeid_    The TypeID that triggered invalidation\n @param cache      Code cache\n @param registry   Method registry\n @param index      Inverted index\n @return           Number of methods invalidated, or -1 on failure"]
+    pub fn vtx_invalidate_dependencies(
+        typeid_: u64,
+        cache: *mut vtx_code_cache_t,
+        registry: *mut vtx_method_registry_t,
+        index: *mut vtx_inverted_index_t,
+    ) -> ::std::os::raw::c_int;
+}
+extern "C" {
+    #[doc = " Invalidate all methods that depend on the given ShapeID.\n\n Called when an object's shape changes (e.g., property added/removed).\n\n @param shapeid    The ShapeID that triggered invalidation\n @param cache      Code cache\n @param registry   Method registry\n @param index      Inverted index\n @return           Number of methods invalidated, or -1 on failure"]
+    pub fn vtx_invalidate_shape(
+        shapeid: vtx_shapeid_t,
+        cache: *mut vtx_code_cache_t,
+        registry: *mut vtx_method_registry_t,
+        index: *mut vtx_inverted_index_t,
+    ) -> ::std::os::raw::c_int;
+}
+extern "C" {
+    #[doc = " Register a method's dependencies in the inverted index.\n Called during method installation.\n\n @param index      Inverted index\n @param method     The compiled method\n @return           0 on success, -1 on failure"]
+    pub fn vtx_invalidate_register(
+        index: *mut vtx_inverted_index_t,
+        method: *const vtx_compiled_method_t,
+    ) -> ::std::os::raw::c_int;
+}
+extern "C" {
+    pub fn vtx_guard_dep_index_init(
+        index: *mut vtx_guard_dep_index_t,
+        arena: *mut vtx_arena_t,
+    ) -> ::std::os::raw::c_int;
+}
+extern "C" {
+    pub fn vtx_guard_dep_index_destroy(index: *mut vtx_guard_dep_index_t);
+}
+extern "C" {
+    pub fn vtx_guard_dep_index_add(
+        index: *mut vtx_guard_dep_index_t,
+        type_id: u32,
+        guard_id: u32,
+        method_id: u32,
+        guard_branch_offset: u32,
+        code_start: *mut u8,
+    ) -> ::std::os::raw::c_int;
+}
+extern "C" {
+    pub fn vtx_guard_dep_index_lookup(
+        index: *mut vtx_guard_dep_index_t,
+        type_id: u32,
+        out_count: *mut u32,
+    ) -> *const vtx_guard_dep_t;
+}
+extern "C" {
+    #[doc = " Fine-grained invalidation: only patch guards that depend on the\n changed TypeID, leaving other guards in the method active.\n\n For each guard that depends on typeid_:\n   1. Patch the guard's JCC in the compiled code to jump to a deopt stub\n   2. The method's other guards remain active\n   3. No recompilation is needed unless all guards are invalidated\n\n This avoids the \"nuclear option\" of invalidating entire methods.\n\n @param typeid_   The TypeID that triggered invalidation\n @param index     Guard-level dependency index\n @param cache     Code cache (for deopt stub allocation)\n @return          Number of guards patched, or -1 on failure"]
+    pub fn vtx_invalidate_guard_fine_grained(
+        typeid_: u32,
+        index: *mut vtx_guard_dep_index_t,
+        cache: *mut vtx_code_cache_t,
+    ) -> ::std::os::raw::c_int;
+}
+extern "C" {
+    #[doc = " Compute SHA-256 hash of bytecode data for version gating.\n Implemented in sha256.c (public domain, FIPS 180-4)."]
+    pub fn vtx_profile_compute_bytecode_hash(bytecode: *const u8, len: usize, hash: *mut u8);
+}
+extern "C" {
+    #[doc = " Save global profile data to a binary file.\n Returns true on success, false on failure.\n The file is written atomically (write to temp, then rename).\n File permissions are set to 0600 (owner read/write only).\n\n @param global         The profile data to save\n @param filename       Output filename\n @param bytecode_hash  SHA-256 hash of the bytecode this profile was\n                       collected against. Stored in the header so that\n                       a profile from a different bytecode version is\n                       automatically rejected on load. May be NULL to\n                       skip the hash (not recommended for production)."]
+    pub fn vtx_profile_save(
+        global: *const vtx_profile_global_t,
+        filename: *const ::std::os::raw::c_char,
+        bytecode_hash: *const u8,
+    ) -> bool;
+}
+extern "C" {
+    #[doc = " Load global profile data from a binary file.\n If the file's version doesn't match VTX_PROFILE_VERSION, the file is ignored\n and false is returned. If the CRC32 doesn't match, false is returned.\n If expected_hash is non-NULL and the stored bytecode hash doesn't match,\n false is returned (profile is from a different bytecode version).\n On success, the loaded data is MERGED into the existing global profile\n (existing data is preserved and augmented with loaded data).\n Returns true on success, false on failure."]
+    pub fn vtx_profile_load(
+        global: *mut vtx_profile_global_t,
+        filename: *const ::std::os::raw::c_char,
+        expected_hash: *const u8,
+    ) -> bool;
+}
+extern "C" {
+    #[doc = " Register an atexit handler that saves the profile to the given filename.\n The global pointer is captured at registration time.\n Returns 0 on success, -1 on failure."]
+    pub fn vtx_profile_register_atexit(
+        global: *mut vtx_profile_global_t,
+        filename: *const ::std::os::raw::c_char,
+        bytecode_hash: *const u8,
+    ) -> ::std::os::raw::c_int;
+}
+extern "C" {
+    #[doc = " Unregister the atexit handler. Clears the stored global pointer\n so the atexit handler will not attempt to access a destroyed global.\n Must be called before destroying the registered global."]
+    pub fn vtx_profile_unregister_atexit();
+}
+#[doc = " A single method's persisted T1 code descriptor.\n\n This is the on-disk format. The code itself is in the code blob at\n `code_offset`."]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct vtx_t1_persist_method_t {
+    pub method_id: u32,
+    pub code_offset: u32,
+    pub code_size: u32,
+    pub entry_offset: u32,
+    pub stack_slots: u32,
+    pub local_slots: u32,
+    pub reloc_count: u32,
+}
+#[doc = " A single persisted relocation entry."]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct vtx_t1_persist_reloc_t {
+    pub kind: u32,
+    pub offset: u32,
+    pub target_offset: u32,
+    pub target_address: u64,
+    pub addend: i32,
+}
+extern "C" {
+    #[doc = " Save a collection of T1 compiled methods to a T1 cache file.\n\n @param filename       Output filename\n @param bytecode_hash  SHA-256 hash of the bytecode (for version gating)\n @param methods        Array of compiled code pointers (T1 only)\n @param method_count   Number of methods\n @return               true on success, false on failure"]
+    pub fn vtx_t1_cache_save(
+        filename: *const ::std::os::raw::c_char,
+        bytecode_hash: *const u8,
+        methods: *mut *const vtx_compiled_code_t,
+        method_count: u32,
+    ) -> bool;
+}
+#[doc = " Loaded T1 cache: an mmap'd code blob with per-method descriptors.\n\n The code blob is mmap'd as PROT_READ|PROT_EXEC. Method entry points\n are computed as (code_base + entry_offset)."]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct vtx_t1_cache_t {
+    pub bytecode_hash: [u8; 32usize],
+    pub method_count: u32,
+    pub total_code_size: u32,
+    pub methods: *mut vtx_t1_persist_method_t,
+    pub method_reloc_offsets: *mut u32,
+    pub relocs: *mut vtx_t1_persist_reloc_t,
+    pub reloc_count: u32,
+    pub code_base: *mut ::std::os::raw::c_void,
+    pub code_map_size: usize,
+    pub code_fd: ::std::os::raw::c_int,
+    pub load_time_ns: u64,
+    pub relocations_applied: bool,
+}
+extern "C" {
+    #[doc = " Load a T1 cache file, mmap the code, and apply relocations.\n\n If the file's bytecode hash doesn't match `expected_hash`, the load\n fails (returns false). If the CRC doesn't match, the load fails.\n\n On success, the caller can call vtx_t1_cache_get_entry() to get the\n native entry point for any method in the cache.\n\n @param cache          Cache structure to populate (caller allocates)\n @param filename       T1 cache file path\n @param expected_hash  Expected bytecode hash (for version gating)\n @return               true on success, false on failure (bad magic,\n                       version mismatch, CRC failure, hash mismatch,\n                       or relocation error)"]
+    pub fn vtx_t1_cache_load(
+        cache: *mut vtx_t1_cache_t,
+        filename: *const ::std::os::raw::c_char,
+        expected_hash: *const u8,
+    ) -> bool;
+}
+extern "C" {
+    #[doc = " Get the native entry point for a method in the loaded T1 cache.\n\n Returns NULL if the method is not in the cache.\n\n @param cache      Loaded T1 cache\n @param method_id  Method to look up\n @return           Native entry point, or NULL"]
+    pub fn vtx_t1_cache_get_entry(
+        cache: *const vtx_t1_cache_t,
+        method_id: u32,
+    ) -> *mut ::std::os::raw::c_void;
+}
+extern "C" {
+    #[doc = " Check if a method is present in the loaded T1 cache."]
+    pub fn vtx_t1_cache_has_method(cache: *const vtx_t1_cache_t, method_id: u32) -> bool;
+}
+extern "C" {
+    #[doc = " Destroy a loaded T1 cache: unmap the code blob and free descriptors."]
+    pub fn vtx_t1_cache_destroy(cache: *mut vtx_t1_cache_t);
+}
+extern "C" {
+    #[doc = " Get T1 cache statistics.\n\n @param cache             Loaded T1 cache\n @param method_count      Out: number of methods in cache\n @param code_size         Out: total native code size\n @param load_time_ns      Out: time spent loading\n @param relocations       Out: number of relocations applied"]
+    pub fn vtx_t1_cache_stats(
+        cache: *const vtx_t1_cache_t,
+        method_count: *mut u32,
+        code_size: *mut u32,
+        load_time_ns: *mut u64,
+        relocations: *mut u32,
+    );
+}
+extern "C" {
+    #[doc = " Build the T1 cache filename for a given bytecode hash.\n\n Format: <dir>/<hash_hex>.t1c\n\n @param dir         Profile directory\n @param hash_hex    Bytecode hash as 32-char hex string\n @param out         Output buffer\n @param out_size    Size of output buffer\n @return            0 on success, -1 on overflow"]
+    pub fn vtx_t1_cache_filename(
+        dir: *const ::std::os::raw::c_char,
+        hash_hex: *const ::std::os::raw::c_char,
+        out: *mut ::std::os::raw::c_char,
+        out_size: usize,
+    ) -> ::std::os::raw::c_int;
 }
 pub const vtx_decision_reason_t_VTX_DECISION_REASON_PROACTIVE: vtx_decision_reason_t = 0;
 pub const vtx_decision_reason_t_VTX_DECISION_REASON_DRIFT: vtx_decision_reason_t = 1;
@@ -8523,7 +7291,7 @@ extern "C" {
 }
 #[doc = " Metadata for a single run's profile.\n\n This is what gets stored alongside each profile snapshot in the\n ensemble. The quality score is derived from these fields."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_ensemble_run_meta_t {
     pub sample_count: u64,
     pub deopt_count: u64,
@@ -8541,15 +7309,6 @@ pub struct vtx_ensemble_entry_t {
     pub meta: vtx_ensemble_run_meta_t,
     pub valid: bool,
 }
-impl Default for vtx_ensemble_entry_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[doc = " Ensemble profile manager.\n\n Stores the last K runs and computes a robust aggregate. The aggregate\n is stored in `working_profile` — this is what the JIT reads from.\n\n The `previous_aggregate` is kept so that rollback can restore it."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -8566,15 +7325,6 @@ pub struct vtx_ensemble_t {
     pub total_aggregates_computed: u64,
     pub total_rollbacks: u64,
     pub total_demotions: u64,
-}
-impl Default for vtx_ensemble_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Initialize the ensemble manager.\n\n Does NOT allocate the working profile — that happens on the first\n call to compute_aggregate().\n\n Returns 0 on success, -1 on failure."]
@@ -8684,15 +7434,6 @@ pub struct vtx_shape_profile_entry_t {
     pub last_seen_ns: u64,
     pub valid: bool,
 }
-impl Default for vtx_shape_profile_entry_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[doc = " Per-method input-shape-keyed profile table.\n\n Holds up to VTX_INPUT_SHAPE_MAX_PER_METHOD shape-specific profile\n entries. When a new shape is observed and the table is full, the\n least-recently-used shape is evicted (its data is merged into the\n default shape).\n\n The table also maintains a \"default\" entry (shape == VTX_INPUT_SHAPE_DEFAULT)\n for observations that don't match any tracked shape, or for methods\n where shape-keying is disabled."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -8703,15 +7444,6 @@ pub struct vtx_input_shape_table_t {
     pub total_observations: u64,
     pub shape_transitions: u64,
     pub shape_evictions: u64,
-}
-impl Default for vtx_input_shape_table_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Initialize a shape-keyed profile table for a method.\n\n Creates a default-shape entry (VTX_INPUT_SHAPE_DEFAULT) so that\n observations can be recorded even before shape-keying kicks in.\n\n @param table      Table to initialize\n @param method_id  Method ID this table is for\n @return           0 on success, -1 on failure"]
@@ -8789,15 +7521,6 @@ pub struct vtx_input_shape_manager_t {
     pub total_shape_observations: u64,
     pub total_multi_version_methods: u64,
 }
-impl Default for vtx_input_shape_manager_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 extern "C" {
     #[doc = " Initialize the global shape manager."]
     pub fn vtx_input_shape_manager_init(
@@ -8850,15 +7573,6 @@ pub struct vtx_shape_version_t {
     pub call_count: u64,
     pub valid: bool,
 }
-impl Default for vtx_shape_version_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[doc = " Per-method shape dispatch table.\n\n Holds up to VTX_SHAPE_DISPATCH_MAX_VERSIONS shape-specific compiled\n versions. The first entry (index 0) is always the \"default\" version\n (shape == VTX_INPUT_SHAPE_DEFAULT) — the fallback when no shape-\n specific version matches."]
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -8867,15 +7581,6 @@ pub struct vtx_shape_dispatch_t {
     pub versions: [vtx_shape_version_t; 8usize],
     pub version_count: u32,
     pub mutex: pthread_mutex_t,
-}
-impl Default for vtx_shape_dispatch_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 #[doc = " Global shape dispatch manager.\n\n Holds per-method dispatch tables. The interpreter queries this at\n call time to find the right compiled version for the current input shape."]
 #[repr(C)]
@@ -8888,15 +7593,6 @@ pub struct vtx_shape_dispatch_mgr_t {
     pub total_dispatches: u64,
     pub total_default_fallbacks: u64,
     pub total_versions_compiled: u64,
-}
-impl Default for vtx_shape_dispatch_mgr_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Initialize the global shape dispatch manager."]
@@ -8980,15 +7676,6 @@ pub struct vtx_patch_log_t {
     pub entry_count: u32,
     pub bytes_written: u64,
     pub writable: bool,
-}
-impl Default for vtx_patch_log_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Open a patch log for appending (writing).\n\n Creates the file if it doesn't exist, with 0600 permissions. If the\n file exists, validates the header (magic, version, bytecode hash).\n If the header is invalid, the file is truncated and re-created.\n\n @param log           Log handle (caller allocates)\n @param filename      Path to the .vpl file\n @param bytecode_hash SHA-256 hash of the bytecode (for version gating)\n @return              0 on success, -1 on failure"]
@@ -9123,15 +7810,6 @@ pub struct vtx_reconstructed_frame_t {
     pub compressed_snapshot: *mut u8,
     pub snapshot_size: u32,
 }
-impl Default for vtx_reconstructed_frame_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[doc = " The result of stack walking: an array of reconstructed interpreter frames."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -9139,15 +7817,6 @@ pub struct vtx_reconstructed_stack_t {
     pub frames: *mut vtx_reconstructed_frame_t,
     pub frame_count: u32,
     pub frame_capacity: u32,
-}
-impl Default for vtx_reconstructed_stack_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 #[doc = " Maps a code entry point to its side table.\n Used during stack walking to look up the side table for each compiled frame."]
 #[repr(C)]
@@ -9157,15 +7826,6 @@ pub struct vtx_code_descriptor_t {
     pub code_size: u32,
     pub side_table: *mut vtx_side_table_t,
 }
-impl Default for vtx_code_descriptor_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[doc = " Registry of all compiled code descriptors, used for side table lookup."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -9173,15 +7833,6 @@ pub struct vtx_side_table_registry_t {
     pub descriptors: *mut vtx_code_descriptor_t,
     pub descriptor_count: u32,
     pub descriptor_capacity: u32,
-}
-impl Default for vtx_side_table_registry_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 #[doc = " Configuration for a stack walk operation."]
 #[repr(C)]
@@ -9193,15 +7844,6 @@ pub struct vtx_stack_walk_config_t {
     pub frame_states: *mut *mut vtx_frame_state_t,
     pub frame_state_count: u32,
     pub max_depth: u32,
-}
-impl Default for vtx_stack_walk_config_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Walk the compiled frame stack starting from the given frame pointer.\n\n For each compiled frame:\n   1. Look up the side table from the registry using the frame's code pointer.\n   2. Determine the native PC (from the saved return address minus 1).\n   3. Look up the FrameState from the side table.\n   4. For inlined methods, the FrameState chain contains multiple logical frames.\n   5. Reconstruct each logical frame as an interpreter frame.\n\n For each interpreter frame:\n   1. Read the method pointer, PC, locals, and stack directly.\n   2. Add to the reconstructed stack.\n\n Returns a newly allocated reconstructed stack (caller must free with\n vtx_reconstructed_stack_destroy), or NULL on failure."]
@@ -9286,7 +7928,7 @@ extern "C" {
 }
 #[doc = " Monitor state entry: tracks which objects are locked by this frame.\n Each entry records the local variable index holding the locked object\n and the object value itself (resolved at deopt time)."]
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct vtx_osr_monitor_entry_t {
     pub local_index: u32,
     pub object: vtx_value_t,
@@ -9311,15 +7953,6 @@ pub struct vtx_interp_frame_t {
     pub return_pc: u32,
     pub frame_kind: vtx_frame_kind_t,
 }
-impl Default for vtx_interp_frame_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
-}
 #[doc = " Information provided when a guard fails and OSR down is needed.\n This is populated by the deopt stub before calling vtx_osr_down.\n This is distinct from vtx_deopt_info_t (which is the static per-method\n deopt metadata) — this struct contains the dynamic runtime state\n at the point of deoptimization."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -9331,15 +7964,6 @@ pub struct vtx_osr_deopt_context_t {
     pub frame_pointer: *mut ::std::os::raw::c_void,
     pub register_map: *mut vtx_value_t,
     pub register_count: u32,
-}
-impl Default for vtx_osr_deopt_context_t {
-    fn default() -> Self {
-        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
-            s.assume_init()
-        }
-    }
 }
 extern "C" {
     #[doc = " Perform OSR up: replace the interpreter frame with a compiled frame\n and transfer control to the compiled code.\n\n Steps:\n   1. Verify the compiled code exists for the method at the loop header.\n   2. Build a FrameState from the interpreter's current local/stack state.\n   3. Set up the JIT frame: copy locals and stack into the JIT frame layout.\n   4. Patch the return address to point into the compiled code.\n   5. Transfer execution to the compiled code's entry point.\n\n @param interp         Current interpreter frame\n @param method_id      Method being executed\n @param compiled_code  Compiled code descriptor for the method\n @param loop_header_pc Bytecode PC of the loop header (OSR entry point)\n @return true if OSR up was successful, false if not"]

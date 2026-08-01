@@ -1,9 +1,4 @@
-/* wrapper.h — VORTEX public API for Rust FFI bindings.
- *
- * This file includes all VORTEX headers that should be exposed
- * to Rust via bindgen. The generated bindings provide types and
- * function declarations for the full VORTEX JIT + PGO API.
- */
+/* wrapper.h — VORTEX public API for Rust FFI bindings. */
 
 /* Runtime */
 #include "runtime/arena.h"
@@ -68,28 +63,18 @@
 #include "lower/regalloc.h"
 #include "lower/guard_emit.h"
 
-/* PGO: Profile data + persistence */
+/* PGO */
 #include "profile/data.h"
 #include "profile/persist.h"
 #include "profile/merge.h"
 #include "profile/phase.h"
-
-/* PGO: Sprint 1 — Stability */
 #include "profile/confidence.h"
 #include "profile/deterministic.h"
-
-/* PGO: Sprint 2 — Phase partitioning */
 #include "profile/phase_partition.h"
 #include "profile/phase_persist.h"
-
-/* PGO: Sprint 3 — Ensemble profiles */
 #include "profile/ensemble.h"
-
-/* PGO: Sprint 4 — Input-shape-keyed profiles */
 #include "profile/input_shape.h"
 #include "profile/shape_dispatch.h"
-
-/* PGO: Sprint 6 — Patch log */
 #include "profile/patch_log.h"
 
 /* Deoptimization */
