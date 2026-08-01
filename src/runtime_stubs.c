@@ -686,6 +686,38 @@ vtx_value_t vtx_runtime_float_div(vtx_value_t a, vtx_value_t b)
     return vtx_make_double(da / db);
 }
 
+/* Float comparison helpers. Take two NaN-boxed values, compare as doubles,
+ * and return SMI(1) for true, SMI(0) for false. */
+vtx_value_t vtx_runtime_float_eq(vtx_value_t a, vtx_value_t b)
+{
+    return vtx_make_smi(vtx_double_value(a) == vtx_double_value(b) ? 1 : 0);
+}
+
+vtx_value_t vtx_runtime_float_ne(vtx_value_t a, vtx_value_t b)
+{
+    return vtx_make_smi(vtx_double_value(a) != vtx_double_value(b) ? 1 : 0);
+}
+
+vtx_value_t vtx_runtime_float_lt(vtx_value_t a, vtx_value_t b)
+{
+    return vtx_make_smi(vtx_double_value(a) < vtx_double_value(b) ? 1 : 0);
+}
+
+vtx_value_t vtx_runtime_float_le(vtx_value_t a, vtx_value_t b)
+{
+    return vtx_make_smi(vtx_double_value(a) <= vtx_double_value(b) ? 1 : 0);
+}
+
+vtx_value_t vtx_runtime_float_gt(vtx_value_t a, vtx_value_t b)
+{
+    return vtx_make_smi(vtx_double_value(a) > vtx_double_value(b) ? 1 : 0);
+}
+
+vtx_value_t vtx_runtime_float_ge(vtx_value_t a, vtx_value_t b)
+{
+    return vtx_make_smi(vtx_double_value(a) >= vtx_double_value(b) ? 1 : 0);
+}
+
 /* ========================================================================== */
 /* Exception throwing                                                          */
 /* ========================================================================== */

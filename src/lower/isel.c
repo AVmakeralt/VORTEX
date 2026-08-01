@@ -3261,68 +3261,74 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
     /* ---- Float/Double Comparison ---- */
     case VTX_OP_CmpF:
     case VTX_OP_CmpD: {
+        /* Lower float comparison to a runtime call.
+         * Float values are in GPRs (NaN-boxed), so we can't use UCOMISD
+         * (which requires XMM registers). Instead, call a runtime helper
+         * that extracts the doubles, compares them, and returns SMI(0)/SMI(1). */
         if (node->input_count < 2) return -1;
         ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t lhs = vtx_isel_node_vreg(stream, node->inputs[0]);
         ensure_node_vreg(stream, node->inputs[1], arena);
         uint32_t rhs = vtx_isel_node_vreg(stream, node->inputs[1]);
-        uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (lhs == VTX_VREG_INVALID || rhs == VTX_VREG_INVALID) return -1;
 
-        /* Emit UCOMISD lhs, rhs — unordered compare scalar double.
-         * UCOMISD sets EFLAGS as follows:
-         *   Equal:           ZF=1, PF=0, CF=0  → SETE (0F 94)
-         *   Below (less):    ZF=0, PF=0, CF=1  → SETB (0F 92)
-         *   Above (greater): ZF=0, PF=0, CF=0  → SETA (0F 97)
-         *   Unordered:       ZF=1, PF=1, CF=1
-         *
-         * For floating-point comparisons, we map VTX conditions to
-         * the unsigned comparison condition codes (same as UCOMISD):
-         *   VTX_COND_EQ  → E  (ZF=1)
-         *   VTX_COND_NE  → NE (ZF=0) — note: doesn't catch unordered,
-         *                   but matches the common behavior for != on floats
-         *   VTX_COND_LT  → B  (CF=1)
-         *   VTX_COND_LE  → BE (CF=1 or ZF=1)
-         *   VTX_COND_GT  → A  (CF=0 and ZF=0)
-         *   VTX_COND_GE  → AE (CF=0) */
-        vtx_inst_t ucomisd;
-        memset(&ucomisd, 0, sizeof(ucomisd));
-        ucomisd.opcode = VTX_X86_UCOMISD;
-        ucomisd.opnd_kinds[0] = VTX_OPND_VREG;
-        ucomisd.operands[0] = lhs;
-        ucomisd.opnd_kinds[1] = VTX_OPND_VREG;
-        ucomisd.operands[1] = rhs;
-        ucomisd.flags = VTX_INST_FLAG_IS_SSE;
-        ucomisd.source_node = node_id;
-        vtx_isel_emit_inst(block, ucomisd, arena);
+        extern vtx_value_t vtx_runtime_float_eq(vtx_value_t a, vtx_value_t b);
+        extern vtx_value_t vtx_runtime_float_ne(vtx_value_t a, vtx_value_t b);
+        extern vtx_value_t vtx_runtime_float_lt(vtx_value_t a, vtx_value_t b);
+        extern vtx_value_t vtx_runtime_float_le(vtx_value_t a, vtx_value_t b);
+        extern vtx_value_t vtx_runtime_float_gt(vtx_value_t a, vtx_value_t b);
+        extern vtx_value_t vtx_runtime_float_ge(vtx_value_t a, vtx_value_t b);
 
-        /* Map float condition to x86 condition code.
-         * Float comparisons use unsigned condition codes because
-         * UCOMISD sets CF/ZF/PF like an unsigned comparison. */
-        vtx_cond_t float_cond = node->cond;
-        /* For LT/LE/GT/GE, use the unsigned equivalents for float */
-        vtx_cond_t ucond = float_cond;
-        switch (float_cond) {
-        case VTX_COND_LT: ucond = VTX_COND_ULT; break;
-        case VTX_COND_LE: ucond = VTX_COND_ULE; break;
-        case VTX_COND_GT: ucond = VTX_COND_UGT; break;
-        case VTX_COND_GE: ucond = VTX_COND_UGE; break;
-        default: break;
+        void *helper;
+        switch (node->cond) {
+        case VTX_COND_EQ: helper = (void*)vtx_runtime_float_eq; break;
+        case VTX_COND_NE: helper = (void*)vtx_runtime_float_ne; break;
+        case VTX_COND_LT: helper = (void*)vtx_runtime_float_lt; break;
+        case VTX_COND_LE: helper = (void*)vtx_runtime_float_le; break;
+        case VTX_COND_GT: helper = (void*)vtx_runtime_float_gt; break;
+        case VTX_COND_GE: helper = (void*)vtx_runtime_float_ge; break;
+        default: helper = (void*)vtx_runtime_float_eq; break;
         }
 
-        /* Fix C2: XOR clobbers UCOMISD flags. Use SETCC+MOVZX+retag
-         * (same pattern as integer Cmp). */
-        vtx_inst_t setcc;
-        memset(&setcc, 0, sizeof(setcc));
-        setcc.opcode = VTX_X86_SETCC;
-        setcc.opnd_kinds[0] = VTX_OPND_VREG;
-        setcc.operands[0] = dst;
-        setcc.cond = ucond;
-        setcc.flags = VTX_INST_FLAG_HAS_COND;
-        setcc.source_node = node_id;
-        vtx_isel_emit_inst(block, setcc, arena);
-        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOVZX, dst, dst, node_id), arena);
-        emit_smi_retag(stream, block, dst, node_id, arena);
+        /* RDI = lhs */
+        uint32_t rdi_preg = vtx_isel_alloc_vreg_fixed(stream, arena, 7);
+        vtx_inst_t mov_rdi = make_rr_inst(VTX_X86_MOV, rdi_preg, lhs, node_id);
+        mov_rdi.flags |= VTX_INST_FLAG_NO_COALESCE;
+        vtx_isel_emit_inst(block, mov_rdi, arena);
+
+        /* RSI = rhs */
+        uint32_t rsi_preg = vtx_isel_alloc_vreg_fixed(stream, arena, 6);
+        vtx_inst_t mov_rsi = make_rr_inst(VTX_X86_MOV, rsi_preg, rhs, node_id);
+        mov_rsi.flags |= VTX_INST_FLAG_NO_COALESCE;
+        vtx_isel_emit_inst(block, mov_rsi, arena);
+
+        /* CALL helper */
+        vtx_inst_t call_inst;
+        memset(&call_inst, 0, sizeof(call_inst));
+        call_inst.opcode = VTX_X86_CALL;
+        call_inst.opnd_kinds[0] = VTX_OPND_IMM;
+        call_inst.imm = (int64_t)(uintptr_t)helper;
+        call_inst.flags = VTX_INST_FLAG_HAS_IMM | VTX_INST_FLAG_IS_CALL |
+                          VTX_INST_FLAG_CLOBBER_RAX | VTX_INST_FLAG_CLOBBER_RCX |
+                          VTX_INST_FLAG_CLOBBER_RDX | VTX_INST_FLAG_CLOBBER_RSI |
+                          VTX_INST_FLAG_CLOBBER_RDI | VTX_INST_FLAG_CLOBBER_R8 |
+                          VTX_INST_FLAG_CLOBBER_R9 | VTX_INST_FLAG_CLOBBER_R10 |
+                          VTX_INST_FLAG_CLOBBER_R11;
+        call_inst.source_node = node_id;
+        vtx_isel_emit_inst(block, call_inst, arena);
+
+        /* MOV dst, RAX (result is SMI(0) or SMI(1) in RAX) */
+        uint32_t dst = ensure_node_vreg(stream, node_id, arena);
+        vtx_inst_t mov_result;
+        memset(&mov_result, 0, sizeof(mov_result));
+        mov_result.opcode = VTX_X86_MOV;
+        mov_result.opnd_kinds[0] = VTX_OPND_VREG;
+        mov_result.operands[0] = dst;
+        mov_result.opnd_kinds[1] = VTX_OPND_PREG;
+        mov_result.operands[1] = 0; /* RAX */
+        mov_result.flags = VTX_INST_FLAG_NO_COALESCE;
+        mov_result.source_node = node_id;
+        vtx_isel_emit_inst(block, mov_result, arena);
         break;
     }
 
