@@ -854,6 +854,33 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
         }
         active_count = new_active_count;
 
+        /* CALL clobber handling: If the current interval's live range
+         * overlaps any CALL instruction, it must NOT be assigned a
+         * caller-saved register (RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11).
+         * CALLs clobber all caller-saved registers.
+         *
+         * Instead, restrict the free register pool to callee-saved only.
+         * If no callee-saved register is available, the interval will be
+         * spilled by the normal spill logic. */
+        if (current->reg_class == VTX_REG_CLASS_GPR) {
+            bool overlaps_call = false;
+            for (uint32_t b = 0; b < stream->block_count && !overlaps_call; b++) {
+                vtx_inst_block_t *blk = &stream->blocks[b];
+                for (uint32_t i = 0; i < blk->inst_count; i++) {
+                    if (blk->insts[i].opcode != VTX_X86_CALL) continue;
+                    uint32_t call_pos = blk->insts[i].native_offset;
+                    if (call_pos >= current->start && call_pos <= current->end) {
+                        overlaps_call = true;
+                        break;
+                    }
+                }
+            }
+            if (overlaps_call) {
+                uint32_t callee_free = *free_regs & VTX_CALLEE_SAVED_MASK;
+                *free_regs = callee_free;
+            }
+        }
+
         /* Handle fixed-register constraints */
         if (current->is_fixed) {
             uint8_t fixed = current->fixed_reg;

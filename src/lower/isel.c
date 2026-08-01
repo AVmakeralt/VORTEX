@@ -2927,9 +2927,16 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         }
 
         /* Non-fused path: test truthiness by comparing the cond value
-         * against SMI(0) using R10 (pre-loaded in prologue). */
+         * against SMI(0) using R10 (pre-loaded in prologue).
+         *
+         * Both integer Cmp and float CmpF return SMI(0) for false and
+         * SMI(1) for true, so this single comparison handles both. */
         if (cond_vreg != VTX_VREG_INVALID) {
             stream->uses_smi = true;
+            /* Compare against SMI(0) = VTX_NAN_BOX_HEADER (R10).
+             * SMI(0) is the "false" value for T2's Cmp/CmpF results.
+             * For if_true (cond NE): jump if cond != SMI(0) (i.e., true)
+             * For if_false (cond EQ): jump if cond == SMI(0) (i.e., false) */
             vtx_inst_t cmp = make_rr_inst(VTX_X86_CMP, cond_vreg,
                                            stream->smi_scratch_vreg, node_id);
             cmp.flags |= VTX_INST_FLAG_FUSED | VTX_INST_FLAG_NO_TEST;
@@ -3317,7 +3324,10 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         call_inst.source_node = node_id;
         vtx_isel_emit_inst(block, call_inst, arena);
 
-        /* MOV dst, RAX (result is SMI(0) or SMI(1) in RAX) */
+        /* Emit "MOV dst, RAX" using PREG for RAX source.
+         * Mark the MOV with NO_COALESCE so the regalloc doesn't merge
+         * the CmpF result vreg with RAX (which would make it a caller-saved
+         * register that gets clobbered by the next CALL). */
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         vtx_inst_t mov_result;
         memset(&mov_result, 0, sizeof(mov_result));

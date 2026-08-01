@@ -687,7 +687,8 @@ vtx_value_t vtx_runtime_float_div(vtx_value_t a, vtx_value_t b)
 }
 
 /* Float comparison helpers. Take two NaN-boxed values, compare as doubles,
- * and return SMI(1) for true, SMI(0) for false. */
+ * and return SMI(1) for true, SMI(0) for false. This matches what the
+ * T2 If isel expects (it compares the condition against SMI(0) = R10). */
 vtx_value_t vtx_runtime_float_eq(vtx_value_t a, vtx_value_t b)
 {
     return vtx_make_smi(vtx_double_value(a) == vtx_double_value(b) ? 1 : 0);
