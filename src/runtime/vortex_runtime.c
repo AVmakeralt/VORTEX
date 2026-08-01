@@ -100,19 +100,63 @@ int vtx_runtime_enable_jit(vtx_runtime_t *rt, uint32_t nthreads)
 
 /* ---- Execution ---- */
 
+/* Derive a stable method_id from a bytecode pointer.
+ *
+ * The baseline JIT (vtx_baseline_compile in src/baseline/codegen.c)
+ * computes method_id as: method->vtable_index != 0xFFFFFFFF
+ *                          ? method->vtable_index
+ *                          : (uint32_t)(uintptr_t)method;
+ *
+ * For runtime-managed methods (no vtable_index set), this means the
+ * method_id is the lower 32 bits of the method descriptor's address.
+ * Since the bytecode pointer is the only stable identity we have at
+ * the runtime API level, we use it as a proxy for the method address.
+ *
+ * The method descriptor constructed in vtx_runtime_run() is on the
+ * stack, so its address changes every call — we can't use that.
+ * Instead, we use the bytecode pointer (which is stable for a given
+ * loaded Bytecode) and rely on the fact that the eager compile path
+ * (vtx_runtime_compile) also constructs its method descriptor with
+ * the same bytecode pointer.
+ *
+ * To make the method_id consistent, we set method.vtable_index to
+ * the lower 32 bits of the bytecode pointer in BOTH the compile and
+ * run paths. This ensures the registry lookup finds the compiled code. */
+static uint32_t runtime_method_id(const vtx_bytecode_t *bc)
+{
+    /* Use lower 32 bits of bytecode pointer. Clamp to avoid colliding
+     * with valid vtable_index values (0 is reserved for "unset" in
+     * some contexts, so add 1). */
+    uint32_t id = (uint32_t)((uintptr_t)bc & 0xFFFFFFFFu);
+    if (id == 0xFFFFFFFFu || id == 0) id = 1;
+    return id;
+}
+
 vtx_value_t vtx_runtime_run(vtx_runtime_t *rt, const vtx_bytecode_t *bc)
 {
     if (!rt || !bc) return VTX_VALUE_UNDEFINED;
+
+    uint32_t method_id = runtime_method_id(bc);
 
     vtx_method_desc_t method = {
         .name = "main",
         .signature = "()I",
         .bytecode = (vtx_bytecode_t *)bc,
         .compiled_code = NULL,
-        .vtable_index = 0,
+        .vtable_index = method_id,
         .arg_count = 0,
         .is_virtual = false,
     };
+
+    /* Look up eagerly-compiled code from the registry. If found,
+     * wire method.compiled_code so the interpreter dispatches to it. */
+    if (rt->method_registry.capacity > 0) {
+        vtx_compiled_method_t *cm = vtx_method_registry_get(
+            &rt->method_registry, method_id);
+        if (cm != NULL && cm->code_start != NULL) {
+            method.compiled_code = cm->code_start;
+        }
+    }
 
     return vtx_interp_run(rt->interp, &method, NULL, 0);
 }
@@ -124,15 +168,26 @@ vtx_value_t vtx_runtime_run_with_args(vtx_runtime_t *rt,
 {
     if (!rt || !bc) return VTX_VALUE_UNDEFINED;
 
+    uint32_t method_id = runtime_method_id(bc);
+
     vtx_method_desc_t method = {
         .name = "main",
         .signature = "(I)I",
         .bytecode = (vtx_bytecode_t *)bc,
         .compiled_code = NULL,
-        .vtable_index = 0,
+        .vtable_index = method_id,
         .arg_count = arg_count,
         .is_virtual = false,
     };
+
+    /* Look up eagerly-compiled code from the registry. */
+    if (rt->method_registry.capacity > 0) {
+        vtx_compiled_method_t *cm = vtx_method_registry_get(
+            &rt->method_registry, method_id);
+        if (cm != NULL && cm->code_start != NULL) {
+            method.compiled_code = cm->code_start;
+        }
+    }
 
     return vtx_interp_run(rt->interp, &method, (vtx_value_t *)args, arg_count);
 }
@@ -143,6 +198,21 @@ int vtx_runtime_compile(vtx_runtime_t *rt, vtx_method_desc_t *method,
                           int tier)
 {
     if (!rt || !method) return -1;
+
+    /* Ensure method_id is stable and consistent with vtx_runtime_run().
+     *
+     * If the caller left vtable_index at 0 (the Rust bindings do this
+     * because they construct the method_desc with mem::zeroed), the
+     * baseline JIT would derive method_id from the method descriptor's
+     * STACK address — which differs between the compile call and the
+     * subsequent run call. That breaks the registry lookup.
+     *
+     * Fix: derive method_id from the bytecode pointer (stable across
+     * calls) and store it in vtable_index so the baseline JIT picks
+     * it up. The run path uses the same derivation. */
+    if (method->vtable_index == 0 || method->vtable_index == 0xFFFFFFFFu) {
+        method->vtable_index = runtime_method_id(method->bytecode);
+    }
 
     if (tier == 1) {
         /* T1 baseline JIT — fast compilation, correct code */

@@ -14,8 +14,7 @@ mod ffi {
 }
 
 use std::ffi::CString;
-use std::os::raw::{c_char, c_void};
-use std::ptr;
+use std::os::raw::c_void;
 
 /// A VORTEX runtime instance. Bundles the type system, GC, interpreter,
 /// code cache, and compilation threadpool.
@@ -30,6 +29,21 @@ pub struct Bytecode {
 
 /// A VORTEX value (NaN-boxed: SMI, double, heap pointer, null, bool, undefined).
 pub type Value = u64;
+
+/// Compilation tier selector.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tier {
+    /// Baseline JIT — fast compilation, correct code.
+    T1 = 1,
+    /// Optimizing JIT — full SoN IR pipeline.
+    T2 = 2,
+}
+
+impl From<u32> for Tier {
+    fn from(v: u32) -> Self {
+        match v { 1 => Tier::T1, _ => Tier::T2 }
+    }
+}
 
 impl Runtime {
     /// Create a new runtime with default settings.
@@ -82,6 +96,39 @@ impl Runtime {
         }
     }
 
+    /// Compile a bytecode module at the given tier, then run it.
+    ///
+    /// This is a convenience wrapper that builds a temporary `vtx_method_desc_t`
+    /// for the bytecode, compiles it at `tier`, then runs it. Returns the
+    /// result value, or an error string on failure.
+    ///
+    /// `tier` = 1 for T1 baseline, 2 for T2 optimizing.
+    ///
+    /// The compiled code is installed in the runtime's code cache and
+    /// method registry, keyed by a stable method_id derived from the
+    /// bytecode pointer. Subsequent `run` calls on the same `Bytecode`
+    /// will dispatch to the compiled code automatically (the interpreter
+    /// checks the registry via the method's `vtable_index`).
+    pub fn compile_method(&mut self, bc: &Bytecode, tier: u32) -> Result<Value, String> {
+        let mut method = build_method_desc(bc);
+        let t = if tier <= 1 { 1 } else { 2 };
+        let rc = unsafe { ffi::vtx_runtime_compile(&mut self.inner, &mut method, t) };
+        if rc != 0 {
+            return Err(format!("T{} compilation failed", t));
+        }
+        Ok(self.run(bc))
+    }
+
+    /// Compile a bytecode module at T1 and run it.
+    pub fn run_compiled_t1(&mut self, bc: &Bytecode) -> Result<Value, String> {
+        self.compile_method(bc, 1)
+    }
+
+    /// Compile a bytecode module at T2 and run it.
+    pub fn run_compiled_t2(&mut self, bc: &Bytecode) -> Result<Value, String> {
+        self.compile_method(bc, 2)
+    }
+
     /// Get a raw pointer to the internal runtime (for advanced FFI).
     pub fn as_ptr(&mut self) -> *mut ffi::vtx_runtime_t { &mut self.inner }
 
@@ -114,6 +161,32 @@ impl Drop for Bytecode {
             }
         }
     }
+}
+
+/// Build a temporary `vtx_method_desc_t` for a bytecode module.
+///
+/// The method descriptor references the bytecode's code/constant_pool pointers
+/// directly — the caller must keep the `Bytecode` alive for as long as the
+/// method descriptor is in use.
+///
+/// `vtable_index` is left as 0 (sentinel for "unset"); the C runtime
+/// (`vtx_runtime_compile`) derives a stable method_id from the bytecode
+/// pointer and stores it in `vtable_index` before compilation. The run
+/// path (`vtx_runtime_run`) uses the same derivation to look up the
+/// compiled code from the registry.
+fn build_method_desc(bc: &Bytecode) -> ffi::vtx_method_desc_t {
+    let mut method: ffi::vtx_method_desc_t = unsafe { std::mem::zeroed() };
+    unsafe {
+        let bc_ref = &*bc.inner;
+        method.bytecode = bc_ref as *const _ as *mut _;
+        method.compiled_code = std::ptr::null_mut();
+        method.arg_count = 0;
+        method.is_virtual = false;
+        method.name = b"main\0".as_ptr() as *const _;
+        method.signature = b"()I\0".as_ptr() as *const _;
+        method.vtable_index = 0; /* runtime_compile derives from bytecode ptr */
+    }
+    method
 }
 
 /// Helper: create an SMI (small integer) value.
@@ -194,5 +267,29 @@ mod tests {
     fn test_runtime_create() {
         let rt = Runtime::new();
         assert!(rt.is_ok());
+    }
+
+    /// Verify the fasthon-compatible API surface exists.
+    /// This is a compile-time check that the method signatures match
+    /// what the fasthon consumer expects:
+    ///   - rt.run_compiled_t1(&bc) -> Result<Value, String>
+    ///   - rt.run_compiled_t2(&bc) -> Result<Value, String>
+    ///   - rt.compile_method(&bc, tier) -> Result<Value, String>
+    #[test]
+    fn test_fasthon_api_surface() {
+        let mut rt = Runtime::new().expect("runtime create");
+
+        // We don't have a real bytecode file in the test environment,
+        // but we can verify the methods exist with the right signatures
+        // by taking function pointers to them.
+        let _t1: fn(&mut Runtime, &Bytecode) -> Result<Value, String> =
+            |rt, bc| rt.run_compiled_t1(bc);
+        let _t2: fn(&mut Runtime, &Bytecode) -> Result<Value, String> =
+            |rt, bc| rt.run_compiled_t2(bc);
+        let _cm: fn(&mut Runtime, &Bytecode, u32) -> Result<Value, String> =
+            |rt, bc, t| rt.compile_method(bc, t);
+
+        // Suppress unused-variable warning for rt
+        let _ = &mut rt;
     }
 }

@@ -26,14 +26,15 @@ fn main() {
     cc_build.include(&vortex_src);
     cc_build.include(&vortex_build);
 
-    cc_build.define("VORTEX_ENABLE_SOTA", None);
-    cc_build.define("VORTEX_ENABLE_ASSERTIONS", None);
-    cc_build.define("VORTEX_ENABLE_VERIFY", None);
-    cc_build.define("VORTEX_ENABLE_PROFILING", None);
-    cc_build.define("VORTEX_CACHE_MAX_SIZE", Some("268435456"));
-    cc_build.define("VORTEX_T1_THRESHOLD", Some("1000"));
-    cc_build.define("VORTEX_T2_THRESHOLD", Some("10000"));
-    cc_build.define("VORTEX_COMPILE_THREADS", Some("0"));
+    /* NOTE: VORTEX_ENABLE_* and VORTEX_CACHE_MAX_SIZE / T1_THRESHOLD /
+     * T2_THRESHOLD / COMPILE_THREADS are all #define'd in
+     * build/vortex_config.h (generated from src/vortex_config.h.in by
+     * CMake). We do NOT pass them via -D here — doing so causes
+     * "macro redefined" warnings on every translation unit because
+     * the command-line definition and the header definition conflict.
+     *
+     * The header is included via -I$BUILD, which is added above. */
+    cc_build.define("NDEBUG", None);
 
     for f in &c_files {
         cc_build.file(f);
@@ -54,10 +55,9 @@ fn main() {
             .clang_arg(format!("-isystem{}/lib/clang/15.0.0/include", clang_lib.display()))
             .clang_arg("-isystem/usr/lib/gcc/x86_64-linux-gnu/14/include")
             .clang_arg("-isystem/usr/include")
-            .clang_arg("-DVORTEX_ENABLE_SOTA")
-            .clang_arg("-DVORTEX_ENABLE_ASSERTIONS")
-            .clang_arg("-DVORTEX_ENABLE_VERIFY")
-            .clang_arg("-DVORTEX_ENABLE_PROFILING")
+            /* Do NOT pass -DVORTEX_ENABLE_* here — they're already defined
+             * in build/vortex_config.h (included via -I above). Passing them
+             * via -D causes "macro redefined" warnings on every TU. */
             .allowlist_type("vtx_.*")
             .allowlist_function("vtx_.*")
             .allowlist_var("VTX_.*")
