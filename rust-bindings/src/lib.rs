@@ -58,7 +58,8 @@ impl Runtime {
     }
 
     /// Eagerly compile a method at T2 (optimizing JIT with full SoN IR pipeline).
-    /// Falls back to T1 if T2 can't handle the method (e.g. float ops).
+    /// T2 now handles float arithmetic (via runtime helpers), float comparisons,
+    /// and float-in-loop patterns. Falls back to T1 only for unsupported opcodes.
     pub fn compile_t2(&mut self, method: &mut ffi::vtx_method_desc_t) -> Result<(), String> {
         let rc = unsafe { ffi::vtx_runtime_compile(&mut self.inner, method, 2) };
         if rc != 0 { Err("T2 compilation failed".to_string()) } else { Ok(()) }
