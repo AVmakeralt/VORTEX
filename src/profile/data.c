@@ -288,7 +288,16 @@ void vtx_profile_record_callsite_type(vtx_profile_global_t *global,
     vtx_callsite_profile_t *cs = find_or_create_callsite(m, callsite_index);
     if (!cs) return;
 
-    if (cs->megamorphic) return;
+    if (cs->megamorphic) {
+        /* BUGFIX (T11): Still count the observation for confidence scoring. */
+        cs->total_count++;
+        return;
+    }
+
+    /* BUGFIX (T11): Increment total_count for EVERY call observation,
+     * not just when a new type is added. This gives the confidence
+     * system an accurate sample count for gating T2 promotion. */
+    cs->total_count++;
 
     /* Check if already recorded */
     for (uint32_t i = 0; i < cs->count; i++) {

@@ -2235,7 +2235,15 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         break;
     }
 
-    /* ---- Min/Max (P1 isel: CMP+CMOV) ---- */
+    /* ---- Min/Max (P1 isel: CMP+CMOV) ----
+     *
+     * BUGFIX (B3 audit): Min/Max compared NaN-boxed SMI operands directly
+     * without untagging. Signed CMP on SMI(-3) (high bits 0x7FF8...) treats
+     * it as > SMI(1), so Min(-3,1) returned 1. Every other comparison path
+     * untags first; Min/Max were missed.
+     *
+     * Fix: Untag both operands into temp vregs, compare, CMOV, then retag
+     * the result. */
     case VTX_OP_Min: {
         if (node->input_count < 2) return -1;
         ensure_node_vreg(stream, node->inputs[0], arena);
@@ -2245,15 +2253,23 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (lhs == VTX_VREG_INVALID || rhs == VTX_VREG_INVALID) return -1;
 
+        /* Untag lhs and rhs into temp vregs */
+        uint32_t lhs_raw = vtx_isel_alloc_vreg(stream, arena);
+        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, lhs_raw, lhs, node_id), arena);
+        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, lhs_raw, 13, node_id), arena);
+        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, lhs_raw, 16, node_id), arena);
+
+        uint32_t rhs_raw = vtx_isel_alloc_vreg(stream, arena);
+        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, rhs_raw, rhs, node_id), arena);
+        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, rhs_raw, 13, node_id), arena);
+        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, rhs_raw, 16, node_id), arena);
+
         /* min(a, b) = b if a > b, else a
-         *   mov dst, lhs
-         *   cmp dst, rhs
-         *   cmovg dst, rhs    ; if dst > rhs, dst = rhs */
-        if (dst != lhs)
-            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs, node_id), arena);
-        /* Mark CMP with NO_TEST — operands are NaN-boxed SMIs, peephole
-         * must not convert CMP→TEST (SMI(0) ≠ 0). */
-        vtx_inst_t min_cmp = make_rr_inst(VTX_X86_CMP, dst, rhs, node_id);
+         *   mov dst, lhs_raw
+         *   cmp dst, rhs_raw
+         *   cmovg dst, rhs_raw    ; if dst > rhs, dst = rhs */
+        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_raw, node_id), arena);
+        vtx_inst_t min_cmp = make_rr_inst(VTX_X86_CMP, dst, rhs_raw, node_id);
         min_cmp.flags |= VTX_INST_FLAG_NO_TEST;
         vtx_isel_emit_inst(block, min_cmp, arena);
 
@@ -2263,11 +2279,16 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         cmov.opnd_kinds[0] = VTX_OPND_VREG;
         cmov.operands[0] = dst;
         cmov.opnd_kinds[1] = VTX_OPND_VREG;
-        cmov.operands[1] = rhs;
+        cmov.operands[1] = rhs_raw;
         cmov.cond = VTX_COND_GT;
         cmov.flags = VTX_INST_FLAG_HAS_COND;
         cmov.source_node = node_id;
         vtx_isel_emit_inst(block, cmov, arena);
+
+        /* Retag: dst = (dst & DATA_MASK) << 3 | HEADER */
+        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_AND, dst, stream->smi_mask_vreg, node_id), arena);
+        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, dst, 3, node_id), arena);
+        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_OR, dst, stream->smi_scratch_vreg, node_id), arena);
         break;
     }
 
@@ -2280,14 +2301,23 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (lhs == VTX_VREG_INVALID || rhs == VTX_VREG_INVALID) return -1;
 
+        /* Untag lhs and rhs into temp vregs */
+        uint32_t lhs_raw = vtx_isel_alloc_vreg(stream, arena);
+        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, lhs_raw, lhs, node_id), arena);
+        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, lhs_raw, 13, node_id), arena);
+        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, lhs_raw, 16, node_id), arena);
+
+        uint32_t rhs_raw = vtx_isel_alloc_vreg(stream, arena);
+        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, rhs_raw, rhs, node_id), arena);
+        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, rhs_raw, 13, node_id), arena);
+        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, rhs_raw, 16, node_id), arena);
+
         /* max(a, b) = a if a > b, else b
-         *   mov dst, lhs
-         *   cmp dst, rhs
-         *   cmovle dst, rhs   ; if dst <= rhs, dst = rhs */
-        if (dst != lhs)
-            vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs, node_id), arena);
-        /* Mark CMP with NO_TEST — operands are NaN-boxed SMIs */
-        vtx_inst_t max_cmp = make_rr_inst(VTX_X86_CMP, dst, rhs, node_id);
+         *   mov dst, lhs_raw
+         *   cmp dst, rhs_raw
+         *   cmovle dst, rhs_raw   ; if dst <= rhs, dst = rhs */
+        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_raw, node_id), arena);
+        vtx_inst_t max_cmp = make_rr_inst(VTX_X86_CMP, dst, rhs_raw, node_id);
         max_cmp.flags |= VTX_INST_FLAG_NO_TEST;
         vtx_isel_emit_inst(block, max_cmp, arena);
 
@@ -2297,11 +2327,16 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         cmov.opnd_kinds[0] = VTX_OPND_VREG;
         cmov.operands[0] = dst;
         cmov.opnd_kinds[1] = VTX_OPND_VREG;
-        cmov.operands[1] = rhs;
+        cmov.operands[1] = rhs_raw;
         cmov.cond = VTX_COND_LE;
         cmov.flags = VTX_INST_FLAG_HAS_COND;
         cmov.source_node = node_id;
         vtx_isel_emit_inst(block, cmov, arena);
+
+        /* Retag: dst = (dst & DATA_MASK) << 3 | HEADER */
+        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_AND, dst, stream->smi_mask_vreg, node_id), arena);
+        vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SHL, dst, 3, node_id), arena);
+        vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_OR, dst, stream->smi_scratch_vreg, node_id), arena);
         break;
     }
 

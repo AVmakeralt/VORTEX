@@ -571,11 +571,13 @@ int vtx_patch_log_replay(vtx_patch_log_t *log,
                             memset(bp, 0, sizeof(*bp));
                             bp->bytecode_pc = sb->bytecode_pc;
                         }
-                        /* Set counts directly (add, saturating). */
-                        uint64_t t_sum = bp->taken + sb->taken;
-                        bp->taken = (t_sum < bp->taken) ? UINT64_MAX : t_sum;
-                        uint64_t n_sum = bp->not_taken + sb->not_taken;
-                        bp->not_taken = (n_sum < bp->not_taken) ? UINT64_MAX : n_sum;
+                        /* BUGFIX (T3 audit): Snapshots are ABSOLUTE state, not
+                         * deltas. The old code ADDED counts (bp->taken + sb->taken),
+                         * which caused counts to roughly double after every
+                         * compaction → confidence/scoring corrupts → recompilation
+                         * storms. Fix: SET counts directly from the snapshot. */
+                        bp->taken = sb->taken;
+                        bp->not_taken = sb->not_taken;
                     }
                 }
                 for (uint32_t c = 0; c < sph->callsite_count; c++) {
@@ -615,8 +617,8 @@ int vtx_patch_log_replay(vtx_patch_log_t *log,
                             memset(lp, 0, sizeof(*lp));
                             lp->loop_header_pc = sl->loop_header_pc;
                         }
-                        uint64_t be_sum = lp->backedge_count + sl->backedge_count;
-                        lp->backedge_count = (be_sum < lp->backedge_count) ? UINT64_MAX : be_sum;
+                        /* BUGFIX (T3 audit): Snapshots are absolute — SET, don't ADD. */
+                        lp->backedge_count = sl->backedge_count;
                     }
                 }
                 for (uint32_t f = 0; f < sph->field_count; f++) {

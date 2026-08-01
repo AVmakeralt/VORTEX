@@ -140,7 +140,13 @@ static inline bool is_truthy(vtx_value_t v)
         return vtx_smi_value(v) != 0;
     }
     if (vtx_is_double(v)) {
-        return vtx_double_value(v) != 0.0;
+        /* BUGFIX (R8 audit): NaN is falsy in JS/Python semantics.
+         * The old code used `!= 0.0`, which returns true for NaN
+         * (NaN comparisons always return false, so NaN != 0.0 is true).
+         * This made IF_TRUE take the wrong branch for NaN values.
+         * Fix: explicitly check for NaN using isnan(). */
+        double d = vtx_double_value(v);
+        return !isnan(d) && d != 0.0;
     }
     /* Heap pointers are always truthy (non-null) */
     return true;
@@ -1021,7 +1027,7 @@ dispatch_VT_OP_STORE_LOCAL:
 dispatch_VT_OP_LOAD_FIELD:
     operand = read_operand(code, pc);
     a = *--sp;
-    vtx_helpers_null_check(a);
+    if (!vtx_helpers_null_check(a)) { fprintf(stderr, "VORTEX: null pointer dereference at pc=%zu\n", (size_t)pc); VTX_ASSERT(false, "null pointer dereference"); }
     {
         vtx_heap_object_t *obj = (vtx_heap_object_t *)vtx_heap_ptr(a);
         VTX_ASSERT(operand < obj->field_count, "field offset out of bounds");
@@ -1043,7 +1049,7 @@ dispatch_VT_OP_STORE_FIELD:
     operand = read_operand(code, pc);
     val = *--sp;  /* value */
     a = *--sp;    /* object */
-    vtx_helpers_null_check(a);
+    if (!vtx_helpers_null_check(a)) { fprintf(stderr, "VORTEX: null pointer dereference at pc=%zu\n", (size_t)pc); VTX_ASSERT(false, "null pointer dereference"); }
     {
         vtx_heap_object_t *obj = (vtx_heap_object_t *)vtx_heap_ptr(a);
         VTX_ASSERT(operand < obj->field_count, "field offset out of bounds");
@@ -1110,10 +1116,20 @@ dispatch_VT_OP_IADD:
     b = *--sp;
     a = *--sp;
     if (VTX_LIKELY(vtx_is_smi(a) && vtx_is_smi(b))) {
-        /* Fast path: SMI + SMI (most common case) */
+        /* Fast path: SMI + SMI (most common case)
+         *
+         * BUGFIX (R2 audit): Perform arithmetic in uint64_t to avoid
+         * signed integer overflow UB. At -O2, GCC/Clang may legally
+         * delete the overflow check based on the assumption that
+         * signed overflow never occurs. Using uint64_t makes the
+         * wraparound well-defined, and we check for overflow via
+         * sign-bit analysis on the unsigned representation. */
         int64_t ia_smi = vtx_smi_value(a);
         int64_t ib_smi = vtx_smi_value(b);
-        int64_t result_i = ia_smi + ib_smi;
+        uint64_t ua = (uint64_t)ia_smi;
+        uint64_t ub = (uint64_t)ib_smi;
+        uint64_t ur = ua + ub;
+        int64_t result_i = (int64_t)ur;
         /* Inline overflow check: if signs of inputs differ, no overflow.
          * If same sign and result has different sign, overflow occurred.
          * This avoids the function call to vtx_helpers_overflow_check_iadd. */
@@ -1140,10 +1156,15 @@ dispatch_VT_OP_ISUB:
     b = *--sp;
     a = *--sp;
     if (VTX_LIKELY(vtx_is_smi(a) && vtx_is_smi(b))) {
-        /* Fast path: SMI - SMI */
+        /* Fast path: SMI - SMI
+         * BUGFIX (R2 audit): Use uint64_t arithmetic to avoid signed
+         * overflow UB. See IADD comment above. */
         int64_t ia_smi = vtx_smi_value(a);
         int64_t ib_smi = vtx_smi_value(b);
-        int64_t result_i = ia_smi - ib_smi;
+        uint64_t ua = (uint64_t)ia_smi;
+        uint64_t ub = (uint64_t)ib_smi;
+        uint64_t ur = ua - ub;
+        int64_t result_i = (int64_t)ur;
         /* Inline overflow check: subtraction overflows when signs of a and -b
          * are the same (i.e., a and b have different signs) and result
          * sign differs from a. */
@@ -2289,7 +2310,7 @@ dispatch_VT_OP_ARRAY_LOAD:
     {
         b = *--sp;  /* index */
         a = *--sp;  /* array */
-        vtx_helpers_null_check(a);
+        if (!vtx_helpers_null_check(a)) { fprintf(stderr, "VORTEX: null pointer dereference at pc=%zu\n", (size_t)pc); VTX_ASSERT(false, "null pointer dereference"); }
         {
             vtx_heap_object_t *arr = (vtx_heap_object_t *)vtx_heap_ptr(a);
             int64_t length = 0;
@@ -2298,7 +2319,7 @@ dispatch_VT_OP_ARRAY_LOAD:
             }
             int64_t index = vtx_is_smi(b) ? vtx_smi_value(b) : 
                             (vtx_is_double(b) ? (int64_t)vtx_double_value(b) : -1);
-            vtx_helpers_bounds_check(index, length);
+            if (!vtx_helpers_bounds_check(index, length)) { fprintf(stderr, "VORTEX: array index %ld out of bounds %ld at pc=%zu\n", (long)index, (long)length, (size_t)pc); VTX_ASSERT(false, "array index out of bounds"); }
             /* Elements start at field[1] */
             *sp++ = arr->fields[1 + (uint32_t)index];
         }
@@ -2311,7 +2332,7 @@ dispatch_VT_OP_ARRAY_STORE:
         val = *--sp;  /* value */
         b = *--sp;    /* index */
         a = *--sp;    /* array */
-        vtx_helpers_null_check(a);
+        if (!vtx_helpers_null_check(a)) { fprintf(stderr, "VORTEX: null pointer dereference at pc=%zu\n", (size_t)pc); VTX_ASSERT(false, "null pointer dereference"); }
         {
             vtx_heap_object_t *arr = (vtx_heap_object_t *)vtx_heap_ptr(a);
             int64_t length = 0;
@@ -2320,7 +2341,7 @@ dispatch_VT_OP_ARRAY_STORE:
             }
             int64_t index = vtx_is_smi(b) ? vtx_smi_value(b) : 
                             (vtx_is_double(b) ? (int64_t)vtx_double_value(b) : -1);
-            vtx_helpers_bounds_check(index, length);
+            if (!vtx_helpers_bounds_check(index, length)) { fprintf(stderr, "VORTEX: array index %ld out of bounds %ld at pc=%zu\n", (long)index, (long)length, (size_t)pc); VTX_ASSERT(false, "array index out of bounds"); }
             uint32_t field_idx = 1 + (uint32_t)index;
             arr->fields[field_idx] = val;
             vtx_gc_write_barrier(interp->gc, arr, field_idx, val);
@@ -2331,7 +2352,7 @@ dispatch_VT_OP_ARRAY_STORE:
     /* ---- VT_OP_ARRAY_LENGTH ---- */
 dispatch_VT_OP_ARRAY_LENGTH:
     a = *--sp;
-    vtx_helpers_null_check(a);
+    if (!vtx_helpers_null_check(a)) { fprintf(stderr, "VORTEX: null pointer dereference at pc=%zu\n", (size_t)pc); VTX_ASSERT(false, "null pointer dereference"); }
     {
         vtx_heap_object_t *arr = (vtx_heap_object_t *)vtx_heap_ptr(a);
         int64_t length = 0;
@@ -2406,7 +2427,7 @@ dispatch_VT_OP_CATCH_TYPED:
     /* ---- VT_OP_MONITOR_ENTER ---- */
 dispatch_VT_OP_MONITOR_ENTER:
     a = *--sp;
-    vtx_helpers_null_check(a);
+    if (!vtx_helpers_null_check(a)) { fprintf(stderr, "VORTEX: null pointer dereference at pc=%zu\n", (size_t)pc); VTX_ASSERT(false, "null pointer dereference"); }
     /* T0 interpreter: monitors are no-ops. A full implementation
      * would use pthread_mutex or similar. We still pop the object
      * to maintain correct stack behavior. */
@@ -2415,7 +2436,7 @@ dispatch_VT_OP_MONITOR_ENTER:
     /* ---- VT_OP_MONITOR_EXIT ---- */
 dispatch_VT_OP_MONITOR_EXIT:
     a = *--sp;
-    vtx_helpers_null_check(a);
+    if (!vtx_helpers_null_check(a)) { fprintf(stderr, "VORTEX: null pointer dereference at pc=%zu\n", (size_t)pc); VTX_ASSERT(false, "null pointer dereference"); }
     /* T0 interpreter: monitors are no-ops. */
     DISPATCH_NEXT();
 
@@ -2487,13 +2508,13 @@ dispatch_VT_OP_CALL_RUNTIME:
             break;
         case 1: /* monitor_enter */
             a = *--sp;
-            vtx_helpers_null_check(a);
+            if (!vtx_helpers_null_check(a)) { fprintf(stderr, "VORTEX: null pointer dereference at pc=%zu\n", (size_t)pc); VTX_ASSERT(false, "null pointer dereference"); }
             /* T0 interpreter: monitors are no-ops. A full implementation
              * would use pthread_mutex or similar. */
             break;
         case 2: /* monitor_exit */
             a = *--sp;
-            vtx_helpers_null_check(a);
+            if (!vtx_helpers_null_check(a)) { fprintf(stderr, "VORTEX: null pointer dereference at pc=%zu\n", (size_t)pc); VTX_ASSERT(false, "null pointer dereference"); }
             /* T0 interpreter: monitors are no-ops. */
             break;
         case 3: /* throw */

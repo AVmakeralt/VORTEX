@@ -229,12 +229,31 @@ uint32_t vtx_loop_unroll_run(vtx_graph_t *graph,
         }
         if (loop_end_id == VTX_NODEID_INVALID) continue;
 
-        /* Find loop Phis and their back-edge values */
+        /* Find loop Phis and their back-edge values.
+         *
+         * BUGFIX (I3 audit): The old code used a fixed phi_ids[32] array
+         * and stopped scanning at phi_count < 32. Loops with >32
+         * loop-carried Phis silently mis-unrolled: Phis 33+ were never
+         * rewired, so iterations 2+ read stale values → silent wrong
+         * code. Fix: use heap-allocated arrays sized to the actual
+         * Phi count. */
         uint32_t phi_count = 0;
-        vtx_nodeid_t phi_ids[32];
-        uint32_t phi_be_idx[32];
-        vtx_nodeid_t phi_be_val[32];  /* the back-edge value node ID */
-        for (uint32_t j = 0; j < graph->node_table.count && phi_count < 32; j++) {
+        /* First pass: count loop Phis */
+        for (uint32_t j = 0; j < graph->node_table.count; j++) {
+            vtx_node_t *n = &graph->node_table.nodes[j];
+            if (is_loop_phi(n, i)) phi_count++;
+        }
+        if (phi_count == 0) continue;
+        /* Allocate arrays */
+        vtx_nodeid_t *phi_ids = (vtx_nodeid_t *)malloc(phi_count * sizeof(vtx_nodeid_t));
+        uint32_t *phi_be_idx = (uint32_t *)malloc(phi_count * sizeof(uint32_t));
+        vtx_nodeid_t *phi_be_val = (vtx_nodeid_t *)malloc(phi_count * sizeof(vtx_nodeid_t));
+        if (!phi_ids || !phi_be_idx || !phi_be_val) {
+            free(phi_ids); free(phi_be_idx); free(phi_be_val);
+            continue; /* OOM — skip this loop */
+        }
+        phi_count = 0; /* reset for second pass */
+        for (uint32_t j = 0; j < graph->node_table.count; j++) {
             vtx_node_t *n = &graph->node_table.nodes[j];
             if (!is_loop_phi(n, i)) continue;
             phi_ids[phi_count] = j;
@@ -334,8 +353,16 @@ uint32_t vtx_loop_unroll_run(vtx_graph_t *graph,
             vtx_node_t *orig_node = &graph->node_table.nodes[orig_id];
             for (uint32_t inp = 0; inp < orig_node->input_count; inp++) {
                 vtx_nodeid_t orig_inp = orig_node->inputs[inp];
+                /* BUGFIX (I4 audit): The old code called
+                 * vtx_node_add_input(new_id, VTX_NODEID_INVALID) for
+                 * invalid inputs. In debug builds this asserts and
+                 * aborts; in release it silently adds a garbage input
+                 * → malformed graph → isel crash or wrong code.
+                 * Fix: skip invalid inputs entirely. The copy's input
+                 * count will be less than the original's, but that's
+                 * safe — the scheduler and isel handle variable input
+                 * counts, and the invalid input was meaningless. */
                 if (orig_inp == VTX_NODEID_INVALID) {
-                    vtx_node_add_input(&graph->node_table, new_id, VTX_NODEID_INVALID);
                     continue;
                 }
                 /* If input is a copied body node → use the copy */
@@ -476,6 +503,10 @@ uint32_t vtx_loop_unroll_run(vtx_graph_t *graph,
         unrolled = 1;
 
     skip_loop:
+        /* BUGFIX (I3): Free the heap-allocated Phi arrays. */
+        free(phi_ids);
+        free(phi_be_idx);
+        free(phi_be_val);
         (void)0;
     }
 

@@ -908,6 +908,19 @@ vtx_iv_result_t *vtx_iv_analyze(vtx_graph_t *graph, vtx_arena_t *arena)
     /* Phase 4: Find derived IVs */
     find_derived_ivs(graph, result, arena, schedule_valid ? &schedule_storage : NULL);
 
+    /* BUGFIX (I1 audit): vtx_schedule_run allocates blocks, node_block,
+     * and per-block arrays inside the arena. However, vtx_schedule_destroy
+     * frees the malloc'd parts (pred_blocks, succ_blocks, nodes, df_blocks).
+     * Without calling destroy, every IV analysis leaks those arrays.
+     * Over a long JIT session with many bounds-check / LICM analyses,
+     * this causes unbounded memory growth.
+     *
+     * The arena-allocated parts are freed when the arena is destroyed,
+     * but the malloc'd parts need explicit cleanup. */
+    if (schedule_valid) {
+        vtx_schedule_destroy(&schedule_storage);
+    }
+
     return result;
 }
 

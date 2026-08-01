@@ -919,7 +919,16 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
          *
          * Instead, restrict the free register pool to callee-saved only.
          * If no callee-saved register is available, the interval will be
-         * spilled by the normal spill logic. */
+         * spilled by the normal spill logic.
+         *
+         * NOTE: The original B2 audit flagged this as permanently stripping
+         * caller-saved bits. That's true, but the alternative (temporary
+         * masking with restore) caused regressions in float-in-loop tests
+         * because the restore logic interfered with the allocation state.
+         * The permanent stripping is a PERFORMANCE issue (cascading spills
+         * under register pressure), not a correctness issue. We keep the
+         * original behavior for correctness and leave the performance
+         * improvement as future work. */
         if (current->reg_class == VTX_REG_CLASS_GPR) {
             bool overlaps_call = false;
             for (uint32_t b = 0; b < stream->block_count && !overlaps_call; b++) {

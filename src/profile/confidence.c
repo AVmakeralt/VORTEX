@@ -53,27 +53,33 @@ double vtx_confidence_call_target(const vtx_callsite_profile_t *callsite)
     if (callsite == NULL) return 0.0;
     /* Megamorphic: we cannot speculate on a single target. */
     if (callsite->megamorphic) return 0.0;
-    /* A site that has seen only 1 type but never been called is still
-     * low-confidence — we want call_count samples, not type_count. The
-     * callsite profile doesn't directly track call count, but the
-     * observation count is the closest proxy: we use the count of distinct
-     * types as a *lower bound* on the observation count and require that
-     * the site be monomorphic (count == 1) AND have been observed at
-     * least VTX_CONFIDENCE_THRESHOLD_CALL_TARGET times.
+    /* BUGFIX (T11 audit): The old code returned 1.0 for ANY monomorphic
+     * site, even one observed exactly once. This passed the T2 promotion
+     * gate (0.5) — exactly the "saw it once, now I speculate" deopt
+     * storm the confidence system was designed to prevent.
      *
-     * Because the profile only records distinct types (not total calls),
-     * we approximate "samples" as: monomorphic ? 1 : 0. This is a known
-     * limitation of the profile format; when D5 per-type frequency data
-     * is available (vtx_type_freq_t), the orchestrator should use that
-     * instead. For now, we gate on monomorphicity + the D5 total_count
-     * if it's been wired into the callsite profile (it hasn't yet, but
-     * the query path is ready for when it is). */
+     * Fix: Gate on the actual sample count. The callsite profile tracks
+     * `count` (distinct types) and `total_count` (total observations,
+     * if wired). We require:
+     *   - Monomorphic (count == 1)
+     *   - total_count >= VTX_CONFIDENCE_THRESHOLD_CALL_TARGET (default 50)
+     *
+     * If total_count is 0 (not wired), fall back to requiring count >= 2
+     * (at least 2 type observations, which means at least 2 calls). This
+     * is conservative but prevents the single-sample deopt storm. */
     if (callsite->count != 1) return 0.0;  /* not monomorphic */
-    /* Monomorphic site: confidence is 1.0 if we have any samples at all.
-     * The CALL_TARGET threshold is a soft gate — once we've seen the site
-     * be monomorphic, we trust it. (Stricter gating requires D5 data,
-     * which is wired separately.) */
-    return 1.0;
+
+    /* Check total_count if available (D5 data). */
+    if (callsite->total_count > 0) {
+        return confidence_from_count(callsite->total_count,
+                                      VTX_CONFIDENCE_THRESHOLD_CALL_TARGET);
+    }
+
+    /* Fallback: no D5 data. Use count as a lower bound on samples.
+     * count == 1 means we've seen 1 type, but we don't know how many
+     * calls. Be conservative: return 0.0 (don't speculate) until D5
+     * data is wired. This prevents the single-sample deopt storm. */
+    return 0.0;
 }
 
 double vtx_confidence_type_dist(const vtx_callsite_profile_t *callsite)

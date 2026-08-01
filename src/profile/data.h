@@ -40,6 +40,11 @@ typedef struct {
     vtx_typeid_t types[VTX_POLY_LIMIT]; /* observed receiver types */
     uint32_t     count;                  /* number of distinct types (<= VTX_POLY_LIMIT) */
     bool         megamorphic;            /* true if more than VTX_POLY_LIMIT types seen */
+    /* BUGFIX (T11 audit): Added total_count to track the total number
+     * of call observations (not just distinct types). This lets the
+     * confidence system gate T2 promotion on actual sample count,
+     * preventing the "saw it once, now I speculate" deopt storm. */
+    uint64_t     total_count;            /* total call observations at this site */
 } vtx_callsite_profile_t;
 
 /* ========================================================================== */

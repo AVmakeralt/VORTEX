@@ -320,6 +320,16 @@ typedef struct {
 #define VTX_INST_FLAG_NO_COALESCE  (1u << 25) /* MOV must NOT be coalesced — destination is modified in-place by later SHL/SAR/AND/OR */
 #define VTX_INST_FLAG_TARGET_SET  (1u << 26) /* branch target is explicitly set by isel — don't override in resolve_branch_targets */
 
+/* ---- Emitter-internal markers (NOT set by isel; only by emit.c) ----
+ *
+ * BUGFIX (B7 audit): These used to be (1u << 16) and (1u << 17), which
+ * collided with VTX_INST_FLAG_PHI_COPY and VTX_INST_FLAG_SPILL_LOAD.
+ * A spill-load MOV at a loop-header block head got treated as an
+ * alignment request (and vice versa), and a PHI_COPY MOV got treated
+ * as a short-jump marker. Moved to high bits that isel never sets. */
+#define VTX_INST_FLAG_EMIT_ALIGN_LOOP_HEADER (1u << 30) /* emitter: align this block's first instruction to 16 bytes (loop header) */
+#define VTX_INST_FLAG_EMIT_SHORT_BRANCH      (1u << 31) /* emitter: use short-jump encoding (rel8) for this JCC/JMP */
+
 typedef struct {
     vtx_x86_opcode_t opcode;
     vtx_opnd_kind_t  opnd_kinds[VTX_INST_MAX_OPERANDS];

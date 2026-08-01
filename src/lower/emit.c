@@ -1968,8 +1968,20 @@ void vtx_x86_emit_prologue(vtx_x86_emit_t *e, uint32_t frame_size,
      * Non-leaf: 4 pushes (rdi, rsi, rdx, rbp) → RSP ≡ 8 - 32 ≡ 8 (mod 16).
      * Leaf: 1 push (rbp) → RSP ≡ 8 - 8 ≡ 0 (mod 16).
      * After N callee-saved pushes: RSP shifts by 8*N.
-     * After sub rsp, frame_size: need RSP ≡ 0 (mod 16). */
-    if (frame_size > 0) {
+     * After sub rsp, frame_size: need RSP ≡ 0 (mod 16).
+     *
+     * BUGFIX (B6 audit): The old code skipped the alignment adjustment
+     * entirely when frame_size == 0. But if total_pushes is even (which
+     * it always is when regalloc forces R12+R13 = 2 callee-saved regs),
+     * RSP ends up at 8 (mod 16) — misaligned. Any CALL from this function
+     * would then push a return address making RSP ≡ 0 (mod 16) at the
+     * callee entry, BUT the callee's MOVAPS on aligned stack slots in
+     * the prologue (before the callee's own sub rsp) would SIGSEGV
+     * because RSP was 8 (mod 16) at that point.
+     *
+     * Fix: Always compute the alignment, even when frame_size == 0.
+     * If alignment is needed, sub rsp, 8 (a dummy slot). */
+    {
         static const uint8_t cs_regs[] = { 3, 12, 13, 14, 15 };
         int cs_count = 0;
         for (int i = 0; i < 5; i++) {
@@ -1979,7 +1991,6 @@ void vtx_x86_emit_prologue(vtx_x86_emit_t *e, uint32_t frame_size,
         int total_pushes = (is_leaf ? 1 : 4) + cs_count;
         uint32_t aligned_size = frame_size;
         aligned_size = (aligned_size + 7u) & ~(uint32_t)7u;
-        if (aligned_size == 0) aligned_size = 8;
         /* total_pushes even → entry RSP ≡ 8 (mod 16) → need frame ≡ 8 (mod 16)
          * total_pushes odd  → entry RSP ≡ 0 (mod 16) → need frame ≡ 0 (mod 16) */
         bool need_mod8 = (total_pushes % 2 == 0);
@@ -1987,7 +1998,16 @@ void vtx_x86_emit_prologue(vtx_x86_emit_t *e, uint32_t frame_size,
         if (need_mod8 != is_mod8) {
             aligned_size += 8;
         }
-        vtx_x86_emit_sub_ri(e, 4, (int32_t)aligned_size); /* RSP = 4 */
+        /* BUGFIX (B6): Even if aligned_size is 0, we may need to sub 8
+         * for alignment when total_pushes is even and frame_size was 0.
+         * The check `aligned_size == 0` would skip the sub, leaving RSP
+         * misaligned. Force at least 8 if alignment requires it. */
+        if (aligned_size == 0 && need_mod8) {
+            aligned_size = 8;
+        }
+        if (aligned_size > 0) {
+            vtx_x86_emit_sub_ri(e, 4, (int32_t)aligned_size); /* RSP = 4 */
+        }
     }
 
     /* ================================================================== */
@@ -2591,7 +2611,7 @@ int vtx_branch_optimize(vtx_inst_stream_t *stream, vtx_x86_emit_t *emit,
                     if (target_block < stream->block_count) {
                         vtx_inst_block_t *hdr = &stream->blocks[target_block];
                         if (hdr->inst_count > 0) {
-                            hdr->insts[0].flags |= (1u << 17); /* Alignment flag */
+                            hdr->insts[0].flags |= VTX_INST_FLAG_EMIT_ALIGN_LOOP_HEADER;
                         }
                     }
                 }
@@ -4720,7 +4740,7 @@ int vtx_x86_emit_function(vtx_x86_emit_t *emit, vtx_inst_stream_t *stream,
          *  10-byte: 66 66 0F 1F 84 00 00 00 00 00
          *  11-byte: 66 66 66 0F 1F 84 00 00 00 00 00
          *  (up to 15 bytes by adding more 66 prefixes) */
-        if (blk->inst_count > 0 && (blk->insts[0].flags & (1u << 17))) {
+        if (blk->inst_count > 0 && (blk->insts[0].flags & VTX_INST_FLAG_EMIT_ALIGN_LOOP_HEADER)) {
             uint32_t pos = vtx_x86_emit_position(emit);
             uint32_t aligned = (pos + 15u) & ~15u;
             uint32_t pad = aligned - pos;
@@ -4809,7 +4829,7 @@ int vtx_x86_emit_function(vtx_x86_emit_t *emit, vtx_inst_stream_t *stream,
             inst->native_offset = vtx_x86_emit_position(emit);
 
             /* Handle short jumps for JCC */
-            if (inst->opcode == VTX_X86_JCC && (inst->flags & (1u << 16))) {
+            if (inst->opcode == VTX_X86_JCC && (inst->flags & VTX_INST_FLAG_EMIT_SHORT_BRANCH)) {
                 /* Short JCC: 7x cb (2 bytes) — will be patched by reloc */
                 uint8_t x86_cond = vtx_cond_to_x86(inst->cond);
                 emit_byte(emit, (uint8_t)(0x70 + x86_cond));
@@ -4832,7 +4852,7 @@ int vtx_x86_emit_function(vtx_x86_emit_t *emit, vtx_inst_stream_t *stream,
             }
 
             /* Handle short jumps for JMP */
-            if (inst->opcode == VTX_X86_JMP && (inst->flags & (1u << 16))) {
+            if (inst->opcode == VTX_X86_JMP && (inst->flags & VTX_INST_FLAG_EMIT_SHORT_BRANCH)) {
                 /* Short JMP: EB cb (2 bytes) */
                 emit_byte(emit, 0xEB);
                 emit_byte(emit, 0x00); /* placeholder rel8 */

@@ -300,15 +300,31 @@ int vtx_threadpool_submit_task(vtx_threadpool_t *pool,
 {
     VTX_ASSERT(pool != NULL, "pool must not be NULL");
 
-    if (__atomic_load_n(&pool->shutdown, __ATOMIC_ACQUIRE)) return -1;
+    /* BUGFIX (P8 audit): The old code checked shutdown without the mutex,
+     * then pushed and signaled. Between the check and the push, shutdown
+     * could drain and join all workers — the pushed task would be leaked
+     * (never executed, never freed).
+     *
+     * Fix: Hold the mutex for the entire check-push-signal sequence.
+     * The shutdown path also holds this mutex, so they're mutually
+     * exclusive. */
+    pthread_mutex_lock(&pool->pool_mutex);
 
-    /* Push to the priority queue */
-    if (vtx_pq_push(&pool->task_queue, task) != 0) {
+    if (__atomic_load_n(&pool->shutdown, __ATOMIC_ACQUIRE)) {
+        pthread_mutex_unlock(&pool->pool_mutex);
         return -1;
     }
 
-    /* Signal one waiting worker */
-    pthread_mutex_lock(&pool->pool_mutex);
+    /* Push to the priority queue (pq_push is not thread-safe on its own;
+     * the mutex protects it). */
+    if (vtx_pq_push(&pool->task_queue, task) != 0) {
+        pthread_mutex_unlock(&pool->pool_mutex);
+        return -1;
+    }
+
+    /* Signal one waiting worker (still holding the mutex to avoid
+     * the lost-wakeup race: if we signal before the worker waits,
+     * the signal is lost). */
     pthread_cond_signal(&pool->work_available);
     pthread_mutex_unlock(&pool->pool_mutex);
 

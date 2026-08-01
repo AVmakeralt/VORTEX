@@ -65,15 +65,47 @@ static void crc32_init_table(void)
     crc32_table_initialized = true;
 }
 
+/* BUGFIX (P7 audit): The old crc32_update did `crc = crc ^ 0xFFFFFFFF`
+ * at the START and `crc ^ 0xFFFFFFFF` at the END. When chaining
+ * (passing the result of a previous call as the `crc` argument), the
+ * pre-XOR undoes the previous post-XOR, which is correct for the FIRST
+ * byte but wrong for subsequent calls — the internal CRC state gets
+ * double-XOR'd, corrupting the result.
+ *
+ * Standard CRC32 (zlib/PNG) convention:
+ *   - Initialize: crc = 0xFFFFFFFF
+ *   - Update:     crc = table[(crc ^ byte) & 0xFF] ^ (crc >> 8)
+ *   - Finalize:   crc = crc ^ 0xFFFFFFFF
+ *
+ * The pre-XOR and post-XOR happen ONCE per CRC computation, not per
+ * update call. Fix: provide crc32_begin() and crc32_end() for the
+ * XOR management, and crc32_update() just does the table walk on
+ * the raw internal state. */
+static uint32_t crc32_begin(void)
+{
+    if (!crc32_table_initialized) crc32_init_table();
+    return 0xFFFFFFFFu;
+}
+
 static uint32_t crc32_update(uint32_t crc, const void *data, size_t len)
 {
     if (!crc32_table_initialized) crc32_init_table();
-    crc = crc ^ 0xFFFFFFFFu;
     const uint8_t *p = (const uint8_t *)data;
     for (size_t i = 0; i < len; i++) {
         crc = crc32_table[(crc ^ p[i]) & 0xFF] ^ (crc >> 8);
     }
+    return crc;
+}
+
+static uint32_t crc32_end(uint32_t crc)
+{
     return crc ^ 0xFFFFFFFFu;
+}
+
+/* Convenience: compute CRC32 of a single buffer (begin + update + end). */
+static uint32_t crc32_compute(const void *data, size_t len)
+{
+    return crc32_end(crc32_update(crc32_begin(), data, len));
 }
 
 static uint64_t t1_now_ns(void)
@@ -157,8 +189,11 @@ bool vtx_t1_cache_save(const char *filename,
      * BUGFIX P3: The old save code included magic+version in the CRC
      * (they're before the CRC field), causing a mismatch with the load
      * code which starts at offset 12. Fix: only CRC the fields after
-     * the CRC field. */
-    uint32_t crc = 0;
+     * the CRC field.
+     *
+     * BUGFIX (P7 audit): Use the proper begin/update/end API so the
+     * pre/post-XOR happens exactly once, not per-update call. */
+    uint32_t crc = crc32_begin();
     /* Skip magic (4) + version (4) + crc32 (4) = 12 bytes.
      * CRC covers: bytecode_hash + method_count + total_code_size +
      * method descriptors + code blob. */
@@ -208,9 +243,11 @@ bool vtx_t1_cache_save(const char *filename,
         }
     }
 
-    /* Go back and write the CRC. */
+    /* Go back and write the CRC.
+     * BUGFIX (P7): Finalize the CRC with crc32_end (post-XOR). */
+    uint32_t final_crc = crc32_end(crc);
     fseek(f, offsetof(vtx_t1_cache_header_t, crc32), SEEK_SET);
-    if (fwrite(&crc, 4, 1, f) != 1) {
+    if (fwrite(&final_crc, 4, 1, f) != 1) {
         fclose(f); remove(tmpname); return false;
     }
 
@@ -295,7 +332,8 @@ bool vtx_t1_cache_load(vtx_t1_cache_t *cache,
         if (fread(crc_region, 1, crc_region_len, f) != crc_region_len) {
             free(crc_region); fclose(f); return false;
         }
-        uint32_t actual_crc = crc32_update(0, crc_region, crc_region_len);
+        /* BUGFIX (P7): Use begin/update/end for a single consistent CRC. */
+        uint32_t actual_crc = crc32_end(crc32_update(crc32_begin(), crc_region, crc_region_len));
         free(crc_region);
 
         if (actual_crc != header.crc32) {

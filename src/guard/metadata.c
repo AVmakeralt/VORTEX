@@ -176,14 +176,9 @@ vtx_guard_meta_t *vtx_guard_meta_register(vtx_guard_meta_table_t *table,
 
     table->guard_count++;
 
-    /* Update strength category count */
-    switch (strength) {
-    case VTX_GUARD_UNCONDITIONAL:    table->unconditional_count++; break;
-    case VTX_GUARD_FAST_CHECK:       table->fast_check_count++; break;
-    case VTX_GUARD_PREDICATED_CHECK: table->predicated_check_count++; break;
-    case VTX_GUARD_FULL_CHECK:       table->full_check_count++; break;
-    case VTX_GUARD_DEOPT_ALWAYS:     table->deopt_always_count++; break;
-    }
+    /* BUGFIX (T1 audit): The strength category count was incremented
+     * TWICE — once at line 152 (Bug #5 fix) and again here (line 180,
+     * the original). Statistics were 2× reality. Removed the duplicate. */
 
     return meta;
 }

@@ -2340,10 +2340,22 @@ static void compile_call_virtual(vtx_compile_ctx_t *ctx, uint16_t method_idx)
     emit_push(buf, VTX_REG_RBX);
 
     /* --- Load receiver from saved stack slot --- */
-    /* After 4 pushes, saved RAX (receiver) is at [RSP + 24] */
+    /* After 4 pushes, saved RAX (receiver) is at [RSP + 24]
+     *
+     * BUGFIX (B1 audit): When r/m = RSP (4) with mod in {0,1,2}, the
+     * x86 encoding mandates a SIB byte follow the ModR/M byte. The old
+     * code emitted ModR/M(disp8, RDI, RSP) + disp8(24) — the CPU
+     * interpreted the disp8=24 as a SIB byte (scale=0, index=RBX=3,
+     * base=RAX=0), then read the next instruction byte as disp8.
+     * Result: every polymorphic call read the receiver from [RAX+RBX]
+     * (garbage) instead of [RSP+24].
+     *
+     * Fix: emit SIB(scale=0, index=RSP=4 [means no index], base=RSP=4)
+     * after the ModR/M byte, then the disp8. */
     vtx_code_buffer_emit_byte(buf, REX_W);
     vtx_code_buffer_emit_byte(buf, 0x8B);  /* MOV r64, r/m64 */
     vtx_code_buffer_emit_byte(buf, modrm(1, VTX_REG_RDI, VTX_REG_RSP));
+    vtx_code_buffer_emit_byte(buf, sib(0, VTX_REG_RSP, VTX_REG_RSP)); /* SIB: no index, base=RSP */
     vtx_code_buffer_emit_byte(buf, 24);     /* disp8 = 24 */
 
     /* --- Load IC pointer into R10 --- */
@@ -2561,10 +2573,14 @@ static void compile_call_interface(vtx_compile_ctx_t *ctx, uint16_t method_idx)
     emit_push(buf, VTX_REG_RBX);
 
     /* --- Load receiver from saved stack slot --- */
-    /* After 4 pushes, saved RAX (receiver) is at [RSP + 24] */
+    /* After 4 pushes, saved RAX (receiver) is at [RSP + 24]
+     *
+     * BUGFIX (B1 audit): Emit mandatory SIB byte for RSP-based addressing.
+     * See the comment at the first call site above for details. */
     vtx_code_buffer_emit_byte(buf, REX_W);
     vtx_code_buffer_emit_byte(buf, 0x8B);
     vtx_code_buffer_emit_byte(buf, modrm(1, VTX_REG_RDI, VTX_REG_RSP));
+    vtx_code_buffer_emit_byte(buf, sib(0, VTX_REG_RSP, VTX_REG_RSP)); /* SIB: no index, base=RSP */
     vtx_code_buffer_emit_byte(buf, 24);
 
     /* --- Load IC pointer into R10 --- */

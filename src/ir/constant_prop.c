@@ -474,12 +474,20 @@ static vtx_lattice_val_t evaluate_node(vtx_node_opcode_t opcode,
     /* ---- Phi: meet of all inputs ---- */
     case VTX_OP_Phi: {
         vtx_lattice_val_t result = vtx_lattice_top();
-        /* IR-1 fix: The last input of a Phi is the Region (control) node,
-         * which has no data-flow value and evaluates to Bottom in SCCP.
-         * Since Bottom meet X = Bottom, including the Region input makes
-         * every Phi resolve to Bottom, defeating constant propagation.
-         * We must skip the last input (the Region). */
-        for (uint32_t i = 0; i + 1 < input_count; i++) {
+        /* BUGFIX (I8 audit): The old code assumed the Region (control)
+         * input is the LAST input and skipped it via `i + 1 < input_count`.
+         * This is wrong for loop-header Phis after Phase 4, where the
+         * LoopBegin is at index 1 (inputs are [forward, LoopBegin, back-edge]).
+         * Skipping the last input (the back-edge value) left only the
+         * forward value, but the LoopBegin at index 1 was included,
+         * making every loop-carried Phi resolve to Bottom — defeating
+         * constant propagation for loop invariants.
+         *
+         * Fix: The caller now filters out control inputs (Region/LoopBegin/
+         * Proj) before passing lattice values to this function. So we
+         * can safely meet all inputs here. See the caller in
+         * vtx_sccp_run for the filtering logic. */
+        for (uint32_t i = 0; i < input_count; i++) {
             result = vtx_lattice_meet(result, inputs[i]);
         }
         return result;
@@ -649,14 +657,31 @@ uint32_t vtx_constant_prop_run(vtx_graph_t *graph)
         if (ic > 0) {
             inp_vals = (vtx_lattice_val_t *)malloc(ic * sizeof(vtx_lattice_val_t));
             if (inp_vals == NULL) continue;
+            /* BUGFIX (I8 audit): For Phi nodes, filter out control inputs
+             * (Region, LoopBegin, Proj) by checking the input node's opcode.
+             * This replaces the old "skip last input" heuristic that broke
+             * loop-carried Phis (where the LoopBegin is at index 1).
+             *
+             * We compact the inp_vals array to only include data inputs. */
+            uint32_t data_count = 0;
             for (uint32_t j = 0; j < ic; j++) {
                 vtx_nodeid_t inp = node->inputs[j];
-                if (inp != VTX_NODEID_INVALID && inp < node_count) {
-                    inp_vals[j] = lattice[inp];
-                } else {
-                    inp_vals[j] = vtx_lattice_top();
+                if (inp == VTX_NODEID_INVALID || inp >= node_count) {
+                    continue;
                 }
+                /* For Phi nodes, skip control inputs */
+                if (node->opcode == VTX_OP_Phi) {
+                    vtx_node_t *inp_node = &nt->nodes[inp];
+                    if (inp_node->opcode == VTX_OP_Region ||
+                        inp_node->opcode == VTX_OP_LoopBegin ||
+                        inp_node->opcode == VTX_OP_Proj) {
+                        continue;
+                    }
+                }
+                inp_vals[data_count] = lattice[inp];
+                data_count++;
             }
+            ic = data_count; /* update count for evaluate_node */
         }
 
         /* Evaluate the node */
