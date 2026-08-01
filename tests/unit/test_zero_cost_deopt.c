@@ -551,16 +551,25 @@ VTX_TEST(guard_page_poll_emission)
     int result = vtx_x86_emit_safepoint_poll_guard_page(&emit);
     VTX_ASSERT_EQUAL(result, 0);
 
-    /* Verify emitted bytes: REX.WR + MOV + ModR/M + disp32 = 7 bytes
-     * B15 fix: poll now uses R11 instead of RAX to avoid clobbering live
-     * RAX values. Encoding:
-     *   0x4C = REX.WR (W=1, R=1 for R11)
-     *   0x8B = MOV r64, r/m64
-     *   0x1D = ModR/M: mod=00, reg=011 (R11 low3), r/m=5 (RIP-relative) */
-    VTX_ASSERT_EQUAL(emit.position, 7);
-    VTX_ASSERT_EQUAL(emit.buffer[0], 0x4C);  /* REX.WR */
-    VTX_ASSERT_EQUAL(emit.buffer[1], 0x8B);  /* MOV r64, r/m64 */
-    VTX_ASSERT_EQUAL(emit.buffer[2], 0x1D);  /* ModR/M: r11, RIP-relative */
+    /* Verify emitted bytes: REX.W + CMP + ModR/M + disp32 + imm8 = 8 bytes
+     *
+     * BUGFIX (float-in-loop crash): The previous encoding used
+     *   MOV R11, [rip+disp32] (0x4C 0x8B 0x1D + disp32)
+     * which clobbered R11 — the reserved smi_mask_vreg register.
+     * The new encoding uses CMP [rip+disp32], 0 which does NOT
+     * clobber any register (only sets flags). The memory access
+     * still triggers SIGSEGV if the guard page is PROT_NONE.
+     *
+     * Encoding:
+     *   0x48 = REX.W
+     *   0x83 = CMP r/m64, imm8
+     *   0x3D = ModR/M: mod=00, reg=111 (CMP /7), r/m=5 (RIP-relative)
+     *   + disp32 (4 bytes) + imm8 (0x00) */
+    VTX_ASSERT_EQUAL(emit.position, 8);
+    VTX_ASSERT_EQUAL(emit.buffer[0], 0x48);  /* REX.W */
+    VTX_ASSERT_EQUAL(emit.buffer[1], 0x83);  /* CMP r/m64, imm8 */
+    VTX_ASSERT_EQUAL(emit.buffer[2], 0x3D);  /* ModR/M: CMP /7, RIP-relative */
+    VTX_ASSERT_EQUAL(emit.buffer[7], 0x00);  /* imm8 = 0 */
 
     /* A relocation should be recorded */
     VTX_ASSERT_TRUE(relocs.count > 0);

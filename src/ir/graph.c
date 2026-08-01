@@ -1543,12 +1543,29 @@ int vtx_graph_build(vtx_graph_t *graph,
             }
             /* If exactly one forward predecessor, re-inherit its EXIT locals.
              *
-             * BUGFIX: DON'T re-inherit from a loop header — blocks inside the
-             * loop body should use the Phis, and the latch/exit blocks get
-             * their values from Phase 4's back-edge fix and the Region Phi
-             * creation respectively. */
+             * BUGFIX (float-in-loop crash): The old code SKIPPED re-inheritance
+             * when the predecessor was a loop header (!blocks[single_pred_idx]
+             * .is_loop_header). This was wrong — it meant the latch block
+             * (successor of the loop header via the If branch) kept the stale
+             * Phase 2 locals (the Phi nodes) instead of getting the loop
+             * header's EXIT locals (which include updates from store_local
+             * in the loop body). Phase 4 then read the stale Phi value as
+             * the back-edge input, detected a circular reference (Phi → Phi),
+             * and fell back to the forward input (the initial constant) —
+             * causing the loop to use the initial value instead of the
+             * updated value on every iteration.
+             *
+             * Re-inheriting from a loop header is ALWAYS correct:
+             *   - If the loop header has no bytecode (just Phis), its EXIT
+             *     locals == the Phi values. Re-inheriting gives the Phis. ✓
+             *   - If the loop header contains loop body bytecode (like when
+             *     the graph builder inlines the body into the header), its
+             *     EXIT locals include the updates. The latch needs these
+             *     updated values for the back-edge Phi input. ✓
+             *   - For blocks inside the loop body, the loop header's EXIT
+             *     locals are the correct entry values (the loop header's
+             *     bytecode runs before the successor). ✓ */
             if (forward_pred_count == 1 &&
-                !blocks[single_pred_idx].is_loop_header &&
                 blocks[single_pred_idx].locals != NULL) {
                 for (uint16_t i = 0; i < max_locals; i++) {
                     /* Only update if the predecessor's exit local is valid
@@ -2775,30 +2792,57 @@ int vtx_graph_build(vtx_graph_t *graph,
                  * EXIT local value (after Phase 3 ran). The Phi was created
                  * in Phase 2 with the predecessor's INITIAL local, which is
                  * now stale. */
-                if (block->locals != NULL) {
-                    for (uint16_t li = 0; li < max_locals; li++) {
-                        vtx_nodeid_t local_node = block->locals[li];
-                        if (local_node == VTX_NODEID_INVALID) continue;
-                        vtx_node_t *local_n = vtx_node_get(&graph->node_table, local_node);
-                        if (local_n != NULL && local_n->opcode == VTX_OP_Phi) {
-                            /* Find the forward (non-loop-end) predecessor */
-                            for (uint32_t p = 0; p < block->pred_count; p++) {
-                                uint32_t pred_idx = block->pred_indices[p];
-                                if (blocks[pred_idx].is_loop_end) continue;
-                                if (blocks[pred_idx].is_unreachable) continue;
-                                if (blocks[pred_idx].locals == NULL) continue;
-                                vtx_nodeid_t exit_val = blocks[pred_idx].locals[li];
-                                if (exit_val == VTX_NODEID_INVALID) continue;
-                                /* Update Input 0 of the Phi to the predecessor's EXIT local.
-                                 * Input 0 is the first data input (the Phi's inputs are:
-                                 * [forward_val, LoopBegin, back_edge_val (added later)]).
-                                 * Use vtx_node_replace_input to properly maintain
-                                 * output counts and use-def lists. */
-                                if (local_n->input_count > 0 && local_n->inputs[0] != exit_val) {
-                                    vtx_node_replace_input(&graph->node_table, local_node, 0, exit_val);
-                                }
-                                break; /* Only one forward predecessor for a loop header */
+                /* BUGFIX (float-in-loop crash): The old code used
+                 * block->locals[li] to find the Phi nodes. But Phase 3
+                 * overwrites block->locals[li] with the EXIT value (e.g.,
+                 * the AddF result N13 for the sum variable). So by Phase 4,
+                 * block->locals[li] is no longer the Phi — it's the last
+                 * value stored to that local. The forward input update was
+                 * silently skipped because local_n->opcode != VTX_OP_Phi.
+                 *
+                 * Fix: Scan the graph for Phi nodes that reference this
+                 * LoopBegin, just like the back-edge code below does.
+                 * Phi nodes are created in create_block_entry in order of
+                 * local index, so the Nth Phi referencing the LoopBegin
+                 * corresponds to local N. */
+                {
+                    vtx_node_table_t *nt = &graph->node_table;
+                    uint32_t phi_index = 0; /* which local index this Phi is */
+                    for (uint32_t ni = 0; ni < nt->count; ni++) {
+                        vtx_node_t *phi_n = &nt->nodes[ni];
+                        if (phi_n->dead) continue;
+                        if (phi_n->opcode != VTX_OP_Phi) continue;
+
+                        /* Check if this Phi references our LoopBegin */
+                        bool belongs_to_this_loop = false;
+                        for (uint32_t inp = 0; inp < phi_n->input_count; inp++) {
+                            if (phi_n->inputs[inp] == block->region_node) {
+                                belongs_to_this_loop = true;
+                                break;
                             }
+                        }
+                        if (!belongs_to_this_loop) continue;
+
+                        /* This Phi belongs to our loop header.
+                         * Use phi_index as the local index. */
+                        uint16_t li = (uint16_t)phi_index;
+                        phi_index++;
+
+                        if (li >= max_locals) continue;
+
+                        /* Find the forward (non-loop-end) predecessor */
+                        for (uint32_t p = 0; p < block->pred_count; p++) {
+                            uint32_t pred_idx = block->pred_indices[p];
+                            if (blocks[pred_idx].is_loop_end) continue;
+                            if (blocks[pred_idx].is_unreachable) continue;
+                            if (blocks[pred_idx].locals == NULL) continue;
+                            vtx_nodeid_t exit_val = blocks[pred_idx].locals[li];
+                            if (exit_val == VTX_NODEID_INVALID) continue;
+                            /* Update Input 0 of the Phi to the predecessor's EXIT local. */
+                            if (phi_n->input_count > 0 && phi_n->inputs[0] != exit_val) {
+                                vtx_node_replace_input(&graph->node_table, (vtx_nodeid_t)ni, 0, exit_val);
+                            }
+                            break; /* Only one forward predecessor for a loop header */
                         }
                     }
                 }

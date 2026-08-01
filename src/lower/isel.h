@@ -148,8 +148,10 @@ typedef enum {
 
     /* Safepoint poll (pseudo-instruction) */
     VTX_X86_SAFEPOINT_POLL,         /* cmpq [vtx_safepoint_flag], 0; jne deopt_stub */
-    VTX_X86_SAFEPOINT_POLL_GUARD_PAGE, /* movq r11, [guard_page] — zero-cost poll
-                                        * (B15: uses R11 to avoid clobbering live RAX) */
+    VTX_X86_SAFEPOINT_POLL_GUARD_PAGE, /* cmpq [guard_page], 0 — zero-cost poll
+                                        * (uses CMP [mem],0 to avoid clobbering
+                                        * any register; memory access triggers
+                                        * SIGSEGV if guard page is PROT_NONE) */
 
     /* SSE2 packed double operations (for vectorized loops) */
     VTX_X86_MOVAPD,     /* movaps/movapd xmm, xmm — 128-bit aligned move */

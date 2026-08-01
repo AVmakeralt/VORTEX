@@ -3670,9 +3670,38 @@ static int resolve_phis(vtx_inst_stream_t *stream, const vtx_schedule_t *schedul
                  * control input (LoopBegin) is INTERLEAVED with data inputs:
                  *   [forward_data, LoopBegin, back_edge_data]
                  * So inputs[p] doesn't give the p-th data input. We must
-                 * skip control inputs for loop header blocks only. */
+                 * skip control inputs for loop header blocks only.
+                 *
+                 * BUGFIX (float-in-loop crash): The old code assumed
+                 * data_idx == p (predecessor index matches data input index).
+                 * This is WRONG when the schedule orders predecessors
+                 * differently from the Phi's data input order. For a loop
+                 * header with inputs [forward_data, LoopBegin, back_edge_data],
+                 * data_idx 0 = forward, data_idx 1 = back-edge. But the
+                 * schedule may list the back-edge predecessor first (e.g.,
+                 * pred_blocks = [latch, preheader]). In that case, p=0 would
+                 * incorrectly select forward_data for the back-edge copy,
+                 * causing the loop to use the initial value instead of the
+                 * updated value on every iteration.
+                 *
+                 * Fix: Determine whether predecessor p is the forward edge
+                 * or the back-edge by comparing block indices. The back-edge
+                 * predecessor (latch) always has a HIGHER block index than
+                 * the loop header (it comes after the header in block order).
+                 * The forward predecessor (preheader) has a LOWER block index.
+                 * Then select data_idx=0 for forward, data_idx=1 for back-edge. */
                 if (sched_blk->is_loop_header) {
-                    /* Loop header: skip control inputs (Region, LoopBegin, Proj) */
+                    /* Determine if this predecessor is the back-edge.
+                     * back-edge: pred_block_idx > b (loop header)
+                     * forward:   pred_block_idx < b */
+                    uint32_t pred_block_idx = sched_blk->pred_blocks[p];
+                    bool is_back_edge = (pred_block_idx > b);
+
+                    /* Loop header Phi inputs: [forward_data, LoopBegin, back_edge_data]
+                     * data_idx 0 = forward_data, data_idx 1 = back_edge_data */
+                    uint32_t target_data_idx = is_back_edge ? 1 : 0;
+
+                    /* Walk inputs, skip control inputs, find the target data input */
                     uint32_t data_idx = 0;
                     for (uint32_t pi = 0; pi < node->input_count; pi++) {
                         vtx_nodeid_t inp_id = node->inputs[pi];
@@ -3683,7 +3712,7 @@ static int resolve_phis(vtx_inst_stream_t *stream, const vtx_schedule_t *schedul
                                          inp_node->opcode == VTX_OP_Proj)) {
                             continue;
                         }
-                        if (data_idx == p) {
+                        if (data_idx == target_data_idx) {
                             uint32_t input_vreg = vtx_isel_node_vreg(stream, inp_id);
                             if (input_vreg != VTX_VREG_INVALID && input_vreg != phi_vreg) {
                                 if (copy_count < MAX_PHI_COPIES) {

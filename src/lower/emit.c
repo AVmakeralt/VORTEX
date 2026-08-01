@@ -1821,29 +1821,43 @@ int vtx_x86_emit_safepoint_poll_guard_page(vtx_x86_emit_t *e)
     if (!e) return -1;
 
     /* Emit:
-     *   movq r11, [rip + disp32]     ; 7 bytes
+     *   cmpq [rip + disp32], 0     ; 8 bytes
      *
-     * B15 fix: Use R11 instead of RAX. The previous encoding
-     *   `movq rax, [rip + disp32]`
-     * destroyed live RAX values. R11 is a caller-saved scratch register
-     * that isel reserves for these polls (it is not used as a general
-     * vreg allocation target), so clobbering it is safe.
+     * BUGFIX (float-in-loop crash): The previous encoding used
+     *   `movq r11, [rip + disp32]`
+     * which clobbered R11 — the reserved smi_mask_vreg register
+     * (VTX_REG_RESERVED_MASK). R11 holds the SMI DATA_MASK
+     * (0x0000FFFFFFFFFFFF) for the entire function lifetime.
+     * Clobbering it in a loop body destroys all subsequent SMI retag
+     * sequences, producing garbage NaN-boxed values.
      *
-     * MOV r64, r/m64 with RIP-relative addressing:
-     *   REX.WR (0x4C) + 0x8B + ModR/M(00, r11(low3=011), 101) + disp32
-     *   0x4C 0x8B 0x1D dd dd dd dd
+     * The B15 fix (which switched from RAX to R11) was correct that
+     * RAX was sometimes live, but R11 is ALSO reserved for the SMI
+     * mask — so it just moved the bug. Every other caller-saved GPR
+     * (RCX, RDX, RSI, RDI, R8, R9) could also be live at the poll
+     * point. R10 is smi_scratch_vreg (also reserved).
      *
-     * When the guard page is readable, this is a normal load — the
-     * value in r11 is ignored. When the guard page is PROT_NONE,
-     * this triggers SIGSEGV, which the signal handler catches and
-     * processes as a safepoint.
+     * The cleanest fix: don't use ANY register. Use CMP [mem], imm8
+     * which only sets flags (and triggers SIGSEGV if the page is
+     * PROT_NONE — the whole point of the guard page poll). Flags
+     * are not live at safepoint poll points (they're placed at
+     * method entry or loop back-edges, never between a CMP and its
+     * JCC).
      *
-     * Advantages over CMP+JCC:
-     *   - 7 bytes vs. 14 bytes (50% smaller)
-     *   - 1 uop vs. 2 uops (CMP+JCC)
-     *   - No branch prediction entry consumed
-     *   - No compare, no conditional branch
-     *   - Same latency as a normal load on the hot path
+     * CMP qword [rip+disp32], imm8 encoding:
+     *   REX.W (0x48) + 0x83 + ModRM(mod=00, reg=7(CMP), r/m=5(RIP)) + disp32 + imm8
+     *   0x48 0x83 0x3D dd dd dd dd 00
+     *   = 8 bytes
+     *
+     * When the guard page is readable, this is a normal memory read
+     * (the comparison result is ignored). When the guard page is
+     * PROT_NONE, the memory access triggers SIGSEGV, which the signal
+     * handler catches and processes as a safepoint.
+     *
+     * Advantages over MOV R11:
+     *   - Does NOT clobber any register (the main fix)
+     *   - Still zero-cost: 1 instruction, no branch, no compare value used
+     *   - 8 bytes vs. 7 bytes (1 byte larger, negligible)
      *
      * The displacement is a placeholder (0); a VTX_RELOC_RIP_REL32
      * external relocation is recorded so it gets patched at code
@@ -1851,18 +1865,19 @@ int vtx_x86_emit_safepoint_poll_guard_page(vtx_x86_emit_t *e)
      * Use stub_id -6 as a special marker for guard page relocations.
      */
 
-    /* Ensure buffer has space: 7 bytes */
-    if (vtx_x86_emit_ensure(e, 7) != 0) return -1;
+    /* Ensure buffer has space: 8 bytes */
+    if (vtx_x86_emit_ensure(e, 8) != 0) return -1;
 
-    /* ---- Emit MOV r11, [rip + disp32] ---- */
-    uint32_t mov_disp_offset = vtx_x86_emit_position(e) + 3; /* disp32 starts at byte 3 */
+    /* ---- Emit CMP qword [rip + disp32], 0 ---- */
+    uint32_t cmp_disp_offset = vtx_x86_emit_position(e) + 3; /* disp32 starts at byte 3 */
 
-    emit_byte(e, 0x4C);  /* REX.WR (W=1, R=1 for R11, B=0) */
-    emit_byte(e, 0x8B);  /* MOV r64, r/m64 */
-    emit_byte(e, 0x1D);  /* ModR/M: mod=00, reg=011 (R11 low3), r/m=5 (RIP-relative) */
+    emit_byte(e, 0x48);  /* REX.W */
+    emit_byte(e, 0x83);  /* CMP r/m64, imm8 (opcode 83 /7) */
+    emit_byte(e, 0x3D);  /* ModR/M: mod=00, reg=111 (CMP /7), r/m=5 (RIP-relative) */
     emit_dword(e, 0);    /* placeholder disp32 — will be patched by relocation */
+    emit_byte(e, 0x00);  /* imm8 = 0 */
 
-    /* Record RIP-relative relocation for the MOV's displacement.
+    /* Record RIP-relative relocation for the CMP's displacement.
      * Marked as external because the code's final address in the code
      * cache is not known at emit time. The target is the address of
      * the guard page (vtx_guard_page_address()).
@@ -1870,7 +1885,7 @@ int vtx_x86_emit_safepoint_poll_guard_page(vtx_x86_emit_t *e)
      * code install step will resolve to vtx_guard_page_address(). */
     if (e->relocs && e->reloc_arena) {
         uint32_t reloc_idx = vtx_reloc_add(e->relocs, VTX_RELOC_RIP_REL32,
-                                            mov_disp_offset,
+                                            cmp_disp_offset,
                                             0,  /* target_offset (N/A for external) */
                                             0,  /* target_addr: resolved at install time */
                                             -6, /* stub_id: special marker for guard_page */
@@ -2405,7 +2420,7 @@ static uint32_t estimate_inst_size(const vtx_inst_t *inst)
     case VTX_X86_JCC:    return 6;  /* 0F 8x + rel32 */
     case VTX_X86_CALL:
         if (inst->flags & VTX_INST_FLAG_HAS_IMM && inst->imm > 4096)
-            return 13;  /* MOV R11, imm64 (10) + CALL R11 (3) */
+            return 12;  /* MOV RAX, imm64 (10) + CALL RAX (2) */
         return 5;  /* E8 + rel32 */
     case VTX_X86_CQO:    return 2;  /* REX.W 99 */
     case VTX_X86_MOV:
@@ -3630,23 +3645,43 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
          * External calls can target functions far from the code cache
          * (e.g. printf at 0x55... vs code cache at 0x7f...), where the
          * 32-bit relative displacement overflows. Use a 64-bit indirect
-         * call (MOV R11, imm64; CALL R11) for external calls.
-         * R11 is caller-saved and already in the clobber list for CALL.
+         * call (MOV RAX, imm64; CALL RAX) for external calls.
+         *
+         * BUGFIX (float-in-loop crash): The old code used R11 as the
+         * indirect-call temp. But R11 is reserved (VTX_REG_RESERVED_MASK)
+         * as smi_mask_vreg — it holds the SMI DATA_MASK (0x0000FFFFFFFFFFFF)
+         * for the entire function lifetime. Clobbering R11 in a loop body
+         * destroys the SMI mask, causing all subsequent SMI retag sequences
+         * (AND, SHL, OR) to produce garbage NaN-boxed values. This was the
+         * root cause of float-loop tests returning the first iteration's
+         * result instead of the accumulated value: the AddF call clobbered
+         * R11, then the n-1 Sub's retag used the function pointer bits as
+         * a mask, producing a corrupt SMI that compared equal to SMI(0)
+         * (NaN-box header), making the loop exit after one iteration.
+         *
+         * RAX is safe because:
+         *   1. The CALL's clobber list already includes RAX (return value),
+         *      so the regalloc ensures no vreg live across the CALL is in RAX.
+         *   2. The MOV RAX, imm64 is emitted as part of the CALL instruction's
+         *      emission — the regalloc doesn't see it as a separate instruction,
+         *      so it can't accidentally assign RAX to something live before
+         *      the CALL that the CALL doesn't already clobber.
+         *   3. After the CALL, RAX holds the return value, which is then
+         *      MOV'd to the destination vreg by a subsequent isel instruction.
          *
          * For internal calls (CALL rel32 to a label), use the regular
          * rel32 encoding which is patched by the relocation system. */
         if ((inst->flags & VTX_INST_FLAG_HAS_IMM) && inst->imm > 4096) {
-            /* External call: MOV R11, imm64; CALL R11
-             * R11 = register 11. REX.W + B8+rd is MOV r64, imm64.
-             * But R11 needs REX.B: REX.WB + B8+0 = 49 BB + imm64.
-             * CALL R11: 41 FF D3 (REX.B + FF /2 + R11) */
-            emit_byte(e, 0x49);  /* REX.WB */
-            emit_byte(e, 0xBB);  /* MOV R11, imm64 */
+            /* External call: MOV RAX, imm64; CALL RAX
+             * RAX = register 0. REX.W + B8+rd is MOV r64, imm64.
+             * RAX doesn't need REX.B: REX.W + B8+0 = 48 B8 + imm64.
+             * CALL RAX: FF D0 (FF /2 + RAX, no REX needed since RAX is low) */
+            emit_byte(e, 0x48);  /* REX.W */
+            emit_byte(e, 0xB8);  /* MOV RAX, imm64 */
             emit_dword(e, (uint32_t)(inst->imm & 0xFFFFFFFF));
             emit_dword(e, (uint32_t)((inst->imm >> 32) & 0xFFFFFFFF));
-            emit_byte(e, 0x41);  /* REX.B */
             emit_byte(e, 0xFF);  /* CALL */
-            emit_byte(e, 0xD3);  /* ModRM: /2, R11 */
+            emit_byte(e, 0xD0);  /* ModRM: /2, RAX (mod=11, reg=010, r/m=000) */
             /* No relocation needed — the address is embedded directly */
         } else {
             /* Internal call: CALL rel32 (will be patched by relocation) */
@@ -4876,7 +4911,7 @@ int vtx_x86_emit_function(vtx_x86_emit_t *emit, vtx_inst_stream_t *stream,
                                    emit->reloc_arena);
             }
             /* ---- Runtime builtin call relocation ---- *
-             * External calls now use MOV R11, imm64; CALL R11 (indirect),
+             * External calls now use MOV RAX, imm64; CALL RAX (indirect),
              * so the function address is embedded directly in the code.
              * No relocation needed — skip. */
             /* (Old rel32 relocation code removed — indirect call handles it) */

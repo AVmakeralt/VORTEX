@@ -210,32 +210,90 @@ static vtx_live_interval_t *compute_live_intervals(vtx_inst_stream_t *stream,
      * (e.g., a constant) is live across ALL iterations. Without extending
      * its interval to cover the entire loop, the regalloc may assign the
      * same register to both the constant and a loop-variant temp, causing
-     * the temp to clobber the constant on subsequent iterations. */
+     * the temp to clobber the constant on subsequent iterations.
+     *
+     * BUGFIX (float-in-loop): The old loop-body detection was broken —
+     * it only included the header block and the block whose successor IS
+     * the header (the latch). It missed all blocks in BETWEEN (the loop
+     * body proper), and it wrongly included the preheader (whose succ is
+     * the header, but which is NOT in the loop). This caused loop_start
+     * to be the preheader's position and loop_end to be the latch's
+     * position, but the body blocks (where the AddF/Sub live) were
+     * excluded from the range. As a result, a constant like 1.5 loaded
+     * in the preheader and used by AddF in the body was NOT extended
+     * across the loop, and the regalloc reused its register for the
+     * Sub result — clobbering the constant on every iteration.
+     *
+     * Fix: compute the natural loop body via reverse reachability from
+     * the latch back to the header. A block is in the loop iff it can
+     * reach the latch without going through the header. We approximate
+     * this with a worklist starting from the latch's predecessors. */
     if (stream->schedule) {
         const vtx_schedule_t *sched = stream->schedule;
         for (uint32_t b = 0; b < sched->count; b++) {
             if (!sched->blocks[b].is_loop_header) continue;
 
-            uint32_t loop_start = UINT32_MAX;
-            uint32_t loop_end = 0;
-
-            if (b < stream->block_count && stream->blocks[b].inst_count > 0) {
-                uint32_t pos = stream->blocks[b].insts[0].native_offset;
-                if (pos < loop_start) loop_start = pos;
-                pos = stream->blocks[b].insts[stream->blocks[b].inst_count-1].native_offset;
-                if (pos > loop_end) loop_end = pos;
-            }
-
+            /* Find the latch: the block whose successor is the header.
+             * For reducible loops there is exactly one. */
+            uint32_t latch = UINT32_MAX;
             for (uint32_t sb = 0; sb < sched->count; sb++) {
-                bool in_loop = (sb == b);
                 for (uint32_t s = 0; s < sched->blocks[sb].succ_count; s++) {
                     if (sched->blocks[sb].succ_blocks[s] == b) {
-                        in_loop = true;
+                        latch = sb;
                         break;
                     }
                 }
-                if (!in_loop) continue;
+                if (latch != UINT32_MAX) break;
+            }
+            if (latch == UINT32_MAX) continue;
 
+            /* Compute loop body: header + all blocks that can reach the
+             * latch without passing through the header. Use a backward
+             * DFS from the latch, stopping at the header.
+             *
+             * BUGFIX (float-in-loop): The previous fixpoint iteration
+             * added ANY block whose predecessor was in the loop. This
+             * wrongly included the loop EXIT block (whose predecessor
+             * is the If inside the loop body). The exit block cannot
+             * reach the latch, so it must NOT be in the loop body.
+             * Including it extended loop_end past the return instruction,
+             * causing the regalloc to extend live ranges of constants
+             * across the epilogue — leading to even worse clobbering.
+             *
+             * Correct algorithm: backward DFS from latch. A block is
+             * in the loop iff it can reach the latch without going
+             * through the header. */
+            bool *in_loop = (bool *)vtx_arena_alloc(arena, sched->count * sizeof(bool));
+            if (!in_loop) continue;
+            memset(in_loop, 0, sched->count * sizeof(bool));
+            in_loop[b] = true;      /* header */
+            in_loop[latch] = true;  /* latch */
+
+            /* Explicit stack-based backward DFS from latch */
+            uint32_t *stack = (uint32_t *)vtx_arena_alloc(
+                arena, sched->count * sizeof(uint32_t));
+            if (!stack) continue;
+            uint32_t sp = 0;
+            stack[sp++] = latch;
+
+            while (sp > 0) {
+                uint32_t cur = stack[--sp];
+                /* Walk cur's predecessors */
+                for (uint32_t p = 0; p < sched->blocks[cur].pred_count; p++) {
+                    uint32_t pred = sched->blocks[cur].pred_blocks[p];
+                    if (pred >= sched->count) continue;
+                    if (pred == b) continue;       /* stop at header */
+                    if (in_loop[pred]) continue;   /* already visited */
+                    in_loop[pred] = true;
+                    stack[sp++] = pred;
+                }
+            }
+
+            uint32_t loop_start = UINT32_MAX;
+            uint32_t loop_end = 0;
+
+            for (uint32_t sb = 0; sb < sched->count; sb++) {
+                if (!in_loop[sb]) continue;
                 if (sb < stream->block_count && stream->blocks[sb].inst_count > 0) {
                     uint32_t pos = stream->blocks[sb].insts[0].native_offset;
                     if (pos < loop_start) loop_start = pos;
