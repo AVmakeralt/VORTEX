@@ -2874,6 +2874,10 @@ pub struct vtx_callsite_profile_t {
     pub types: [vtx_typeid_t; 4usize],
     pub count: u32,
     pub megamorphic: bool,
+    /// BUGFIX (T11): Total call observations at this site (not just
+    /// distinct types). Used by the confidence system to gate T2
+    /// promotion on actual sample count.
+    pub total_count: u64,
 }
 #[doc = " Records taken / not-taken counts for a single branch bytecode PC.\n Both counters use saturating increment."]
 #[repr(C)]
