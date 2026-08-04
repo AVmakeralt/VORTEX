@@ -21,6 +21,12 @@
 #include "lower/isel.h"
 #include "runtime/arena.h"
 
+/* Forward declaration to avoid circular include with target.h.
+ * target.h includes regalloc.h for vtx_reg_class_t, so we can't
+ * include it here. The full definition is available in target.c. */
+struct vtx_target_description;
+typedef struct vtx_target_description vtx_target_description_t;
+
 /**
  * VORTEX Linear Scan Register Allocator
  *
@@ -237,6 +243,23 @@ typedef struct {
  * @return        Register allocation result, or NULL on failure
  */
 vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *arena);
+
+/**
+ * Run the register allocator with a specific target description.
+ *
+ * Same as vtx_regalloc_run but queries the target for register masks,
+ * calling conventions, and clobber sets instead of using hardcoded x86-64
+ * constants. This enables cross-compilation: pass vtx_target_arm64() to
+ * allocate for ARM64, etc.
+ *
+ * @param stream  The instruction stream (with virtual registers)
+ * @param arena   Arena for allocations
+ * @param target  The target description (x86_64, arm64, riscv64)
+ * @return        Register allocation result, or NULL on failure
+ */
+vtx_regalloc_result_t *vtx_regalloc_run_target(vtx_inst_stream_t *stream,
+                                                  vtx_arena_t *arena,
+                                                  const vtx_target_description_t *target);
 
 /**
  * Apply the register allocation result to the instruction stream.

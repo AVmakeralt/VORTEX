@@ -33,6 +33,11 @@
 #include "sota/recomp.h"
 #include "sota/fdi.h"
 #include "compile/phase_react.h"
+#include "trace/retrace.h"  /* vtx_trace_retrace_t */
+/* Forward declare vtx_aot_manager_t to avoid circular include:
+ * aot.h → pipeline.h → orchestrator.h → aot.h. The full definition
+ * is in compile/aot.h, included by orchestrator.c. */
+typedef struct vtx_aot_manager vtx_aot_manager_t;
 #endif
 
 /**
@@ -158,6 +163,19 @@ typedef struct vtx_orchestrator_struct {
      * atomically by compile/decision.c. See decision.h for the API. */
     uint64_t                   decision_submit_counts[8 /* VTX_DECISION_REASON_COUNT */];
     uint64_t                   decision_deopt_count;
+
+    /* Trace-based PGO re-tracing registry.
+     * Tracks per-method guard failure state and triggers re-tracing
+     * when the failure rate exceeds the threshold. See trace/retrace.h. */
+    vtx_trace_retrace_t       *trace_retrace;
+    uint64_t                   total_trace_retraces;
+
+    /* AOT background compilation manager.
+     * Serializes traces for background compilation, generates bailout
+     * stubs, and feeds guard failures into the retrace system.
+     * See compile/aot.h. */
+    vtx_aot_manager_t         *aot;
+    uint64_t                   total_aot_compiles;
 } vtx_orchestrator_t;  /* struct vtx_orchestrator_struct */
 
 /* ========================================================================== */
@@ -316,6 +334,14 @@ void vtx_orchestrator_wake(vtx_orchestrator_t *orch);
  */
 void vtx_orchestrator_set_phase_partition(vtx_orchestrator_t *orch,
                                             vtx_phase_partition_t *part);
+
+/* Wire the code cache and method registry into the AOT manager.
+ * Must be called after vtx_orchestrator_init() and before
+ * vtx_orchestrator_start() if you want AOT background compilation
+ * to install compiled code in the cache. */
+void vtx_orchestrator_set_aot_cache(vtx_orchestrator_t *orch,
+                                      vtx_code_cache_t *cache,
+                                      vtx_method_registry_t *registry);
 
 /**
  * Manually trigger a phase partition transition.

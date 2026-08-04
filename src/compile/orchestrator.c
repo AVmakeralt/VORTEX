@@ -24,6 +24,7 @@
 #include "compile/orchestrator.h"
 #include "compile/decision.h"
 #include "trace/retrace.h"
+#include "compile/aot.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -770,6 +771,15 @@ void vtx_orchestrator_set_phase_partition(vtx_orchestrator_t *orch,
         }
     }
     pthread_mutex_unlock(&orch->mutex);
+}
+
+void vtx_orchestrator_set_aot_cache(vtx_orchestrator_t *orch,
+                                      vtx_code_cache_t *cache,
+                                      vtx_method_registry_t *registry)
+{
+    if (orch == NULL || orch->aot == NULL) return;
+    orch->aot->code_cache = cache;
+    orch->aot->registry = registry;
 }
 
 void vtx_orchestrator_phase_transition(vtx_orchestrator_t *orch,

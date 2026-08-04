@@ -34,7 +34,10 @@
 #include "sota/fdi.h"
 #include "compile/phase_react.h"
 #include "trace/retrace.h"  /* vtx_trace_retrace_t */
-#include "compile/aot.h"    /* vtx_aot_manager_t */
+/* Forward declare vtx_aot_manager_t to avoid circular include:
+ * aot.h → pipeline.h → orchestrator.h → aot.h. The full definition
+ * is in compile/aot.h, included by orchestrator.c. */
+typedef struct vtx_aot_manager vtx_aot_manager_t;
 #endif
 
 /**
@@ -331,6 +334,14 @@ void vtx_orchestrator_wake(vtx_orchestrator_t *orch);
  */
 void vtx_orchestrator_set_phase_partition(vtx_orchestrator_t *orch,
                                             vtx_phase_partition_t *part);
+
+/* Wire the code cache and method registry into the AOT manager.
+ * Must be called after vtx_orchestrator_init() and before
+ * vtx_orchestrator_start() if you want AOT background compilation
+ * to install compiled code in the cache. */
+void vtx_orchestrator_set_aot_cache(vtx_orchestrator_t *orch,
+                                      vtx_code_cache_t *cache,
+                                      vtx_method_registry_t *registry);
 
 /**
  * Manually trigger a phase partition transition.
