@@ -61,6 +61,7 @@ typedef enum {
     VTX_DECISION_REASON_DEOPTLESS,      /* Deoptless continuation compile */
     VTX_DECISION_REASON_DEOPT,          /* Deopt-triggered recompile */
     VTX_DECISION_REASON_PHASE,          /* Phase transition recompile */
+    VTX_DECISION_REASON_RETRACE,        /* Trace-based PGO re-tracing */
     VTX_DECISION_REASON_COUNT
 } vtx_decision_reason_t;
 

@@ -70,6 +70,7 @@ add_library(vortex_trace STATIC
     trace/recorder.c
     trace/tree.c
     trace/side_exit.c
+    trace/retrace.c
 )
 target_include_directories(vortex_trace PUBLIC ${VORTEX_INCLUDE_DIRS})
 target_link_libraries(vortex_trace PUBLIC vortex_runtime vortex_ir vortex_profile)
@@ -143,6 +144,7 @@ add_library(vortex_lower STATIC
     lower/emit.c
     lower/guard_emit.c
     lower/reloc.c
+    lower/target.c
 )
 target_include_directories(vortex_lower PUBLIC ${VORTEX_INCLUDE_DIRS})
 target_link_libraries(vortex_lower PUBLIC vortex_ir vortex_deopt)

@@ -33,6 +33,7 @@
 #include "sota/recomp.h"
 #include "sota/fdi.h"
 #include "compile/phase_react.h"
+#include "trace/retrace.h"  /* vtx_trace_retrace_t */
 #endif
 
 /**
@@ -158,6 +159,12 @@ typedef struct vtx_orchestrator_struct {
      * atomically by compile/decision.c. See decision.h for the API. */
     uint64_t                   decision_submit_counts[8 /* VTX_DECISION_REASON_COUNT */];
     uint64_t                   decision_deopt_count;
+
+    /* Trace-based PGO re-tracing registry.
+     * Tracks per-method guard failure state and triggers re-tracing
+     * when the failure rate exceeds the threshold. See trace/retrace.h. */
+    vtx_trace_retrace_t       *trace_retrace;
+    uint64_t                   total_trace_retraces;
 } vtx_orchestrator_t;  /* struct vtx_orchestrator_struct */
 
 /* ========================================================================== */

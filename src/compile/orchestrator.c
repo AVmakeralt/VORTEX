@@ -23,6 +23,7 @@
 #define _POSIX_C_SOURCE 199309L
 #include "compile/orchestrator.h"
 #include "compile/decision.h"
+#include "trace/retrace.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -419,6 +420,22 @@ static void *orchestrator_thread_fn(void *arg)
 
         /* 5. Deoptless → compile continuations for repeatedly failing guards */
         check_deoptless_continuations(orch);
+
+        /* 6. Trace-based PGO → re-trace methods with high guard failure rates.
+         *
+         * When a guard fails repeatedly, the trace's speculation is wrong.
+         * Re-record the trace with updated profile data so the next trace
+         * picks a different hot path. This implements the "dynamic superblock"
+         * vision: traces are linearized SoN regions that get specialized
+         * variants on guard failure. */
+        if (orch->trace_retrace != NULL) {
+            uint32_t submitted = vtx_trace_retrace_check(
+                orch->trace_retrace, orch);
+            if (submitted > 0) {
+                __atomic_fetch_add(&orch->total_trace_retraces,
+                                     submitted, __ATOMIC_RELAXED);
+            }
+        }
     }
 
     return NULL;
@@ -467,6 +484,14 @@ int vtx_orchestrator_init(vtx_orchestrator_t *orch,
     /* Sprint 2: phase partition starts detached. Use
      * vtx_orchestrator_set_phase_partition() to attach one after init. */
     orch->phase_partition = NULL;
+
+    /* Trace-based PGO: initialize the re-trace registry.
+     * Capacity 256 handles up to 256 methods with active re-trace state. */
+    orch->trace_retrace = (vtx_trace_retrace_t *)
+        calloc(1, sizeof(vtx_trace_retrace_t));
+    if (orch->trace_retrace != NULL) {
+        vtx_trace_retrace_init(orch->trace_retrace, 256);
+    }
 
     orch->check_interval_ms = VTX_ORCHESTRATOR_CHECK_INTERVAL_MS;
     orch->min_profile_observations = VTX_ORCHESTRATOR_MIN_PROFILE_OBS;
@@ -536,6 +561,13 @@ void vtx_orchestrator_destroy(vtx_orchestrator_t *orch)
     if (orch == NULL) return;
 
     vtx_orchestrator_stop(orch);
+
+    /* Clean up the trace re-trace registry */
+    if (orch->trace_retrace != NULL) {
+        vtx_trace_retrace_destroy(orch->trace_retrace);
+        free(orch->trace_retrace);
+        orch->trace_retrace = NULL;
+    }
 
     pthread_mutex_destroy(&orch->mutex);
     pthread_cond_destroy(&orch->wake_cond);
@@ -609,6 +641,21 @@ void vtx_orchestrator_on_deopt(vtx_orchestrator_t *orch,
             vtx_orchestrator_wake(orch);
         }
     }
+
+    /* Feed deopt to the trace re-tracing system.
+     *
+     * Records the guard failure so the orchestrator background thread
+     * can check if the failure rate exceeds the re-trace threshold.
+     * Also updates the profile data's branch probabilities so the next
+     * trace recording picks a different hot path. */
+    if (orch->trace_retrace != NULL) {
+        vtx_trace_retrace_record_failure(
+            orch->trace_retrace,
+            method_id,
+            guard_id,
+            orch->profile,         /* global profile for branch updates */
+            NULL);                 /* guard meta table (TODO: wire from compile ctx) */
+    }
 }
 
 void vtx_orchestrator_on_compile_done(vtx_orchestrator_t *orch,
@@ -628,6 +675,13 @@ void vtx_orchestrator_on_compile_done(vtx_orchestrator_t *orch,
     if (orch->fdi != NULL) {
         vtx_sota_fdi_register_version(orch->fdi, method_id, version_id);
         vtx_sota_fdi_record_recompilation(orch->fdi, method_id, version_id);
+    }
+
+    /* Notify the trace re-tracing system that a compile completed.
+     * This resets the cooldown so future guard failures can trigger
+     * new re-traces for the freshly compiled trace. */
+    if (orch->trace_retrace != NULL) {
+        vtx_trace_retrace_on_compile_done(orch->trace_retrace, method_id);
     }
 }
 
