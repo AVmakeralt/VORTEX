@@ -34,6 +34,7 @@
 #include "sota/fdi.h"
 #include "compile/phase_react.h"
 #include "trace/retrace.h"  /* vtx_trace_retrace_t */
+#include "compile/aot.h"    /* vtx_aot_manager_t */
 #endif
 
 /**
@@ -165,6 +166,13 @@ typedef struct vtx_orchestrator_struct {
      * when the failure rate exceeds the threshold. See trace/retrace.h. */
     vtx_trace_retrace_t       *trace_retrace;
     uint64_t                   total_trace_retraces;
+
+    /* AOT background compilation manager.
+     * Serializes traces for background compilation, generates bailout
+     * stubs, and feeds guard failures into the retrace system.
+     * See compile/aot.h. */
+    vtx_aot_manager_t         *aot;
+    uint64_t                   total_aot_compiles;
 } vtx_orchestrator_t;  /* struct vtx_orchestrator_struct */
 
 /* ========================================================================== */

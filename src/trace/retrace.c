@@ -101,6 +101,7 @@ void vtx_trace_retrace_record_failure(vtx_trace_retrace_t *rt,
     if (!state) return;
 
     state->last_failed_guard = guard_id;
+    state->failure_count++;  /* increment for threshold-based re-tracing */
 
     /* Feed the guard failure back into the profile data.
      *
@@ -193,10 +194,10 @@ uint32_t vtx_trace_retrace_check(vtx_trace_retrace_t *rt,
          *       { submit re-trace }
          */
 
-        /* For now: if we have a failed guard recorded, submit re-trace.
-         * This is conservative — it re-traces on any failure, not just
-         * frequent ones. The guard metadata check is TODO. */
-        if (s->last_failed_guard != 0) {
+        /* Check if the failure count exceeds the re-trace threshold.
+         * This replaces the guard metadata table check — we track
+         * failures directly in the re-trace state. */
+        if (s->failure_count >= VTX_RETRACE_MIN_FAILURES) {
             vtx_compile_task_t task;
             memset(&task, 0, sizeof(task));
             task.method_id = s->method_id;
@@ -208,7 +209,8 @@ uint32_t vtx_trace_retrace_check(vtx_trace_retrace_t *rt,
                 s->attempt_count++;
                 s->total_retraces++;
                 s->check_cooldown = VTX_RETRACE_COOLDOWN_CHECKS;
-                s->last_failed_guard = 0;  /* Reset until next failure */
+                s->last_failed_guard = 0;
+                s->failure_count = 0;  /* Reset until next failure cycle */
                 rt->retrace_count++;
                 submitted++;
             }

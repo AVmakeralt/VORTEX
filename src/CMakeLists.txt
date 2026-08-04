@@ -174,6 +174,7 @@ add_library(vortex_compile STATIC
     compile/decision.c
     compile/request.c
     compile/callee_lookup.c
+    compile/aot.c
 )
 target_include_directories(vortex_compile PUBLIC ${VORTEX_INCLUDE_DIRS})
 target_link_libraries(vortex_compile PUBLIC

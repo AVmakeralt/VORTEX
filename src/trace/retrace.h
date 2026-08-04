@@ -77,6 +77,7 @@ typedef struct {
     uint32_t check_cooldown;      /* checks remaining before next re-trace allowed */
     uint32_t attempt_count;       /* how many times we've re-traced this method */
     uint32_t last_failed_guard;   /* guard_id of the last failure that triggered */
+    uint32_t failure_count;        /* guard failures since last re-trace (for threshold) */
     uint64_t total_retraces;       /* total re-traces performed */
 } vtx_retrace_state_t;
 

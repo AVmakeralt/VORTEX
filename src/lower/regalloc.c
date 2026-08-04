@@ -28,6 +28,7 @@
  */
 
 #include "lower/regalloc.h"
+#include "lower/target.h"
 #include "ir/node.h"
 #include <stdlib.h>
 #include <string.h>
@@ -693,7 +694,24 @@ vtx_live_interval_t *vtx_regalloc_split_interval(vtx_live_interval_t *interval,
 
 vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *arena)
 {
+    /* Default to x86-64 target. Callers that need cross-compilation
+     * should use vtx_regalloc_run_target() directly. */
+    return vtx_regalloc_run_target(stream, arena, vtx_target_x86_64());
+}
+
+vtx_regalloc_result_t *vtx_regalloc_run_target(vtx_inst_stream_t *stream,
+                                                  vtx_arena_t *arena,
+                                                  const vtx_target_description_t *target)
+{
     VTX_ASSERT(stream != NULL, "stream must not be NULL");
+    VTX_ASSERT(target != NULL, "target must not be NULL");
+
+    /* Query target-specific masks once at the start.
+     * These replace the old hardcoded x86 constants. */
+    const vtx_calling_conv_t *cc = vtx_target_calling_conv(target);
+    uint32_t target_call_clobber = (uint32_t)vtx_target_call_clobber_mask(target);
+    uint32_t target_callee_saved = (uint32_t)cc->callee_saved_mask;
+    uint32_t target_reserved = (uint32_t)cc->reserved_mask;
 
     vtx_regalloc_result_t *result = (vtx_regalloc_result_t *)vtx_arena_alloc(
         arena, sizeof(vtx_regalloc_result_t));
@@ -835,8 +853,9 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
      * Perf 4: RAX and RDX are only needed by IDIV/CQO/IMUL_FULL. Scan the
      * instruction stream and only reserve them when such instructions exist.
      * This gives non-IDIV functions 2 extra registers, reducing spills. */
-    uint32_t free_gpr_regs = VTX_CALLER_SAVED_MASK | VTX_CALLEE_SAVED_MASK;
-    free_gpr_regs &= ~VTX_REG_RESERVED_MASK;
+    /* Target-aware register pool: query the TargetDescription for the
+     * allocatable GPR mask instead of using hardcoded x86-64 constants. */
+    uint32_t free_gpr_regs = (uint32_t)vtx_target_allocatable_mask(target, VTX_REG_CLASS_GPR);
 
     /* Check if any instruction uses IDIV/IMUL_FULL/CQO */
     bool uses_idiv = false;
@@ -854,7 +873,7 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
         free_gpr_regs &= ~(1u << 0);  /* RAX — reserved for IDIV quotient */
         free_gpr_regs &= ~(1u << 2);  /* RDX — reserved for IDIV remainder */
     }
-    uint32_t free_xmm_regs = VTX_XMM_ALLOCATABLE_MASK;
+    uint32_t free_xmm_regs = (uint32_t)vtx_target_allocatable_mask(target, VTX_REG_CLASS_XMM);
 
     /* Track which callee-saved registers are used */
     uint32_t callee_saved_used = 0;
@@ -943,7 +962,7 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
                 }
             }
             if (overlaps_call) {
-                uint32_t callee_free = *free_regs & VTX_CALLEE_SAVED_MASK;
+                uint32_t callee_free = *free_regs & target_callee_saved;
                 *free_regs = callee_free;
             }
         }
@@ -985,7 +1004,7 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
             /* Mark the register as used in the correct pool */
             *free_regs &= ~(1u << fixed);
             if (current->reg_class == VTX_REG_CLASS_GPR &&
-                VTX_CALLEE_SAVED_MASK & (1u << fixed)) {
+                target_callee_saved & (1u << fixed)) {
                 callee_saved_used |= (1u << fixed);
             }
 
@@ -1018,8 +1037,8 @@ vtx_regalloc_result_t *vtx_regalloc_run(vtx_inst_stream_t *stream, vtx_arena_t *
                  * Heuristic: if loop_depth > 0 AND the interval is long (> 20
                  * instructions), prefer callee-saved. This ensures constants and
                  * Phi values survive across loop iterations. */
-                uint32_t caller_free = *free_regs & VTX_CALLER_SAVED_MASK;
-                uint32_t callee_free = *free_regs & VTX_CALLEE_SAVED_MASK;
+                uint32_t caller_free = *free_regs & target_call_clobber;
+                uint32_t callee_free = *free_regs & target_callee_saved;
 
                 uint32_t interval_length = current->end - current->start;
                 /* Loop-invariant values MUST use callee-saved to survive the loop */

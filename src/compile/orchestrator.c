@@ -493,6 +493,17 @@ int vtx_orchestrator_init(vtx_orchestrator_t *orch,
         vtx_trace_retrace_init(orch->trace_retrace, 256);
     }
 
+    /* AOT background compilation: initialize the AOT manager.
+     * The code cache and method registry are wired later via
+     * vtx_aot_init() when the runtime creates them. For now,
+     * create the manager with NULL cache/registry — they'll be
+     * set when the runtime calls vtx_orchestrator_set_aot_cache(). */
+    orch->aot = (vtx_aot_manager_t *)
+        calloc(1, sizeof(vtx_aot_manager_t));
+    if (orch->aot != NULL) {
+        vtx_aot_init(orch->aot, NULL, NULL);
+    }
+
     orch->check_interval_ms = VTX_ORCHESTRATOR_CHECK_INTERVAL_MS;
     orch->min_profile_observations = VTX_ORCHESTRATOR_MIN_PROFILE_OBS;
     orch->proactive_compile_limit = VTX_ORCHESTRATOR_PROACTIVE_COMPILE_LIMIT;
@@ -538,6 +549,11 @@ int vtx_orchestrator_start(vtx_orchestrator_t *orch)
         return -1;
     }
 
+    /* Start the AOT background worker */
+    if (orch->aot != NULL) {
+        vtx_aot_start(orch->aot);
+    }
+
     return 0;
 }
 
@@ -554,6 +570,11 @@ void vtx_orchestrator_stop(vtx_orchestrator_t *orch)
         pthread_join(orch->orchestrator_thread, NULL);
         orch->running = false;
     }
+
+    /* Stop the AOT background worker */
+    if (orch->aot != NULL) {
+        vtx_aot_stop(orch->aot);
+    }
 }
 
 void vtx_orchestrator_destroy(vtx_orchestrator_t *orch)
@@ -567,6 +588,13 @@ void vtx_orchestrator_destroy(vtx_orchestrator_t *orch)
         vtx_trace_retrace_destroy(orch->trace_retrace);
         free(orch->trace_retrace);
         orch->trace_retrace = NULL;
+    }
+
+    /* Clean up the AOT manager */
+    if (orch->aot != NULL) {
+        vtx_aot_destroy(orch->aot);
+        free(orch->aot);
+        orch->aot = NULL;
     }
 
     pthread_mutex_destroy(&orch->mutex);
@@ -654,7 +682,16 @@ void vtx_orchestrator_on_deopt(vtx_orchestrator_t *orch,
             method_id,
             guard_id,
             orch->profile,         /* global profile for branch updates */
-            NULL);                 /* guard meta table (TODO: wire from compile ctx) */
+            NULL);                 /* guard meta table (not wired yet) */
+    }
+
+    /* Feed deopt to the AOT background compilation system.
+     *
+     * Marks the trace edge as unstable and increments the bailout
+     * counter. If the failure count exceeds the threshold, the AOT
+     * system triggers a re-trace via the retrace system. */
+    if (orch->aot != NULL) {
+        vtx_aot_on_guard_failure(orch->aot, method_id, guard_id);
     }
 }
 
