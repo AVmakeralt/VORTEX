@@ -7,7 +7,7 @@ license = "MIT"
 repository = "https://github.com/AVmakeralt/VORTEX"
 keywords = ["jit", "compiler", "pgo", "bytecode", "vm"]
 categories = ["compilers", "api-bindings"]
-include = ["Cargo.toml", "build.rs", "wrapper.h", "src/**", "../src/**", "../build/vortex_config.h"]
+include = ["Cargo.toml", "build.rs", "wrapper.h", "src/**", "vendor/**"]
 
 [lib]
 name = "vortex"

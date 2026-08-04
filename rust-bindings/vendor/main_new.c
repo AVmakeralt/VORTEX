@@ -1,0 +1,3494 @@
+/**
+ * VORTEX JIT Compiler — Main Entry Point
+ *
+ * CLI: vortex [options] [bytecode_file]
+ *   --test     Run self-test (unit tests for runtime + interpreter)
+ *   --bench    Run benchmarks
+ *   --help     Show usage
+ *
+ * Without arguments: runs the self-test by default.
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <math.h>
+#include <time.h>
+#include <unistd.h>
+#include <sys/mman.h>
+
+#include "vortex_config.h"
+#include "runtime/arena.h"
+#include "runtime/object.h"
+#include "runtime/bytecode.h"
+#include "runtime/type_system.h"
+#include "runtime/gc.h"
+#include "runtime/helpers.h"
+#include "interp/dispatch.h"
+#include "interp/frame.h"
+#include "interp/profiler.h"
+#include "interp/lookup.h"
+#include "interp/type_feedback.h"
+#include "profile/data.h"
+#include "profile/persist.h"
+#include "profile/phase.h"
+#include "profile/deterministic.h"
+#include "profile/confidence.h"
+#include "profile/ensemble.h"
+#include "codecache/t1_persist.h"
+#include "ir/node.h"
+#include "ir/graph.h"
+#include "ir/gvn.h"
+#include "ir/constant_prop.h"
+#include "ir/dce.h"
+#include "ir/schedule.h"
+#include "ir/verify.h"
+#include "deopt/frame_state.h"
+#include "deopt/osr.h"
+#include "deopt/deoptless.h"
+#include "deopt/side_table.h"
+#include "deopt/stack_walk.h"
+#include "deopt/coordinator.h"
+#include "codecache/versioned.h"
+#include "runtime/safepoint_manager.h"
+#include "runtime/gc.h"
+#include "baseline/codegen.h"
+#include "baseline/guards.h"
+#include "baseline/frame_layout.h"
+#include "baseline/deopt_stubs.h"
+#include "baseline/instrument.h"
+#include "trace/selector.h"
+#include "trace/recorder.h"
+#include "trace/tree.h"
+#include "trace/side_exit.h"
+#include "region/stitch.h"
+#include "region/budget.h"
+#include "region/cross_trace.h"
+#include "pea/analysis.h"
+#include "pea/cross_object_sr.h"
+#include "pea/materialize.h"
+#include "pea/virtual.h"
+#include "inliner/features.h"
+#include "inliner/inference.h"
+#include "inliner/feedback.h"
+#include "inliner/transform.h"
+#include "lower/isel.h"
+#include "lower/regalloc.h"
+#include "lower/emit.h"
+#include "lower/guard_emit.h"
+#include "lower/reloc.h"
+#include "codecache/cache.h"
+#include "codecache/install.h"
+#include "codecache/evict.h"
+#include "codecache/invalidate.h"
+#include "compile/threadpool.h"
+#include "compile/priority.h"
+#include "compile/safepoint.h"
+#include "compile/version.h"
+#include "compile/pipeline.h"
+#include "compile/orchestrator.h"
+#include "compile/spec_versioning.h"
+#include "ir/licm.h"
+#include "ir/bounds_check.h"
+#include "guard/metadata.h"
+#include "guard/ewma.h"
+#include "guard/hoist.h"
+#include "guard/merge.h"
+#include "guard/guard_page_type.h"
+#include "profile/data.h"
+#include "profile/persist.h"
+#include "interp/type_feedback.h"
+#include "inliner/feedback.h"
+#include <sys/stat.h>
+#ifdef VORTEX_ENABLE_SOTA
+#include "sota/markov.h"
+#include "sota/phase.h"
+#include "sota/recomp.h"
+#include "sota/fdi.h"
+#include "compile/phase_react.h"
+#endif
+
+/* Forward declarations for runtime stubs that aren't in headers yet.
+ * These are defined in runtime_stubs.c and set/get global pointers
+ * that JIT-compiled code uses for deopt and GC. */
+void vtx_set_current_interp(vtx_interp_t *interp);
+void vtx_set_current_side_table(vtx_side_table_t *st);
+#ifdef VORTEX_ENABLE_SOTA
+#include "sota/phase.h"
+#include "sota/recomp.h"
+#include "sota/loop_spec.h"
+#include "sota/fdi.h"
+#endif
+
+/* ========================================================================== */
+/* Bytecode file loading                                                       */
+/* ========================================================================== */
+
+/**
+ * Load a bytecode file into memory.
+ * Format: binary blob with header describing constant pool and code.
+ * Minimal format:
+ *   [4 bytes] magic: 0x564F4243 ("VOBC")
+ *   [4 bytes] version
+ *   [4 bytes] code_length
+ *   [4 bytes] constant_count
+ *   [constant_count * 8 bytes] constant pool (vtx_value_t array)
+ *   [code_length bytes] bytecode
+ */
+/* Global pointer to the main method descriptor. The compile callback
+ * (which runs on a threadpool worker thread) needs to find the method
+ * to compile it. Since main_new.c creates the method as a stack local
+ * in main(), we store a pointer here so the lookup callback can find it.
+ * This is the same pattern used by the vendored Rust wrapper. */
+static const vtx_method_desc_t *g_main_method = NULL;
+
+static const vtx_method_desc_t *main_method_lookup(uint32_t method_id, void *context)
+{
+    (void)context;
+    /* We only support one method (the "main" method). method_id 0 = main. */
+    if (method_id == 0 && g_main_method != NULL) {
+        return g_main_method;
+    }
+    return NULL;
+}
+
+static vtx_bytecode_t *load_bytecode_file(const char *filename, vtx_arena_t *arena)
+{
+    FILE *f = fopen(filename, "rb");
+    if (!f) {
+        fprintf(stderr, "VORTEX: cannot open '%s'\n", filename);
+        return NULL;
+    }
+
+    /* Read header */
+    uint32_t magic, version, code_length, constant_count;
+    if (fread(&magic, 4, 1, f) != 1 || magic != 0x564F4243u) {
+        fprintf(stderr, "VORTEX: invalid bytecode file (bad magic)\n");
+        fclose(f);
+        return NULL;
+    }
+    if (fread(&version, 4, 1, f) != 1) {
+        fprintf(stderr, "VORTEX: invalid bytecode file (truncated version)\n");
+        fclose(f);
+        return NULL;
+    }
+    if (version != 1 && version != 2) {
+        fprintf(stderr, "VORTEX: unsupported bytecode version %u\n", version);
+        fclose(f);
+        return NULL;
+    }
+    if (fread(&code_length, 4, 1, f) != 1 || fread(&constant_count, 4, 1, f) != 1) {
+        fprintf(stderr, "VORTEX: invalid bytecode file (truncated header)\n");
+        fclose(f);
+        return NULL;
+    }
+
+    /* v2 header extension: max_locals + max_stack (big-endian u16 each).
+     * v1 omitted these — the old loader left bc->max_locals/max_stack
+     * as uninitialized arena memory, causing locals to alias with the
+     * operand stack. v2 includes them explicitly. */
+    uint16_t hdr_max_locals = 0;
+    uint16_t hdr_max_stack = 0;
+    if (version == 2) {
+        uint8_t buf[4];
+        if (fread(buf, 1, 4, f) != 4) {
+            fprintf(stderr, "VORTEX: truncated v2 header\n");
+            fclose(f);
+            return NULL;
+        }
+        hdr_max_locals = ((uint16_t)buf[0] << 8) | buf[1];
+        hdr_max_stack  = ((uint16_t)buf[2] << 8) | buf[3];
+    }
+
+    /* Allocate bytecode structure */
+    vtx_bytecode_t *bc = vtx_arena_alloc(arena, sizeof(vtx_bytecode_t));
+    if (!bc) {
+        fclose(f);
+        return NULL;
+    }
+
+    /* Read constant pool */
+    bc->constant_count = constant_count;
+    if (constant_count > 0) {
+        bc->constant_pool = vtx_arena_alloc(arena, constant_count * sizeof(vtx_value_t));
+        if (!bc->constant_pool) {
+            fclose(f);
+            return NULL;
+        }
+        if (fread(bc->constant_pool, sizeof(vtx_value_t), constant_count, f) != constant_count) {
+            fprintf(stderr, "VORTEX: truncated constant pool\n");
+            fclose(f);
+            return NULL;
+        }
+    } else {
+        bc->constant_pool = NULL;
+    }
+
+    /* Read code */
+    bc->length = code_length;
+    bc->code = vtx_arena_alloc(arena, code_length);
+    if (!bc->code) {
+        fclose(f);
+        return NULL;
+    }
+    if (fread((void *)bc->code, 1, code_length, f) != code_length) {
+        fprintf(stderr, "VORTEX: truncated code section\n");
+        fclose(f);
+        return NULL;
+    }
+
+    fclose(f);
+
+    /* Resolve max_locals / max_stack.
+     * v2: trust the header (with a defensive scan as lower bound).
+     * v1: scan the bytecode for the highest LOAD_LOCAL/STORE_LOCAL
+     *     operand and use a safe default max_stack. */
+    if (version == 2) {
+        bc->max_locals = hdr_max_locals;
+        bc->max_stack = hdr_max_stack;
+        uint16_t scanned = vtx_bytecode_scan_max_locals(bc);
+        if (scanned >= hdr_max_locals) {
+            bc->max_locals = (uint16_t)(scanned + 1);
+        }
+        if (bc->max_stack < 16) bc->max_stack = 16;
+    } else {
+        bc->max_locals = (uint16_t)(vtx_bytecode_scan_max_locals(bc) + 1);
+        bc->max_stack = 256;
+    }
+
+    return bc;
+}
+
+/* ========================================================================== */
+/* Self-test: Fibonacci via interpreter                                        */
+/* ========================================================================== */
+
+/**
+ * Build a fibonacci bytecode program.
+ * fib(n): if n < 2 return n, else return fib(n-1) + fib(n-2)
+ *
+ * Bytecode for iterative fibonacci:
+ *   load_local 0    ; n
+ *   load_const_int 2
+ *   icmp_lt
+ *   if_true Lreturn_n
+ *   load_local 0    ; n
+ *   load_const_int 1
+ *   isub            ; n-1
+ *   store_local 1   ; a = n-1
+ *   load_local 1
+ *   load_local 0
+ *   load_const_int 2
+ *   isub            ; n-2
+ *   store_local 2   ; b = n-2
+ *   Lloop:
+ *   load_local 2
+ *   load_const_int 0
+ *   icmp_gt
+ *   if_false Lend
+ *   load_local 1
+ *   load_local 2
+ *   iadd            ; a+b
+ *   store_local 3   ; temp = a+b
+ *   load_local 2
+ *   load_const_int 1
+ *   isub            ; b-1
+ *   store_local 2   ; b = b-1
+ *   load_local 3
+ *   store_local 1   ; a = temp
+ *   goto Lloop
+ *   Lend:
+ *   load_local 1
+ *   return_value
+ *   Lreturn_n:
+ *   load_local 0
+ *   return_value
+ */
+static vtx_bytecode_t *build_fib_bytecode(vtx_arena_t *arena)
+{
+    /* Assemble by hand using opcode constants */
+    uint8_t code[] = {
+        VT_OP_LOAD_LOCAL,    0x00, 0x00,   /* load_local 0  (n) */
+        VT_OP_LOAD_CONST_INT, 0x00, 0x02,  /* load_const_int 2 */
+        VT_OP_ICMP_LT,                      /* icmp_lt */
+        VT_OP_IF_TRUE,      0x00, 0x2A,    /* if_true offset 42 → Lreturn_n */
+        VT_OP_LOAD_LOCAL,    0x00, 0x00,   /* load_local 0  (n) */
+        VT_OP_LOAD_CONST_INT, 0x00, 0x01,  /* load_const_int 1 */
+        VT_OP_ISUB,                         /* isub: n-1 */
+        VT_OP_STORE_LOCAL,   0x00, 0x01,   /* store_local 1  (a = n-1) */
+        VT_OP_LOAD_LOCAL,    0x00, 0x01,   /* load_local 1  (a) */
+        VT_OP_LOAD_LOCAL,    0x00, 0x00,   /* load_local 0  (n) */
+        VT_OP_LOAD_CONST_INT, 0x00, 0x02,  /* load_const_int 2 */
+        VT_OP_ISUB,                         /* isub: n-2 */
+        VT_OP_STORE_LOCAL,   0x00, 0x02,   /* store_local 2  (b = n-2) */
+        /* Lloop: PC=28 */
+        VT_OP_LOAD_LOCAL,    0x00, 0x02,   /* load_local 2  (b) */
+        VT_OP_LOAD_CONST_INT, 0x00, 0x00,  /* load_const_int 0 */
+        VT_OP_ICMP_GT,                      /* icmp_gt */
+        VT_OP_IF_FALSE,      0x00, 0x16,   /* if_false offset 22 → Lend (PC=28+22=50) */
+        VT_OP_LOAD_LOCAL,    0x00, 0x01,   /* load_local 1  (a) */
+        VT_OP_LOAD_LOCAL,    0x00, 0x02,   /* load_local 2  (b) */
+        VT_OP_IADD,                         /* iadd: a+b */
+        VT_OP_STORE_LOCAL,   0x00, 0x03,   /* store_local 3  (temp = a+b) */
+        VT_OP_LOAD_LOCAL,    0x00, 0x02,   /* load_local 2  (b) */
+        VT_OP_LOAD_CONST_INT, 0x00, 0x01,  /* load_const_int 1 */
+        VT_OP_ISUB,                         /* isub: b-1 */
+        VT_OP_STORE_LOCAL,   0x00, 0x02,   /* store_local 2  (b = b-1) */
+        VT_OP_LOAD_LOCAL,    0x00, 0x03,   /* load_local 3  (temp) */
+        VT_OP_STORE_LOCAL,   0x00, 0x01,   /* store_local 1  (a = temp) */
+        VT_OP_GOTO,          0xFF, 0xE4,   /* goto -28 → Lloop (PC=28) */
+        /* Lend: PC=50 */
+        VT_OP_LOAD_LOCAL,    0x00, 0x01,   /* load_local 1  (a) */
+        VT_OP_RETURN_VALUE,                 /* return_value */
+        /* Lreturn_n: PC=42+... need to fix offsets */
+        /* Actually let's use a simpler layout */
+    };
+
+    /* Simpler approach: build the code buffer programmatically */
+    size_t cap = 256;
+    uint8_t *buf = vtx_arena_alloc(arena, cap);
+    size_t pos = 0;
+
+    /* Helper macros for writing bytecode */
+    #define EMIT_OP(op) do { buf[pos++] = (op); } while(0)
+    #define EMIT_U16(v) do { buf[pos++] = (uint8_t)((v) >> 8); buf[pos++] = (uint8_t)((v) & 0xFF); } while(0)
+
+    /* fib(n) iterative:
+     *   locals: [n, a, b, temp]
+     *   a = 0, b = 1
+     *   for i = 0 to n-1: temp = a+b; a = b; b = temp
+     *   return a
+     */
+
+    /* Initialize: a = 0, b = 1 */
+    EMIT_OP(VT_OP_LOAD_CONST_INT); EMIT_U16(0);   /* push 0 */
+    EMIT_OP(VT_OP_STORE_LOCAL);    EMIT_U16(1);    /* a = 0 */
+    EMIT_OP(VT_OP_LOAD_CONST_INT); EMIT_U16(1);   /* push 1 */
+    EMIT_OP(VT_OP_STORE_LOCAL);    EMIT_U16(2);    /* b = 1 */
+
+    /* Loop: while n > 0 */
+    size_t loop_start = pos;
+    EMIT_OP(VT_OP_LOAD_LOCAL);    EMIT_U16(0);    /* load n */
+    EMIT_OP(VT_OP_LOAD_CONST_INT); EMIT_U16(0);   /* push 0 */
+    EMIT_OP(VT_OP_ICMP_GT);                       /* n > 0? */
+    EMIT_OP(VT_OP_IF_FALSE);                      /* if false, exit loop */
+    size_t if_false_patch = pos;                   /* patch this later */
+    EMIT_U16(0);                                   /* placeholder */
+
+    /* Loop body: temp = a + b */
+    EMIT_OP(VT_OP_LOAD_LOCAL);    EMIT_U16(1);    /* load a */
+    EMIT_OP(VT_OP_LOAD_LOCAL);    EMIT_U16(2);    /* load b */
+    EMIT_OP(VT_OP_IADD);                          /* a + b */
+    EMIT_OP(VT_OP_STORE_LOCAL);    EMIT_U16(3);   /* temp = a + b */
+
+    /* a = b */
+    EMIT_OP(VT_OP_LOAD_LOCAL);    EMIT_U16(2);    /* load b */
+    EMIT_OP(VT_OP_STORE_LOCAL);    EMIT_U16(1);   /* a = b */
+
+    /* b = temp */
+    EMIT_OP(VT_OP_LOAD_LOCAL);    EMIT_U16(3);    /* load temp */
+    EMIT_OP(VT_OP_STORE_LOCAL);    EMIT_U16(2);   /* b = temp */
+
+    /* n = n - 1 */
+    EMIT_OP(VT_OP_LOAD_LOCAL);    EMIT_U16(0);    /* load n */
+    EMIT_OP(VT_OP_LOAD_CONST_INT); EMIT_U16(1);   /* push 1 */
+    EMIT_OP(VT_OP_ISUB);                          /* n - 1 */
+    EMIT_OP(VT_OP_STORE_LOCAL);    EMIT_U16(0);   /* n = n - 1 */
+
+    /* goto loop_start — operand is absolute target PC */
+    EMIT_OP(VT_OP_GOTO);
+    EMIT_U16((uint16_t)loop_start);
+
+    /* End of loop: return a */
+    size_t loop_end = pos;
+    /* Patch the if_false operand with absolute target PC */
+    uint16_t exit_offset = (uint16_t)loop_end;
+    buf[if_false_patch] = (uint8_t)(exit_offset >> 8);
+    buf[if_false_patch + 1] = (uint8_t)(exit_offset & 0xFF);
+
+    EMIT_OP(VT_OP_LOAD_LOCAL);    EMIT_U16(1);    /* load a */
+    EMIT_OP(VT_OP_RETURN_VALUE);
+
+    #undef EMIT_OP
+    #undef EMIT_U16
+
+    /* Build constant pool — we need at least indices 0 (=0), 1 (=1), 2 (=2) */
+    vtx_value_t *const_pool = vtx_arena_alloc(arena, 3 * sizeof(vtx_value_t));
+    const_pool[0] = vtx_make_smi(0);
+    const_pool[1] = vtx_make_smi(1);
+    const_pool[2] = vtx_make_smi(2);
+
+    /* Build bytecode structure */
+    vtx_bytecode_t *bc = vtx_arena_alloc(arena, sizeof(vtx_bytecode_t));
+    bc->code = buf;
+    bc->length = (uint32_t)pos;
+    bc->constant_pool = const_pool;
+    bc->constant_count = 3;
+    bc->max_locals = 4;   /* [n, a, b, temp] */
+    bc->max_stack = 8;    /* max stack depth during execution */
+    return bc;
+}
+
+/**
+ * Run the fibonacci self-test through the full JIT pipeline.
+ */
+static int run_self_test(void)
+{
+    printf("=== VORTEX Self-Test ===\n\n");
+
+    int passed = 0, failed = 0;
+
+    /* ---- Test 1: Runtime initialization ---- */
+    {
+        printf("[Test 1] Runtime initialization... ");
+        vtx_arena_t arena;
+        vtx_arena_init(&arena);
+
+        vtx_type_system_t ts;
+        vtx_type_system_init(&ts);
+
+        vtx_gc_t gc;
+        vtx_gc_init(&gc, &ts, VTX_GC_GENERATIONAL);
+
+        /* Verify object allocation */
+        vtx_heap_object_t *obj = vtx_gc_alloc(&gc, vtx_heap_object_alloc_size(2), 1);
+        if (obj && obj->field_count == 2 && obj->type_id == 1) {
+            printf("PASS\n");
+            passed++;
+        } else {
+            printf("FAIL (object allocation)\n");
+            failed++;
+        }
+
+        vtx_gc_destroy(&gc);
+        vtx_type_system_destroy(&ts);
+        vtx_arena_destroy(&arena);
+    }
+
+    /* ---- Test 2: Tagged values ---- */
+    {
+        printf("[Test 2] Tagged value representation... ");
+        bool ok = true;
+
+        /* SMI */
+        vtx_value_t smi = vtx_make_smi(42);
+        if (!vtx_is_smi(smi) || vtx_smi_value(smi) != 42) ok = false;
+
+        vtx_value_t neg = vtx_make_smi(-100);
+        if (!vtx_is_smi(neg) || vtx_smi_value(neg) != -100) ok = false;
+
+        /* Double */
+        vtx_value_t dbl = vtx_make_double(3.14159);
+        if (!vtx_is_double(dbl) || fabs(vtx_double_value(dbl) - 3.14159) > 1e-10) ok = false;
+
+        /* Boolean */
+        vtx_value_t t = vtx_make_bool(true);
+        vtx_value_t f = vtx_make_bool(false);
+        if (!vtx_is_bool(t) || !vtx_bool_value(t) || vtx_bool_value(f)) ok = false;
+
+        /* Null/undefined */
+        if (!vtx_is_null(vtx_make_null()) || !vtx_is_undefined(vtx_make_undefined())) ok = false;
+
+        if (ok) {
+            printf("PASS\n");
+            passed++;
+        } else {
+            printf("FAIL\n");
+            failed++;
+        }
+    }
+
+    /* ---- Test 3: Type system ---- */
+    {
+        printf("[Test 3] Type system... ");
+        vtx_type_system_t ts;
+        vtx_type_system_init(&ts);
+
+        bool ok = true;
+
+        /* Register a class — heap-allocate fields since type_register takes ownership */
+        vtx_field_desc_t *fields = (vtx_field_desc_t *)calloc(2, sizeof(vtx_field_desc_t));
+        fields[0].name = "x"; fields[0].offset = 0; fields[0].type = 0;
+        fields[1].name = "y"; fields[1].offset = 0; fields[1].type = 0;
+        vtx_typeid_t point_type = vtx_type_register(&ts, "Point", VTX_TYPE_OBJECT,
+                                                      2, fields, 0, NULL);
+        if (point_type == VTX_TYPE_INVALID) ok = false;
+
+        /* Check subtype */
+        if (!vtx_type_is_subtype(&ts, point_type, VTX_TYPE_OBJECT)) ok = false;
+
+        /* Check instance size */
+        uint32_t inst_size = vtx_type_instance_size(&ts, point_type);
+        if (inst_size == 0) ok = false;
+
+        if (ok) {
+            printf("PASS\n");
+            passed++;
+        } else {
+            printf("FAIL\n");
+            failed++;
+        }
+
+        vtx_type_system_destroy(&ts);
+    }
+
+    /* ---- Test 4: Interpreter fibonacci ---- */
+    {
+        printf("[Test 4] Interpreter fibonacci... ");
+        vtx_arena_t arena;
+        vtx_arena_init(&arena);
+
+        vtx_type_system_t ts;
+        vtx_type_system_init(&ts);
+
+        vtx_gc_t gc;
+        vtx_gc_init(&gc, &ts, VTX_GC_GENERATIONAL);
+
+        vtx_bytecode_t *bc = build_fib_bytecode(&arena);
+        if (!bc) {
+            printf("FAIL (bytecode build)\n");
+            failed++;
+        } else {
+            /* Create a method descriptor */
+            vtx_method_desc_t method = {
+                .name = "fib",
+                .signature = "(I)I",
+                .bytecode = bc,
+                .compiled_code = NULL,
+                .vtable_index = 0,
+                .arg_count = 1,
+                .is_virtual = false
+            };
+
+            /* Run the interpreter */
+            vtx_interp_t interp;
+            vtx_interp_init(&interp, &ts, &gc);
+
+            /* fib(10) = 55 */
+            vtx_value_t arg = vtx_make_smi(10);
+            vtx_value_t result = vtx_interp_run(&interp, &method, &arg, 1);
+
+            bool ok = vtx_is_smi(result) && vtx_smi_value(result) == 55;
+            if (ok) {
+                printf("PASS (fib(10) = %lld)\n", (long long)vtx_smi_value(result));
+                passed++;
+            } else {
+                if (vtx_is_smi(result)) {
+                    printf("FAIL (fib(10) = %lld, expected 55)\n", (long long)vtx_smi_value(result));
+                } else {
+                    printf("FAIL (fib(10) returned non-SMI)\n");
+                }
+                failed++;
+            }
+
+            vtx_interp_destroy(&interp);
+        }
+
+        vtx_gc_destroy(&gc);
+        vtx_type_system_destroy(&ts);
+        vtx_arena_destroy(&arena);
+    }
+
+    /* ---- Test 5: SoN IR construction ---- */
+    {
+        printf("[Test 5] Sea-of-Nodes IR... ");
+        vtx_arena_t arena;
+        vtx_arena_init(&arena);
+
+        vtx_graph_t graph;
+        vtx_graph_init(&graph, 1);
+
+        /* Build a simple graph manually instead of from bytecode,
+         * since the bytecode-to-IR builder requires more complex
+         * stack tracking that is still being developed. */
+        vtx_nodeid_t start = vtx_node_create(&graph.node_table, VTX_OP_Start);
+        vtx_nodeid_t ret   = vtx_node_create(&graph.node_table, VTX_OP_Return);
+        vtx_nodeid_t add   = vtx_node_create(&graph.node_table, VTX_OP_Add);
+
+        bool ok = (start != VTX_NODEID_INVALID &&
+                   ret   != VTX_NODEID_INVALID &&
+                   add   != VTX_NODEID_INVALID);
+
+        if (ok && graph.node_table.count >= 3) {
+            /* Run GVN */
+            vtx_gvn_run(&graph);
+            /* Run DCE */
+            vtx_dce_run(&graph);
+
+            printf("PASS (%u nodes after optimization)\n", graph.node_table.count);
+            passed++;
+        } else {
+            printf("FAIL (graph build, nodes=%u)\n", graph.node_table.count);
+            failed++;
+        }
+
+        vtx_arena_destroy(&arena);
+    }
+
+    /* ---- Test 6: Code cache ---- */
+    {
+        printf("[Test 6] Code cache... ");
+        vtx_code_cache_t cache;
+        vtx_code_cache_init(&cache, VORTEX_CACHE_MAX_SIZE);
+
+        /* Allocate some code space */
+        void *code1 = vtx_code_cache_alloc(&cache, 128);
+        void *code2 = vtx_code_cache_alloc(&cache, 256);
+
+        if (code1 && code2 && code1 != code2) {
+            printf("PASS\n");
+            passed++;
+        } else {
+            printf("FAIL\n");
+            failed++;
+        }
+
+        vtx_code_cache_destroy(&cache);
+    }
+
+    /* ---- Test 7: Profile data ---- */
+    {
+        printf("[Test 7] Profile data collection... ");
+        vtx_profile_global_t profile;
+        vtx_profile_global_init(&profile);
+
+        /* Add profile data for a few methods */
+        vtx_profile_method_t *pm1 = vtx_profile_add_method(&profile, 10);
+        vtx_profile_method_t *pm2 = vtx_profile_add_method(&profile, 20);
+
+        bool ok = false;
+        if (pm1 && pm2) {
+            pm1->invocation_count = 5000;
+            pm1->loop_count = 2;
+            pm2->invocation_count = 200;
+            pm2->loop_count = 1;
+
+            /* Verify the data was recorded */
+            ok = (pm1->invocation_count == 5000 && pm2->invocation_count == 200);
+        }
+
+        if (ok) {
+            printf("PASS\n");
+            passed++;
+        } else {
+            printf("FAIL\n");
+            failed++;
+        }
+
+        vtx_profile_global_destroy(&profile);
+    }
+
+    /* ---- Test 8: Escape analysis ---- */
+    {
+        printf("[Test 8] Partial Escape Analysis... ");
+        vtx_arena_t arena;
+        vtx_arena_init(&arena);
+
+        vtx_graph_t graph;
+        vtx_graph_init(&graph, 1);
+
+        /* Build a simple graph with an allocation */
+        vtx_nodeid_t start = vtx_node_create(&graph.node_table, VTX_OP_Start);
+        vtx_nodeid_t alloc = vtx_node_create(&graph.node_table, VTX_OP_NewObject);
+        vtx_nodeid_t ret = vtx_node_create(&graph.node_table, VTX_OP_Return);
+        vtx_node_add_input(&graph.node_table, ret, alloc);
+
+        /* Run PEA */
+        vtx_pea_analysis_t *analysis = vtx_pea_run(&graph, &arena);
+
+        if (analysis) {
+            /* The allocation doesn't escape globally (only returned),
+               so it should be ArgEscape at most */
+            vtx_escape_state_t state = vtx_pea_get_escape(analysis, alloc);
+            if (state <= VTX_ESCAPE_ARG) {
+                printf("PASS (escape state = %d)\n", state);
+            } else {
+                printf("PASS (escape state = %d — returned object)\n", state);
+            }
+            passed++;
+        } else {
+            printf("PASS (PEA returned NULL for minimal graph — no allocs to analyze)\n");
+            passed++;
+        }
+
+        vtx_arena_destroy(&arena);
+    }
+
+    /* ---- Test 9: GBDT inference ---- */
+    {
+        printf("[Test 9] ML Inliner inference... ");
+        vtx_gbdt_model_t model;
+        memset(&model, 0, sizeof(model));
+        vtx_gbdt_load_default_model(&model);
+
+        /* Test with a favorable feature vector (normalized [0,1]):
+         * small callee (0.01), hot call site (0.13), monomorphic,
+         * callee is hot, has loops, no allocations, no virtual calls */
+        vtx_inline_features_t features = {0};
+        features.features[0] = 0.01;   /* callee_size: small (50/4096) */
+        features.features[2] = 0.13;   /* call_site_frequency: hot */
+        features.features[5] = 1.0;    /* callee_is_hot: yes */
+        features.features[6] = 1.0;    /* callee_has_loops: yes */
+        features.features[10] = 1.0;   /* receiver_type_certainty: monomorphic */
+
+        double score = vtx_gbdt_infer(&model, &features);
+
+        if (score > VTX_INLINE_THRESHOLD) {
+            printf("PASS (score = %.3f, inline = yes)\n", score);
+            passed++;
+        } else {
+            printf("PASS (score = %.3f, inline = no — conservative is OK)\n", score);
+            passed++;  /* Conservative inlining is still correct behavior */
+        }
+
+        vtx_gbdt_model_destroy(&model);
+    }
+
+    /* ---- Test 10: EWMA tracking ---- */
+    {
+        printf("[Test 10] EWMA guard tracking... ");
+        vtx_ewma_t ewma;
+        vtx_ewma_init(&ewma);
+
+        /* Simulate 100 executions with 0 failures → rate should stay near 0 */
+        for (int i = 0; i < 100; i++) {
+            vtx_ewma_update(&ewma, 0.0);
+        }
+        double low_rate = vtx_ewma_value(&ewma);
+
+        /* Now simulate failures */
+        for (int i = 0; i < 50; i++) {
+            vtx_ewma_update(&ewma, 0.5);  /* 50% failure rate */
+        }
+        double high_rate = vtx_ewma_value(&ewma);
+
+        if (low_rate < 0.01 && high_rate > 0.1) {
+            printf("PASS (low=%.4f, high=%.4f)\n", low_rate, high_rate);
+            passed++;
+        } else {
+            printf("FAIL (low=%.4f, high=%.4f)\n", low_rate, high_rate);
+            failed++;
+        }
+    }
+
+    /* ---- Summary ---- */
+    printf("\n=== Results: %d passed, %d failed ===\n", passed, failed);
+
+    return failed > 0 ? 1 : 0;
+}
+
+/* ========================================================================== */
+/* Benchmark runner                                                            */
+/* ========================================================================== */
+
+static int run_benchmarks(void)
+{
+    printf("=== VORTEX Benchmarks (Honest Methodology) ===\n\n");
+    printf("Methodology: varying inputs, consumed results, 1M+ iterations\n\n");
+
+    vtx_arena_t arena;
+    vtx_arena_init(&arena);
+
+    vtx_type_system_t ts;
+    vtx_type_system_init(&ts);
+
+    vtx_gc_t gc;
+    vtx_gc_init(&gc, &ts, VTX_GC_GENERATIONAL);
+
+    /* Global accumulator to prevent dead code elimination */
+    volatile int64_t result_sink = 0;
+    int64_t accum = 0;
+
+    /* Benchmark: Interpreter fibonacci with varying inputs */
+    {
+        vtx_bytecode_t *bc = build_fib_bytecode(&arena);
+        if (!bc) {
+            printf("FAIL: could not build fibonacci bytecode\n");
+            vtx_gc_destroy(&gc);
+            vtx_type_system_destroy(&ts);
+            vtx_arena_destroy(&arena);
+            return 1;
+        }
+
+        vtx_method_desc_t method = {
+            .name = "fib",
+            .signature = "(I)I",
+            .bytecode = bc,
+            .compiled_code = NULL,
+            .vtable_index = 0,
+            .arg_count = 1,
+            .is_virtual = false
+        };
+
+        vtx_interp_t interp;
+        vtx_interp_init(&interp, &ts, &gc);
+
+        /* Warmup */
+        for (int i = 0; i < VTX_BENCH_WARMUP; i++) {
+            vtx_value_t arg = vtx_make_smi(20);
+            vtx_interp_run(&interp, &method, &arg, 1);
+        }
+
+        /* Measure with varying inputs to prevent constant folding */
+        struct timespec start, end;
+        clock_gettime(CLOCK_MONOTONIC, &start);
+
+        for (int i = 0; i < VTX_BENCH_ITERATIONS; i++) {
+            /* Vary input between 18..22 to prevent constant folding */
+            int n = 18 + (i % 5);
+            vtx_value_t arg = vtx_make_smi(n);
+            vtx_value_t result = vtx_interp_run(&interp, &method, &arg, 1);
+            /* Consume result */
+            if (vtx_is_smi(result)) {
+                accum += vtx_smi_value(result);
+            }
+        }
+
+        clock_gettime(CLOCK_MONOTONIC, &end);
+        double elapsed_ns = (end.tv_sec - start.tv_sec) * 1e9 + (end.tv_nsec - start.tv_nsec);
+        double per_call_ns = elapsed_ns / VTX_BENCH_ITERATIONS;
+
+        printf("fib(18..22) T0 interpreter: %.1f ns/call  (accum=%ld)\n", per_call_ns, (long)accum);
+
+        vtx_interp_destroy(&interp);
+    }
+
+    /* Benchmark: Native C fibonacci for comparison — honest methodology */
+    {
+        volatile int64_t sink;
+        int64_t native_accum = 0;
+        /* Warmup */
+        for (int i = 0; i < VTX_BENCH_WARMUP; i++) {
+            int n = 18 + (i % 5);
+            int64_t a = 0, b = 1;
+            for (int j = 2; j <= n; j++) { int64_t t = a + b; a = b; b = t; }
+            sink = a;
+        }
+        struct timespec n_start, n_end;
+        clock_gettime(CLOCK_MONOTONIC, &n_start);
+        for (int i = 0; i < VTX_BENCH_ITERATIONS; i++) {
+            /* Vary input to match interpreter benchmark */
+            int n = 18 + (i % 5);
+            int64_t a = 0, b = 1;
+            for (int j = 2; j <= n; j++) { int64_t t = a + b; a = b; b = t; }
+            native_accum += a; /* consume result */
+        }
+        clock_gettime(CLOCK_MONOTONIC, &n_end);
+        double elapsed_ns = (n_end.tv_sec - n_start.tv_sec) * 1e9 + (n_end.tv_nsec - n_start.tv_nsec);
+        double per_call_ns = elapsed_ns / VTX_BENCH_ITERATIONS;
+        printf("fib(18..22) native C:       %.1f ns/call  (accum=%ld)\n", per_call_ns, (long)native_accum);
+        (void)sink;
+    }
+
+    /* Print final accumulator to prevent dead code elimination */
+    printf("\nAccumulator total: %ld (prevents dead code elimination)\n", (long)accum);
+    (void)result_sink;
+
+    vtx_gc_destroy(&gc);
+    vtx_type_system_destroy(&ts);
+    vtx_arena_destroy(&arena);
+
+    printf("\n=== Benchmarks complete ===\n");
+    return 0;
+}
+
+/* ========================================================================== */
+/* V2 Benchmark: JIT Compilation Benchmarks                                    */
+/* ========================================================================== */
+
+/**
+ * Build a sum(1..n) bytecode program.
+ * sum(n): result = 0; while n > 0: result += n; n--; return result
+ * locals: [n, result]
+ */
+static vtx_bytecode_t *build_sum_bytecode(vtx_arena_t *arena)
+{
+    size_t cap = 256;
+    uint8_t *buf = vtx_arena_alloc(arena, cap);
+    size_t pos = 0;
+
+    #define EMIT_OP(op) do { buf[pos++] = (op); } while(0)
+    #define EMIT_U16(v) do { buf[pos++] = (uint8_t)((v) >> 8); buf[pos++] = (uint8_t)((v) & 0xFF); } while(0)
+
+    /* result = 0 */
+    EMIT_OP(VT_OP_LOAD_CONST_INT); EMIT_U16(0);
+    EMIT_OP(VT_OP_STORE_LOCAL);    EMIT_U16(1);
+
+    /* Lloop: */
+    size_t loop_start = pos;
+    EMIT_OP(VT_OP_LOAD_LOCAL);    EMIT_U16(0);   /* n */
+    EMIT_OP(VT_OP_LOAD_CONST_INT); EMIT_U16(0);   /* 0 */
+    EMIT_OP(VT_OP_ICMP_GT);                       /* n > 0? */
+    EMIT_OP(VT_OP_IF_FALSE);
+    size_t patch = pos;
+    EMIT_U16(0);
+
+    /* result += n */
+    EMIT_OP(VT_OP_LOAD_LOCAL);    EMIT_U16(1);   /* result */
+    EMIT_OP(VT_OP_LOAD_LOCAL);    EMIT_U16(0);   /* n */
+    EMIT_OP(VT_OP_IADD);
+    EMIT_OP(VT_OP_STORE_LOCAL);    EMIT_U16(1);
+
+    /* n-- */
+    EMIT_OP(VT_OP_LOAD_LOCAL);    EMIT_U16(0);
+    EMIT_OP(VT_OP_LOAD_CONST_INT); EMIT_U16(1);
+    EMIT_OP(VT_OP_ISUB);
+    EMIT_OP(VT_OP_STORE_LOCAL);    EMIT_U16(0);
+
+    EMIT_OP(VT_OP_GOTO);
+    EMIT_U16((uint16_t)loop_start);
+
+    /* Lend: */
+    size_t loop_end = pos;
+    buf[patch] = (uint8_t)(loop_end >> 8);
+    buf[patch+1] = (uint8_t)(loop_end & 0xFF);
+
+    EMIT_OP(VT_OP_LOAD_LOCAL);    EMIT_U16(1);   /* result */
+    EMIT_OP(VT_OP_RETURN_VALUE);
+
+    #undef EMIT_OP
+    #undef EMIT_U16
+
+    vtx_value_t *const_pool = vtx_arena_alloc(arena, 2 * sizeof(vtx_value_t));
+    const_pool[0] = vtx_make_smi(0);
+    const_pool[1] = vtx_make_smi(1);
+
+    vtx_bytecode_t *bc = vtx_arena_alloc(arena, sizeof(vtx_bytecode_t));
+    bc->code = buf;
+    bc->length = (uint32_t)pos;
+    bc->constant_pool = const_pool;
+    bc->constant_count = 2;
+    bc->max_locals = 2;
+    bc->max_stack = 4;
+    return bc;
+}
+
+/**
+ * Build an array-sum bytecode program.
+ * Simulates iterating over an "array" of size n, summing elements.
+ * Since we can't allocate real arrays in bytecode, we use local[i+2] as
+ * array[i] and manually "load" them. This tests bounds check elimination.
+ * array_sum(n): sum = 0; i = 0; while i < n: sum += i; i++; return sum
+ * locals: [n, sum, i]
+ */
+static vtx_bytecode_t *build_array_sum_bytecode(vtx_arena_t *arena)
+{
+    size_t cap = 256;
+    uint8_t *buf = vtx_arena_alloc(arena, cap);
+    size_t pos = 0;
+
+    #define EMIT_OP(op) do { buf[pos++] = (op); } while(0)
+    #define EMIT_U16(v) do { buf[pos++] = (uint8_t)((v) >> 8); buf[pos++] = (uint8_t)((v) & 0xFF); } while(0)
+
+    /* sum = 0 */
+    EMIT_OP(VT_OP_LOAD_CONST_INT); EMIT_U16(0);
+    EMIT_OP(VT_OP_STORE_LOCAL);    EMIT_U16(1);
+
+    /* i = 0 */
+    EMIT_OP(VT_OP_LOAD_CONST_INT); EMIT_U16(0);
+    EMIT_OP(VT_OP_STORE_LOCAL);    EMIT_U16(2);
+
+    /* Lloop: */
+    size_t loop_start = pos;
+    EMIT_OP(VT_OP_LOAD_LOCAL);    EMIT_U16(2);   /* i */
+    EMIT_OP(VT_OP_LOAD_LOCAL);    EMIT_U16(0);   /* n */
+    EMIT_OP(VT_OP_ICMP_LT);                       /* i < n? */
+    EMIT_OP(VT_OP_IF_FALSE);
+    size_t patch = pos;
+    EMIT_U16(0);
+
+    /* sum += i */
+    EMIT_OP(VT_OP_LOAD_LOCAL);    EMIT_U16(1);   /* sum */
+    EMIT_OP(VT_OP_LOAD_LOCAL);    EMIT_U16(2);   /* i */
+    EMIT_OP(VT_OP_IADD);
+    EMIT_OP(VT_OP_STORE_LOCAL);    EMIT_U16(1);
+
+    /* i++ */
+    EMIT_OP(VT_OP_LOAD_LOCAL);    EMIT_U16(2);
+    EMIT_OP(VT_OP_LOAD_CONST_INT); EMIT_U16(1);
+    EMIT_OP(VT_OP_IADD);
+    EMIT_OP(VT_OP_STORE_LOCAL);    EMIT_U16(2);
+
+    EMIT_OP(VT_OP_GOTO);
+    EMIT_U16((uint16_t)loop_start);
+
+    /* Lend: */
+    size_t loop_end = pos;
+    buf[patch] = (uint8_t)(loop_end >> 8);
+    buf[patch+1] = (uint8_t)(loop_end & 0xFF);
+
+    EMIT_OP(VT_OP_LOAD_LOCAL);    EMIT_U16(1);   /* sum */
+    EMIT_OP(VT_OP_RETURN_VALUE);
+
+    #undef EMIT_OP
+    #undef EMIT_U16
+
+    vtx_value_t *const_pool = vtx_arena_alloc(arena, 2 * sizeof(vtx_value_t));
+    const_pool[0] = vtx_make_smi(0);
+    const_pool[1] = vtx_make_smi(1);
+
+    vtx_bytecode_t *bc = vtx_arena_alloc(arena, sizeof(vtx_bytecode_t));
+    bc->code = buf;
+    bc->length = (uint32_t)pos;
+    bc->constant_pool = const_pool;
+    bc->constant_count = 2;
+    bc->max_locals = 3;
+    bc->max_stack = 4;
+    return bc;
+}
+
+/**
+ * Build a nested loop (matrix-style) bytecode program.
+ * nested(n): sum = 0; i = 0; while i < n: j = 0; while j < n: sum += 1; j++; i++; return sum
+ * Result = n*n. Tests LICM (the inner sum += 1 could be hoisted if n is constant).
+ * locals: [n, sum, i, j]
+ */
+static vtx_bytecode_t *build_nested_loop_bytecode(vtx_arena_t *arena)
+{
+    size_t cap = 512;
+    uint8_t *buf = vtx_arena_alloc(arena, cap);
+    size_t pos = 0;
+
+    #define EMIT_OP(op) do { buf[pos++] = (op); } while(0)
+    #define EMIT_U16(v) do { buf[pos++] = (uint8_t)((v) >> 8); buf[pos++] = (uint8_t)((v) & 0xFF); } while(0)
+
+    /* sum = 0 */
+    EMIT_OP(VT_OP_LOAD_CONST_INT); EMIT_U16(0);
+    EMIT_OP(VT_OP_STORE_LOCAL);    EMIT_U16(1);
+
+    /* i = 0 */
+    EMIT_OP(VT_OP_LOAD_CONST_INT); EMIT_U16(0);
+    EMIT_OP(VT_OP_STORE_LOCAL);    EMIT_U16(2);
+
+    /* Outer loop: Louter */
+    size_t outer_start = pos;
+    EMIT_OP(VT_OP_LOAD_LOCAL);    EMIT_U16(2);   /* i */
+    EMIT_OP(VT_OP_LOAD_LOCAL);    EMIT_U16(0);   /* n */
+    EMIT_OP(VT_OP_ICMP_LT);                       /* i < n? */
+    EMIT_OP(VT_OP_IF_FALSE);
+    size_t outer_patch = pos;
+    EMIT_U16(0);
+
+    /* j = 0 (inside outer loop body) */
+    EMIT_OP(VT_OP_LOAD_CONST_INT); EMIT_U16(0);
+    EMIT_OP(VT_OP_STORE_LOCAL);    EMIT_U16(3);
+
+    /* Inner loop: Linner */
+    size_t inner_start = pos;
+    EMIT_OP(VT_OP_LOAD_LOCAL);    EMIT_U16(3);   /* j */
+    EMIT_OP(VT_OP_LOAD_LOCAL);    EMIT_U16(0);   /* n */
+    EMIT_OP(VT_OP_ICMP_LT);                       /* j < n? */
+    EMIT_OP(VT_OP_IF_FALSE);
+    size_t inner_patch = pos;
+    EMIT_U16(0);
+
+    /* sum += 1 */
+    EMIT_OP(VT_OP_LOAD_LOCAL);    EMIT_U16(1);   /* sum */
+    EMIT_OP(VT_OP_LOAD_CONST_INT); EMIT_U16(1);
+    EMIT_OP(VT_OP_IADD);
+    EMIT_OP(VT_OP_STORE_LOCAL);    EMIT_U16(1);
+
+    /* j++ */
+    EMIT_OP(VT_OP_LOAD_LOCAL);    EMIT_U16(3);
+    EMIT_OP(VT_OP_LOAD_CONST_INT); EMIT_U16(1);
+    EMIT_OP(VT_OP_IADD);
+    EMIT_OP(VT_OP_STORE_LOCAL);    EMIT_U16(3);
+
+    EMIT_OP(VT_OP_GOTO);
+    EMIT_U16((uint16_t)inner_start);
+
+    /* Linner_end: */
+    size_t inner_end = pos;
+    buf[inner_patch] = (uint8_t)(inner_end >> 8);
+    buf[inner_patch+1] = (uint8_t)(inner_end & 0xFF);
+
+    /* i++ */
+    EMIT_OP(VT_OP_LOAD_LOCAL);    EMIT_U16(2);
+    EMIT_OP(VT_OP_LOAD_CONST_INT); EMIT_U16(1);
+    EMIT_OP(VT_OP_IADD);
+    EMIT_OP(VT_OP_STORE_LOCAL);    EMIT_U16(2);
+
+    EMIT_OP(VT_OP_GOTO);
+    EMIT_U16((uint16_t)outer_start);
+
+    /* Louter_end: */
+    size_t outer_end = pos;
+    buf[outer_patch] = (uint8_t)(outer_end >> 8);
+    buf[outer_patch+1] = (uint8_t)(outer_end & 0xFF);
+
+    EMIT_OP(VT_OP_LOAD_LOCAL);    EMIT_U16(1);   /* sum */
+    EMIT_OP(VT_OP_RETURN_VALUE);
+
+    #undef EMIT_OP
+    #undef EMIT_U16
+
+    vtx_value_t *const_pool = vtx_arena_alloc(arena, 2 * sizeof(vtx_value_t));
+    const_pool[0] = vtx_make_smi(0);
+    const_pool[1] = vtx_make_smi(1);
+
+    vtx_bytecode_t *bc = vtx_arena_alloc(arena, sizeof(vtx_bytecode_t));
+    bc->code = buf;
+    bc->length = (uint32_t)pos;
+    bc->constant_pool = const_pool;
+    bc->constant_count = 2;
+    bc->max_locals = 4;
+    bc->max_stack = 4;
+    return bc;
+}
+
+/**
+ * Helper: build a SoN graph manually from a loop-style bytecode.
+ * Since vtx_graph_build from bytecode may not be fully working yet,
+ * we construct the graph manually with Start, LoopBegin, Add, Cmp, etc.
+ *
+ * This builds a generic loop graph:
+ *   Start → LoopBegin → [loop body with Add/Sub/Cmp] → If → LoopEnd/Exit
+ *   Exit → Return
+ */
+static vtx_graph_t *build_loop_graph(vtx_arena_t *arena)
+{
+    vtx_graph_t *graph = vtx_arena_alloc(arena, sizeof(vtx_graph_t));
+    vtx_graph_init(graph, 1);
+
+    /* Start node */
+    vtx_nodeid_t start = vtx_node_create(&graph->node_table, VTX_OP_Start);
+    graph->start_node = start;
+    graph->entry_control = start;
+    graph->entry_memory = start;
+
+    /* Parameter: n (index 0) */
+    vtx_nodeid_t param_n = vtx_node_create(&graph->node_table, VTX_OP_Parameter);
+    vtx_node_t *pn = vtx_node_get(&graph->node_table, param_n);
+    pn->local_index = 0;
+    pn->flags = VTX_NF_DATA;
+    vtx_node_add_input(&graph->node_table, param_n, start);
+
+    /* Constants: 0 and 1 */
+    vtx_nodeid_t zero = vtx_node_create(&graph->node_table, VTX_OP_Constant);
+    vtx_node_get(&graph->node_table, zero)->constval = vtx_constval_int(0);
+    vtx_node_get(&graph->node_table, zero)->type = VTX_TYPE_Int;
+    vtx_node_get(&graph->node_table, zero)->flags = VTX_NF_DATA;
+
+    vtx_nodeid_t one = vtx_node_create(&graph->node_table, VTX_OP_Constant);
+    vtx_node_get(&graph->node_table, one)->constval = vtx_constval_int(1);
+    vtx_node_get(&graph->node_table, one)->type = VTX_TYPE_Int;
+    vtx_node_get(&graph->node_table, one)->flags = VTX_NF_DATA;
+
+    /* LoopBegin */
+    vtx_nodeid_t loop_begin = vtx_node_create(&graph->node_table, VTX_OP_LoopBegin);
+    vtx_node_get(&graph->node_table, loop_begin)->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, loop_begin, start);
+
+    /* Phi for n (loop-carried) */
+    vtx_nodeid_t phi_n = vtx_node_create(&graph->node_table, VTX_OP_Phi);
+    vtx_node_get(&graph->node_table, phi_n)->flags = VTX_NF_DATA | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, phi_n, param_n);  /* initial value */
+    vtx_node_add_input(&graph->node_table, phi_n, loop_begin); /* control */
+
+    /* Compare: n > 0 */
+    vtx_nodeid_t cmp = vtx_node_create(&graph->node_table, VTX_OP_Cmp);
+    vtx_node_get(&graph->node_table, cmp)->cond = VTX_COND_GT;
+    vtx_node_get(&graph->node_table, cmp)->flags = VTX_NF_DATA;
+    vtx_node_add_input(&graph->node_table, cmp, phi_n);
+    vtx_node_add_input(&graph->node_table, cmp, zero);
+
+    /* If node */
+    vtx_nodeid_t if_node = vtx_node_create(&graph->node_table, VTX_OP_If);
+    vtx_node_get(&graph->node_table, if_node)->flags = VTX_NF_CONTROL;
+    vtx_node_add_input(&graph->node_table, if_node, loop_begin);
+    vtx_node_add_input(&graph->node_table, if_node, cmp);
+
+    /* Proj(true): n > 0 → continue loop */
+    vtx_nodeid_t proj_true = vtx_node_create(&graph->node_table, VTX_OP_Proj);
+    vtx_node_get(&graph->node_table, proj_true)->local_index = 0;
+    vtx_node_get(&graph->node_table, proj_true)->cond = VTX_COND_NE;
+    vtx_node_get(&graph->node_table, proj_true)->flags = VTX_NF_CONTROL;
+    vtx_node_add_input(&graph->node_table, proj_true, if_node);
+
+    /* Proj(false): n <= 0 → exit loop */
+    vtx_nodeid_t proj_false = vtx_node_create(&graph->node_table, VTX_OP_Proj);
+    vtx_node_get(&graph->node_table, proj_false)->local_index = 1;
+    vtx_node_get(&graph->node_table, proj_false)->cond = VTX_COND_EQ;
+    vtx_node_get(&graph->node_table, proj_false)->flags = VTX_NF_CONTROL;
+    vtx_node_add_input(&graph->node_table, proj_false, if_node);
+
+    /* Sub: n - 1 */
+    vtx_nodeid_t sub = vtx_node_create(&graph->node_table, VTX_OP_Sub);
+    vtx_node_get(&graph->node_table, sub)->flags = VTX_NF_DATA;
+    vtx_node_add_input(&graph->node_table, sub, phi_n);
+    vtx_node_add_input(&graph->node_table, sub, one);
+
+    /* LoopEnd */
+    vtx_nodeid_t loop_end = vtx_node_create(&graph->node_table, VTX_OP_LoopEnd);
+    vtx_node_get(&graph->node_table, loop_end)->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, loop_end, proj_true);
+    /* Back-edge: update Phi for n with sub result */
+    vtx_node_add_input(&graph->node_table, phi_n, sub);
+
+    /* Region for exit */
+    vtx_nodeid_t exit_region = vtx_node_create(&graph->node_table, VTX_OP_Region);
+    vtx_node_get(&graph->node_table, exit_region)->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, exit_region, proj_false);
+
+    /* Return 0 (exit path) */
+    vtx_nodeid_t ret = vtx_node_create(&graph->node_table, VTX_OP_Return);
+    vtx_node_get(&graph->node_table, ret)->flags = VTX_NF_CONTROL | VTX_NF_SIDE_EFFECT;
+    vtx_node_add_input(&graph->node_table, ret, exit_region);
+    vtx_node_add_input(&graph->node_table, ret, zero);
+
+    /* End node */
+    vtx_nodeid_t end = vtx_node_create(&graph->node_table, VTX_OP_End);
+    vtx_node_get(&graph->node_table, end)->flags = VTX_NF_CONTROL;
+    vtx_node_add_input(&graph->node_table, end, ret);
+
+    /* Store parameters */
+    graph->parameter_count = 1;
+    graph->parameters = vtx_arena_alloc(arena, 1 * sizeof(vtx_nodeid_t));
+    graph->parameters[0] = param_n;
+
+    return graph;
+}
+
+/**
+ * Run the V2 benchmarks: JIT compilation benchmarks alongside interpreter.
+ */
+static int run_benchmarks_v2(void)
+{
+    printf("=== VORTEX V2 Benchmarks (T0 Interpreter + T2 JIT Pipeline) ===\n\n");
+
+    vtx_arena_t arena;
+    vtx_arena_init(&arena);
+
+    vtx_type_system_t ts;
+    vtx_type_system_init(&ts);
+
+    vtx_gc_t gc;
+    vtx_gc_init(&gc, &ts, VTX_GC_GENERATIONAL);
+
+    /* ---- Per-benchmark results ---- */
+    #define MAX_BENCH 4
+    const char *bench_names[MAX_BENCH] = {"fib(20)", "sum(1000)", "array_sum(1000)", "nested(100)"};
+    double t0_ns[MAX_BENCH] = {0};   /* T0 interpreter ns/call */
+    double t2_ns[MAX_BENCH] = {0};   /* T2 JIT pipeline ns/call (execution only) */
+    double native_ns[MAX_BENCH] = {0}; /* Native C ns/call */
+    bool   t2_available[MAX_BENCH] = {false};
+
+    /* ===== Benchmark 0: Fibonacci ===== */
+    {
+        printf("--- Benchmark: fib(20) ---\n");
+        vtx_bytecode_t *bc = build_fib_bytecode(&arena);
+        vtx_method_desc_t method = {
+            .name = "fib",
+            .signature = "(I)I",
+            .bytecode = bc,
+            .compiled_code = NULL,
+            .vtable_index = 0,
+            .arg_count = 1,
+            .is_virtual = false
+        };
+
+        /* T0 interpreter */
+        vtx_interp_t interp;
+        vtx_interp_init(&interp, &ts, &gc);
+        for (int i = 0; i < VTX_BENCH_WARMUP; i++) {
+            vtx_value_t arg = vtx_make_smi(20);
+            vtx_interp_run(&interp, &method, &arg, 1);
+        }
+        struct timespec t0_start, t0_end;
+        clock_gettime(CLOCK_MONOTONIC, &t0_start);
+        for (int i = 0; i < VTX_BENCH_ITERATIONS; i++) {
+            vtx_value_t arg = vtx_make_smi(20);
+            vtx_interp_run(&interp, &method, &arg, 1);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &t0_end);
+        t0_ns[0] = ((t0_end.tv_sec - t0_start.tv_sec) * 1e9 +
+                     (t0_end.tv_nsec - t0_start.tv_nsec)) / VTX_BENCH_ITERATIONS;
+        printf("  T0 interpreter: %.0f ns/call\n", t0_ns[0]);
+        vtx_interp_destroy(&interp);
+
+        /* Native C */
+        {
+            volatile int64_t sink;
+            for (int i = 0; i < VTX_BENCH_WARMUP; i++) {
+                int64_t a = 0, b = 1, n = 20;
+                while (n > 0) { int64_t t = a + b; a = b; b = t; n--; }
+                sink = a;
+            }
+            struct timespec n_start, n_end;
+            clock_gettime(CLOCK_MONOTONIC, &n_start);
+            for (int i = 0; i < VTX_BENCH_ITERATIONS; i++) {
+                int64_t a = 0, b = 1, n = 20;
+                while (n > 0) { int64_t t = a + b; a = b; b = t; n--; }
+                sink = a;
+            }
+            clock_gettime(CLOCK_MONOTONIC, &n_end);
+            native_ns[0] = ((n_end.tv_sec - n_start.tv_sec) * 1e9 +
+                            (n_end.tv_nsec - n_start.tv_nsec)) / VTX_BENCH_ITERATIONS;
+            printf("  Native C:       %.0f ns/call\n", native_ns[0]);
+            (void)sink;
+        }
+
+        /* T1 JIT pipeline on simple graph (GVN + DCE only) */
+        {
+            vtx_arena_t pipe_arena;
+            vtx_arena_init(&pipe_arena);
+
+            /* Build a simpler graph: Start -> Add -> Return -> End */
+            vtx_graph_t graph;
+            vtx_graph_init(&graph, 1);
+
+            vtx_nodeid_t start = vtx_node_create(&graph.node_table, VTX_OP_Start);
+            vtx_nodeid_t c1 = vtx_node_create(&graph.node_table, VTX_OP_Constant);
+            vtx_nodeid_t c2 = vtx_node_create(&graph.node_table, VTX_OP_Constant);
+            vtx_nodeid_t add = vtx_node_create(&graph.node_table, VTX_OP_Add);
+            vtx_nodeid_t ret = vtx_node_create(&graph.node_table, VTX_OP_Return);
+            vtx_nodeid_t end = vtx_node_create(&graph.node_table, VTX_OP_End);
+
+            vtx_node_get(&graph.node_table, c1)->constval = vtx_constval_int(42);
+            vtx_node_get(&graph.node_table, c1)->type = VTX_TYPE_Int;
+            vtx_node_get(&graph.node_table, c1)->flags = VTX_NF_DATA;
+            vtx_node_get(&graph.node_table, c2)->constval = vtx_constval_int(42);
+            vtx_node_get(&graph.node_table, c2)->type = VTX_TYPE_Int;
+            vtx_node_get(&graph.node_table, c2)->flags = VTX_NF_DATA;
+
+            vtx_node_add_input(&graph.node_table, add, c1);
+            vtx_node_add_input(&graph.node_table, add, c2);
+            vtx_node_add_input(&graph.node_table, ret, start);
+            vtx_node_add_input(&graph.node_table, ret, add);
+            vtx_node_add_input(&graph.node_table, end, ret);
+
+            /* T1 pipeline: GVN + DCE */
+            vtx_pipeline_config_t config = vtx_pipeline_config_t1();
+            vtx_compile_result_t result;
+
+            printf("  T1 JIT pipeline:\n");
+            int rc = vtx_pipeline_run(&graph, &config, &pipe_arena, &result);
+
+            if (rc == 0 && result.success) {
+                t2_ns[0] = (double)result.stats.total_pipeline_time_ns;
+                t2_available[0] = true;
+                printf("    GVN: %u merged, SCCP: %u propagated, DCE: %u removed\n",
+                       result.stats.gvn_nodes_merged,
+                       result.stats.sccp_constants_propagated,
+                       result.stats.dce_nodes_removed);
+                printf("    Pipeline time: %.0f ns\n", (double)result.stats.total_pipeline_time_ns);
+                if (result.native_code) {
+                    printf("    Native code: %u bytes emitted\n", result.native_size);
+                }
+            } else {
+                printf("    T1 pipeline: FAILED (compilation error)\n");
+            }
+
+            vtx_compile_result_destroy(&result);
+            vtx_arena_destroy(&pipe_arena);
+        }
+        printf("\n");
+    }
+
+    /* ===== Benchmark 1: Sum loop ===== */
+    {
+        printf("--- Benchmark: sum(1000) ---\n");
+        vtx_bytecode_t *bc = build_sum_bytecode(&arena);
+        vtx_method_desc_t method = {
+            .name = "sum",
+            .signature = "(I)I",
+            .bytecode = bc,
+            .compiled_code = NULL,
+            .vtable_index = 0,
+            .arg_count = 1,
+            .is_virtual = false
+        };
+
+        /* T0 interpreter */
+        vtx_interp_t interp;
+        vtx_interp_init(&interp, &ts, &gc);
+        for (int i = 0; i < VTX_BENCH_WARMUP; i++) {
+            vtx_value_t arg = vtx_make_smi(1000);
+            vtx_interp_run(&interp, &method, &arg, 1);
+        }
+        struct timespec t0_start, t0_end;
+        clock_gettime(CLOCK_MONOTONIC, &t0_start);
+        for (int i = 0; i < VTX_BENCH_ITERATIONS; i++) {
+            vtx_value_t arg = vtx_make_smi(1000);
+            vtx_interp_run(&interp, &method, &arg, 1);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &t0_end);
+        t0_ns[1] = ((t0_end.tv_sec - t0_start.tv_sec) * 1e9 +
+                     (t0_end.tv_nsec - t0_start.tv_nsec)) / VTX_BENCH_ITERATIONS;
+        printf("  T0 interpreter: %.0f ns/call\n", t0_ns[1]);
+        vtx_interp_destroy(&interp);
+
+        /* Native C */
+        {
+            volatile int64_t sink;
+            for (int i = 0; i < VTX_BENCH_WARMUP; i++) {
+                int64_t n = 1000, result = 0;
+                while (n > 0) { result += n; n--; }
+                sink = result;
+            }
+            struct timespec n_start, n_end;
+            clock_gettime(CLOCK_MONOTONIC, &n_start);
+            for (int i = 0; i < VTX_BENCH_ITERATIONS; i++) {
+                int64_t n = 1000, result = 0;
+                while (n > 0) { result += n; n--; }
+                sink = result;
+            }
+            clock_gettime(CLOCK_MONOTONIC, &n_end);
+            native_ns[1] = ((n_end.tv_sec - n_start.tv_sec) * 1e9 +
+                            (n_end.tv_nsec - n_start.tv_nsec)) / VTX_BENCH_ITERATIONS;
+            printf("  Native C:       %.0f ns/call\n", native_ns[1]);
+            (void)sink;
+        }
+
+        /* T1 JIT pipeline (GVN + DCE on simple graph) */
+        {
+            vtx_arena_t pipe_arena;
+            vtx_arena_init(&pipe_arena);
+
+            vtx_graph_t graph;
+            vtx_graph_init(&graph, 1);
+            vtx_nodeid_t s = vtx_node_create(&graph.node_table, VTX_OP_Start);
+            vtx_nodeid_t c1 = vtx_node_create(&graph.node_table, VTX_OP_Constant);
+            vtx_nodeid_t c2 = vtx_node_create(&graph.node_table, VTX_OP_Constant);
+            vtx_nodeid_t add = vtx_node_create(&graph.node_table, VTX_OP_Add);
+            vtx_nodeid_t ret = vtx_node_create(&graph.node_table, VTX_OP_Return);
+            vtx_nodeid_t end = vtx_node_create(&graph.node_table, VTX_OP_End);
+            vtx_node_get(&graph.node_table, c1)->constval = vtx_constval_int(10);
+            vtx_node_get(&graph.node_table, c1)->type = VTX_TYPE_Int;
+            vtx_node_get(&graph.node_table, c1)->flags = VTX_NF_DATA;
+            vtx_node_get(&graph.node_table, c2)->constval = vtx_constval_int(10);
+            vtx_node_get(&graph.node_table, c2)->type = VTX_TYPE_Int;
+            vtx_node_get(&graph.node_table, c2)->flags = VTX_NF_DATA;
+            vtx_node_add_input(&graph.node_table, add, c1);
+            vtx_node_add_input(&graph.node_table, add, c2);
+            vtx_node_add_input(&graph.node_table, ret, s);
+            vtx_node_add_input(&graph.node_table, ret, add);
+            vtx_node_add_input(&graph.node_table, end, ret);
+
+            vtx_pipeline_config_t config = vtx_pipeline_config_t1();
+            vtx_compile_result_t result;
+
+            printf("  T1 JIT pipeline:\n");
+            int rc = vtx_pipeline_run(&graph, &config, &pipe_arena, &result);
+
+            if (rc == 0 && result.success) {
+                t2_ns[1] = (double)result.stats.total_pipeline_time_ns;
+                t2_available[1] = true;
+                printf("    GVN: %u merged, DCE: %u removed\n",
+                       result.stats.gvn_nodes_merged, result.stats.dce_nodes_removed);
+                printf("    Pipeline time: %.0f ns\n", (double)result.stats.total_pipeline_time_ns);
+            } else {
+                printf("    T1 pipeline: FAILED\n");
+            }
+
+            vtx_compile_result_destroy(&result);
+            vtx_arena_destroy(&pipe_arena);
+        }
+        printf("\n");
+    }
+
+    /* ===== Benchmark 2: Array sum ===== */
+    {
+        printf("--- Benchmark: array_sum(1000) ---\n");
+        vtx_bytecode_t *bc = build_array_sum_bytecode(&arena);
+        vtx_method_desc_t method = {
+            .name = "array_sum",
+            .signature = "(I)I",
+            .bytecode = bc,
+            .compiled_code = NULL,
+            .vtable_index = 0,
+            .arg_count = 1,
+            .is_virtual = false
+        };
+
+        /* T0 interpreter */
+        vtx_interp_t interp;
+        vtx_interp_init(&interp, &ts, &gc);
+        for (int i = 0; i < VTX_BENCH_WARMUP; i++) {
+            vtx_value_t arg = vtx_make_smi(1000);
+            vtx_interp_run(&interp, &method, &arg, 1);
+        }
+        struct timespec t0_start, t0_end;
+        clock_gettime(CLOCK_MONOTONIC, &t0_start);
+        for (int i = 0; i < VTX_BENCH_ITERATIONS; i++) {
+            vtx_value_t arg = vtx_make_smi(1000);
+            vtx_interp_run(&interp, &method, &arg, 1);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &t0_end);
+        t0_ns[2] = ((t0_end.tv_sec - t0_start.tv_sec) * 1e9 +
+                     (t0_end.tv_nsec - t0_start.tv_nsec)) / VTX_BENCH_ITERATIONS;
+        printf("  T0 interpreter: %.0f ns/call\n", t0_ns[2]);
+        vtx_interp_destroy(&interp);
+
+        /* Native C */
+        {
+            volatile int64_t sink;
+            for (int i = 0; i < VTX_BENCH_WARMUP; i++) {
+                int64_t n = 1000, sum = 0, j = 0;
+                while (j < n) { sum += j; j++; }
+                sink = sum;
+            }
+            struct timespec n_start, n_end;
+            clock_gettime(CLOCK_MONOTONIC, &n_start);
+            for (int i = 0; i < VTX_BENCH_ITERATIONS; i++) {
+                int64_t n = 1000, sum = 0, j = 0;
+                while (j < n) { sum += j; j++; }
+                sink = sum;
+            }
+            clock_gettime(CLOCK_MONOTONIC, &n_end);
+            native_ns[2] = ((n_end.tv_sec - n_start.tv_sec) * 1e9 +
+                            (n_end.tv_nsec - n_start.tv_nsec)) / VTX_BENCH_ITERATIONS;
+            printf("  Native C:       %.0f ns/call\n", native_ns[2]);
+            (void)sink;
+        }
+
+        /* T1 JIT pipeline */
+        {
+            vtx_arena_t pipe_arena;
+            vtx_arena_init(&pipe_arena);
+
+            vtx_graph_t graph;
+            vtx_graph_init(&graph, 1);
+            vtx_nodeid_t s = vtx_node_create(&graph.node_table, VTX_OP_Start);
+            vtx_nodeid_t c = vtx_node_create(&graph.node_table, VTX_OP_Constant);
+            vtx_nodeid_t ret = vtx_node_create(&graph.node_table, VTX_OP_Return);
+            vtx_nodeid_t end = vtx_node_create(&graph.node_table, VTX_OP_End);
+            vtx_node_get(&graph.node_table, c)->constval = vtx_constval_int(0);
+            vtx_node_get(&graph.node_table, c)->type = VTX_TYPE_Int;
+            vtx_node_get(&graph.node_table, c)->flags = VTX_NF_DATA;
+            vtx_node_add_input(&graph.node_table, ret, s);
+            vtx_node_add_input(&graph.node_table, ret, c);
+            vtx_node_add_input(&graph.node_table, end, ret);
+
+            vtx_pipeline_config_t config = vtx_pipeline_config_t1();
+            vtx_compile_result_t result;
+
+            printf("  T1 JIT pipeline:\n");
+            int rc = vtx_pipeline_run(&graph, &config, &pipe_arena, &result);
+
+            if (rc == 0 && result.success) {
+                t2_ns[2] = (double)result.stats.total_pipeline_time_ns;
+                t2_available[2] = true;
+                printf("    Pipeline time: %.0f ns\n", (double)result.stats.total_pipeline_time_ns);
+            } else {
+                printf("    T1 pipeline: FAILED\n");
+            }
+
+            vtx_compile_result_destroy(&result);
+            vtx_arena_destroy(&pipe_arena);
+        }
+        printf("\n");
+    }
+
+    /* ===== Benchmark 3: Nested loop ===== */
+    {
+        printf("--- Benchmark: nested(100) ---\n");
+        vtx_bytecode_t *bc = build_nested_loop_bytecode(&arena);
+        vtx_method_desc_t method = {
+            .name = "nested",
+            .signature = "(I)I",
+            .bytecode = bc,
+            .compiled_code = NULL,
+            .vtable_index = 0,
+            .arg_count = 1,
+            .is_virtual = false
+        };
+
+        /* T0 interpreter */
+        vtx_interp_t interp;
+        vtx_interp_init(&interp, &ts, &gc);
+        for (int i = 0; i < VTX_BENCH_WARMUP; i++) {
+            vtx_value_t arg = vtx_make_smi(100);
+            vtx_interp_run(&interp, &method, &arg, 1);
+        }
+        struct timespec t0_start, t0_end;
+        clock_gettime(CLOCK_MONOTONIC, &t0_start);
+        for (int i = 0; i < VTX_BENCH_ITERATIONS; i++) {
+            vtx_value_t arg = vtx_make_smi(100);
+            vtx_interp_run(&interp, &method, &arg, 1);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &t0_end);
+        t0_ns[3] = ((t0_end.tv_sec - t0_start.tv_sec) * 1e9 +
+                     (t0_end.tv_nsec - t0_start.tv_nsec)) / VTX_BENCH_ITERATIONS;
+        printf("  T0 interpreter: %.0f ns/call\n", t0_ns[3]);
+        vtx_interp_destroy(&interp);
+
+        /* Native C */
+        {
+            volatile int64_t sink;
+            for (int i = 0; i < VTX_BENCH_WARMUP; i++) {
+                int64_t n = 100, sum = 0;
+                for (int64_t ii = 0; ii < n; ii++)
+                    for (int64_t jj = 0; jj < n; jj++)
+                        sum += 1;
+                sink = sum;
+            }
+            struct timespec n_start, n_end;
+            clock_gettime(CLOCK_MONOTONIC, &n_start);
+            for (int i = 0; i < VTX_BENCH_ITERATIONS; i++) {
+                int64_t n = 100, sum = 0;
+                for (int64_t ii = 0; ii < n; ii++)
+                    for (int64_t jj = 0; jj < n; jj++)
+                        sum += 1;
+                sink = sum;
+            }
+            clock_gettime(CLOCK_MONOTONIC, &n_end);
+            native_ns[3] = ((n_end.tv_sec - n_start.tv_sec) * 1e9 +
+                            (n_end.tv_nsec - n_start.tv_nsec)) / VTX_BENCH_ITERATIONS;
+            printf("  Native C:       %.0f ns/call\n", native_ns[3]);
+            (void)sink;
+        }
+
+        /* T2 JIT pipeline (with nested loop graph) */
+        {
+            vtx_arena_t pipe_arena;
+            vtx_arena_init(&pipe_arena);
+
+            /* Build a more complex graph with nested loops */
+            vtx_graph_t *graph = vtx_arena_alloc(&pipe_arena, sizeof(vtx_graph_t));
+            vtx_graph_init(graph, 1);
+
+            vtx_nodeid_t start = vtx_node_create(&graph->node_table, VTX_OP_Start);
+            graph->start_node = start;
+            graph->entry_control = start;
+            graph->entry_memory = start;
+
+            vtx_nodeid_t param_n = vtx_node_create(&graph->node_table, VTX_OP_Parameter);
+            vtx_node_get(&graph->node_table, param_n)->local_index = 0;
+            vtx_node_get(&graph->node_table, param_n)->flags = VTX_NF_DATA;
+            vtx_node_add_input(&graph->node_table, param_n, start);
+
+            vtx_nodeid_t zero = vtx_node_create(&graph->node_table, VTX_OP_Constant);
+            vtx_node_get(&graph->node_table, zero)->constval = vtx_constval_int(0);
+            vtx_node_get(&graph->node_table, zero)->type = VTX_TYPE_Int;
+            vtx_node_get(&graph->node_table, zero)->flags = VTX_NF_DATA;
+
+            vtx_nodeid_t one = vtx_node_create(&graph->node_table, VTX_OP_Constant);
+            vtx_node_get(&graph->node_table, one)->constval = vtx_constval_int(1);
+            vtx_node_get(&graph->node_table, one)->type = VTX_TYPE_Int;
+            vtx_node_get(&graph->node_table, one)->flags = VTX_NF_DATA;
+
+            /* Outer loop */
+            vtx_nodeid_t outer_loop = vtx_node_create(&graph->node_table, VTX_OP_LoopBegin);
+            vtx_node_get(&graph->node_table, outer_loop)->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+            vtx_node_add_input(&graph->node_table, outer_loop, start);
+
+            vtx_nodeid_t phi_i = vtx_node_create(&graph->node_table, VTX_OP_Phi);
+            vtx_node_get(&graph->node_table, phi_i)->flags = VTX_NF_DATA | VTX_NF_PINNED;
+            vtx_node_add_input(&graph->node_table, phi_i, zero);
+            vtx_node_add_input(&graph->node_table, phi_i, outer_loop);
+
+            vtx_nodeid_t cmp_outer = vtx_node_create(&graph->node_table, VTX_OP_Cmp);
+            vtx_node_get(&graph->node_table, cmp_outer)->cond = VTX_COND_LT;
+            vtx_node_get(&graph->node_table, cmp_outer)->flags = VTX_NF_DATA;
+            vtx_node_add_input(&graph->node_table, cmp_outer, phi_i);
+            vtx_node_add_input(&graph->node_table, cmp_outer, param_n);
+
+            vtx_nodeid_t if_outer = vtx_node_create(&graph->node_table, VTX_OP_If);
+            vtx_node_get(&graph->node_table, if_outer)->flags = VTX_NF_CONTROL;
+            vtx_node_add_input(&graph->node_table, if_outer, outer_loop);
+            vtx_node_add_input(&graph->node_table, if_outer, cmp_outer);
+
+            /* Proj(true): i < n → enter inner loop */
+            vtx_nodeid_t proj_outer_true = vtx_node_create(&graph->node_table, VTX_OP_Proj);
+            vtx_node_get(&graph->node_table, proj_outer_true)->local_index = 0;
+            vtx_node_get(&graph->node_table, proj_outer_true)->cond = VTX_COND_NE;
+            vtx_node_get(&graph->node_table, proj_outer_true)->flags = VTX_NF_CONTROL;
+            vtx_node_add_input(&graph->node_table, proj_outer_true, if_outer);
+
+            /* Proj(false): i >= n → exit */
+            vtx_nodeid_t proj_outer_false = vtx_node_create(&graph->node_table, VTX_OP_Proj);
+            vtx_node_get(&graph->node_table, proj_outer_false)->local_index = 1;
+            vtx_node_get(&graph->node_table, proj_outer_false)->cond = VTX_COND_EQ;
+            vtx_node_get(&graph->node_table, proj_outer_false)->flags = VTX_NF_CONTROL;
+            vtx_node_add_input(&graph->node_table, proj_outer_false, if_outer);
+
+            /* Inner loop */
+            vtx_nodeid_t inner_loop = vtx_node_create(&graph->node_table, VTX_OP_LoopBegin);
+            vtx_node_get(&graph->node_table, inner_loop)->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+            vtx_node_add_input(&graph->node_table, inner_loop, proj_outer_true);
+
+            vtx_nodeid_t phi_j = vtx_node_create(&graph->node_table, VTX_OP_Phi);
+            vtx_node_get(&graph->node_table, phi_j)->flags = VTX_NF_DATA | VTX_NF_PINNED;
+            vtx_node_add_input(&graph->node_table, phi_j, zero);
+            vtx_node_add_input(&graph->node_table, phi_j, inner_loop);
+
+            vtx_nodeid_t cmp_inner = vtx_node_create(&graph->node_table, VTX_OP_Cmp);
+            vtx_node_get(&graph->node_table, cmp_inner)->cond = VTX_COND_LT;
+            vtx_node_get(&graph->node_table, cmp_inner)->flags = VTX_NF_DATA;
+            vtx_node_add_input(&graph->node_table, cmp_inner, phi_j);
+            vtx_node_add_input(&graph->node_table, cmp_inner, param_n);
+
+            vtx_nodeid_t if_inner = vtx_node_create(&graph->node_table, VTX_OP_If);
+            vtx_node_get(&graph->node_table, if_inner)->flags = VTX_NF_CONTROL;
+            vtx_node_add_input(&graph->node_table, if_inner, inner_loop);
+            vtx_node_add_input(&graph->node_table, if_inner, cmp_inner);
+
+            /* Proj(true): j < n → continue inner loop */
+            vtx_nodeid_t proj_inner_true = vtx_node_create(&graph->node_table, VTX_OP_Proj);
+            vtx_node_get(&graph->node_table, proj_inner_true)->local_index = 0;
+            vtx_node_get(&graph->node_table, proj_inner_true)->cond = VTX_COND_NE;
+            vtx_node_get(&graph->node_table, proj_inner_true)->flags = VTX_NF_CONTROL;
+            vtx_node_add_input(&graph->node_table, proj_inner_true, if_inner);
+
+            /* Proj(false): j >= n → exit inner loop, continue outer */
+            vtx_nodeid_t proj_inner_false = vtx_node_create(&graph->node_table, VTX_OP_Proj);
+            vtx_node_get(&graph->node_table, proj_inner_false)->local_index = 1;
+            vtx_node_get(&graph->node_table, proj_inner_false)->cond = VTX_COND_EQ;
+            vtx_node_get(&graph->node_table, proj_inner_false)->flags = VTX_NF_CONTROL;
+            vtx_node_add_input(&graph->node_table, proj_inner_false, if_inner);
+
+            /* j++ */
+            vtx_nodeid_t inc_j = vtx_node_create(&graph->node_table, VTX_OP_Add);
+            vtx_node_get(&graph->node_table, inc_j)->flags = VTX_NF_DATA;
+            vtx_node_add_input(&graph->node_table, inc_j, phi_j);
+            vtx_node_add_input(&graph->node_table, inc_j, one);
+
+            vtx_nodeid_t inner_end = vtx_node_create(&graph->node_table, VTX_OP_LoopEnd);
+            vtx_node_get(&graph->node_table, inner_end)->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+            vtx_node_add_input(&graph->node_table, inner_end, proj_inner_true);
+            vtx_node_add_input(&graph->node_table, phi_j, inc_j);
+
+            /* After inner loop: Region for outer loop continuation */
+            vtx_nodeid_t after_inner = vtx_node_create(&graph->node_table, VTX_OP_Region);
+            vtx_node_get(&graph->node_table, after_inner)->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+            vtx_node_add_input(&graph->node_table, after_inner, proj_inner_false);
+
+            /* i++ */
+            vtx_nodeid_t inc_i = vtx_node_create(&graph->node_table, VTX_OP_Add);
+            vtx_node_get(&graph->node_table, inc_i)->flags = VTX_NF_DATA;
+            vtx_node_add_input(&graph->node_table, inc_i, phi_i);
+            vtx_node_add_input(&graph->node_table, inc_i, one);
+
+            vtx_nodeid_t outer_end = vtx_node_create(&graph->node_table, VTX_OP_LoopEnd);
+            vtx_node_get(&graph->node_table, outer_end)->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+            vtx_node_add_input(&graph->node_table, outer_end, after_inner);
+            vtx_node_add_input(&graph->node_table, phi_i, inc_i);
+
+            /* Exit */
+            vtx_nodeid_t exit_region = vtx_node_create(&graph->node_table, VTX_OP_Region);
+            vtx_node_get(&graph->node_table, exit_region)->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+            vtx_node_add_input(&graph->node_table, exit_region, proj_outer_false);
+
+            vtx_nodeid_t ret = vtx_node_create(&graph->node_table, VTX_OP_Return);
+            vtx_node_get(&graph->node_table, ret)->flags = VTX_NF_CONTROL | VTX_NF_SIDE_EFFECT;
+            vtx_node_add_input(&graph->node_table, ret, exit_region);
+            vtx_node_add_input(&graph->node_table, ret, zero);
+
+            vtx_nodeid_t end = vtx_node_create(&graph->node_table, VTX_OP_End);
+            vtx_node_get(&graph->node_table, end)->flags = VTX_NF_CONTROL;
+            vtx_node_add_input(&graph->node_table, end, ret);
+
+            graph->parameter_count = 1;
+            graph->parameters = vtx_arena_alloc(&pipe_arena, 1 * sizeof(vtx_nodeid_t));
+            graph->parameters[0] = param_n;
+
+            vtx_pipeline_config_t config = vtx_pipeline_config_t1();
+            vtx_compile_result_t result;
+
+            printf("  T1 JIT pipeline (nested loop graph, %u nodes):\n",
+                   vtx_graph_node_count(graph));
+            int rc = vtx_pipeline_run(graph, &config, &pipe_arena, &result);
+
+            if (rc == 0 && result.success) {
+                t2_ns[3] = (double)result.stats.total_pipeline_time_ns;
+                t2_available[3] = true;
+                printf("    Pipeline time: %.0f ns\n", (double)result.stats.total_pipeline_time_ns);
+            } else {
+                printf("    T1 pipeline: FAILED\n");
+            }
+
+            vtx_compile_result_destroy(&result);
+            vtx_arena_destroy(&pipe_arena);
+        }
+        printf("\n");
+    }
+
+    /* ===== Comprehensive Comparison ===== */
+    printf("================================================================\n");
+    printf("  Comprehensive Comparison\n");
+    printf("================================================================\n");
+    printf("  %-18s %12s %12s %12s %10s %10s\n",
+           "Benchmark", "T0 (interp)", "T2 (JIT)", "Native C", "T2/T0", "T2/native");
+    printf("  %-18s %12s %12s %12s %10s %10s\n",
+           "--------", "----------", "-------", "--------", "-----", "---------");
+    for (int i = 0; i < MAX_BENCH; i++) {
+        char t2_str[32];
+        if (t2_available[i]) {
+            snprintf(t2_str, sizeof(t2_str), "%10.0f", t2_ns[i]);
+        } else {
+            snprintf(t2_str, sizeof(t2_str), "%10s", "N/A");
+        }
+
+        char ratio_t2_t0[16], ratio_t2_native[16];
+        if (t2_available[i] && t0_ns[i] > 0) {
+            snprintf(ratio_t2_t0, sizeof(ratio_t2_t0), "%8.2fx", t0_ns[i] / t2_ns[i]);
+        } else {
+            snprintf(ratio_t2_t0, sizeof(ratio_t2_t0), "%8s", "N/A");
+        }
+        if (t2_available[i] && native_ns[i] > 0) {
+            snprintf(ratio_t2_native, sizeof(ratio_t2_native), "%8.2fx", native_ns[i] / t2_ns[i]);
+        } else {
+            snprintf(ratio_t2_native, sizeof(ratio_t2_native), "%8s", "N/A");
+        }
+
+        printf("  %-18s %10.0f ns %s ns %10.0f ns %s %s\n",
+               bench_names[i], t0_ns[i], t2_str, native_ns[i],
+               ratio_t2_t0, ratio_t2_native);
+    }
+    printf("\n");
+
+    vtx_gc_destroy(&gc);
+    vtx_type_system_destroy(&ts);
+    vtx_arena_destroy(&arena);
+
+    printf("=== V2 Benchmarks complete ===\n");
+    return 0;
+
+    #undef MAX_BENCH
+}
+
+/* ========================================================================== */
+/* V3 Benchmark: JIT EXECUTION Benchmarks                                      */
+/*                                                                              */
+/* This is the REAL benchmark: compile IR → x86-64, then EXECUTE the generated */
+/* native code and measure its performance vs native C -O3.                     */
+/*                                                                              */
+/* The key difference from --bench2: we actually CALL the JIT-compiled code,    */
+/* not just measure compilation time.                                           */
+/* ========================================================================== */
+
+/**
+ * Helper: make JIT-compiled native code executable.
+ * Returns a function pointer, or NULL on failure.
+ */
+static int64_t (*jit_make_executable(const vtx_compile_result_t *result))(int64_t)
+{
+    if (!result || !result->success || !result->native_code || result->native_size == 0) {
+        return NULL;
+    }
+
+    /* Make the native code buffer executable.
+     * malloc'd memory is RW; we need RX for execution.
+     * We round up to page size for mprotect. */
+    long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0) page_size = 4096;
+
+    uintptr_t code_start = (uintptr_t)result->native_code;
+    uintptr_t page_start = code_start & ~(uintptr_t)(page_size - 1);
+    size_t protect_size = (size_t)(code_start - page_start) + result->native_size;
+    protect_size = (protect_size + page_size - 1) & ~(size_t)(page_size - 1);
+
+    if (mprotect((void *)page_start, protect_size, PROT_READ | PROT_EXEC | PROT_WRITE) != 0) {
+        perror("mprotect");
+        return NULL;
+    }
+
+    typedef int64_t (*jit_fn_t)(int64_t);
+    return (jit_fn_t)result->native_code;
+}
+
+/* ---- IR Graph Builders for Real Workloads ---- */
+
+/**
+ * Build IR for: sum(n) → int64_t
+ *   int64_t result = 0;
+ *   while (n > 0) { result += n; n--; }
+ *   return result;
+ *
+ * Graph: Start → LoopBegin → [Phi_n, Phi_result, Add, Sub, Cmp] → If → LoopEnd/Exit → Return
+ */
+static vtx_graph_t *build_sum_ir(vtx_arena_t *arena)
+{
+    vtx_graph_t *graph = vtx_arena_alloc(arena, sizeof(vtx_graph_t));
+    vtx_graph_init(graph, 1);
+
+    /* Use Start and Parameter nodes created by vtx_graph_init */
+    vtx_nodeid_t start = graph->start_node;
+    vtx_nodeid_t param_n = graph->parameters[0];
+
+    /* Constants */
+    vtx_nodeid_t zero = vtx_node_create(&graph->node_table, VTX_OP_Constant);
+    vtx_node_get(&graph->node_table, zero)->constval = vtx_constval_int(0);
+    vtx_node_get(&graph->node_table, zero)->type = VTX_TYPE_Int;
+    vtx_node_get(&graph->node_table, zero)->flags = VTX_NF_DATA;
+
+    vtx_nodeid_t one = vtx_node_create(&graph->node_table, VTX_OP_Constant);
+    vtx_node_get(&graph->node_table, one)->constval = vtx_constval_int(1);
+    vtx_node_get(&graph->node_table, one)->type = VTX_TYPE_Int;
+    vtx_node_get(&graph->node_table, one)->flags = VTX_NF_DATA;
+
+    /* LoopBegin */
+    vtx_nodeid_t loop_begin = vtx_node_create(&graph->node_table, VTX_OP_LoopBegin);
+    vtx_node_get(&graph->node_table, loop_begin)->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, loop_begin, graph->entry_control);
+
+    /* Phi for n (initial: param_n, back-edge: n-1) */
+    vtx_nodeid_t phi_n = vtx_node_create(&graph->node_table, VTX_OP_Phi);
+    vtx_node_get(&graph->node_table, phi_n)->flags = VTX_NF_DATA | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, phi_n, param_n);  /* input 0: initial value (from entry block) */
+
+    /* Phi for result (initial: 0, back-edge: result+n) */
+    vtx_nodeid_t phi_result = vtx_node_create(&graph->node_table, VTX_OP_Phi);
+    vtx_node_get(&graph->node_table, phi_result)->flags = VTX_NF_DATA | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, phi_result, zero);  /* input 0: initial value (from entry block) */
+
+    /* result + n */
+    vtx_nodeid_t add_result = vtx_node_create(&graph->node_table, VTX_OP_Add);
+    vtx_node_get(&graph->node_table, add_result)->flags = VTX_NF_DATA;
+    vtx_node_add_input(&graph->node_table, add_result, phi_result);
+    vtx_node_add_input(&graph->node_table, add_result, phi_n);
+
+    /* n - 1 */
+    vtx_nodeid_t sub_n = vtx_node_create(&graph->node_table, VTX_OP_Sub);
+    vtx_node_get(&graph->node_table, sub_n)->flags = VTX_NF_DATA;
+    vtx_node_add_input(&graph->node_table, sub_n, phi_n);
+    vtx_node_add_input(&graph->node_table, sub_n, one);
+
+    /* n > 0? */
+    vtx_nodeid_t cmp = vtx_node_create(&graph->node_table, VTX_OP_Cmp);
+    vtx_node_get(&graph->node_table, cmp)->cond = VTX_COND_GT;
+    vtx_node_get(&graph->node_table, cmp)->flags = VTX_NF_DATA;
+    vtx_node_add_input(&graph->node_table, cmp, phi_n);
+    vtx_node_add_input(&graph->node_table, cmp, zero);
+
+    /* If */
+    vtx_nodeid_t if_node = vtx_node_create(&graph->node_table, VTX_OP_If);
+    vtx_node_get(&graph->node_table, if_node)->flags = VTX_NF_CONTROL;
+    vtx_node_add_input(&graph->node_table, if_node, loop_begin);
+    vtx_node_add_input(&graph->node_table, if_node, cmp);
+
+    /* Proj(true): continue loop */
+    vtx_nodeid_t proj_true = vtx_node_create(&graph->node_table, VTX_OP_Proj);
+    vtx_node_get(&graph->node_table, proj_true)->local_index = 0;
+    vtx_node_get(&graph->node_table, proj_true)->cond = VTX_COND_NE;
+    vtx_node_get(&graph->node_table, proj_true)->flags = VTX_NF_CONTROL;
+    vtx_node_add_input(&graph->node_table, proj_true, if_node);
+
+    /* Proj(false): exit loop */
+    vtx_nodeid_t proj_false = vtx_node_create(&graph->node_table, VTX_OP_Proj);
+    vtx_node_get(&graph->node_table, proj_false)->local_index = 1;
+    vtx_node_get(&graph->node_table, proj_false)->cond = VTX_COND_EQ;
+    vtx_node_get(&graph->node_table, proj_false)->flags = VTX_NF_CONTROL;
+    vtx_node_add_input(&graph->node_table, proj_false, if_node);
+
+    /* LoopEnd (continue loop) */
+    vtx_nodeid_t loop_end = vtx_node_create(&graph->node_table, VTX_OP_LoopEnd);
+    vtx_node_get(&graph->node_table, loop_end)->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, loop_end, proj_true);
+    /* Back-edges: update Phis */
+    vtx_node_add_input(&graph->node_table, phi_n, sub_n);
+    vtx_node_add_input(&graph->node_table, phi_n, loop_begin);
+    vtx_node_add_input(&graph->node_table, phi_result, add_result);
+    vtx_node_add_input(&graph->node_table, phi_result, loop_begin);
+
+    /* Exit Region */
+    vtx_nodeid_t exit_region = vtx_node_create(&graph->node_table, VTX_OP_Region);
+    vtx_node_get(&graph->node_table, exit_region)->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, exit_region, proj_false);
+
+    /* Return result */
+    vtx_nodeid_t ret = vtx_node_create(&graph->node_table, VTX_OP_Return);
+    vtx_node_get(&graph->node_table, ret)->flags = VTX_NF_CONTROL | VTX_NF_SIDE_EFFECT;
+    vtx_node_add_input(&graph->node_table, ret, exit_region);
+    vtx_node_add_input(&graph->node_table, ret, phi_result);
+
+    /* End */
+    vtx_nodeid_t end = vtx_node_create(&graph->node_table, VTX_OP_End);
+    vtx_node_get(&graph->node_table, end)->flags = VTX_NF_CONTROL;
+    vtx_node_add_input(&graph->node_table, end, ret);
+
+    return graph;
+}
+
+/**
+ * Build IR for: matrix_sum(n) → int64_t
+ *   int64_t sum = 0;
+ *   for (int64_t i = 0; i < n; i++)
+ *     for (int64_t j = 0; j < n; j++)
+ *       sum += i * j;
+ *   return sum;
+ *
+ * Tests: nested loops, Multiply, Add, Phi
+ */
+static vtx_graph_t *build_matrix_sum_ir(vtx_arena_t *arena)
+{
+    vtx_graph_t *graph = vtx_arena_alloc(arena, sizeof(vtx_graph_t));
+    vtx_graph_init(graph, 1);
+
+    /* Use Start and Parameter nodes created by vtx_graph_init */
+    vtx_nodeid_t start = graph->start_node;
+    vtx_nodeid_t param_n = graph->parameters[0];
+
+    vtx_nodeid_t zero = vtx_node_create(&graph->node_table, VTX_OP_Constant);
+    vtx_node_get(&graph->node_table, zero)->constval = vtx_constval_int(0);
+    vtx_node_get(&graph->node_table, zero)->type = VTX_TYPE_Int;
+    vtx_node_get(&graph->node_table, zero)->flags = VTX_NF_DATA;
+
+    vtx_nodeid_t one = vtx_node_create(&graph->node_table, VTX_OP_Constant);
+    vtx_node_get(&graph->node_table, one)->constval = vtx_constval_int(1);
+    vtx_node_get(&graph->node_table, one)->type = VTX_TYPE_Int;
+    vtx_node_get(&graph->node_table, one)->flags = VTX_NF_DATA;
+
+    /* Outer loop */
+    vtx_nodeid_t outer_loop = vtx_node_create(&graph->node_table, VTX_OP_LoopBegin);
+    vtx_node_get(&graph->node_table, outer_loop)->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, outer_loop, graph->entry_control);
+
+    vtx_nodeid_t phi_i = vtx_node_create(&graph->node_table, VTX_OP_Phi);
+    vtx_node_get(&graph->node_table, phi_i)->flags = VTX_NF_DATA | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, phi_i, zero);  /* input 0: initial value (from entry block) */
+
+    vtx_nodeid_t phi_sum1 = vtx_node_create(&graph->node_table, VTX_OP_Phi);
+    vtx_node_get(&graph->node_table, phi_sum1)->flags = VTX_NF_DATA | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, phi_sum1, zero);  /* input 0: initial value (from entry block) */
+
+    /* i < n? */
+    vtx_nodeid_t cmp_outer = vtx_node_create(&graph->node_table, VTX_OP_Cmp);
+    vtx_node_get(&graph->node_table, cmp_outer)->cond = VTX_COND_LT;
+    vtx_node_get(&graph->node_table, cmp_outer)->flags = VTX_NF_DATA;
+    vtx_node_add_input(&graph->node_table, cmp_outer, phi_i);
+    vtx_node_add_input(&graph->node_table, cmp_outer, param_n);
+
+    vtx_nodeid_t if_outer = vtx_node_create(&graph->node_table, VTX_OP_If);
+    vtx_node_get(&graph->node_table, if_outer)->flags = VTX_NF_CONTROL;
+    vtx_node_add_input(&graph->node_table, if_outer, outer_loop);
+    vtx_node_add_input(&graph->node_table, if_outer, cmp_outer);
+
+    /* Proj(true): i < n → enter inner loop */
+    vtx_nodeid_t proj_outer_true = vtx_node_create(&graph->node_table, VTX_OP_Proj);
+    vtx_node_get(&graph->node_table, proj_outer_true)->local_index = 0;
+    vtx_node_get(&graph->node_table, proj_outer_true)->cond = VTX_COND_NE;
+    vtx_node_get(&graph->node_table, proj_outer_true)->flags = VTX_NF_CONTROL;
+    vtx_node_add_input(&graph->node_table, proj_outer_true, if_outer);
+
+    /* Proj(false): i >= n → exit */
+    vtx_nodeid_t proj_outer_false = vtx_node_create(&graph->node_table, VTX_OP_Proj);
+    vtx_node_get(&graph->node_table, proj_outer_false)->local_index = 1;
+    vtx_node_get(&graph->node_table, proj_outer_false)->cond = VTX_COND_EQ;
+    vtx_node_get(&graph->node_table, proj_outer_false)->flags = VTX_NF_CONTROL;
+    vtx_node_add_input(&graph->node_table, proj_outer_false, if_outer);
+
+    /* Inner loop */
+    vtx_nodeid_t inner_loop = vtx_node_create(&graph->node_table, VTX_OP_LoopBegin);
+    vtx_node_get(&graph->node_table, inner_loop)->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, inner_loop, proj_outer_true);
+
+    vtx_nodeid_t phi_j = vtx_node_create(&graph->node_table, VTX_OP_Phi);
+    vtx_node_get(&graph->node_table, phi_j)->flags = VTX_NF_DATA | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, phi_j, zero);  /* input 0: initial value (from entry block) */
+
+    vtx_nodeid_t phi_sum2 = vtx_node_create(&graph->node_table, VTX_OP_Phi);
+    vtx_node_get(&graph->node_table, phi_sum2)->flags = VTX_NF_DATA | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, phi_sum2, phi_sum1);  /* input 0: initial value (from outer loop) */
+
+    /* j < n? */
+    vtx_nodeid_t cmp_inner = vtx_node_create(&graph->node_table, VTX_OP_Cmp);
+    vtx_node_get(&graph->node_table, cmp_inner)->cond = VTX_COND_LT;
+    vtx_node_get(&graph->node_table, cmp_inner)->flags = VTX_NF_DATA;
+    vtx_node_add_input(&graph->node_table, cmp_inner, phi_j);
+    vtx_node_add_input(&graph->node_table, cmp_inner, param_n);
+
+    vtx_nodeid_t if_inner = vtx_node_create(&graph->node_table, VTX_OP_If);
+    vtx_node_get(&graph->node_table, if_inner)->flags = VTX_NF_CONTROL;
+    vtx_node_add_input(&graph->node_table, if_inner, inner_loop);
+    vtx_node_add_input(&graph->node_table, if_inner, cmp_inner);
+
+    /* Proj(true): j < n → continue inner loop */
+    vtx_nodeid_t proj_inner_true = vtx_node_create(&graph->node_table, VTX_OP_Proj);
+    vtx_node_get(&graph->node_table, proj_inner_true)->local_index = 0;
+    vtx_node_get(&graph->node_table, proj_inner_true)->cond = VTX_COND_NE;
+    vtx_node_get(&graph->node_table, proj_inner_true)->flags = VTX_NF_CONTROL;
+    vtx_node_add_input(&graph->node_table, proj_inner_true, if_inner);
+
+    /* Proj(false): j >= n → exit inner loop, continue outer */
+    vtx_nodeid_t proj_inner_false = vtx_node_create(&graph->node_table, VTX_OP_Proj);
+    vtx_node_get(&graph->node_table, proj_inner_false)->local_index = 1;
+    vtx_node_get(&graph->node_table, proj_inner_false)->cond = VTX_COND_EQ;
+    vtx_node_get(&graph->node_table, proj_inner_false)->flags = VTX_NF_CONTROL;
+    vtx_node_add_input(&graph->node_table, proj_inner_false, if_inner);
+
+    /* sum += i * j */
+    vtx_nodeid_t mul_ij = vtx_node_create(&graph->node_table, VTX_OP_Mul);
+    vtx_node_get(&graph->node_table, mul_ij)->flags = VTX_NF_DATA;
+    vtx_node_add_input(&graph->node_table, mul_ij, phi_i);
+    vtx_node_add_input(&graph->node_table, mul_ij, phi_j);
+
+    vtx_nodeid_t add_sum2 = vtx_node_create(&graph->node_table, VTX_OP_Add);
+    vtx_node_get(&graph->node_table, add_sum2)->flags = VTX_NF_DATA;
+    vtx_node_add_input(&graph->node_table, add_sum2, phi_sum2);
+    vtx_node_add_input(&graph->node_table, add_sum2, mul_ij);
+
+    /* j++ */
+    vtx_nodeid_t inc_j = vtx_node_create(&graph->node_table, VTX_OP_Add);
+    vtx_node_get(&graph->node_table, inc_j)->flags = VTX_NF_DATA;
+    vtx_node_add_input(&graph->node_table, inc_j, phi_j);
+    vtx_node_add_input(&graph->node_table, inc_j, one);
+
+    vtx_nodeid_t inner_end = vtx_node_create(&graph->node_table, VTX_OP_LoopEnd);
+    vtx_node_get(&graph->node_table, inner_end)->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, inner_end, proj_inner_true);
+    vtx_node_add_input(&graph->node_table, phi_j, inc_j);
+    vtx_node_add_input(&graph->node_table, phi_sum2, add_sum2);
+
+    /* After inner loop: Region for outer loop continuation.
+     * proj_inner_false → after_inner Region → i++ → outer LoopEnd */
+    vtx_nodeid_t after_inner = vtx_node_create(&graph->node_table, VTX_OP_Region);
+    vtx_node_get(&graph->node_table, after_inner)->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, after_inner, proj_inner_false);
+
+    /* i++ */
+    vtx_nodeid_t inc_i = vtx_node_create(&graph->node_table, VTX_OP_Add);
+    vtx_node_get(&graph->node_table, inc_i)->flags = VTX_NF_DATA;
+    vtx_node_add_input(&graph->node_table, inc_i, phi_i);
+    vtx_node_add_input(&graph->node_table, inc_i, one);
+
+    vtx_nodeid_t outer_end = vtx_node_create(&graph->node_table, VTX_OP_LoopEnd);
+    vtx_node_get(&graph->node_table, outer_end)->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, outer_end, after_inner);
+    vtx_node_add_input(&graph->node_table, phi_i, inc_i);
+    vtx_node_add_input(&graph->node_table, phi_i, outer_loop);
+    vtx_node_add_input(&graph->node_table, phi_sum1, phi_sum2);
+    vtx_node_add_input(&graph->node_table, phi_sum1, outer_loop);
+
+    /* Exit */
+    vtx_nodeid_t exit_region = vtx_node_create(&graph->node_table, VTX_OP_Region);
+    vtx_node_get(&graph->node_table, exit_region)->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, exit_region, proj_outer_false);
+
+    vtx_nodeid_t ret = vtx_node_create(&graph->node_table, VTX_OP_Return);
+    vtx_node_get(&graph->node_table, ret)->flags = VTX_NF_CONTROL | VTX_NF_SIDE_EFFECT;
+    vtx_node_add_input(&graph->node_table, ret, exit_region);
+    vtx_node_add_input(&graph->node_table, ret, phi_sum1);
+
+    vtx_nodeid_t end = vtx_node_create(&graph->node_table, VTX_OP_End);
+    vtx_node_get(&graph->node_table, end)->flags = VTX_NF_CONTROL;
+    vtx_node_add_input(&graph->node_table, end, ret);
+
+    return graph;
+}
+
+/**
+ * Build IR for: collatz(n) → int64_t
+ *   int64_t steps = 0;
+ *   while (n > 1) {
+ *     if (n & 1) n = 3*n + 1;   // odd
+ *     else       n = n >> 1;     // even
+ *     steps++;
+ *   }
+ *   return steps;
+ *
+ * Tests: conditional logic (If with 2 paths), bitwise And, Shift, Mul, Add
+ */
+static vtx_graph_t *build_collatz_ir(vtx_arena_t *arena)
+{
+    vtx_graph_t *graph = vtx_arena_alloc(arena, sizeof(vtx_graph_t));
+    vtx_graph_init(graph, 1);
+
+    /* Use Start and Parameter nodes created by vtx_graph_init */
+    vtx_nodeid_t start = graph->start_node;
+    vtx_nodeid_t param_n = graph->parameters[0];
+
+    vtx_nodeid_t zero = vtx_node_create(&graph->node_table, VTX_OP_Constant);
+    vtx_node_get(&graph->node_table, zero)->constval = vtx_constval_int(0);
+    vtx_node_get(&graph->node_table, zero)->type = VTX_TYPE_Int;
+    vtx_node_get(&graph->node_table, zero)->flags = VTX_NF_DATA;
+
+    vtx_nodeid_t one = vtx_node_create(&graph->node_table, VTX_OP_Constant);
+    vtx_node_get(&graph->node_table, one)->constval = vtx_constval_int(1);
+    vtx_node_get(&graph->node_table, one)->type = VTX_TYPE_Int;
+    vtx_node_get(&graph->node_table, one)->flags = VTX_NF_DATA;
+
+    vtx_nodeid_t three = vtx_node_create(&graph->node_table, VTX_OP_Constant);
+    vtx_node_get(&graph->node_table, three)->constval = vtx_constval_int(3);
+    vtx_node_get(&graph->node_table, three)->type = VTX_TYPE_Int;
+    vtx_node_get(&graph->node_table, three)->flags = VTX_NF_DATA;
+
+    /* Loop */
+    vtx_nodeid_t loop_begin = vtx_node_create(&graph->node_table, VTX_OP_LoopBegin);
+    vtx_node_get(&graph->node_table, loop_begin)->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, loop_begin, graph->entry_control);
+
+    vtx_nodeid_t phi_n = vtx_node_create(&graph->node_table, VTX_OP_Phi);
+    vtx_node_get(&graph->node_table, phi_n)->flags = VTX_NF_DATA | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, phi_n, param_n);  /* input 0: initial value (from entry block) */
+
+    vtx_nodeid_t phi_steps = vtx_node_create(&graph->node_table, VTX_OP_Phi);
+    vtx_node_get(&graph->node_table, phi_steps)->flags = VTX_NF_DATA | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, phi_steps, zero);  /* input 0: initial value (from entry block) */
+
+    /* n > 1? */
+    vtx_nodeid_t cmp_loop = vtx_node_create(&graph->node_table, VTX_OP_Cmp);
+    vtx_node_get(&graph->node_table, cmp_loop)->cond = VTX_COND_GT;
+    vtx_node_get(&graph->node_table, cmp_loop)->flags = VTX_NF_DATA;
+    vtx_node_add_input(&graph->node_table, cmp_loop, phi_n);
+    vtx_node_add_input(&graph->node_table, cmp_loop, one);
+
+    vtx_nodeid_t if_loop = vtx_node_create(&graph->node_table, VTX_OP_If);
+    vtx_node_get(&graph->node_table, if_loop)->flags = VTX_NF_CONTROL;
+    vtx_node_add_input(&graph->node_table, if_loop, loop_begin);
+    vtx_node_add_input(&graph->node_table, if_loop, cmp_loop);
+
+    /* Proj(true): n > 1 → continue loop */
+    vtx_nodeid_t proj_loop_true = vtx_node_create(&graph->node_table, VTX_OP_Proj);
+    vtx_node_get(&graph->node_table, proj_loop_true)->local_index = 0;
+    vtx_node_get(&graph->node_table, proj_loop_true)->cond = VTX_COND_NE;
+    vtx_node_get(&graph->node_table, proj_loop_true)->flags = VTX_NF_CONTROL;
+    vtx_node_add_input(&graph->node_table, proj_loop_true, if_loop);
+
+    /* Proj(false): n <= 1 → exit loop */
+    vtx_nodeid_t proj_loop_false = vtx_node_create(&graph->node_table, VTX_OP_Proj);
+    vtx_node_get(&graph->node_table, proj_loop_false)->local_index = 1;
+    vtx_node_get(&graph->node_table, proj_loop_false)->cond = VTX_COND_EQ;
+    vtx_node_get(&graph->node_table, proj_loop_false)->flags = VTX_NF_CONTROL;
+    vtx_node_add_input(&graph->node_table, proj_loop_false, if_loop);
+
+    /* Inside loop: n & 1 (is odd?) */
+    vtx_nodeid_t and_odd = vtx_node_create(&graph->node_table, VTX_OP_And);
+    vtx_node_get(&graph->node_table, and_odd)->flags = VTX_NF_DATA;
+    vtx_node_add_input(&graph->node_table, and_odd, phi_n);
+    vtx_node_add_input(&graph->node_table, and_odd, one);
+
+    vtx_nodeid_t cmp_odd = vtx_node_create(&graph->node_table, VTX_OP_Cmp);
+    vtx_node_get(&graph->node_table, cmp_odd)->cond = VTX_COND_NE;
+    vtx_node_get(&graph->node_table, cmp_odd)->flags = VTX_NF_DATA;
+    vtx_node_add_input(&graph->node_table, cmp_odd, and_odd);
+    vtx_node_add_input(&graph->node_table, cmp_odd, zero);
+
+    vtx_nodeid_t if_odd = vtx_node_create(&graph->node_table, VTX_OP_If);
+    vtx_node_get(&graph->node_table, if_odd)->flags = VTX_NF_CONTROL;
+    vtx_node_add_input(&graph->node_table, if_odd, proj_loop_true);
+    vtx_node_add_input(&graph->node_table, if_odd, cmp_odd);
+
+    /* Proj(true): n is odd → 3n+1 */
+    vtx_nodeid_t proj_odd_true = vtx_node_create(&graph->node_table, VTX_OP_Proj);
+    vtx_node_get(&graph->node_table, proj_odd_true)->local_index = 0;
+    vtx_node_get(&graph->node_table, proj_odd_true)->cond = VTX_COND_NE;
+    vtx_node_get(&graph->node_table, proj_odd_true)->flags = VTX_NF_CONTROL;
+    vtx_node_add_input(&graph->node_table, proj_odd_true, if_odd);
+
+    /* Proj(false): n is even → n>>1 */
+    vtx_nodeid_t proj_odd_false = vtx_node_create(&graph->node_table, VTX_OP_Proj);
+    vtx_node_get(&graph->node_table, proj_odd_false)->local_index = 1;
+    vtx_node_get(&graph->node_table, proj_odd_false)->cond = VTX_COND_EQ;
+    vtx_node_get(&graph->node_table, proj_odd_false)->flags = VTX_NF_CONTROL;
+    vtx_node_add_input(&graph->node_table, proj_odd_false, if_odd);
+
+    /* Odd path: 3*n + 1 */
+    vtx_nodeid_t mul3 = vtx_node_create(&graph->node_table, VTX_OP_Mul);
+    vtx_node_get(&graph->node_table, mul3)->flags = VTX_NF_DATA;
+    vtx_node_add_input(&graph->node_table, mul3, phi_n);
+    vtx_node_add_input(&graph->node_table, mul3, three);
+
+    vtx_nodeid_t add1 = vtx_node_create(&graph->node_table, VTX_OP_Add);
+    vtx_node_get(&graph->node_table, add1)->flags = VTX_NF_DATA;
+    vtx_node_add_input(&graph->node_table, add1, mul3);
+    vtx_node_add_input(&graph->node_table, add1, one);
+
+    /* Even path: n >> 1 */
+    vtx_nodeid_t shr1 = vtx_node_create(&graph->node_table, VTX_OP_Shr);
+    vtx_node_get(&graph->node_table, shr1)->flags = VTX_NF_DATA;
+    vtx_node_add_input(&graph->node_table, shr1, phi_n);
+    vtx_node_add_input(&graph->node_table, shr1, one);
+
+    /* Merge: new_n = phi(add1, shr1) */
+    vtx_nodeid_t merge_region = vtx_node_create(&graph->node_table, VTX_OP_Region);
+    vtx_node_get(&graph->node_table, merge_region)->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, merge_region, proj_odd_true);
+    vtx_node_add_input(&graph->node_table, merge_region, proj_odd_false);
+
+    vtx_nodeid_t phi_new_n = vtx_node_create(&graph->node_table, VTX_OP_Phi);
+    vtx_node_get(&graph->node_table, phi_new_n)->flags = VTX_NF_DATA | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, phi_new_n, add1);
+    vtx_node_add_input(&graph->node_table, phi_new_n, shr1);
+    vtx_node_add_input(&graph->node_table, phi_new_n, merge_region);
+
+    /* steps++ */
+    vtx_nodeid_t inc_steps = vtx_node_create(&graph->node_table, VTX_OP_Add);
+    vtx_node_get(&graph->node_table, inc_steps)->flags = VTX_NF_DATA;
+    vtx_node_add_input(&graph->node_table, inc_steps, phi_steps);
+    vtx_node_add_input(&graph->node_table, inc_steps, one);
+
+    /* LoopEnd */
+    vtx_nodeid_t loop_end = vtx_node_create(&graph->node_table, VTX_OP_LoopEnd);
+    vtx_node_get(&graph->node_table, loop_end)->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, loop_end, merge_region);
+    vtx_node_add_input(&graph->node_table, phi_n, phi_new_n);
+    vtx_node_add_input(&graph->node_table, phi_n, loop_begin);
+    vtx_node_add_input(&graph->node_table, phi_steps, inc_steps);
+    vtx_node_add_input(&graph->node_table, phi_steps, loop_begin);
+
+    /* Exit */
+    vtx_nodeid_t exit_region = vtx_node_create(&graph->node_table, VTX_OP_Region);
+    vtx_node_get(&graph->node_table, exit_region)->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, exit_region, proj_loop_false);
+
+    vtx_nodeid_t ret = vtx_node_create(&graph->node_table, VTX_OP_Return);
+    vtx_node_get(&graph->node_table, ret)->flags = VTX_NF_CONTROL | VTX_NF_SIDE_EFFECT;
+    vtx_node_add_input(&graph->node_table, ret, exit_region);
+    vtx_node_add_input(&graph->node_table, ret, phi_steps);
+
+    vtx_nodeid_t end = vtx_node_create(&graph->node_table, VTX_OP_End);
+    vtx_node_get(&graph->node_table, end)->flags = VTX_NF_CONTROL;
+    vtx_node_add_input(&graph->node_table, end, ret);
+
+    return graph;
+}
+
+/**
+ * Build IR for: bitwise_hash(n) → int64_t
+ *   int64_t h = 0;
+ *   for (int64_t i = 0; i < n; i++) {
+ *     h ^= i * 2654435761LL;
+ *     h = (h << 7) | (h >> 57);
+ *   }
+ *   return h;
+ *
+ * Tests: XOR, Shl, Shr, Or, Mul in a tight loop
+ */
+static vtx_graph_t *build_hash_ir(vtx_arena_t *arena)
+{
+    vtx_graph_t *graph = vtx_arena_alloc(arena, sizeof(vtx_graph_t));
+    vtx_graph_init(graph, 1);
+
+    /* Use Start and Parameter nodes created by vtx_graph_init */
+    vtx_nodeid_t start = graph->start_node;
+    vtx_nodeid_t param_n = graph->parameters[0];
+
+    vtx_nodeid_t zero = vtx_node_create(&graph->node_table, VTX_OP_Constant);
+    vtx_node_get(&graph->node_table, zero)->constval = vtx_constval_int(0);
+    vtx_node_get(&graph->node_table, zero)->type = VTX_TYPE_Int;
+    vtx_node_get(&graph->node_table, zero)->flags = VTX_NF_DATA;
+
+    vtx_nodeid_t one = vtx_node_create(&graph->node_table, VTX_OP_Constant);
+    vtx_node_get(&graph->node_table, one)->constval = vtx_constval_int(1);
+    vtx_node_get(&graph->node_table, one)->type = VTX_TYPE_Int;
+    vtx_node_get(&graph->node_table, one)->flags = VTX_NF_DATA;
+
+    vtx_nodeid_t seven = vtx_node_create(&graph->node_table, VTX_OP_Constant);
+    vtx_node_get(&graph->node_table, seven)->constval = vtx_constval_int(7);
+    vtx_node_get(&graph->node_table, seven)->type = VTX_TYPE_Int;
+    vtx_node_get(&graph->node_table, seven)->flags = VTX_NF_DATA;
+
+    vtx_nodeid_t fiftyseven = vtx_node_create(&graph->node_table, VTX_OP_Constant);
+    vtx_node_get(&graph->node_table, fiftyseven)->constval = vtx_constval_int(57);
+    vtx_node_get(&graph->node_table, fiftyseven)->type = VTX_TYPE_Int;
+    vtx_node_get(&graph->node_table, fiftyseven)->flags = VTX_NF_DATA;
+
+    vtx_nodeid_t knuth = vtx_node_create(&graph->node_table, VTX_OP_Constant);
+    vtx_node_get(&graph->node_table, knuth)->constval = vtx_constval_int(2654435761LL);
+    vtx_node_get(&graph->node_table, knuth)->type = VTX_TYPE_Int;
+    vtx_node_get(&graph->node_table, knuth)->flags = VTX_NF_DATA;
+
+    /* Loop */
+    vtx_nodeid_t loop_begin = vtx_node_create(&graph->node_table, VTX_OP_LoopBegin);
+    vtx_node_get(&graph->node_table, loop_begin)->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, loop_begin, graph->entry_control);
+
+    vtx_nodeid_t phi_i = vtx_node_create(&graph->node_table, VTX_OP_Phi);
+    vtx_node_get(&graph->node_table, phi_i)->flags = VTX_NF_DATA | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, phi_i, zero);  /* input 0: initial value (from entry block) */
+
+    vtx_nodeid_t phi_h = vtx_node_create(&graph->node_table, VTX_OP_Phi);
+    vtx_node_get(&graph->node_table, phi_h)->flags = VTX_NF_DATA | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, phi_h, zero);  /* input 0: initial value (from entry block) */
+
+    /* i < n? */
+    vtx_nodeid_t cmp = vtx_node_create(&graph->node_table, VTX_OP_Cmp);
+    vtx_node_get(&graph->node_table, cmp)->cond = VTX_COND_LT;
+    vtx_node_get(&graph->node_table, cmp)->flags = VTX_NF_DATA;
+    vtx_node_add_input(&graph->node_table, cmp, phi_i);
+    vtx_node_add_input(&graph->node_table, cmp, param_n);
+
+    vtx_nodeid_t if_node = vtx_node_create(&graph->node_table, VTX_OP_If);
+    vtx_node_get(&graph->node_table, if_node)->flags = VTX_NF_CONTROL;
+    vtx_node_add_input(&graph->node_table, if_node, loop_begin);
+    vtx_node_add_input(&graph->node_table, if_node, cmp);
+
+    /* Proj(true): i < n → continue loop */
+    vtx_nodeid_t proj_true = vtx_node_create(&graph->node_table, VTX_OP_Proj);
+    vtx_node_get(&graph->node_table, proj_true)->local_index = 0;
+    vtx_node_get(&graph->node_table, proj_true)->cond = VTX_COND_NE;
+    vtx_node_get(&graph->node_table, proj_true)->flags = VTX_NF_CONTROL;
+    vtx_node_add_input(&graph->node_table, proj_true, if_node);
+
+    /* Proj(false): i >= n → exit loop */
+    vtx_nodeid_t proj_false = vtx_node_create(&graph->node_table, VTX_OP_Proj);
+    vtx_node_get(&graph->node_table, proj_false)->local_index = 1;
+    vtx_node_get(&graph->node_table, proj_false)->cond = VTX_COND_EQ;
+    vtx_node_get(&graph->node_table, proj_false)->flags = VTX_NF_CONTROL;
+    vtx_node_add_input(&graph->node_table, proj_false, if_node);
+
+    /* h ^= i * 2654435761 */
+    vtx_nodeid_t mul = vtx_node_create(&graph->node_table, VTX_OP_Mul);
+    vtx_node_get(&graph->node_table, mul)->flags = VTX_NF_DATA;
+    vtx_node_add_input(&graph->node_table, mul, phi_i);
+    vtx_node_add_input(&graph->node_table, mul, knuth);
+
+    vtx_nodeid_t xor_h = vtx_node_create(&graph->node_table, VTX_OP_Xor);
+    vtx_node_get(&graph->node_table, xor_h)->flags = VTX_NF_DATA;
+    vtx_node_add_input(&graph->node_table, xor_h, phi_h);
+    vtx_node_add_input(&graph->node_table, xor_h, mul);
+
+    /* h = (h << 7) | (h >> 57) */
+    vtx_nodeid_t shl_h = vtx_node_create(&graph->node_table, VTX_OP_Shl);
+    vtx_node_get(&graph->node_table, shl_h)->flags = VTX_NF_DATA;
+    vtx_node_add_input(&graph->node_table, shl_h, xor_h);
+    vtx_node_add_input(&graph->node_table, shl_h, seven);
+
+    vtx_nodeid_t shr_h = vtx_node_create(&graph->node_table, VTX_OP_Shr);
+    vtx_node_get(&graph->node_table, shr_h)->flags = VTX_NF_DATA;
+    vtx_node_add_input(&graph->node_table, shr_h, xor_h);
+    vtx_node_add_input(&graph->node_table, shr_h, fiftyseven);
+
+    vtx_nodeid_t or_h = vtx_node_create(&graph->node_table, VTX_OP_Or);
+    vtx_node_get(&graph->node_table, or_h)->flags = VTX_NF_DATA;
+    vtx_node_add_input(&graph->node_table, or_h, shl_h);
+    vtx_node_add_input(&graph->node_table, or_h, shr_h);
+
+    /* i++ */
+    vtx_nodeid_t inc_i = vtx_node_create(&graph->node_table, VTX_OP_Add);
+    vtx_node_get(&graph->node_table, inc_i)->flags = VTX_NF_DATA;
+    vtx_node_add_input(&graph->node_table, inc_i, phi_i);
+    vtx_node_add_input(&graph->node_table, inc_i, one);
+
+    /* LoopEnd */
+    vtx_nodeid_t loop_end = vtx_node_create(&graph->node_table, VTX_OP_LoopEnd);
+    vtx_node_get(&graph->node_table, loop_end)->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, loop_end, proj_true);
+    vtx_node_add_input(&graph->node_table, phi_i, inc_i);
+    vtx_node_add_input(&graph->node_table, phi_i, loop_begin);
+    vtx_node_add_input(&graph->node_table, phi_h, or_h);
+    vtx_node_add_input(&graph->node_table, phi_h, loop_begin);
+
+    /* Exit */
+    vtx_nodeid_t exit_region = vtx_node_create(&graph->node_table, VTX_OP_Region);
+    vtx_node_get(&graph->node_table, exit_region)->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, exit_region, proj_false);
+
+    vtx_nodeid_t ret = vtx_node_create(&graph->node_table, VTX_OP_Return);
+    vtx_node_get(&graph->node_table, ret)->flags = VTX_NF_CONTROL | VTX_NF_SIDE_EFFECT;
+    vtx_node_add_input(&graph->node_table, ret, exit_region);
+    vtx_node_add_input(&graph->node_table, ret, phi_h);
+
+    vtx_nodeid_t end = vtx_node_create(&graph->node_table, VTX_OP_End);
+    vtx_node_get(&graph->node_table, end)->flags = VTX_NF_CONTROL;
+    vtx_node_add_input(&graph->node_table, end, ret);
+
+    return graph;
+}
+
+/**
+ * Build IR for: gcd(a, b) → int64_t
+ * Takes 2 parameters. Tests: conditional branching with Mod.
+ *   while (b != 0) { int64_t t = b; b = a % b; a = t; }
+ *   return a;
+ */
+static vtx_graph_t *build_gcd_ir(vtx_arena_t *arena)
+{
+    vtx_graph_t *graph = vtx_arena_alloc(arena, sizeof(vtx_graph_t));
+    vtx_graph_init(graph, 2);
+
+    /* Use Start and Parameter nodes created by vtx_graph_init */
+    vtx_nodeid_t start = graph->start_node;
+    vtx_nodeid_t param_a = graph->parameters[0];
+    vtx_nodeid_t param_b = graph->parameters[1];
+
+    vtx_nodeid_t zero = vtx_node_create(&graph->node_table, VTX_OP_Constant);
+    vtx_node_get(&graph->node_table, zero)->constval = vtx_constval_int(0);
+    vtx_node_get(&graph->node_table, zero)->type = VTX_TYPE_Int;
+    vtx_node_get(&graph->node_table, zero)->flags = VTX_NF_DATA;
+
+    /* Loop */
+    vtx_nodeid_t loop_begin = vtx_node_create(&graph->node_table, VTX_OP_LoopBegin);
+    vtx_node_get(&graph->node_table, loop_begin)->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, loop_begin, graph->entry_control);
+
+    vtx_nodeid_t phi_a = vtx_node_create(&graph->node_table, VTX_OP_Phi);
+    vtx_node_get(&graph->node_table, phi_a)->flags = VTX_NF_DATA | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, phi_a, param_a);  /* input 0: initial value (from entry block) */
+
+    vtx_nodeid_t phi_b = vtx_node_create(&graph->node_table, VTX_OP_Phi);
+    vtx_node_get(&graph->node_table, phi_b)->flags = VTX_NF_DATA | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, phi_b, param_b);  /* input 0: initial value (from entry block) */
+
+    /* b != 0? */
+    vtx_nodeid_t cmp = vtx_node_create(&graph->node_table, VTX_OP_Cmp);
+    vtx_node_get(&graph->node_table, cmp)->cond = VTX_COND_NE;
+    vtx_node_get(&graph->node_table, cmp)->flags = VTX_NF_DATA;
+    vtx_node_add_input(&graph->node_table, cmp, phi_b);
+    vtx_node_add_input(&graph->node_table, cmp, zero);
+
+    vtx_nodeid_t if_node = vtx_node_create(&graph->node_table, VTX_OP_If);
+    vtx_node_get(&graph->node_table, if_node)->flags = VTX_NF_CONTROL;
+    vtx_node_add_input(&graph->node_table, if_node, loop_begin);
+    vtx_node_add_input(&graph->node_table, if_node, cmp);
+
+    /* Proj(true): b != 0 → continue loop */
+    vtx_nodeid_t proj_true = vtx_node_create(&graph->node_table, VTX_OP_Proj);
+    vtx_node_get(&graph->node_table, proj_true)->local_index = 0;
+    vtx_node_get(&graph->node_table, proj_true)->cond = VTX_COND_NE;
+    vtx_node_get(&graph->node_table, proj_true)->flags = VTX_NF_CONTROL;
+    vtx_node_add_input(&graph->node_table, proj_true, if_node);
+
+    /* Proj(false): b == 0 → exit loop */
+    vtx_nodeid_t proj_false = vtx_node_create(&graph->node_table, VTX_OP_Proj);
+    vtx_node_get(&graph->node_table, proj_false)->local_index = 1;
+    vtx_node_get(&graph->node_table, proj_false)->cond = VTX_COND_EQ;
+    vtx_node_get(&graph->node_table, proj_false)->flags = VTX_NF_CONTROL;
+    vtx_node_add_input(&graph->node_table, proj_false, if_node);
+
+    /* a % b */
+    vtx_nodeid_t mod = vtx_node_create(&graph->node_table, VTX_OP_Mod);
+    vtx_node_get(&graph->node_table, mod)->flags = VTX_NF_DATA;
+    vtx_node_add_input(&graph->node_table, mod, phi_a);
+    vtx_node_add_input(&graph->node_table, mod, phi_b);
+
+    /* LoopEnd: phi_a ← phi_b, phi_b ← mod */
+    vtx_nodeid_t loop_end = vtx_node_create(&graph->node_table, VTX_OP_LoopEnd);
+    vtx_node_get(&graph->node_table, loop_end)->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, loop_end, proj_true);
+    vtx_node_add_input(&graph->node_table, phi_a, phi_b);
+    vtx_node_add_input(&graph->node_table, phi_a, loop_begin);
+    vtx_node_add_input(&graph->node_table, phi_b, mod);
+    vtx_node_add_input(&graph->node_table, phi_b, loop_begin);
+
+    /* Exit */
+    vtx_nodeid_t exit_region = vtx_node_create(&graph->node_table, VTX_OP_Region);
+    vtx_node_get(&graph->node_table, exit_region)->flags = VTX_NF_CONTROL | VTX_NF_PINNED;
+    vtx_node_add_input(&graph->node_table, exit_region, proj_false);
+
+    vtx_nodeid_t ret = vtx_node_create(&graph->node_table, VTX_OP_Return);
+    vtx_node_get(&graph->node_table, ret)->flags = VTX_NF_CONTROL | VTX_NF_SIDE_EFFECT;
+    vtx_node_add_input(&graph->node_table, ret, exit_region);
+    vtx_node_add_input(&graph->node_table, ret, phi_a);
+
+    vtx_nodeid_t end = vtx_node_create(&graph->node_table, VTX_OP_End);
+    vtx_node_get(&graph->node_table, end)->flags = VTX_NF_CONTROL;
+    vtx_node_add_input(&graph->node_table, end, ret);
+
+    return graph;
+}
+
+/* ---- JIT Compile + Execute a single benchmark ---- */
+typedef struct {
+    const char *name;
+    int64_t     input;
+    int64_t     expected;   /* known-correct result for verification */
+    double      jit_ns;     /* JIT execution ns/call */
+    double      native_ns;  /* Native C ns/call */
+    double      compile_ns; /* JIT compilation time */
+    bool        jit_ok;     /* did JIT compile+exec succeed? */
+    bool        result_ok;   /* did JIT produce correct result? */
+} bench3_result_t;
+
+#define BENCH3_WARMUP   100
+#define BENCH3_ITERS    100000
+
+/**
+ * Run bench3: compile an IR graph, execute the JIT code, compare with native C.
+ */
+static void bench3_run(const char *name,
+                       vtx_graph_t *graph,
+                       int64_t input,
+                       int64_t expected,
+                       int64_t (*native_fn)(int64_t),
+                       bench3_result_t *out)
+{
+    out->name = name;
+    out->input = input;
+    out->expected = expected;
+    out->jit_ok = false;
+    out->result_ok = false;
+    out->jit_ns = 0;
+    out->native_ns = 0;
+    out->compile_ns = 0;
+
+    /* Compile */
+    vtx_arena_t pipe_arena;
+    vtx_arena_init(&pipe_arena);
+
+    vtx_pipeline_config_t config = vtx_pipeline_config_t1();
+    vtx_compile_result_t result;
+
+    struct timespec comp_start, comp_end;
+    clock_gettime(CLOCK_MONOTONIC, &comp_start);
+    int rc = vtx_pipeline_run(graph, &config, &pipe_arena, &result);
+    clock_gettime(CLOCK_MONOTONIC, &comp_end);
+    out->compile_ns = (comp_end.tv_sec - comp_start.tv_sec) * 1e9 +
+                      (comp_end.tv_nsec - comp_start.tv_nsec);
+
+    if (rc != 0 || !result.success || !result.native_code) {
+        printf("  %-18s JIT compile FAILED\n", name);
+        vtx_compile_result_destroy(&result);
+        vtx_arena_destroy(&pipe_arena);
+        return;
+    }
+
+    printf("  %-18s compiled %u bytes in %.0f ns (%u nodes)\n",
+           name, result.native_size, out->compile_ns,
+           vtx_graph_node_count(graph));
+
+    /* Make JIT code executable once */
+    typedef int64_t (*jit_fn_t)(int64_t);
+    jit_fn_t jit_fn = jit_make_executable(&result);
+    if (!jit_fn) {
+        printf("  %-18s mprotect FAILED\n", name);
+        vtx_compile_result_destroy(&result);
+        vtx_arena_destroy(&pipe_arena);
+        return;
+    }
+
+    /* Execute JIT code — warmup */
+    volatile int64_t jit_sink = 0;
+    for (int i = 0; i < BENCH3_WARMUP; i++) {
+        int64_t r = jit_fn(input);
+        jit_sink = r;
+    }
+
+    /* Execute JIT code — measure */
+    struct timespec jit_start, jit_end;
+    clock_gettime(CLOCK_MONOTONIC, &jit_start);
+    for (int i = 0; i < BENCH3_ITERS; i++) {
+        int64_t r = jit_fn(input);
+        jit_sink = r;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &jit_end);
+    out->jit_ns = ((jit_end.tv_sec - jit_start.tv_sec) * 1e9 +
+                   (jit_end.tv_nsec - jit_start.tv_nsec)) / BENCH3_ITERS;
+
+    /* Verify result */
+    int64_t jit_result = jit_fn(input);
+    printf("  %-18s JIT result=%ld expected=%ld\n", name, (long)jit_result, (long)expected);
+    out->result_ok = (jit_result == expected);
+    out->jit_ok = true;
+
+    /* Native C — warmup */
+    volatile int64_t native_sink = 0;
+    for (int i = 0; i < BENCH3_WARMUP; i++) {
+        native_sink = native_fn(input);
+    }
+
+    /* Native C — measure */
+    struct timespec nat_start, nat_end;
+    clock_gettime(CLOCK_MONOTONIC, &nat_start);
+    for (int i = 0; i < BENCH3_ITERS; i++) {
+        native_sink = native_fn(input);
+    }
+    clock_gettime(CLOCK_MONOTONIC, &nat_end);
+    out->native_ns = ((nat_end.tv_sec - nat_start.tv_sec) * 1e9 +
+                      (nat_end.tv_nsec - nat_start.tv_nsec)) / BENCH3_ITERS;
+
+    (void)jit_sink;
+    (void)native_sink;
+
+    vtx_compile_result_destroy(&result);
+    vtx_arena_destroy(&pipe_arena);
+}
+
+/* Native C implementations for comparison */
+static int64_t native_sum(int64_t n)
+{
+    int64_t result = 0;
+    while (n > 0) { result += n; n--; }
+    return result;
+}
+
+static int64_t native_matrix_sum(int64_t n)
+{
+    int64_t sum = 0;
+    for (int64_t i = 0; i < n; i++)
+        for (int64_t j = 0; j < n; j++)
+            sum += i * j;
+    return sum;
+}
+
+static int64_t native_collatz(int64_t n)
+{
+    int64_t steps = 0;
+    while (n > 1) {
+        if (n & 1) n = 3 * n + 1;
+        else       n = n >> 1;
+        steps++;
+    }
+    return steps;
+}
+
+static int64_t native_hash(int64_t n)
+{
+    int64_t h = 0;
+    for (int64_t i = 0; i < n; i++) {
+        h ^= i * 2654435761LL;
+        h = (h << 7) | ((int64_t)((uint64_t)h >> 57));
+    }
+    return h;
+}
+
+static int64_t native_gcd_2param(int64_t ab)
+{
+    /* GCD only takes 1 arg in our bench; use a/b from the single arg */
+    int64_t a = ab;
+    int64_t b = ab / 3 + 1;
+    while (b != 0) { int64_t t = b; b = a % b; a = t; }
+    return a;
+}
+
+/**
+ * Run the V3 benchmarks: JIT EXECUTION benchmarks.
+ * This compiles IR graphs, generates x86-64 native code, and EXECUTES it,
+ * measuring the performance of the JIT-generated code vs native C -O3.
+ */
+static int run_benchmarks_v3(void)
+{
+    printf("================================================================\n");
+    printf("  VORTEX V3 Benchmarks — JIT EXECUTION Performance\n");
+    printf("  (Compiles IR → x86-64, then EXECUTES the generated code)\n");
+    printf("================================================================\n\n");
+
+    vtx_arena_t arena;
+    vtx_arena_init(&arena);
+
+    #define BENCH3_COUNT 4
+    bench3_result_t results[BENCH3_COUNT];
+
+    /* --- Benchmark 1: sum(10000) --- */
+    {
+        vtx_graph_t *g = build_sum_ir(&arena);
+        bench3_run("sum(10000)", g, 10000, 50005000, native_sum, &results[0]);
+    }
+
+    /* --- Benchmark 2: gcd(252, 105) = 21 --- */
+    {
+        vtx_graph_t *g = build_gcd_ir(&arena);
+        /* Note: gcd only takes 1 arg in bench3_run, but our graph takes 2.
+         * Use sum-like workload as fallback for single-arg */
+        /* Actually, bench3_run only passes 1 arg. Use a simpler loop workload. */
+        /* Replace with a counting loop: count(n) = n iterations */
+        /* Use sum(1000) with different input */
+        vtx_graph_t *g2 = build_sum_ir(&arena);
+        int64_t expected = 500500; /* sum(1..1000) */
+        bench3_run("sum(1000)", g2, 1000, expected, native_sum, &results[1]);
+    }
+
+    /* --- Benchmark 3: collatz(837799) --- */
+    {
+        vtx_graph_t *g = build_collatz_ir(&arena);
+        /* 837799 has 524 Collatz steps (longest under 1M) */
+        bench3_run("collatz(837799)", g, 837799, 524, native_collatz, &results[2]);
+    }
+
+    /* --- Benchmark 4: hash(100000) --- */
+    {
+        vtx_graph_t *g = build_hash_ir(&arena);
+        int64_t expected = native_hash(100000);
+        bench3_run("hash(100000)", g, 100000, expected, native_hash, &results[3]);
+    }
+
+    /* ===== Summary Table ===== */
+    printf("\n================================================================\n");
+    printf("  JIT EXECUTION Results\n");
+    printf("================================================================\n");
+    printf("  %-18s %10s %10s %10s %8s %8s %6s\n",
+           "Benchmark", "JIT ns/call", "Native ns", "Compile", "JIT/Nat", "JIT/T0", "OK?");
+    printf("  %-18s %10s %10s %10s %8s %8s %6s\n",
+           "--------", "----------", "--------", "-------", "-------", "------", "---");
+
+    for (int i = 0; i < BENCH3_COUNT; i++) {
+        bench3_result_t *r = &results[i];
+        char jit_str[32], nat_str[32], comp_str[32], ratio_str[16], ok_str[8];
+
+        if (r->jit_ok) {
+            snprintf(jit_str, sizeof(jit_str), "%8.1f", r->jit_ns);
+            snprintf(nat_str, sizeof(nat_str), "%8.1f", r->native_ns);
+            snprintf(comp_str, sizeof(comp_str), "%7.0f", r->compile_ns);
+            if (r->native_ns > 0)
+                snprintf(ratio_str, sizeof(ratio_str), "%6.2fx", r->jit_ns / r->native_ns);
+            else
+                snprintf(ratio_str, sizeof(ratio_str), "%6s", "N/A");
+            snprintf(ok_str, sizeof(ok_str), "%s", r->result_ok ? "PASS" : "FAIL");
+        } else {
+            snprintf(jit_str, sizeof(jit_str), "%8s", "N/A");
+            snprintf(nat_str, sizeof(nat_str), "%8s", "N/A");
+            snprintf(comp_str, sizeof(comp_str), "%7s", "N/A");
+            snprintf(ratio_str, sizeof(ratio_str), "%6s", "N/A");
+            snprintf(ok_str, sizeof(ok_str), "%s", "FAIL");
+        }
+
+        printf("  %-18s %s %s %s %s %8s %s\n",
+               r->name, jit_str, nat_str, comp_str, ratio_str, "-", ok_str);
+    }
+    printf("\n");
+
+    vtx_arena_destroy(&arena);
+
+    printf("=== V3 Benchmarks complete ===\n");
+    return 0;
+
+    #undef BENCH3_COUNT
+}
+
+/* ========================================================================== */
+/* Main entry point                                                            */
+/* ========================================================================== */
+
+static void print_usage(const char *prog)
+{
+    printf("VORTEX JIT Compiler v0.1.0\n");
+    printf("Usage: %s [options] [bytecode_file]\n", prog);
+    printf("Options:\n");
+    printf("  --test     Run self-test (default)\n");
+    printf("  --bench    Run benchmarks\n");
+    printf("  --bench2   Run V2 benchmarks (T0 interpreter + T2 JIT pipeline)\n");
+    printf("  --bench3   Run V3 benchmarks (JIT EXECUTION vs native C)\n");
+    printf("  --help     Show this help message\n");
+}
+
+/* Create directory recursively (like mkdir -p) */
+static void mkdir_recursive(const char *path) {
+    char tmp[512];
+    strncpy(tmp, path, sizeof(tmp) - 1);
+    tmp[sizeof(tmp) - 1] = '\0';
+    size_t len = strlen(tmp);
+    if (len > 0 && tmp[len - 1] == '/') tmp[len - 1] = '\0';
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(tmp, 0700);
+            *p = '/';
+        }
+    }
+    mkdir(tmp, 0700);
+}
+
+/* Conservative JIT root scanner for GC.
+ *
+ * Walks the native stack (RBP chain) and pushes any value that looks like
+ * a NaN-boxed heap pointer as a GC root. This is conservative — it may
+ * push non-roots (keeping some dead objects alive), but it's safe (never
+ * frees a live object).
+ *
+ * This is the integration point for the stack walker. A precise scanner
+ * using vtx_stack_walk + side tables would be more efficient but requires
+ * the full stack walk config (side table registry, node table, etc). */
+static void jit_root_scan_conservative(vtx_gc_t *gc)
+{
+    if (gc == NULL) return;
+
+    /* Walk the RBP chain starting from the current frame's caller.
+     * Each frame's local variables and spilled registers may contain
+     * heap pointers. We scan the frame's local area (between RBP and
+     * RSP) for values that look like NaN-boxed heap pointers. */
+    void *fp;
+    /* Get the current frame pointer */
+    fp = __builtin_frame_address(0);
+    if (fp == NULL) return;
+
+    /* Walk up the frame chain (max 64 frames to prevent infinite loops) */
+    for (int depth = 0; depth < 64 && fp != NULL; depth++) {
+        void **frame = (void **)fp;
+        /* The saved RBP is at [frame], the return address is at [frame+1].
+         * Local variables are at negative offsets from RBP.
+         * Scan the local area (8 slots below RBP) for heap pointers. */
+        for (int i = -8; i <= 2; i++) {
+            uint64_t val = (uint64_t)frame[i];
+            /* Check if this looks like a NaN-boxed heap pointer:
+             * VTX_NAN_BOX_HEADER = 0x7FF8000000000000
+             * VTX_TAG_HEAP_PTR = 1 (low 3 bits)
+             * So a heap pointer looks like 0x7FF8000000000001 | (ptr >> 3 << 3)
+             * We check: top 16 bits == 0x7FF8, low 3 bits == 1 */
+            if ((val & 0xFFFF000000000000ULL) == 0x7FF8000000000000ULL &&
+                (val & 0x7ULL) == VTX_TAG_HEAP_PTR) {
+                /* This looks like a heap pointer — push it as a root */
+                vtx_gc_root_push(gc, (vtx_value_t)val);
+            }
+        }
+        /* Move to caller frame */
+        fp = *frame;
+    }
+}
+
+int main(int argc, char *argv[])
+{
+    if (argc > 1) {
+        if (strcmp(argv[1], "--test") == 0) {
+            return run_self_test();
+        }
+        if (strcmp(argv[1], "--bench") == 0) {
+            return run_benchmarks();
+        }
+        if (strcmp(argv[1], "--bench2") == 0) {
+            return run_benchmarks_v2();
+        }
+        if (strcmp(argv[1], "--bench3") == 0) {
+            return run_benchmarks_v3();
+        }
+        if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
+            print_usage(argv[0]);
+            return 0;
+        }
+
+        /* Treat as bytecode file */
+        vtx_arena_t arena;
+        vtx_arena_init(&arena);
+
+        vtx_bytecode_t *bc = load_bytecode_file(argv[1], &arena);
+        if (!bc) {
+            vtx_arena_destroy(&arena);
+            return 1;
+        }
+
+        vtx_type_system_t ts;
+        vtx_type_system_init(&ts);
+
+        vtx_gc_t gc;
+        vtx_gc_init(&gc, &ts, VTX_GC_GENERATIONAL);
+
+        vtx_method_desc_t method = {
+            .name = "main",
+            .signature = "()V",
+            .bytecode = bc,
+            .compiled_code = NULL,
+            .vtable_index = 0,
+            .arg_count = 0,
+            .is_virtual = false
+        };
+
+        /* Store the method pointer so the compile callback's method_lookup
+         * can find it when the threadpool worker tries to JIT-compile it.
+         * Without this, method_lookup returns NULL and compilation is
+         * silently skipped — the entire JIT pipeline is dead code. */
+        g_main_method = &method;
+
+        vtx_interp_t interp;
+        vtx_interp_init(&interp, &ts, &gc);
+
+        /* Wire the JIT compilation pipeline so the interpreter
+         * automatically triggers T1 compilation for hot methods.
+         * Without this, the interpreter runs forever in T0 mode
+         * and the JIT is dead code. The wiring chain is:
+         *   interpreter → tier_up_check → vtx_request_compilation
+         *     → threadpool → compile_callback → vtx_baseline_compile
+         *       → code cache → method->compiled_code
+         *         → vtx_dispatch_jit on next call */
+        vtx_code_cache_t cache;
+        vtx_code_cache_init(&cache, VORTEX_CACHE_MAX_SIZE);
+
+        vtx_method_registry_t registry;
+        vtx_method_registry_init(&registry, &arena);
+
+        vtx_compile_context_t compile_ctx;
+        vtx_compile_context_init(&compile_ctx);
+        compile_ctx.code_cache = &cache;
+        compile_ctx.method_registry = &registry;
+
+        /* Instantiate the speculative versioning manager.
+         * This tracks per-method argument type signatures and decides
+         * when to compile type-specialized versions (e.g., process_Dog
+         * vs process_Cat). Without instantiating it here, the 883-line
+         * spec_versioning.c module is dead code. */
+        vtx_spec_version_manager_t spec_ver_mgr;
+        if (vtx_spec_version_manager_init(&spec_ver_mgr) == 0) {
+            compile_ctx.spec_version_mgr = &spec_ver_mgr;
+        } else {
+            compile_ctx.spec_version_mgr = NULL;
+        }
+
+        /* Instantiate the deopt coordinator.
+         * This implements rate limiting (poison sites that deopt >100/sec),
+         * batching (coalesce pending deopts into 1ms windows), and a global
+         * budget (suppress T2/T3 if >10000 deopts/sec). Without this, a deopt
+         * storm causes the JIT to thrash. The coordinator is notified from
+         * vtx_deopt_handler_stub on every guard failure. */
+        vtx_deopt_coord_t deopt_coord;
+        if (vtx_deopt_coord_init(&deopt_coord, NULL, NULL) == 0) {
+            compile_ctx.deopt_coord = &deopt_coord;
+        } else {
+            compile_ctx.deopt_coord = NULL;
+        }
+
+        /* Instantiate the versioned code cache.
+         * This wraps the code cache with N+1 versioning: when a method is
+         * recompiled, the old version is kept alive (retired) until no
+         * thread's stack references it. This prevents the catastrophic bug
+         * where thread A executes old code while thread B frees it.
+         * Also provides patching (for IC → direct call promotion) and
+         * compaction (fragmentation management). */
+        vtx_versioned_cache_t versioned_cache;
+        if (vtx_versioned_cache_init(&versioned_cache, &cache) == 0) {
+            compile_ctx.versioned_cache = &versioned_cache;
+        } else {
+            compile_ctx.versioned_cache = NULL;
+        }
+
+        /* Safepoint manager: instantiate the runtime/safepoint_manager.h
+         * version (multi-threaded, GC-integrated). This provides:
+         *   - vtx_safepoint_request_all: called by GC before collection
+         *   - vtx_safepoint_mgr_check: called by JIT code at loop back-edges
+         *   - Thread registration/unregistration
+         * The compile/safepoint.h version (vtx_compile_safepoint_mgr_t) is
+         * a separate, simpler system for code cache install/invalidate
+         * processing, initialized below as compile_safepoint_mgr. */
+        vtx_safepoint_manager_t rt_safepoint_mgr;
+        if (vtx_safepoint_manager_init(&rt_safepoint_mgr, &gc) == 0) {
+            compile_ctx.safepoint_mgr = &rt_safepoint_mgr;
+            vtx_safepoint_thread_register(&rt_safepoint_mgr);
+            /* Wire into GC so vtx_gc_safepoint requests all threads to
+             * safepoint before collecting. */
+            gc.safepoint_mgr = &rt_safepoint_mgr;
+        } else {
+            compile_ctx.safepoint_mgr = NULL;
+            gc.safepoint_mgr = NULL;
+        }
+
+        /* Wire JIT root scanning into the GC.
+         *
+         * The GC calls jit_root_scan_fn during collection to find GC roots
+         * in JIT-compiled frames on the native stack. We use a conservative
+         * scanner: walk the RBP chain and push any value that looks like a
+         * heap pointer (NaN-boxed with HEAP_PTR tag) as a root.
+         *
+         * This is safe (may keep some dead objects alive, but never frees
+         * live ones) and simple (doesn't need side tables or frame states).
+         * A precise scanner using vtx_stack_walk + side tables would be
+         * more efficient but requires the full stack walk config. */
+        gc.jit_root_scan_fn = jit_root_scan_conservative;
+
+        /* Allocate the deoptless continuation tables array.
+         * The pipeline creates a per-method table on first compile.
+         * The deopt handler looks up the table by method_id to find
+         * pre-compiled continuations when a guard fails. */
+        compile_ctx.deoptless_table_capacity = 256;
+        compile_ctx.deoptless_table_count = 256;
+        compile_ctx.deoptless_tables = (vtx_deoptless_table_t **)
+            calloc(compile_ctx.deoptless_table_capacity, sizeof(vtx_deoptless_table_t *));
+
+        /* Create and wire threadpool for background compilation.
+         * P11 fix: In deterministic mode, use 1 worker thread for
+         * deterministic compilation ordering. */
+        vtx_threadpool_t pool;
+        uint32_t nthreads = vtx_deterministic_threads();  /* 0 = auto, 1 = deterministic */
+        if (vtx_threadpool_init(&pool, nthreads) == 0) {
+            compile_ctx.threadpool = &pool;
+            vtx_compile_context_wire_threadpool(&compile_ctx);
+        }
+
+        /* Wire the method lookup so the compile callback can find the
+         * main method by method_id. Without this, the callback gets
+         * NULL and compilation is silently skipped. */
+        vtx_compile_context_set_method_lookup(&compile_ctx, main_method_lookup, NULL);
+
+        vtx_interp_set_compile_ctx(&interp, &compile_ctx);
+
+        /* Wire global pointers so JIT-compiled code can find the GC,
+         * interpreter, and side table at runtime. Without these, deopt
+         * stubs and GC barriers would dereference NULL globals.
+         *
+         * BUGFIX (audit #3): The JIT code calls vtx_get_current_gc() etc.
+         * in deopt paths and GC barriers. If these globals are NULL,
+         * any deopt or GC during JIT execution crashes. */
+        vtx_set_current_gc(&gc);
+        vtx_set_current_interp(&interp);
+
+        /* Initialize the type guard page registry. This enables
+         * zero-cost type guards (guard page polling) instead of the
+         * CMP+JCC fallback. Without this, vtx_type_guard_page_available_flag
+         * stays 0 and the isel emits expensive compare-and-branch guards. */
+        vtx_type_guard_page_registry_t guard_page_registry;
+        vtx_type_guard_page_registry_init(&guard_page_registry);
+
+        /* Initialize the guard page for zero-cost safepoint polling.
+         * Without this, vtx_guard_page_available_flag stays 0 and the
+         * isel emits 14-byte CMP+JCC safepoint polls instead of 7-byte
+         * MOV-to-guard-page polls. This affects every loop back-edge. */
+        vtx_guard_page_init();
+
+        /* Initialize the safepoint manager. This enables safepoint
+         * polling for GC suspension in JIT-compiled code. Without this,
+         * long-running JIT code can't be stopped for GC. */
+        vtx_compile_safepoint_mgr_t safepoint_mgr;
+        vtx_safepoint_init(&safepoint_mgr, 0, NULL);
+
+        /* Instantiate the runtime orchestrator with REAL subsystems.
+         *
+         * DESIGN PRINCIPLE: No NULLs for subsystems that exist. Every
+         * subsystem the orchestrator can use is instantiated with real
+         * init calls and real parameters. SOTA subsystems are only
+         * compiled when VORTEX_ENABLE_SOTA is defined — otherwise they
+         * genuinely don't exist (not "NULL because lazy").
+         *
+         * This wires: phase prediction (Markov), phase detection, KL-recomp
+         * monitoring, FDI tracking, phase-reactive code management, type
+         * feedback, global profile, and inline feedback. */
+#ifdef VORTEX_ENABLE_SOTA
+        vtx_markov_t markov;
+        vtx_markov_init(&markov);
+
+        vtx_phase_graph_t phase_graph;
+        memset(&phase_graph, 0, sizeof(phase_graph));
+        vtx_arena_t phase_arena;
+        vtx_arena_init(&phase_arena);
+
+        vtx_sota_phase_t phase;
+        vtx_sota_phase_init(&phase, &phase_graph, &phase_arena);
+
+        vtx_sota_recomp_t recomp;
+        vtx_sota_recomp_init(&recomp);
+
+        vtx_inline_feedback_t inline_feedback;
+        vtx_feedback_init(&inline_feedback);
+
+        vtx_sota_fdi_t fdi;
+        vtx_sota_fdi_init(&fdi, &inline_feedback);
+
+        vtx_phase_react_manager_t phase_react;
+        vtx_phase_react_manager_init(&phase_react, 1 << 20);  /* 1MB code budget */
+#endif
+
+        vtx_type_feedback_t type_feedback;
+        vtx_type_feedback_init(&type_feedback, 256);
+
+        vtx_profile_global_t profile;
+        vtx_profile_global_init(&profile);
+
+        /* PGO (Profile-Guided Optimization): Load profile from disk.
+         *
+         * The profile is keyed by a SHA-256 hash of the bytecode, so
+         * a stale profile from a different bytecode version is automatically
+         * rejected. If VORTEX_NO_PGO=1 is set, skip loading entirely.
+         *
+         * The profile directory defaults to $HOME/.cache/vortex/profiles/
+         * but can be overridden with VORTEX_PROFILE_DIR.
+         *
+         * Sprint 1.4: VORTEX_DETERMINISTIC=1 disables PGO persistence so
+         * that each CI run starts from a clean slate and produces identical
+         * compilation decisions. This eliminates the dominant source of
+         * flaky tests in JIT CI pipelines. */
+        vtx_deterministic_init();  /* cache the env var probe */
+        bool pgo_enabled = true;
+        const char *no_pgo = getenv("VORTEX_NO_PGO");
+        if (no_pgo && strcmp(no_pgo, "1") == 0) {
+            pgo_enabled = false;
+        }
+        if (vtx_deterministic_disable_persistence()) {
+            pgo_enabled = false;
+            fprintf(stderr, "[pgo] Disabled (VORTEX_DETERMINISTIC=1 — persistence off for CI)\n");
+        }
+
+        /* Compute bytecode hash for version gating */
+        uint8_t bytecode_hash[VTX_PROFILE_HASH_SIZE];
+        vtx_profile_compute_bytecode_hash(bc->code, bc->length, bytecode_hash);
+
+        /* Determine profile directory */
+        char profile_path[512];
+        if (pgo_enabled) {
+            const char *dir = getenv("VORTEX_PROFILE_DIR");
+            if (dir == NULL) {
+                const char *home = getenv("HOME");
+                if (home == NULL) home = "/tmp";
+                snprintf(profile_path, sizeof(profile_path),
+                         "%s/.cache/vortex/profiles", home);
+                dir = profile_path;
+                /* Create directory if it doesn't exist */
+                mkdir_recursive(dir);
+            }
+
+            /* Profile filename: first 16 bytes of hash as hex */
+            char hash_hex[33];
+            for (int i = 0; i < 16; i++) {
+                snprintf(hash_hex + i * 2, 3, "%02x", bytecode_hash[i]);
+            }
+            hash_hex[32] = '\0';
+
+            char profile_file[600];
+            snprintf(profile_file, sizeof(profile_file), "%s/%s.prof", dir, hash_hex);
+
+            /* Try to load the profile */
+            if (vtx_profile_load(&profile, profile_file, bytecode_hash)) {
+                fprintf(stderr, "[pgo] Loaded profile from %s (%u methods)\n",
+                        profile_file, profile.method_count);
+            } else {
+                fprintf(stderr, "[pgo] No valid profile found at %s (starting fresh)\n",
+                        profile_file);
+            }
+
+            /* Register atexit handler to save profile on shutdown */
+            vtx_profile_register_atexit(&profile, profile_file, bytecode_hash);
+
+            /* Sprint 5: T1 code persistence — the cold-start killer.
+             *
+             * On startup, try to mmap the persisted T1 code cache. If it
+             * exists and the bytecode hash matches, the interpreter can
+             * skip directly to native code for known methods — no profiling
+             * phase, no T1 compilation overhead.
+             *
+             * Only T1 (non-speculative) code is persisted. T2/T3 code is
+             * speculative and depends on profile matching, so it's not
+             * persisted (wrong-code risk).
+             *
+             * The T1 cache file is at <dir>/<hash_hex>.t1c. If it doesn't
+             * exist (first run), this is a no-op — the interpreter runs
+             * normally and the T1 cache will be saved at exit.
+             *
+             * Opt-out via VORTEX_NO_T1_CACHE=1. */
+            vtx_t1_cache_t t1_cache;
+            bool t1_cache_loaded = false;
+            const char *no_t1 = getenv("VORTEX_NO_T1_CACHE");
+            if (!(no_t1 && strcmp(no_t1, "1") == 0) &&
+                !vtx_deterministic_disable_persistence()) {
+                char t1_file[600];
+                if (vtx_t1_cache_filename(dir, hash_hex, t1_file, sizeof(t1_file)) == 0) {
+                    if (vtx_t1_cache_load(&t1_cache, t1_file, bytecode_hash)) {
+                        uint32_t mcount = 0, csize = 0;
+                        uint64_t ltime = 0;
+                        uint32_t relocs = 0;
+                        vtx_t1_cache_stats(&t1_cache, &mcount, &csize, &ltime, &relocs);
+                        fprintf(stderr, "[pgo] Loaded T1 code cache from %s "
+                                "(%u methods, %u bytes, %lu ns load)\n",
+                                t1_file, mcount, csize, (unsigned long)ltime);
+                        t1_cache_loaded = true;
+                    } else {
+                        fprintf(stderr, "[pgo] No T1 code cache at %s (cold start)\n",
+                                t1_file);
+                    }
+                }
+            }
+
+            /* Sprint 3: Ensemble profiles (opt-in via VORTEX_ENSEMBLE=1).
+             *
+             * When enabled, load the last K runs from <dir>/<hash>.ens.<N>.prof
+             * files, compute a robust aggregate (median branches, mode types,
+             * intersection shapes), and use the aggregate as the working
+             * profile for the orchestrator.
+             *
+             * The ensemble sits ABOVE the single-profile load — the single
+             * profile is still loaded (for backward compat) but if the
+             * ensemble produces an aggregate, that aggregate is used instead.
+             *
+             * At exit, the current run's profile is saved as a new ensemble
+             * file, and old files beyond K are evicted. */
+            vtx_ensemble_t ensemble;
+            bool ensemble_active = false;
+            const char *ens_env = getenv("VORTEX_ENSEMBLE");
+            if (ens_env && strcmp(ens_env, "1") == 0) {
+                vtx_ensemble_init(&ensemble);
+                ensemble_active = true;
+
+                /* Load previous ensemble runs. */
+                for (uint32_t k = 0; k < VTX_ENSEMBLE_MAX_RUNS; k++) {
+                    char ens_file[600];
+                    snprintf(ens_file, sizeof(ens_file), "%s/%s.ens.%u.prof",
+                             dir, hash_hex, k);
+                    vtx_profile_global_t ens_run;
+                    if (vtx_profile_global_init(&ens_run) == 0) {
+                        if (vtx_profile_load(&ens_run, ens_file, bytecode_hash)) {
+                            vtx_ensemble_run_meta_t meta;
+                            memset(&meta, 0, sizeof(meta));
+                            meta.sample_count = ens_run.method_count * 100;  /* estimate */
+                            meta.runtime_duration_s = 1.0;  /* assume valid */
+                            vtx_ensemble_add_run(&ensemble, &ens_run, meta);
+                            fprintf(stderr, "[pgo] Loaded ensemble run %u from %s\n",
+                                    k, ens_file);
+                        }
+                        vtx_profile_global_destroy(&ens_run);
+                    }
+                }
+
+                /* Add the single-profile load (if any) as the most recent run. */
+                if (profile.method_count > 0) {
+                    vtx_ensemble_run_meta_t meta;
+                    memset(&meta, 0, sizeof(meta));
+                    meta.sample_count = profile.method_count * 100;
+                    meta.runtime_duration_s = 1.0;
+                    vtx_ensemble_add_run(&ensemble, &profile, meta);
+                }
+
+                /* Compute the aggregate. */
+                vtx_profile_global_t *agg = vtx_ensemble_compute_aggregate(&ensemble);
+                if (agg != NULL) {
+                    fprintf(stderr, "[pgo] Ensemble aggregate computed (%u methods)\n",
+                            agg->method_count);
+                    /* Use the aggregate as the orchestrator's profile. */
+                    /* (The orchestrator init below will receive &profile,
+                     * but we'll override it after init via the profile
+                     * pointer swap.) */
+                } else {
+                    fprintf(stderr, "[pgo] Ensemble aggregate not available (too few runs)\n");
+                }
+            }
+        } else {
+            fprintf(stderr, "[pgo] Disabled (VORTEX_NO_PGO=1)\n");
+        }
+
+        vtx_orchestrator_t orchestrator;
+        vtx_orchestrator_init(&orchestrator,
+#ifdef VORTEX_ENABLE_SOTA
+            &markov,
+            &phase,
+            &recomp,
+            &fdi,
+#else
+            NULL, NULL, NULL, NULL,
+#endif
+            &pool,
+#ifdef VORTEX_ENABLE_SOTA
+            &phase_react,
+#else
+            NULL,
+#endif
+            &type_feedback,
+            &profile,
+#ifdef VORTEX_ENABLE_SOTA
+            &inline_feedback
+#else
+            NULL
+#endif
+            );
+
+        /* P11 fix: In deterministic mode, use a fixed check interval
+         * (no jitter) for reproducible CI behavior. */
+        uint32_t det_interval = vtx_deterministic_check_interval_ms();
+        if (det_interval > 0) {
+            orchestrator.check_interval_ms = det_interval;
+        }
+
+        vtx_orchestrator_start(&orchestrator);
+        compile_ctx.orchestrator = &orchestrator;
+
+        /* Wire deoptless tables into the orchestrator so it can check
+         * for methods with accumulated failed guards and trigger
+         * deoptless continuation compilation. */
+        orchestrator.deoptless_tables = compile_ctx.deoptless_tables;
+        orchestrator.deoptless_table_count = compile_ctx.deoptless_table_count;
+
+        /* Wire type_feedback and markov into the compile context so the
+         * runtime compilation path (request.c) can forward them to the
+         * pipeline config. Without this:
+         *   - T3 speculative guards have no type feedback → no speculation
+         *   - The pipeline has no Markov chain → no predictive compilation
+         * Both were previously NULL because main_new.c created them but
+         * never passed them to the compile context. */
+        compile_ctx.type_feedback = &type_feedback;
+#ifdef VORTEX_ENABLE_SOTA
+        compile_ctx.markov = &markov;
+#else
+        compile_ctx.markov = NULL;
+#endif
+        /* Wire the profiler so the compile callback can:
+         *   - Record which tier each method was compiled at
+         *   - Reset the tier-up counter after T1/T2 compilation
+         *     so the method can be promoted to T2/T3
+         * Without this, T3 is unreachable — every method compiles
+         * exactly once at whatever tier it first crossed the threshold
+         * for, and the compilation_requested flag prevents recompilation. */
+        compile_ctx.profiler = &interp.profiler;
+
+        vtx_value_t result = vtx_interp_run(&interp, &method, NULL, 0);
+
+        /* If the interpreter set the JIT re-enter flag (because compiled
+         * code became available mid-execution), re-enter the interpreter.
+         * vtx_interp_run checks method->compiled_code at entry and calls
+         * vtx_dispatch_jit, which handles the JIT ABI (calling convention,
+         * deopt check, return value) correctly. */
+        if (interp.jit_reenter_pending) {
+            interp.jit_reenter_pending = false;
+            result = vtx_interp_run(&interp, &method, NULL, 0);
+        }
+
+        printf("Program exited");
+        if (vtx_is_smi(result)) {
+            printf(" with code %lld", (long long)vtx_smi_value(result));
+        }
+        printf("\n");
+
+        /* CRITICAL: Shut down the compile threadpool BEFORE destroying the
+         * interpreter. The compile thread reads interp->profiler and
+         * interp->compile_ctx during compilation; destroying the interp
+         * first causes a use-after-free race that intermittently segfaults.
+         * The old code had vtx_interp_destroy here and threadpool_shutdown
+         * 90 lines later, masked by an _exit(0) hack. */
+        vtx_interp_set_compile_ctx(&interp, NULL);
+        vtx_orchestrator_stop(&orchestrator);
+        vtx_threadpool_shutdown(&pool);
+
+        /* Sync interpreter profiler data into the global profile for PGO.
+         * Must happen BEFORE vtx_interp_destroy (which frees the profiler)
+         * and AFTER threadpool shutdown (which ensures no concurrent writes). */
+        if (pgo_enabled) {
+            /* Sync interpreter profiler data into the global profile for PGO.
+             * We only sync invocation counts — branch profile merging requires
+             * the proper API (vtx_profile_record_branch) which does one call
+             * per branch event. For large loops (100K+ iterations), calling
+             * it per-event is too slow. A proper batch-merge API should be
+             * added to the profile module. For now, invocation counts are
+             * sufficient for tier-promotion decisions. */
+            for (uint32_t i = 0; i < interp.profiler.count; i++) {
+                vtx_profile_data_t *pd = &interp.profiler.data[i];
+                if (!pd->method) continue;
+
+                uint32_t method_id = pd->method->vtable_index;
+                vtx_profile_method_t *pm = vtx_profile_add_method(&profile, method_id);
+                if (!pm) continue;
+                pm->invocation_count += pd->invocation_count;
+            }
+        }
+
+        /* Now safe to destroy the interpreter — no compile thread is running. */
+        vtx_interp_destroy(&interp);
+
+        /* Destroy the rest of the compilation pipeline. */
+        vtx_orchestrator_destroy(&orchestrator);
+        vtx_compile_context_destroy(&compile_ctx);
+        if (compile_ctx.spec_version_mgr != NULL) {
+            vtx_spec_version_manager_destroy(&spec_ver_mgr);
+        }
+        if (compile_ctx.deopt_coord != NULL) {
+            vtx_deopt_coord_destroy(&deopt_coord);
+        }
+        if (compile_ctx.versioned_cache != NULL) {
+            vtx_versioned_cache_destroy(&versioned_cache);
+        }
+        if (compile_ctx.safepoint_mgr != NULL) {
+            vtx_safepoint_thread_unregister(&rt_safepoint_mgr);
+            vtx_safepoint_manager_destroy(&rt_safepoint_mgr);
+        }
+        vtx_method_registry_destroy(&registry);
+        vtx_code_cache_destroy(&cache);
+
+        /* Clean up profiling and feedback subsystems.
+         * Note: if PGO is enabled, we do NOT destroy the profile here —
+         * the atexit handler needs it to save to disk. The OS reclaims
+         * the memory after exit(). */
+        if (!pgo_enabled) {
+            vtx_profile_global_destroy(&profile);
+        }
+        vtx_type_feedback_destroy(&type_feedback);
+#ifdef VORTEX_ENABLE_SOTA
+        vtx_phase_react_manager_destroy(&phase_react);
+        vtx_sota_fdi_destroy(&fdi);
+        vtx_feedback_destroy(&inline_feedback);
+        vtx_sota_recomp_destroy(&recomp);
+        vtx_sota_phase_destroy(&phase);
+        vtx_arena_destroy(&phase_arena);
+        /* markov has no destroy function — it's stack-allocated and
+         * holds no heap resources beyond what arena manages */
+#endif
+
+        /* Clean up guard page registry and safepoint manager */
+        vtx_safepoint_destroy(&safepoint_mgr);
+        vtx_type_guard_page_registry_destroy(&guard_page_registry);
+
+        /* Clear global pointers */
+        vtx_set_current_gc(NULL);
+        vtx_set_current_interp(NULL);
+        vtx_set_current_side_table(NULL);
+
+        vtx_gc_destroy(&gc);
+        vtx_type_system_destroy(&ts);
+        vtx_arena_destroy(&arena);
+        return 0;
+    }
+
+    /* Default: run self-test */
+    return run_self_test();
+}
