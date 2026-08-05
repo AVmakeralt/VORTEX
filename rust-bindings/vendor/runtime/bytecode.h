@@ -93,6 +93,12 @@ typedef enum {
     /* Returns */
     VT_OP_RETURN,        /* return void */
     VT_OP_RETURN_VALUE,  /* pop 1, return value */
+    VT_OP_RETURN_MULTI,  /* 2-byte operand: count. Pop count values, return them. */
+
+    /* Varargs support */
+    VT_OP_LOAD_VARARGS,  /* push varargs array (set up by caller) onto stack */
+    VT_OP_VARARG_COUNT,  /* push number of varargs */
+    VT_OP_VARARG_GET,    /* 2-byte operand: index. Push the nth vararg. */
 
     /* Object creation (2-byte operand: typeid) */
     VT_OP_NEW,

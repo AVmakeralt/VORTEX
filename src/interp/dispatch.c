@@ -746,6 +746,10 @@ vtx_value_t vtx_interp_run(vtx_interp_t *interp,
         local_dispatch_table[VT_OP_CALL_INTERFACE] = DISPATCH_LABEL(VT_OP_CALL_INTERFACE);
         local_dispatch_table[VT_OP_RETURN]         = DISPATCH_LABEL(VT_OP_RETURN);
         local_dispatch_table[VT_OP_RETURN_VALUE]   = DISPATCH_LABEL(VT_OP_RETURN_VALUE);
+        local_dispatch_table[VT_OP_RETURN_MULTI]   = DISPATCH_LABEL(VT_OP_RETURN_MULTI);
+        local_dispatch_table[VT_OP_LOAD_VARARGS]   = DISPATCH_LABEL(VT_OP_LOAD_VARARGS);
+        local_dispatch_table[VT_OP_VARARG_COUNT]   = DISPATCH_LABEL(VT_OP_VARARG_COUNT);
+        local_dispatch_table[VT_OP_VARARG_GET]    = DISPATCH_LABEL(VT_OP_VARARG_GET);
         local_dispatch_table[VT_OP_NEW]            = DISPATCH_LABEL(VT_OP_NEW);
         local_dispatch_table[VT_OP_NEWARRAY]       = DISPATCH_LABEL(VT_OP_NEWARRAY);
         local_dispatch_table[VT_OP_CHECKCAST]      = DISPATCH_LABEL(VT_OP_CHECKCAST);
@@ -966,6 +970,10 @@ switch_dispatch:
             case VT_OP_CALL_INTERFACE: goto dispatch_VT_OP_CALL_INTERFACE;
             case VT_OP_RETURN:         goto dispatch_VT_OP_RETURN;
             case VT_OP_RETURN_VALUE:   goto dispatch_VT_OP_RETURN_VALUE;
+            case VT_OP_RETURN_MULTI:   goto dispatch_VT_OP_RETURN_MULTI;
+            case VT_OP_LOAD_VARARGS:   goto dispatch_VT_OP_LOAD_VARARGS;
+            case VT_OP_VARARG_COUNT:   goto dispatch_VT_OP_VARARG_COUNT;
+            case VT_OP_VARARG_GET:     goto dispatch_VT_OP_VARARG_GET;
             case VT_OP_NEW:            goto dispatch_VT_OP_NEW;
             case VT_OP_NEWARRAY:       goto dispatch_VT_OP_NEWARRAY;
             case VT_OP_CHECKCAST:      goto dispatch_VT_OP_CHECKCAST;
@@ -2134,12 +2142,80 @@ dispatch_VT_OP_CALL_INTERFACE:
     /* ---- VT_OP_RETURN ---- */
 dispatch_VT_OP_RETURN:
     result = VTX_VALUE_UNDEFINED;
+    interp->multi_return_count = 0;
     goto dispatch_return;
 
     /* ---- VT_OP_RETURN_VALUE ---- */
 dispatch_VT_OP_RETURN_VALUE:
     result = *--sp;
+    interp->multi_return_count = 0;
     goto dispatch_return;
+
+    /* ---- VT_OP_RETURN_MULTI ----
+     * Pop `count` values from the stack and return them.
+     * The first value popped is the primary return value (stored in `result`).
+     * The remaining values are stored in interp->multi_return_values[].
+     * interp->multi_return_count holds the total count (including primary).
+     *
+     * The caller can use VT_OP_LOAD_MULTI_RET to push the extra values
+     * back onto its stack.
+     *
+     * Stack before: [..., val_n, ..., val_2, val_1]  (val_1 on top)
+     * After: result = val_1, multi_return_values = [val_2, ..., val_n] */
+dispatch_VT_OP_RETURN_MULTI:
+    {
+        uint16_t count = read_operand(code, pc);
+        if (count == 0) {
+            result = VTX_VALUE_UNDEFINED;
+            interp->multi_return_count = 0;
+        } else {
+            /* Pop count values. The last popped (top of stack) is the
+             * primary return value. The rest go in multi_return_values. */
+            result = *--sp;  /* primary (top of stack) */
+            uint32_t extra = (count > 1) ? (count - 1) : 0;
+            for (uint32_t i = 0; i < extra && i < 16; i++) {
+                interp->multi_return_values[i] = *--sp;
+            }
+            interp->multi_return_count = count;
+        }
+        goto dispatch_return;
+    }
+
+    /* ---- VT_OP_LOAD_VARARGS ----
+     * Pushes the current frame's varargs array onto the stack.
+     * Varargs are set up by the caller: extra arguments beyond the
+     * declared parameter count are stored in frame->varargs[]. */
+dispatch_VT_OP_LOAD_VARARGS:
+    {
+        /* Push the varargs as an array (heap object) */
+        /* For now, push the count as an SMI — the frontend can build
+         * an array from individual elements using VARARG_GET.
+         * A full array push would require GC allocation here. */
+        *sp++ = vtx_make_smi((int64_t)frame->vararg_count);
+        DISPATCH_NEXT();
+    }
+
+    /* ---- VT_OP_VARARG_COUNT ----
+     * Pushes the number of varargs as an SMI. */
+dispatch_VT_OP_VARARG_COUNT:
+    {
+        *sp++ = vtx_make_smi((int64_t)frame->vararg_count);
+        DISPATCH_NEXT();
+    }
+
+    /* ---- VT_OP_VARARG_GET ----
+     * 2-byte operand: index.
+     * Pushes the nth vararg (0-indexed). If index >= count, pushes nil. */
+dispatch_VT_OP_VARARG_GET:
+    {
+        uint16_t index = read_operand(code, pc);
+        if (index < frame->vararg_count) {
+            *sp++ = frame->varargs[index];
+        } else {
+            *sp++ = VTX_VALUE_UNDEFINED;
+        }
+        DISPATCH_NEXT();
+    }
 
 dispatch_return:
     {

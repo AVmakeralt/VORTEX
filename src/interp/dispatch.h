@@ -113,6 +113,12 @@ typedef struct {
     vtx_method_ic_storage_t *method_ics;
     uint32_t                 method_ic_count;
     uint32_t                 method_ic_capacity;
+
+    /* Multi-return support: when a function uses RETURN_MULTI, the extra
+     * return values (beyond the primary) are stored here. The caller
+     * can access them via LOAD_MULTI_RET opcode. */
+    vtx_value_t             multi_return_values[16];
+    uint32_t                multi_return_count;
 } vtx_interp_t;
 
 /* ========================================================================== */
