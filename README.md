@@ -112,7 +112,7 @@ Maximum attempts, 5 re-traces per method before giving up
 Retargetable RegAlloc
 
 The register allocator uses a polymorphic TargetDescription interface (lower/target.h) instead of hardcoded x86-64 constants:
-
+'''C
 vtx_target_x86_64(), 16 GPRs + 16 XMMs, System V ABI
 
 vtx_target_arm64(), 32 GPRs, AAPCS64 ABI (register layout ready, codegen TBD)
@@ -120,12 +120,12 @@ vtx_target_arm64(), 32 GPRs, AAPCS64 ABI (register layout ready, codegen TBD)
 vtx_target_riscv64(), 32 GPRs, standard ABI (register layout ready, codegen TBD)
 
 // Cross-compile for ARM64 (on an x86 host):
-vtx_regalloc_run_target(stream, arena, vtx_target_arm64());
+vtx_regalloc_run_target(stream, arena, vtx_target_arm64());'''
 
 Adding a new architecture only requires writing a TargetDescription implementation (a data definition), not rewriting the register allocation algorithm.
 
 C++ Embedding API
-
+'''C++
 #include "vortex/runtime.hpp"
 #include "vortex/object.hpp"
 
@@ -145,7 +145,7 @@ dog.get(rt, "legs");  // 4 (inherited from prototype)
 vortex::register_host_function("print", [](int argc, const vortex::Value* argv) {
     std::cout << argv[0].to_string() << "\n";
     return vortex::Value::undefined();
-});
+});'''
 
 A C API (vortex/embed.h) is also available for C-only consumers.
 
