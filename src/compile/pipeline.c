@@ -1359,10 +1359,20 @@ int vtx_pipeline_run(vtx_graph_t *graph,
         }
         if (config->run_sccp) {
             run_sccp_pass(graph, 1, &stats.sccp_time_ns);
-            /* Note: strength reduction is NOT re-run here. The first pass
-             * (Phase 2.5) already replaced all Div(x, 2^k) with Sar chains.
-             * Re-running here would try to replace already-dead Div nodes
-             * and create duplicate Sar chains, producing wrong code. */
+        }
+        /* BUGFIX (audit #22): Re-run strength reduction after LICM.
+         * LICM may hoist Mul(x, const) out of loops, creating new
+         * opportunities for strength reduction (e.g., Mul(x, 8) →
+         * Shl(x, 3) outside the loop). The old code skipped this,
+         * leaving hoisted Muls as IMULs.
+         *
+         * Safe because strength_reduce checks if the node is already
+         * a shift — it won't create duplicate Sar chains. */
+        if (config->run_sccp) {
+            uint32_t sr_replaced2 = vtx_strength_reduce_run(graph);
+            if (sr_replaced2 > 0) {
+                vtx_node_table_clear_dead(&graph->node_table);
+            }
         }
         if (config->run_dce) {
             run_dce_pass(graph, 1, &stats.dce_time_ns, false);

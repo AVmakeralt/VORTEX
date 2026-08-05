@@ -424,7 +424,7 @@ uint32_t vtx_gvn_run(vtx_graph_t *graph)
      * This is needed because redirecting uses may create new redundancy. */
     bool changed = true;
     uint32_t iteration = 0;
-    const uint32_t max_iterations = 10; /* bounded for safety */
+    const uint32_t max_iterations = 100; /* BUGFIX: was 10, config says 100 */
 
     while (changed && iteration < max_iterations) {
         changed = false;

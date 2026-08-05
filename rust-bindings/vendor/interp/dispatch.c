@@ -484,6 +484,7 @@ static vtx_frame_t *unwind_to_handler(vtx_interp_t *interp,
  * multi-GB allocations for the first site at a high index).
  */
 #define VTX_FEEDBACK_SITE_MAX  4096
+#define VTX_FEEDBACK_SITE_MASK (VTX_FEEDBACK_SITE_MAX - 1)  /* 0xFFF, power of 2 */
 
 static inline uint32_t vtx_hash_site_index(const void *method, uint32_t pc)
 {
@@ -493,7 +494,7 @@ static inline uint32_t vtx_hash_site_index(const void *method, uint32_t pc)
     h *= 0x45d9f3bu;
     h ^= h >> 16;
     /* Cap to a reasonable table size to prevent unbounded growth */
-    return h % VTX_FEEDBACK_SITE_MAX;
+    return h & VTX_FEEDBACK_SITE_MASK;  /* BUGFIX: bitmask instead of modulo */
 }
 
 /**
@@ -537,31 +538,24 @@ static inline vtx_value_t vtx_dispatch_jit(
      *   RDI = method ptr, RSI = deopt_info, RDX = profile_data
      * And it returns a vtx_value_t in RAX.
      *
-     * CRITICAL FIX: We pass a sentinel value for profile_data (1 instead
-     * of NULL) so the JIT prologue's `if (profile_data)` check doesn't
-     * skip instrumentation entirely, but also doesn't dereference NULL.
-     * The sentinel value 1 is never a valid pointer but is non-NULL,
-     * so the prologue can safely check it without crashing. The actual
-     * profile data is stored in the compiled_code metadata, not passed
-     * through this argument in practice. */
+     * BUGFIX (audit #13): Was passing (void*)1 as profile_data, which
+     * causes T1 instrumentation to read garbage memory. The profile_data
+     * pointer is used by the T1 prologue to record call types. Passing
+     * a garbage pointer means either: (a) instrumentation crashes on
+     * dereference, or (b) it writes to address 0x1 → segfault.
+     *
+     * Fix: Pass NULL. The T1 prologue checks `if (profile_data)` before
+     * dereferencing. NULL means "no profiling" — the method runs without
+     * T1 type recording, which is safe (just less profile data for T2). */
     vtx_jit_entry_t entry = (vtx_jit_entry_t)code;
 
-    /* Clear the deopt_pending flag before calling JIT code.
-     * The deopt stub will set this flag instead of returning
-     * VTX_VALUE_UNDEFINED, so we can distinguish between
-     * a legitimate undefined return value and a deopt. */
     interp->deopt_pending = false;
 
     vtx_value_t result;
     if (arg_count > 0 && args != NULL) {
-        /* Pass args directly — the JIT prologue copies args[i] → local[i].
-         * No placeholder receiver is needed; for virtual calls the receiver
-         * is already args[0], and for static calls args map 1:1 to locals.
-         * We pass (void*)1 as profile_data to avoid NULL dereference in
-         * the JIT prologue's instrumentation check. */
-        result = entry(target_method, NULL, (void*)1, args, arg_count);
+        result = entry(target_method, NULL, NULL, args, arg_count);
     } else {
-        result = entry(target_method, NULL, (void*)1, NULL, 0);
+        result = entry(target_method, NULL, NULL, NULL, 0);
     }
 
     /* CRITICAL FIX: Check deopt_pending flag instead of checking for
@@ -785,10 +779,17 @@ vtx_value_t vtx_interp_run(vtx_interp_t *interp,
         }
     }
 
-    /* Copy dispatch table to interpreter instance */
-    if (interp->dispatch_table != NULL) {
+    /* BUGFIX (audit #14): Was memcpy'ing the 568-byte dispatch table
+     * on EVERY vtx_interp_run call. The table is static and never
+     * changes after first build. Only copy once — on the first call
+     * for this interpreter instance.
+     *
+     * We use a per-interpreter flag to track whether the table has
+     * been copied. This avoids the memcpy on subsequent calls. */
+    if (interp->dispatch_table != NULL && !interp->dispatch_table_copied) {
         memcpy(interp->dispatch_table, local_dispatch_table,
                VT_OP_COUNT * sizeof(void *));
+        interp->dispatch_table_copied = true;
     }
 #endif /* VTX_USE_COMPUTED_GOTO */
 

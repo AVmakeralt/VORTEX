@@ -74,6 +74,7 @@ typedef struct {
 
     /* Dispatch table for computed goto (indexed by opcode) */
     void              **dispatch_table;
+    bool                dispatch_table_copied; /* true after first copy (avoids re-copy) */
 
     /* Running state */
     bool                running;

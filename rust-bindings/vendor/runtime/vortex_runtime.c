@@ -27,7 +27,9 @@ int vtx_runtime_create(vtx_runtime_t *rt)
     vtx_type_system_init(&rt->type_system);
     vtx_gc_init(&rt->gc, &rt->type_system, VTX_GC_GENERATIONAL);
     vtx_arena_init(&rt->arena);
-    vtx_code_cache_init(&rt->code_cache, 1 << 20);
+    /* BUGFIX (audit #26): Was 1MB (1<<20), ignoring VORTEX_CACHE_MAX_SIZE.
+     * Use the configured 256MB cache size for proper JIT operation. */
+    vtx_code_cache_init(&rt->code_cache, VORTEX_CACHE_MAX_SIZE);
     vtx_method_registry_init(&rt->method_registry, &rt->arena);
 
     rt->interp = (vtx_interp_t *)malloc(sizeof(vtx_interp_t));
@@ -39,7 +41,9 @@ int vtx_runtime_create(vtx_runtime_t *rt)
     vtx_compile_context_init(rt->compile_ctx);
 
     rt->use_jit = 0;
-    rt->hot_threshold = 100;  /* compile after 100 invocations */
+    /* BUGFIX (audit #28): Was hardcoded 100, conflicting with
+     * VORTEX_T1_THRESHOLD=1000. Use the configured value. */
+    rt->hot_threshold = VORTEX_T1_THRESHOLD;
     rt->initialized = 1;
     return 0;
 }
