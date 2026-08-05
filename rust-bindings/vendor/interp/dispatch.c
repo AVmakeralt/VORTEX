@@ -89,24 +89,28 @@ static const uint8_t vtx_insn_length[VT_OP_COUNT] = {
     3,  /* 46: CALL_INTERFACE */
     1,  /* 47: RETURN */
     1,  /* 48: RETURN_VALUE */
-    3,  /* 49: NEW */
-    3,  /* 50: NEWARRAY */
-    3,  /* 51: CHECKCAST */
-    3,  /* 52: INSTANCEOF */
-    1,  /* 53: ARRAY_LOAD */
-    1,  /* 54: ARRAY_STORE */
-    1,  /* 55: ARRAY_LENGTH */
-    1,  /* 56: THROW */
-    3,  /* 57: CATCH */
-    5,  /* 58: CATCH_TYPED — opcode(1) + handler_pc(2) + typeid(2) */
-    1,  /* 59: MONITOR_ENTER */
-    1,  /* 60: MONITOR_EXIT */
-    1,  /* 61: DUP */
-    1,  /* 62: POP */
-    1,  /* 63: SWAP */
-    1,  /* 64: ISNULL */
-    1,  /* 65: TYPEOF */
-    3,  /* 66: CALL_RUNTIME */
+    3,  /* 49: RETURN_MULTI — 2-byte operand (count) */
+    1,  /* 50: LOAD_VARARGS */
+    1,  /* 51: VARARG_COUNT */
+    3,  /* 52: VARARG_GET — 2-byte operand (index) */
+    3,  /* 53: NEW */
+    3,  /* 54: NEWARRAY */
+    3,  /* 55: CHECKCAST */
+    3,  /* 56: INSTANCEOF */
+    1,  /* 57: ARRAY_LOAD */
+    1,  /* 58: ARRAY_STORE */
+    1,  /* 59: ARRAY_LENGTH */
+    1,  /* 60: THROW */
+    3,  /* 61: CATCH */
+    5,  /* 62: CATCH_TYPED — opcode(1) + handler_pc(2) + typeid(2) */
+    1,  /* 63: MONITOR_ENTER */
+    1,  /* 64: MONITOR_EXIT */
+    1,  /* 65: DUP */
+    1,  /* 66: POP */
+    1,  /* 67: SWAP */
+    1,  /* 68: ISNULL */
+    1,  /* 69: TYPEOF */
+    3,  /* 70: CALL_RUNTIME — 2-byte operand (func_id) */
 };
 
 /* ========================================================================== */
@@ -746,6 +750,10 @@ vtx_value_t vtx_interp_run(vtx_interp_t *interp,
         local_dispatch_table[VT_OP_CALL_INTERFACE] = DISPATCH_LABEL(VT_OP_CALL_INTERFACE);
         local_dispatch_table[VT_OP_RETURN]         = DISPATCH_LABEL(VT_OP_RETURN);
         local_dispatch_table[VT_OP_RETURN_VALUE]   = DISPATCH_LABEL(VT_OP_RETURN_VALUE);
+        local_dispatch_table[VT_OP_RETURN_MULTI]   = DISPATCH_LABEL(VT_OP_RETURN_MULTI);
+        local_dispatch_table[VT_OP_LOAD_VARARGS]   = DISPATCH_LABEL(VT_OP_LOAD_VARARGS);
+        local_dispatch_table[VT_OP_VARARG_COUNT]   = DISPATCH_LABEL(VT_OP_VARARG_COUNT);
+        local_dispatch_table[VT_OP_VARARG_GET]     = DISPATCH_LABEL(VT_OP_VARARG_GET);
         local_dispatch_table[VT_OP_NEW]            = DISPATCH_LABEL(VT_OP_NEW);
         local_dispatch_table[VT_OP_NEWARRAY]       = DISPATCH_LABEL(VT_OP_NEWARRAY);
         local_dispatch_table[VT_OP_CHECKCAST]      = DISPATCH_LABEL(VT_OP_CHECKCAST);
@@ -966,6 +974,10 @@ switch_dispatch:
             case VT_OP_CALL_INTERFACE: goto dispatch_VT_OP_CALL_INTERFACE;
             case VT_OP_RETURN:         goto dispatch_VT_OP_RETURN;
             case VT_OP_RETURN_VALUE:   goto dispatch_VT_OP_RETURN_VALUE;
+            case VT_OP_RETURN_MULTI:   goto dispatch_VT_OP_RETURN_MULTI;
+            case VT_OP_LOAD_VARARGS:   goto dispatch_VT_OP_LOAD_VARARGS;
+            case VT_OP_VARARG_COUNT:   goto dispatch_VT_OP_VARARG_COUNT;
+            case VT_OP_VARARG_GET:     goto dispatch_VT_OP_VARARG_GET;
             case VT_OP_NEW:            goto dispatch_VT_OP_NEW;
             case VT_OP_NEWARRAY:       goto dispatch_VT_OP_NEWARRAY;
             case VT_OP_CHECKCAST:      goto dispatch_VT_OP_CHECKCAST;
@@ -2134,12 +2146,56 @@ dispatch_VT_OP_CALL_INTERFACE:
     /* ---- VT_OP_RETURN ---- */
 dispatch_VT_OP_RETURN:
     result = VTX_VALUE_UNDEFINED;
+    interp->multi_return_count = 0;
     goto dispatch_return;
 
     /* ---- VT_OP_RETURN_VALUE ---- */
 dispatch_VT_OP_RETURN_VALUE:
     result = *--sp;
+    interp->multi_return_count = 0;
     goto dispatch_return;
+
+    /* ---- VT_OP_RETURN_MULTI ----
+     * Pop `count` values and return them all. Primary (top of stack) goes
+     * in `result`, extras in interp->multi_return_values[]. */
+dispatch_VT_OP_RETURN_MULTI:
+    {
+        uint16_t count = read_operand(code, pc);
+        if (count == 0) {
+            result = VTX_VALUE_UNDEFINED;
+            interp->multi_return_count = 0;
+        } else {
+            result = *--sp;  /* primary (top of stack) */
+            uint32_t extra = (count > 1) ? (count - 1) : 0;
+            for (uint32_t i = 0; i < extra && i < 16; i++) {
+                interp->multi_return_values[i] = *--sp;
+            }
+            interp->multi_return_count = count;
+        }
+        goto dispatch_return;
+    }
+
+    /* ---- VT_OP_LOAD_VARARGS ---- */
+dispatch_VT_OP_LOAD_VARARGS:
+    *sp++ = vtx_make_smi((int64_t)frame->vararg_count);
+    DISPATCH_NEXT();
+
+    /* ---- VT_OP_VARARG_COUNT ---- */
+dispatch_VT_OP_VARARG_COUNT:
+    *sp++ = vtx_make_smi((int64_t)frame->vararg_count);
+    DISPATCH_NEXT();
+
+    /* ---- VT_OP_VARARG_GET ---- */
+dispatch_VT_OP_VARARG_GET:
+    {
+        uint16_t index = read_operand(code, pc);
+        if (index < frame->vararg_count) {
+            *sp++ = frame->varargs[index];
+        } else {
+            *sp++ = VTX_VALUE_UNDEFINED;
+        }
+        DISPATCH_NEXT();
+    }
 
 dispatch_return:
     {
@@ -2164,7 +2220,27 @@ dispatch_return:
         RELOAD_FRAME();
         pc = ret_pc;
 
-        /* Push the return value onto the caller's operand stack */
+        /* Push the return value(s) onto the caller's operand stack.
+         *
+         * For RETURN / RETURN_VALUE: pushes 1 value (result).
+         * For RETURN_MULTI: pushes all N values. The primary (result)
+         *   was the top of the callee's stack, so it goes on top.
+         *   The extras (in multi_return_values[0..N-2]) go below it.
+         *
+         * Stack order after RETURN_MULTI N:
+         *   [..., extra_N-1, ..., extra_1, result]
+         * (result on top, extras in reverse order below)
+         *
+         * The caller can then use LOAD_LOCAL or stack operations to
+         * access all N values. */
+        if (interp->multi_return_count > 1) {
+            /* Push extras in reverse order (they were stored in order
+             * extra[0] = 2nd value, extra[1] = 3rd value, etc.)
+             * We want the 2nd value deepest, primary on top. */
+            for (int i = (int)interp->multi_return_count - 2; i >= 0; i--) {
+                *sp++ = interp->multi_return_values[i];
+            }
+        }
         *sp++ = result;
 
         DISPATCH();

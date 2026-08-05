@@ -84,6 +84,12 @@ const vtx_opcode_info_t vtx_opcode_table[VT_OP_COUNT] = {
     /* Returns */
     OP(VT_OP_RETURN,       0, 0, false, 0),
     OP(VT_OP_RETURN_VALUE, 1, 0, false, 0),
+    OP(VT_OP_RETURN_MULTI, 0, 0, true, 2),  /* pop N values, return them */
+
+    /* Varargs support */
+    OP(VT_OP_LOAD_VARARGS, 0, 1, false, 0),  /* push varargs count */
+    OP(VT_OP_VARARG_COUNT, 0, 1, false, 0),  /* push varargs count */
+    OP(VT_OP_VARARG_GET,   0, 1, true, 2),  /* push nth vararg */
 
     /* Object creation */
     OP(VT_OP_NEW,      0, 1, true, 2),
