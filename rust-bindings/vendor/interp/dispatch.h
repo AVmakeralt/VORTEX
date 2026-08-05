@@ -184,6 +184,54 @@ vtx_value_t vtx_interp_handle_uncaught(vtx_interp_t *interp,
  * The ctx pointer is stored but NOT owned by the interpreter.
  */
 void vtx_interp_set_compile_ctx(vtx_interp_t *interp,
-                                 vtx_compile_context_t *ctx);
+                                  vtx_compile_context_t *ctx);
+
+/* ========================================================================== */
+/* CALL_RUNTIME callback hook                                                  */
+/* ========================================================================== */
+/*
+ * The VT_OP_CALL_RUNTIME opcode has a built-in switch for runtime IDs
+ * 0-6 (typeof, monitor_enter, monitor_exit, throw, print_ln, print, exit).
+ *
+ * For IDs >= 100 (or any ID not handled by the built-in switch), the
+ * interpreter checks if a runtime callback has been registered via
+ * vtx_set_runtime_callback(). If so, it calls the callback with:
+ *   - func_id: the operand from CALL_RUNTIME
+ *   - sp: pointer to the operand stack pointer (can push/pop)
+ *   - user_data: the opaque pointer passed to set_runtime_callback
+ *
+ * The callback returns the number of values pushed onto the stack
+ * (0 = void, 1 = single return value). The interpreter adjusts sp
+ * accordingly.
+ *
+ * This enables frontends (like LuaVortex) to extend the runtime
+ * without patching dispatch.c. Register a callback at startup:
+ *
+ *   vtx_set_runtime_callback(my_callback, my_user_data);
+ *
+ * Thread safety: the callback is global (process-wide). Register once
+ * at startup before running any bytecode. The callback is invoked from
+ * the interpreter dispatch loop on the calling thread.
+ */
+
+typedef int (*vtx_runtime_callback_t)(uint32_t func_id,
+                                        vtx_value_t **sp_ptr,
+                                        void *user_data);
+
+/* Register a runtime callback for CALL_RUNTIME opcodes.
+ * The callback is invoked for ALL CALL_RUNTIME operands, including
+ * the built-in ones (0-6). If the callback returns -1, the built-in
+ * handler runs. If it returns >= 0, the built-in handler is skipped
+ * and the callback's result is used.
+ *
+ * Pass NULL to unregister. */
+void vtx_set_runtime_callback(vtx_runtime_callback_t callback,
+                                void *user_data);
+
+/* Get the currently registered callback (or NULL). */
+vtx_runtime_callback_t vtx_get_runtime_callback(void);
+
+/* Get the user_data passed to vtx_set_runtime_callback. */
+void *vtx_get_runtime_callback_data(void);
 
 #endif /* VORTEX_DISPATCH_H */

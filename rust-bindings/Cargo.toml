@@ -1,6 +1,6 @@
 [package]
 name = "vortex-jit"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
 description = "Rust bindings for the VORTEX JIT compiler — multi-tier JIT with AOT background compilation, trace-based PGO with re-tracing, retargetable regalloc (x86-64/ARM64/RISC-V), float arithmetic, and dynamic objects with prototype chains."
 license = "MIT"

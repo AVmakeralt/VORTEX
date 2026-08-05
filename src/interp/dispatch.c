@@ -14,6 +14,37 @@
 #include <math.h>
 
 /* ========================================================================== */
+/* CALL_RUNTIME callback hook                                                  */
+/* ========================================================================== */
+/*
+ * Global callback for CALL_RUNTIME opcodes. When registered, the
+ * dispatch handler calls this BEFORE the built-in switch. If the
+ * callback returns >= 0, the built-in switch is skipped.
+ *
+ * This enables frontends (LuaVortex, etc.) to extend the runtime
+ * without patching dispatch.c. Register at startup:
+ *   vtx_set_runtime_callback(my_callback, my_user_data);
+ */
+static vtx_runtime_callback_t g_runtime_callback = NULL;
+static void *g_runtime_callback_data = NULL;
+
+void vtx_set_runtime_callback(vtx_runtime_callback_t callback, void *user_data)
+{
+    g_runtime_callback = callback;
+    g_runtime_callback_data = user_data;
+}
+
+vtx_runtime_callback_t vtx_get_runtime_callback(void)
+{
+    return g_runtime_callback;
+}
+
+void *vtx_get_runtime_callback_data(void)
+{
+    return g_runtime_callback_data;
+}
+
+/* ========================================================================== */
 /* Branch prediction hints                                                      */
 /* ========================================================================== */
 
@@ -89,24 +120,28 @@ static const uint8_t vtx_insn_length[VT_OP_COUNT] = {
     3,  /* 46: CALL_INTERFACE */
     1,  /* 47: RETURN */
     1,  /* 48: RETURN_VALUE */
-    3,  /* 49: NEW */
-    3,  /* 50: NEWARRAY */
-    3,  /* 51: CHECKCAST */
-    3,  /* 52: INSTANCEOF */
-    1,  /* 53: ARRAY_LOAD */
-    1,  /* 54: ARRAY_STORE */
-    1,  /* 55: ARRAY_LENGTH */
-    1,  /* 56: THROW */
-    3,  /* 57: CATCH */
-    5,  /* 58: CATCH_TYPED — opcode(1) + handler_pc(2) + typeid(2) */
-    1,  /* 59: MONITOR_ENTER */
-    1,  /* 60: MONITOR_EXIT */
-    1,  /* 61: DUP */
-    1,  /* 62: POP */
-    1,  /* 63: SWAP */
-    1,  /* 64: ISNULL */
-    1,  /* 65: TYPEOF */
-    3,  /* 66: CALL_RUNTIME */
+    3,  /* 49: RETURN_MULTI — 2-byte operand (count) */
+    1,  /* 50: LOAD_VARARGS — no operand */
+    1,  /* 51: VARARG_COUNT — no operand */
+    3,  /* 52: VARARG_GET — 2-byte operand (index) */
+    3,  /* 53: NEW */
+    3,  /* 54: NEWARRAY */
+    3,  /* 55: CHECKCAST */
+    3,  /* 56: INSTANCEOF */
+    1,  /* 57: ARRAY_LOAD */
+    1,  /* 58: ARRAY_STORE */
+    1,  /* 59: ARRAY_LENGTH */
+    1,  /* 60: THROW */
+    3,  /* 61: CATCH */
+    5,  /* 62: CATCH_TYPED — opcode(1) + handler_pc(2) + typeid(2) */
+    1,  /* 63: MONITOR_ENTER */
+    1,  /* 64: MONITOR_EXIT */
+    1,  /* 65: DUP */
+    1,  /* 66: POP */
+    1,  /* 67: SWAP */
+    1,  /* 68: ISNULL */
+    1,  /* 69: TYPEOF */
+    3,  /* 70: CALL_RUNTIME — 2-byte operand (func_id) */
 };
 
 /* ========================================================================== */
@@ -2669,7 +2704,28 @@ dispatch_VT_OP_CALL_RUNTIME:
             }
             break;
         default:
-            /* Unknown runtime function — push undefined as a safe fallback */
+            /* Unknown runtime function — check if a callback is registered.
+             *
+             * The callback receives the func_id and a pointer to the stack
+             * pointer. It can pop arguments and push results. If it returns
+             * -1, fall through to the default (push undefined). If it
+             * returns >= 0, skip the built-in handler — the callback
+             * already pushed results.
+             *
+             * This enables frontends (LuaVortex, etc.) to extend CALL_RUNTIME
+             * without patching dispatch.c. */
+            if (g_runtime_callback != NULL) {
+                vtx_value_t *sp_ptr = sp;
+                int n_pushed = g_runtime_callback(operand, &sp_ptr,
+                                                    g_runtime_callback_data);
+                if (n_pushed >= 0) {
+                    /* Callback handled it — sync sp */
+                    sp = sp_ptr;
+                    break;
+                }
+                /* Callback returned -1 — fall through to default */
+            }
+            /* No callback or callback declined — push undefined */
             *sp++ = VTX_VALUE_UNDEFINED;
             break;
         }
