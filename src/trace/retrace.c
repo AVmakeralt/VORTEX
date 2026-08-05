@@ -143,9 +143,23 @@ void vtx_trace_retrace_record_failure(vtx_trace_retrace_t *rt,
                         bp->not_taken = 0;
                     }
                     if (bp) {
-                        /* The guard failed, meaning the trace's assumed path
-                         * was wrong. Increment the "wrong" direction. */
-                        bp->not_taken++;  /* conservative: assume trace assumed taken */
+                        /* BUGFIX (audit #12): The old code unconditionally
+                         * incremented not_taken, which is wrong for guards
+                         * with cond=EQ (the trace assumed the branch was
+                         * NOT taken, so a failure means the branch WAS taken
+                         * → increment `taken`).
+                         *
+                         * For cond=NE guards (trace assumed taken), failure
+                         * means branch was NOT taken → increment not_taken.
+                         *
+                         * Since we don't have the guard's cond here (the
+                         * guard_table parameter is often NULL), we use a
+                         * conservative approach: increment BOTH counters
+                         * slightly. This makes the branch appear "volatile"
+                         * (near 50/50), which prevents the trace recorder
+                         * from re-selecting the same path. */
+                        bp->taken++;
+                        bp->not_taken++;
                     }
                 }
             }

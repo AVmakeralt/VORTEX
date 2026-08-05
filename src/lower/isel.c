@@ -2117,23 +2117,28 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
     case VTX_OP_SubF:
     case VTX_OP_MulF:
     case VTX_OP_DivF: {
+        /* FP arithmetic via runtime CALL.
+         *
+         * NOTE: Inline SSE2 (MOVQ xmm←gpr, ADDSD, MOVQ gpr←xmm) was
+         * attempted but produces wrong results because the regalloc
+         * misclassifies GPR operands touched by MOVQ_XMM_R64 instructions
+         * as XMM (the IS_SSE flag on the instruction causes ALL vregs
+         * it touches to be classified as XMM, including the GPR source).
+         *
+         * Fixing this requires the regalloc to distinguish per-operand
+         * register classes (operand[0] is XMM, operand[1] is GPR for
+         * MOVQ_XMM_R64). That's a deeper refactor.
+         *
+         * For now, runtime calls are correct (if slow). The CMake -O3
+         * fix (audit #1) speeds up the runtime helpers themselves. */
         if (node->input_count < 2) return -1;
 
-        /* Get the two input vregs (NaN-boxed values in GPRs). */
         ensure_node_vreg(stream, node->inputs[0], arena);
         uint32_t lhs_vreg = vtx_isel_node_vreg(stream, node->inputs[0]);
         ensure_node_vreg(stream, node->inputs[1], arena);
         uint32_t rhs_vreg = vtx_isel_node_vreg(stream, node->inputs[1]);
         if (lhs_vreg == VTX_VREG_INVALID || rhs_vreg == VTX_VREG_INVALID) return -1;
 
-        /* Call the runtime helper (same pattern as CallRuntime):
-         *   RDI = lhs (NaN-boxed value)
-         *   RSI = rhs (NaN-boxed value)
-         *   RAX = result (NaN-boxed value)
-         *
-         * The runtime helper extracts the doubles, does the arithmetic,
-         * and re-boxes the result. Float values stay in GPRs throughout —
-         * no XMM register allocation involved. */
         extern vtx_value_t vtx_runtime_float_add(vtx_value_t a, vtx_value_t b);
         extern vtx_value_t vtx_runtime_float_sub(vtx_value_t a, vtx_value_t b);
         extern vtx_value_t vtx_runtime_float_mul(vtx_value_t a, vtx_value_t b);
@@ -2148,23 +2153,16 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         default: helper = (void *)vtx_runtime_float_add; break;
         }
 
-        /* RDI = lhs
-         * Mark NO_COALESCE so the regalloc doesn't coalesce RDI with lhs_vreg
-         * (which would extend lhs_vreg's live range across the call and
-         * conflict with RDI being clobbered by the call). */
-        uint32_t rdi_preg = vtx_isel_alloc_vreg_fixed(stream, arena, 7 /* RDI */);
+        uint32_t rdi_preg = vtx_isel_alloc_vreg_fixed(stream, arena, 7);
         vtx_inst_t mov_rdi = make_rr_inst(VTX_X86_MOV, rdi_preg, lhs_vreg, node_id);
         mov_rdi.flags |= VTX_INST_FLAG_NO_COALESCE;
         vtx_isel_emit_inst(block, mov_rdi, arena);
 
-        /* RSI = rhs
-         * Same NO_COALESCE reason. */
-        uint32_t rsi_preg = vtx_isel_alloc_vreg_fixed(stream, arena, 6 /* RSI */);
+        uint32_t rsi_preg = vtx_isel_alloc_vreg_fixed(stream, arena, 6);
         vtx_inst_t mov_rsi = make_rr_inst(VTX_X86_MOV, rsi_preg, rhs_vreg, node_id);
         mov_rsi.flags |= VTX_INST_FLAG_NO_COALESCE;
         vtx_isel_emit_inst(block, mov_rsi, arena);
 
-        /* CALL helper */
         vtx_inst_t call_inst;
         memset(&call_inst, 0, sizeof(call_inst));
         call_inst.opcode = VTX_X86_CALL;
@@ -2179,28 +2177,14 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         call_inst.source_node = node_id;
         vtx_isel_emit_inst(block, call_inst, arena);
 
-        /* Emit "MOV dst_vreg, RAX" where RAX is a PREG (physical register),
-         * NOT a VREG. This is the key fix:
-         *
-         * The CALL instruction doesn't define any vreg in the regalloc's
-         * view (its operand[0] is IMM, not VREG). So a fixed-RAX vreg
-         * allocated after the call has no definition → invalid interval
-         * → gets fallback-spilled → the result is lost.
-         *
-         * By using PREG for the source (RAX=0), the regalloc doesn't need
-         * to track it. The dst vreg is properly defined (operand[0] of MOV).
-         * The emitter sees r1=0 (RAX) and emits either:
-         *   - MOV dst_reg, RAX (if dst gets a register)
-         *   - MOV [spill_slot], RAX (if dst is spilled)
-         * Both are correct — RAX holds the call result. */
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         vtx_inst_t mov_result;
         memset(&mov_result, 0, sizeof(mov_result));
         mov_result.opcode = VTX_X86_MOV;
         mov_result.opnd_kinds[0] = VTX_OPND_VREG;
         mov_result.operands[0] = dst;
-        mov_result.opnd_kinds[1] = VTX_OPND_PREG;  /* RAX as physical register */
-        mov_result.operands[1] = 0;                 /* RAX = register 0 */
+        mov_result.opnd_kinds[1] = VTX_OPND_PREG;
+        mov_result.operands[1] = 0;
         mov_result.flags = VTX_INST_FLAG_NO_COALESCE;
         mov_result.source_node = node_id;
         vtx_isel_emit_inst(block, mov_result, arena);

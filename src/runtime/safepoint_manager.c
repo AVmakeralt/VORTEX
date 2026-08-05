@@ -96,15 +96,29 @@ void vtx_safepoint_thread_unregister(vtx_safepoint_manager_t *mgr)
 void vtx_safepoint_mgr_check(vtx_safepoint_manager_t *mgr)
 {
     if (mgr == NULL) return;
+
+    /* BUGFIX (audit #10): Fast path uses atomic load instead of mutex.
+     *
+     * The old code took pthread_mutex_lock on EVERY safepoint check
+     * (every method entry + backedge). The mutex is ~25-50ns per lock/
+     * unlock pair, which adds up to millions of cycles per second on
+     * hot loops.
+     *
+     * Fix: Use __atomic_load_n to check safepoint_requested without
+     * the mutex. The mutex is only taken on the slow path (when a
+     * safepoint IS requested), which is rare. */
+    if (!__atomic_load_n(&mgr->safepoint_requested, __ATOMIC_ACQUIRE)) {
+        return;  /* Fast path: no mutex needed */
+    }
+
+    /* Slow path: safepoint requested. Take the mutex and block. */
     pthread_mutex_lock(&mgr->mutex);
 
-    /* Fast path: no safepoint requested. */
+    /* Double-check under mutex (avoids race between atomic load and mutex) */
     if (!mgr->safepoint_requested) {
         pthread_mutex_unlock(&mgr->mutex);
         return;
     }
-
-    /* Slow path: safepoint requested. Block until released. */
     pthread_t self = pthread_self();
     uint32_t my_idx = (uint32_t)-1;
     for (uint32_t i = 0; i < mgr->thread_count; i++) {

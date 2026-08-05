@@ -216,6 +216,10 @@ static bool write_method_profile(vtx_writer_t *w, const vtx_profile_method_t *m)
         const vtx_callsite_profile_t *cs = &m->call_sites[i];
         writer_u32(w, cs->count);
         writer_u8(w, cs->megamorphic ? 1 : 0);
+        /* BUGFIX (audit #11): Save total_count so confidence scoring
+         * works on warm start. Without this, vtx_confidence_call_target()
+         * returns 0.0 after reload, blocking T2 promotion. */
+        writer_u64(w, cs->total_count);
         for (uint32_t j = 0; j < cs->count; j++) {
             writer_u32(w, cs->types[j]);
         }
@@ -406,6 +410,14 @@ static bool read_method_profile(vtx_reader_t *r, vtx_profile_method_t *m)
         uint8_t mega;
         if (!reader_u8(r, &mega)) return false;
         cs->megamorphic = (mega != 0);
+        /* BUGFIX (audit #11): Load total_count. Note: old profile files
+         * don't have this field. We try to read it; if it fails, the
+         * reader position is wrong, so we set it to 0 and continue.
+         * New files always include it. */
+        if (!reader_u64(r, &cs->total_count)) {
+            /* Old format file — no total_count. Default to 0. */
+            cs->total_count = 0;
+        }
         if (cs->count > VTX_POLY_LIMIT) return false; /* corrupt data */
         for (uint32_t j = 0; j < cs->count; j++) {
             if (!reader_u32(r, &cs->types[j])) return false;

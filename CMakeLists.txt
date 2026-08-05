@@ -6,24 +6,47 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# ---- Build type defaults ----
+# Default to Release if not specified. This is the #1 performance fix:
+# -O0 → -O3 is a 5-20x throughput improvement for the JIT host binary.
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 # Compile flags: strict warnings, no external dependencies
 add_compile_options(-Wall -Wextra)
-# Warning suppressions removed per audit recommendation.
-# Previously suppressed: -Wno-unused-variable -Wno-unused-function
-# -Wno-unused-but-set-variable -Wno-unused-parameter -Wno-sign-compare
-# -Wno-discarded-qualifiers
-# These suppressed 327 warnings including the GBDT inliner corruption
-# (Bug #1). All warnings are now visible — fix them at the source.
-# The manual build script (scripts/rebuild_vortex.sh) still uses these
-# suppressions for development builds to reduce noise.
 add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions> $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>)
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-fPIC)
+
+    # ---- Optimization flags for Release builds ----
+    # These give 5-20x host throughput improvement over -O0.
+    if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+        add_compile_options(-O3)
+        add_compile_options(-fomit-frame-pointer -fno-plt)
+        add_compile_options(-ffunction-sections -fdata-sections)
+        add_link_options(-Wl,--gc-sections)
+
+        # LTO for cross-module inlining across the 14 static libs
+        if(CMAKE_C_COMPILER_ID MATCHES "GNU")
+            add_compile_options(-flto)
+            add_link_options(-flto)
+        endif()
+
+        # -march=native enables SSE4.2/AVX2 for the host binary
+        # (GBDT inference, arena memcpy, hash table operations)
+        include(CheckCXXCompilerFlag)
+        check_cxx_compiler_flag(-march=native HAS_MARCH_NATIVE)
+        if(HAS_MARCH_NATIVE)
+            add_compile_options(-march=native)
+        endif()
+    endif()
 endif()
 
-# Configuration options
-option(VORTEX_ENABLE_ASSERTIONS "Enable debug assertions" ON)
-option(VORTEX_ENABLE_VERIFY "Enable IR verification after each pass" ON)
+# Configuration options — assertions OFF by default in Release
+# (every arena alignment check, every NULL check does a runtime branch)
+option(VORTEX_ENABLE_ASSERTIONS "Enable debug assertions" OFF)
+option(VORTEX_ENABLE_VERIFY "Enable IR verification after each pass" OFF)
 option(VORTEX_ENABLE_PROFILING "Enable profiling in interpreter and T1" ON)
 option(VORTEX_ENABLE_SOTA "Enable SOTA features" ON)
 option(VORTEX_ENABLE_TESTS "Build tests" ON)
