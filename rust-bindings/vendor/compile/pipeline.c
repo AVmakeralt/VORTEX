@@ -1380,10 +1380,13 @@ int vtx_pipeline_run(vtx_graph_t *graph,
          * (audit #13: wire vtx_merge_guards) */
         vtx_merge_guards(graph, arena);
 
-        /* Loop unrolling: unroll small loops by factor 2 to reduce loop
+        /* Loop unrolling: unroll small loops by factor 4 to reduce loop
          * overhead and enable more instruction-level parallelism.
-         * (audit #3: wire loop unrolling) */
-        vtx_loop_unroll_run(graph, &schedule, arena, 2);
+         * BUGFIX (audit #8): Was factor=2 (too conservative). Factor 4
+         * gives better ILP exposure without excessive code size growth.
+         * The unroll pass now also handles multiple loops (was aborting
+         * after the first). */
+        vtx_loop_unroll_run(graph, &schedule, arena, 4);
     }
 
     /* ================================================================== */

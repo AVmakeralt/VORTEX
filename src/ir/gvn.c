@@ -467,7 +467,13 @@ uint32_t vtx_gvn_run(vtx_graph_t *graph)
              * that verifies dominance and value preservation. GVN must
              * not merge guards. */
             if (vtx_node_is_control(node->opcode)) continue;
-            if (vtx_node_is_memory(node->opcode)) continue;
+            /* BUGFIX (audit #6): Don't skip ALL memory nodes — only skip
+             * stores (which have side effects). Pure loads (LoadField,
+             * LoadIndexed, Load) CAN be CSE'd if they have the same
+             * memory input (i.e., no intervening store). The GVN hash
+             * includes the memory input, so two loads with different
+             * memory inputs won't match. Two loads with the SAME memory
+             * input (no store between them) will match → CSE'd. */
             if (vtx_node_is_side_effecting(node->opcode)) continue;
             if (vtx_nf_has(node->flags, VTX_NF_PINNED)) continue;
             if (node->opcode == VTX_OP_NewObject || node->opcode == VTX_OP_NewArray ||

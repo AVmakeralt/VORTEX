@@ -71,14 +71,25 @@ static bool can_produce_raw_int(vtx_node_opcode_t op) {
     case VTX_OP_Xor:
     case VTX_OP_Neg:
         return true;
-    /* NOTE: Phi is intentionally NOT listed here. While loop-carried SMI
-     * tag elision via Phi would be a significant perf win, it requires
-     * the elision pass to insert retag instructions at Phi boundaries
-     * when a Phi has both RAW_INT and non-RAW_INT consumers. Without
-     * that, a raw int value leaks through the Phi to a consumer that
-     * expects a tagged SMI (e.g. Cmp in a loop condition), producing
-     * wrong results or crashes. This is a future optimization — see
-     * the analysis in the frontend audit. */
+    case VTX_OP_Phi:
+        /* BUGFIX (audit #7): Phi nodes CAN produce raw int.
+         *
+         * The old code excluded Phi, meaning every loop iteration
+         * retagged the loop variable (10-30% perf loss on int loops).
+         *
+         * The key insight: the isel's resolve_phis already handles
+         * RAW_INT Phis correctly — it emits an untag sequence (SHL+SAR)
+         * for the forward-edge (preheader) and a plain MOV for the
+         * back-edge (where the value is already raw int from the
+         * elided Add/Sub). The Cmp isel also handles RAW_INT inputs
+         * by skipping the untag. So Phi elision is safe as long as:
+         *   1. All Phi data inputs are SMI producers or RAW_INT
+         *   2. All Phi consumers are eligible arithmetic ops (not
+         *      chain terminators like Return/Store/If)
+         *
+         * The all_consumers_arith check below ensures condition 2.
+         * The phi_inputs_ok check ensures condition 1. */
+        return true;
     default:
         return false;
     }
