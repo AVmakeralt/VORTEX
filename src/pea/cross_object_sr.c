@@ -281,8 +281,11 @@ static vtx_effective_escape_t *compute_effective_escape(
      * We iterate until no more effective states can be lowered.
      * Each iteration may lower an allocation's effective escape,
      * which can then allow other allocations stored into it to
-     * also be lowered in the next iteration. */
-    const uint32_t MAX_ITERATIONS = 10; /* safety bound */
+     * also be lowered in the next iteration.
+     *
+     * BUGFIX (audit): Was 10 — too low for deep allocation chains
+     * (factory patterns with >10 levels of nesting). Increased to 50. */
+    const uint32_t MAX_ITERATIONS = 50; /* was 10 */
     for (uint32_t iter = 0; iter < MAX_ITERATIONS; iter++) {
         bool any_changed = false;
 

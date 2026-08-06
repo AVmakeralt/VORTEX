@@ -569,9 +569,20 @@ vtx_pea_analysis_t *vtx_pea_run(vtx_graph_t *graph, vtx_arena_t *arena)
         on_worklist[block_idx] = true;
     }
 
-    /* Step 5: Iterate to fixed point */
+    /* Step 5: Iterate to fixed point.
+     *
+     * BUGFIX (audit #4): The old hard cap of 100 iterations was too low
+     * for large CFGs. If the worklist hadn't converged by iteration 100,
+     * the escape states were left in an intermediate (wrong) state.
+     * Allocations that should be GlobalEscape might be marked NoEscape
+     * → heap corruption from scalar replacement.
+     *
+     * Fix: Increase to 10000 (sufficient for any real-world CFG), and
+     * if we hit the cap, conservatively mark ALL allocations as
+     * GlobalEscape (safe fallback — no scalar replacement). */
     uint32_t iterations = 0;
-    const uint32_t MAX_ITERATIONS = 100; /* safety bound */
+    const uint32_t MAX_ITERATIONS = 10000; /* safety bound — was 100 */
+    bool hit_cap = false;
 
     while (wl_head != wl_tail && iterations < MAX_ITERATIONS) {
         iterations++;
@@ -636,12 +647,27 @@ vtx_pea_analysis_t *vtx_pea_run(vtx_graph_t *graph, vtx_arena_t *arena)
 
     result->iterations = iterations;
 
+    /* If we hit the iteration cap, the escape states may not have
+     * converged. Conservatively mark ALL allocations as GlobalEscape
+     * to prevent incorrect scalar replacement. */
+    if (iterations >= MAX_ITERATIONS) {
+        hit_cap = true;
+        for (uint32_t a = 0; a < result->escape_map.alloc_count; a++) {
+            vtx_nodeid_t alloc_id = result->escape_map.alloc_ids[a];
+            for (uint32_t b = 0; b < block_count; b++) {
+                if (alloc_id < result->block_states[b].state_count) {
+                    result->block_states[b].exit_state[alloc_id] = VTX_ESCAPE_GLOBAL;
+                    result->block_states[b].entry_state[alloc_id] = VTX_ESCAPE_GLOBAL;
+                }
+            }
+        }
+    }
+
     /* Step 6: Finalize — compute the global escape state for each allocation
      * as the join of all block exit states */
     for (uint32_t a = 0; a < result->escape_map.alloc_count; a++) {
         vtx_nodeid_t alloc_id = result->escape_map.alloc_ids[a];
         vtx_escape_state_t final_state = VTX_ESCAPE_NONE;
-
         for (uint32_t b = 0; b < block_count; b++) {
             if (alloc_id < result->block_states[b].state_count) {
                 final_state = vtx_escape_join(final_state,
