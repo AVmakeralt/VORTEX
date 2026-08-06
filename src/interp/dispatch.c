@@ -14,6 +14,37 @@
 #include <math.h>
 
 /* ========================================================================== */
+/* CALL_RUNTIME callback hook                                                  */
+/* ========================================================================== */
+/*
+ * Global callback for CALL_RUNTIME opcodes. When registered, the
+ * dispatch handler calls this BEFORE the built-in switch. If the
+ * callback returns >= 0, the built-in switch is skipped.
+ *
+ * This enables frontends (LuaVortex, etc.) to extend the runtime
+ * without patching dispatch.c. Register at startup:
+ *   vtx_set_runtime_callback(my_callback, my_user_data);
+ */
+static vtx_runtime_callback_t g_runtime_callback = NULL;
+static void *g_runtime_callback_data = NULL;
+
+void vtx_set_runtime_callback(vtx_runtime_callback_t callback, void *user_data)
+{
+    g_runtime_callback = callback;
+    g_runtime_callback_data = user_data;
+}
+
+vtx_runtime_callback_t vtx_get_runtime_callback(void)
+{
+    return g_runtime_callback;
+}
+
+void *vtx_get_runtime_callback_data(void)
+{
+    return g_runtime_callback_data;
+}
+
+/* ========================================================================== */
 /* Branch prediction hints                                                      */
 /* ========================================================================== */
 
@@ -2670,7 +2701,27 @@ dispatch_VT_OP_CALL_RUNTIME:
             }
             break;
         default:
-            /* Unknown runtime function — push undefined as a safe fallback */
+            /* Unknown runtime function — check if a callback is registered.
+             *
+             * The callback receives the func_id and a pointer to the stack
+             * pointer. It can pop arguments and push results. If it returns
+             * -1, fall through to the default (push undefined). If it
+             * returns >= 0, skip the built-in handler.
+             *
+             * This enables frontends (LuaVortex, etc.) to extend CALL_RUNTIME
+             * without patching dispatch.c. */
+            if (g_runtime_callback != NULL) {
+                vtx_value_t *sp_ptr = sp;
+                int n_pushed = g_runtime_callback(operand, &sp_ptr,
+                                                    g_runtime_callback_data);
+                if (n_pushed >= 0) {
+                    /* Callback handled it — sync sp */
+                    sp = sp_ptr;
+                    break;
+                }
+                /* Callback returned -1 — fall through to default */
+            }
+            /* No callback or callback declined — push undefined */
             *sp++ = VTX_VALUE_UNDEFINED;
             break;
         }
