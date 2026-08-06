@@ -189,6 +189,43 @@ fn build_method_desc(bc: &Bytecode) -> ffi::vtx_method_desc_t {
     method
 }
 
+/* ---- CALL_RUNTIME callback hook ----
+ *
+ * Register a callback that handles CALL_RUNTIME opcodes with func_id >= 100
+ * (or any unhandled ID). The callback receives:
+ *   - func_id: the operand from CALL_RUNTIME
+ *   - sp: mutable stack pointer (can push/pop values)
+ *   - user_data: the opaque pointer passed to set_runtime_callback
+ *
+ * The callback returns the number of values pushed (0 = void, 1 = single).
+ * Return -1 to let the built-in handler run.
+ *
+ * This enables frontends (like LuaVortex) to extend the runtime without
+ * patching dispatch.c. Register at startup before running bytecode.
+ */
+
+pub type RuntimeCallback = extern "C" fn(
+    func_id: u32,
+    sp: *mut *mut u64,
+    user_data: *mut std::ffi::c_void,
+) -> i32;
+
+extern "C" {
+    pub fn vtx_set_runtime_callback(
+        callback: Option<RuntimeCallback>,
+        user_data: *mut std::ffi::c_void,
+    );
+    pub fn vtx_get_runtime_callback() -> Option<RuntimeCallback>;
+    pub fn vtx_get_runtime_callback_data() -> *mut std::ffi::c_void;
+}
+
+/// Register a runtime callback for CALL_RUNTIME opcodes.
+/// The callback is invoked for unhandled CALL_RUNTIME IDs.
+/// Pass None to unregister.
+pub fn set_runtime_callback(callback: Option<RuntimeCallback>, user_data: *mut std::ffi::c_void) {
+    unsafe { vtx_set_runtime_callback(callback, user_data); }
+}
+
 /// Helper: create an SMI (small integer) value.
 pub fn make_smi(val: i64) -> Value {
     // VTX_NAN_BOX_HEADER = 0x7FF8000000000000, VTX_TAG_SMI = 0

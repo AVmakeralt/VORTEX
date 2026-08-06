@@ -54,6 +54,10 @@ struct vtx_frame {
     uint32_t            catch_handler_pc; /* PC of current catch handler (VTX_CATCH_NONE if none) */
     vtx_typeid_t        catch_type;       /* TypeID of exception caught (0 = catch-all, VTX_TYPE_INVALID = none) */
     vtx_value_t         exception;        /* pending exception (VTX_VALUE_UNDEFINED if none) */
+
+    /* Varargs support */
+    vtx_value_t        *varargs;          /* array of vararg values (NULL if none) */
+    uint32_t            vararg_count;     /* number of varargs */
 };
 
 /* Sentinel value for "no catch handler active" */

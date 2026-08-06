@@ -197,12 +197,19 @@ uint32_t vtx_loop_unroll_run(vtx_graph_t *graph,
                               uint32_t factor)
 {
     if (!graph || !schedule || !arena) return 0;
-    if (factor != 2) return 0;  /* only factor=2 is supported */
+    /* BUGFIX (audit #8): Allow factors 2, 4, and 8 instead of only 2.
+     * The unroll logic is generic — it copies the body N times and
+     * rewires Phi back-edges. Higher factors give more instruction-
+     * level parallelism at the cost of code size. */
+    if (factor != 2 && factor != 4 && factor != 8) return 0;
 
     uint32_t unrolled = 0;
 
-    /* Find a LoopBegin node to unroll */
-    for (uint32_t i = 0; i < graph->node_table.count && unrolled == 0; i++) {
+    /* BUGFIX (audit #8): Remove `unrolled == 0` from the loop condition.
+     * The old code aborted after the first loop was unrolled, meaning
+     * programs with multiple hot loops only got one unrolled. Now we
+     * unroll ALL eligible loops (up to VTX_UNROLL_MAX_BODY nodes each). */
+    for (uint32_t i = 0; i < graph->node_table.count; i++) {
         vtx_node_t *loop = &graph->node_table.nodes[i];
         if (loop->dead || loop->opcode != VTX_OP_LoopBegin) continue;
 

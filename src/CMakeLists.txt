@@ -14,6 +14,7 @@ add_library(vortex_runtime STATIC
     runtime/helpers.c
     runtime/bytecode.c
     runtime/safepoint_manager.c
+    runtime/coroutine.c
     runtime/vortex_runtime.c
 )
 target_include_directories(vortex_runtime PUBLIC ${VORTEX_INCLUDE_DIRS})
@@ -57,6 +58,7 @@ add_library(vortex_ir STATIC
     ir/tbaa.c
     ir/spec_elim.c
     ir/strength_reduce.c
+    ir/algebraic.c
     ir/loop_unroll.c
     ir/smi_tag_elision.c
     ir/rep_infer.c

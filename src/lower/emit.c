@@ -4124,8 +4124,32 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
     case VTX_X86_MOVQ_XMM_R64:
         r0 = (inst->opnd_kinds[0] == VTX_OPND_PREG) ? (uint8_t)inst->operands[0] : 0xFF;
         r1 = (inst->opnd_kinds[1] == VTX_OPND_PREG) ? (uint8_t)inst->operands[1] : 0xFF;
-        if (r0 != 0xFF && r1 != 0xFF)
+        if (r0 != 0xFF && r1 != 0xFF) {
             vtx_x86_emit_movq_xmm_r64(e, r0, r1);
+        } else if (r0 != 0xFF && r1 == 0xFF) {
+            /* GPR source spilled — load to GPR temp, then MOVQ */
+            uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+            if (slot1 != VTX_NO_SPILL) {
+                emit_spill_load(e, slot1, VTX_SPILL_TMP_REG, ra);
+                vtx_x86_emit_movq_xmm_r64(e, r0, VTX_SPILL_TMP_REG);
+            }
+        } else if (r0 == 0xFF && r1 != 0xFF) {
+            /* XMM dst spilled — MOVQ to XMM temp, then store */
+            uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+            if (slot0 != VTX_NO_SPILL) {
+                vtx_x86_emit_movq_xmm_r64(e, VTX_SPILL_XMM_TMP, r1);
+                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP, ra);
+            }
+        } else {
+            /* Both spilled */
+            uint32_t slot0 = get_spill_slot_for_opnd(inst, 0, ra);
+            uint32_t slot1 = get_spill_slot_for_opnd(inst, 1, ra);
+            if (slot0 != VTX_NO_SPILL && slot1 != VTX_NO_SPILL) {
+                emit_spill_load(e, slot1, VTX_SPILL_TMP_REG, ra);
+                vtx_x86_emit_movq_xmm_r64(e, VTX_SPILL_XMM_TMP, VTX_SPILL_TMP_REG);
+                emit_spill_store_xmm(e, slot0, VTX_SPILL_XMM_TMP, ra);
+            }
+        }
         break;
 
     case VTX_X86_MOVQ_R64_XMM:

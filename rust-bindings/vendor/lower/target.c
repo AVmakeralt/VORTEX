@@ -129,7 +129,11 @@ static uint64_t x86_allocatable_mask(const vtx_target_description_t *self,
     (void)self;
     if (cls == VTX_REG_CLASS_GPR) {
         /* All GPRs except reserved (RSP, RBP, and R12/R13 for spill scratch) */
-        return VTX_CALLER_SAVED_MASK | VTX_CALLEE_SAVED_MASK & ~VTX_REG_RESERVED_MASK;
+        /* BUGFIX: C operator precedence — `&` binds tighter than `|`,
+         * so the original `CALLER | CALLEE & ~RESERVED` parsed as
+         * `CALLER | (CALLEE & ~RESERVED)`, leaking R10/R11 (reserved
+         * but caller-saved) into the allocatable pool. */
+        return (VTX_CALLER_SAVED_MASK | VTX_CALLEE_SAVED_MASK) & ~VTX_REG_RESERVED_MASK;
     }
     if (cls == VTX_REG_CLASS_XMM) {
         return VTX_XMM_ALL_MASK;  /* all 16 XMM regs */

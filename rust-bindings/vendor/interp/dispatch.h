@@ -74,6 +74,7 @@ typedef struct {
 
     /* Dispatch table for computed goto (indexed by opcode) */
     void              **dispatch_table;
+    bool                dispatch_table_copied; /* true after first copy (avoids re-copy) */
 
     /* Running state */
     bool                running;
@@ -113,6 +114,12 @@ typedef struct {
     vtx_method_ic_storage_t *method_ics;
     uint32_t                 method_ic_count;
     uint32_t                 method_ic_capacity;
+
+    /* Multi-return support: when a function uses RETURN_MULTI, the extra
+     * return values (beyond the primary) are stored here. The caller's
+     * dispatch_return pushes them all back onto the operand stack. */
+    vtx_value_t             multi_return_values[16];
+    uint32_t                multi_return_count;
 } vtx_interp_t;
 
 /* ========================================================================== */
@@ -179,5 +186,43 @@ vtx_value_t vtx_interp_handle_uncaught(vtx_interp_t *interp,
  */
 void vtx_interp_set_compile_ctx(vtx_interp_t *interp,
                                  vtx_compile_context_t *ctx);
+
+/* ========================================================================== */
+/* CALL_RUNTIME callback hook                                                  */
+/* ========================================================================== */
+/*
+ * The VT_OP_CALL_RUNTIME opcode has a built-in switch for runtime IDs
+ * 0-6 (typeof, monitor_enter, monitor_exit, throw, print_ln, print, exit).
+ *
+ * For IDs >= 7 (or any ID not handled by the built-in switch), the
+ * interpreter checks if a runtime callback has been registered via
+ * vtx_set_runtime_callback(). If so, it calls the callback with:
+ *   - func_id: the operand from CALL_RUNTIME
+ *   - sp: pointer to the operand stack pointer (can push/pop)
+ *   - user_data: the opaque pointer passed to set_runtime_callback
+ *
+ * The callback returns the number of values pushed onto the stack
+ * (0 = void, 1 = single return value). Return -1 to let the built-in
+ * handler run.
+ *
+ * This enables frontends (like LuaVortex) to extend the runtime
+ * without patching dispatch.c. Register a callback at startup:
+ *
+ *   vtx_set_runtime_callback(my_callback, my_user_data);
+ */
+
+typedef int (*vtx_runtime_callback_t)(uint32_t func_id,
+                                        vtx_value_t **sp_ptr,
+                                        void *user_data);
+
+/* Register a runtime callback for CALL_RUNTIME opcodes. */
+void vtx_set_runtime_callback(vtx_runtime_callback_t callback,
+                                void *user_data);
+
+/* Get the currently registered callback (or NULL). */
+vtx_runtime_callback_t vtx_get_runtime_callback(void);
+
+/* Get the user_data passed to vtx_set_runtime_callback. */
+void *vtx_get_runtime_callback_data(void);
 
 #endif /* VORTEX_DISPATCH_H */

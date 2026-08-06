@@ -43,6 +43,7 @@
 #include "codecache/install.h"
 #include "deopt/deoptless.h"
 #include "ir/strength_reduce.h"
+#include "ir/algebraic.h"
 
 /* Forward declarations from codecache/versioned.h (can't include directly
  * due to vtx_code_version_t struct conflict with compile/version.h) */
@@ -1079,12 +1080,14 @@ int vtx_pipeline_run(vtx_graph_t *graph,
     if (config->run_sccp) {
         uint32_t sr_replaced = vtx_strength_reduce_run(graph);
         if (sr_replaced > 0) {
-            /* Clean up dead nodes created by strength reduction before
-             * verification and subsequent passes. */
             vtx_node_table_clear_dead(&graph->node_table);
-            /* Don't fail on verify — strength reduction intentionally
-             * creates dead nodes that DCE will clean up. The verify
-             * "no dead nodes" check is for post-DCE only. */
+        }
+
+        /* Algebraic simplification: fold x+0, x*1, x*0, x-x, !!x, etc.
+         * Runs after SCCP (constants are known) and strength reduction. */
+        uint32_t alg_simplified = vtx_algebraic_simplify_run(graph);
+        if (alg_simplified > 0) {
+            vtx_node_table_clear_dead(&graph->node_table);
         }
     }
 
@@ -1359,10 +1362,20 @@ int vtx_pipeline_run(vtx_graph_t *graph,
         }
         if (config->run_sccp) {
             run_sccp_pass(graph, 1, &stats.sccp_time_ns);
-            /* Note: strength reduction is NOT re-run here. The first pass
-             * (Phase 2.5) already replaced all Div(x, 2^k) with Sar chains.
-             * Re-running here would try to replace already-dead Div nodes
-             * and create duplicate Sar chains, producing wrong code. */
+        }
+        /* BUGFIX (audit #22): Re-run strength reduction after LICM.
+         * LICM may hoist Mul(x, const) out of loops, creating new
+         * opportunities for strength reduction (e.g., Mul(x, 8) →
+         * Shl(x, 3) outside the loop). The old code skipped this,
+         * leaving hoisted Muls as IMULs.
+         *
+         * Safe because strength_reduce checks if the node is already
+         * a shift — it won't create duplicate Sar chains. */
+        if (config->run_sccp) {
+            uint32_t sr_replaced2 = vtx_strength_reduce_run(graph);
+            if (sr_replaced2 > 0) {
+                vtx_node_table_clear_dead(&graph->node_table);
+            }
         }
         if (config->run_dce) {
             run_dce_pass(graph, 1, &stats.dce_time_ns, false);
@@ -1380,10 +1393,13 @@ int vtx_pipeline_run(vtx_graph_t *graph,
          * (audit #13: wire vtx_merge_guards) */
         vtx_merge_guards(graph, arena);
 
-        /* Loop unrolling: unroll small loops by factor 2 to reduce loop
+        /* Loop unrolling: unroll small loops by factor 4 to reduce loop
          * overhead and enable more instruction-level parallelism.
-         * (audit #3: wire loop unrolling) */
-        vtx_loop_unroll_run(graph, &schedule, arena, 2);
+         * BUGFIX (audit #8): Was factor=2 (too conservative). Factor 4
+         * gives better ILP exposure without excessive code size growth.
+         * The unroll pass now also handles multiple loops (was aborting
+         * after the first). */
+        vtx_loop_unroll_run(graph, &schedule, arena, 4);
     }
 
     /* ================================================================== */
