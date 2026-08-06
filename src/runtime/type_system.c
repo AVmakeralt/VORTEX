@@ -806,7 +806,9 @@ int vtx_type_update_vtable(vtx_type_system_t *ts,
 void vtx_ic_init(vtx_inline_cache_t *ic)
 {
     VTX_ASSERT(ic != NULL, "inline cache must not be NULL");
-    ic->state = VT_IC_MONOMORPHIC;
+    /* TS-002 fix: write state atomically so concurrent readers using
+     * __atomic_load_n(..., ACQUIRE) don't see a torn value. */
+    __atomic_store_n(&ic->state, VT_IC_MONOMORPHIC, __ATOMIC_RELEASE);
     ic->count = 0;
     ic->lock = 0;  /* C17 fix: initialize spinlock */
     memset(ic->entries, 0, sizeof(ic->entries));
@@ -880,13 +882,15 @@ void vtx_ic_update(vtx_inline_cache_t *ic,
         ic->entries[ic->count].method  = method;
         __atomic_store_n(&ic->count, ic->count + 1, __ATOMIC_RELEASE);
 
-        /* Transition: monomorphic → polymorphic */
+        /* Transition: monomorphic → polymorphic.
+         * TS-002 fix: atomic store so lock-free readers don't race. */
         if (ic->count > 1) {
-            ic->state = VT_IC_POLYMORPHIC;
+            __atomic_store_n(&ic->state, VT_IC_POLYMORPHIC, __ATOMIC_RELEASE);
         }
     } else {
-        /* Exceeded polymorphic limit → megamorphic */
-        ic->state = VT_IC_MEGAMORPHIC;
+        /* Exceeded polymorphic limit → megamorphic.
+         * TS-002 fix: atomic store. */
+        __atomic_store_n(&ic->state, VT_IC_MEGAMORPHIC, __ATOMIC_RELEASE);
         ic->count = VTX_POLY_LIMIT; /* keep existing entries for potential future use */
     }
 

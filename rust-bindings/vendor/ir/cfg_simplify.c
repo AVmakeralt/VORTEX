@@ -52,11 +52,25 @@ uint32_t vtx_cfg_simplify_run(vtx_graph_t *graph)
                 }
             }
             if (control_count == 1 && single_input != VTX_NODEID_INVALID) {
-                /* Replace Region with pass-through: redirect all users
-                 * of this Region to use the single input directly. */
-                vtx_node_replace_all_uses(nt, i, single_input);
-                node->dead = true;
-                simplified++;
+                /* IR-005 fix: Replacing a Region with an arbitrary control
+                 * node (Goto/If) breaks Phi nodes, which reference their
+                 * Region as a structural input. Walk the Region's users;
+                 * if any user is a Phi that would be orphaned, skip the
+                 * replacement (DCE will clean it up later). */
+                bool safe = true;
+                for (uint32_t u = 0; u < node->use_count; u++) {
+                    vtx_use_entry_t *ue = &node->uses[u];
+                    if (ue->user_id < nt->count &&
+                        nt->nodes[ue->user_id].opcode == VTX_OP_Phi) {
+                        safe = false;
+                        break;
+                    }
+                }
+                if (safe) {
+                    vtx_node_replace_all_uses(nt, i, single_input);
+                    node->dead = true;
+                    simplified++;
+                }
             }
         }
 
@@ -87,8 +101,12 @@ uint32_t vtx_cfg_simplify_run(vtx_graph_t *graph)
                 vtx_node_t *target = &nt->nodes[target_id];
                 if (!target->dead && target->opcode == VTX_OP_Goto &&
                     target->input_count >= 1) {
-                    /* Goto → Goto: redirect to final target */
-                    node->inputs[0] = target->inputs[0];
+                    /* IR-003 fix: Use vtx_node_replace_input so the old
+                     * target's use-def list drops us and the new target's
+                     * use-def list gains us. The old raw assignment left
+                     * stale use-def entries, breaking downstream passes. */
+                    vtx_node_replace_input(nt, (vtx_nodeid_t)i, 0,
+                                          target->inputs[0]);
                     simplified++;
                 }
             }

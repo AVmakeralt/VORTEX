@@ -1277,11 +1277,14 @@ dispatch_VT_OP_IDIV:
         /* Fast path: SMI / SMI */
         int64_t ia_smi = vtx_smi_value(a);
         int64_t ib_smi = vtx_smi_value(b);
-        VTX_ASSERT(ib_smi != 0, "integer division by zero");
+        /* DISP-004 fix: check before the assert — debug builds used to
+         * abort() here, defeating the recovery path that returns
+         * UNDEFINED. The recovery is the intended semantics. */
         if (VTX_UNLIKELY(ib_smi == 0)) {
             *sp++ = VTX_VALUE_UNDEFINED;
             DISPATCH_NEXT();
         }
+        VTX_ASSERT(ib_smi != 0, "integer division by zero");
         if (VTX_UNLIKELY(ia_smi == INT64_MIN && ib_smi == -1)) {
             /* Bug #3 fix: INT64_MIN / -1 = 2^63 which overflows int64_t.
              * The correct result as a double is -(double)INT64_MIN = 2^63.0,
@@ -2735,6 +2738,31 @@ dispatch_VT_OP_CALL_RUNTIME:
 dispatch_done:
     /* Sync sp back to frame so the frame state is consistent */
     SYNC_SP();
+
+    /* ===================================================================
+     * DISP-005 fix: jit_reenter_pending was set when OSR couldn't find
+     * a loop-header entry (or vtx_osr_up failed). The old code set the
+     * flag but never checked it — the dispatch loop just returned to
+     * vtx_interp_run, which propagated the (already-computed) return
+     * value, never giving the JIT a chance to take over.
+     *
+     * Fix: if jit_reenter_pending is set and compiled_code is now
+     * available (the threadpool may have just finished installing it),
+     * dispatch to the JIT from method entry. This is the "whole-method
+     * re-enter" fallback documented in the OSR block above. */
+    if (interp->jit_reenter_pending) {
+        interp->jit_reenter_pending = false;
+        if (method != NULL) {
+            void *cc = __atomic_load_n(&method->compiled_code,
+                                          __ATOMIC_ACQUIRE);
+            if (cc != NULL) {
+                return vtx_dispatch_jit(interp, method, NULL, 0);
+            }
+        }
+        /* If compiled_code is still NULL (compilation not yet finished),
+         * fall through and return the current interp result. The next
+         * call to vtx_interp_run will check compiled_code again. */
+    }
 
     /* ===================================================================
      * OSR UP: If the dispatch loop set osr_pending at a backward branch,

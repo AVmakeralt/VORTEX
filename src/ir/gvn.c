@@ -15,6 +15,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 /* ========================================================================== */
 /* GVN hash computation                                                        */
@@ -307,9 +308,28 @@ static vtx_nodeid_t gvn_table_lookup_or_insert(vtx_gvn_table_t *t,
 {
     VTX_ASSERT(hash != 0, "hash must be non-zero");
 
-    /* IR-6 fix: grow table when load factor exceeds 0.7 */
+    /* IR-6 fix: grow table when load factor exceeds 0.7.
+     * IR-022 fix: don't silently ignore grow failure — if grow returns
+     * -1 (calloc failed), the table is at capacity and the lookup will
+     * fall through to the "table full" fallback. We continue (the new
+     * entry will not be inserted) but log a warning so the failure is
+     * visible. The pipeline still produces correct code, just with
+     * missed CSE opportunities. */
     if (t->count * 10 >= t->capacity * 7) {
-        gvn_table_grow(t, nt);
+        int grc = gvn_table_grow(t, nt);
+        if (grc != 0) {
+            /* Growth failed — fall through with the existing table.
+             * The lookup may still succeed (find an existing congruent
+             * node) but new inserts will be lost. This is a perf cliff,
+             * not a correctness bug, so don't abort. */
+            static int gvn_grow_warned = 0;
+            if (!gvn_grow_warned) {
+                fprintf(stderr,
+                        "VORTEX: GVN table grow failed (memory pressure) — "
+                        "CSE will be incomplete for this compilation.\n");
+                gvn_grow_warned = 1;
+            }
+        }
     }
 
     uint32_t idx = hash & (t->capacity - 1);

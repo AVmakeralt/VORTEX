@@ -38,7 +38,13 @@ public:
     // Useful for interop with C code that owns the bytecode.
     static Bytecode borrow(const vtx_bytecode_t* bc) {
         // const_cast is safe: we mark ourselves as non-owning.
-        return Bytecode(const_cast<vtx_bytecode_t*>(bc), /*own=*/false);
+        // CPP-002 fix: pass own_buffers=false explicitly. The old code
+        // passed only `/*own=*/false` which set own_struct=false but
+        // left own_buffers=true (default) — release() would then
+        // std::free bc_->code and bc_->constant_pool on memory the
+        // caller owns, causing a double-free.
+        return Bytecode(const_cast<vtx_bytecode_t*>(bc),
+                        /*own_struct=*/false, /*own_buffers=*/false);
     }
 
     // Build bytecode from in-memory bytes (does NOT copy — borrows).

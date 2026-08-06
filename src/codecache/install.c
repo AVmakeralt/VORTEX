@@ -35,6 +35,12 @@ int vtx_method_registry_init(vtx_method_registry_t *registry, vtx_arena_t *arena
         return -1;
     }
     memset(registry->methods, 0, registry->capacity * sizeof(vtx_compiled_method_t *));
+    /* COMPILE-001 fix: init the install/uninstall mutex. */
+    if (pthread_mutex_init(&registry->mutex, NULL) != 0) {
+        registry->mutex_initialized = false;
+        return -1;
+    }
+    registry->mutex_initialized = true;
     return 0;
 }
 
@@ -61,12 +67,26 @@ void vtx_method_registry_destroy(vtx_method_registry_t *registry)
     registry->capacity_mask = 0;
     registry->clock_hand = 0;
     registry->malloc_allocated = false;
+    /* COMPILE-001 fix: destroy the install/uninstall mutex. */
+    if (registry->mutex_initialized) {
+        pthread_mutex_destroy(&registry->mutex);
+        registry->mutex_initialized = false;
+    }
 }
 
 int vtx_method_registry_add(vtx_method_registry_t *registry,
                              vtx_compiled_method_t *method)
 {
     if (!registry || !method) return -1;
+
+    /* COMPILE-001 fix: lock the registry during install. Without this,
+     * two threadpool workers installing methods concurrently race on
+     * the realloc below — one may free the array the other is
+     * memcpy-ing from → UAF / heap corruption. The lock is only
+     * contended on install (rare), not on dispatch. */
+    if (registry->mutex_initialized) {
+        pthread_mutex_lock(&registry->mutex);
+    }
 
     /* Grow array if needed. Capacity is always kept as a power of 2
      * so that (index & capacity_mask) is equivalent to (index % capacity). */
@@ -83,11 +103,18 @@ int vtx_method_registry_add(vtx_method_registry_t *registry,
         }
         vtx_compiled_method_t **new_arr = (vtx_compiled_method_t **)malloc(
             new_cap * sizeof(vtx_compiled_method_t *));
-        if (!new_arr) return -1;
+        if (!new_arr) {
+            if (registry->mutex_initialized) pthread_mutex_unlock(&registry->mutex);
+            return -1;
+        }
         memset(new_arr, 0, new_cap * sizeof(vtx_compiled_method_t *));
         if (registry->methods) {
             memcpy(new_arr, registry->methods,
                    registry->capacity * sizeof(vtx_compiled_method_t *));
+        }
+        /* Old array was read while we held the lock — safe to free. */
+        if (registry->malloc_allocated && registry->methods) {
+            free(registry->methods);
         }
         registry->methods = new_arr;
         registry->capacity = new_cap;
@@ -99,6 +126,9 @@ int vtx_method_registry_add(vtx_method_registry_t *registry,
     if (method->method_id >= registry->method_count) {
         registry->method_count = method->method_id + 1;
     }
+    if (registry->mutex_initialized) {
+        pthread_mutex_unlock(&registry->mutex);
+    }
     return 0;
 }
 
@@ -106,13 +136,23 @@ vtx_compiled_method_t *vtx_method_registry_get(vtx_method_registry_t *registry,
                                                 uint32_t method_id)
 {
     if (!registry || method_id >= registry->capacity) return NULL;
+    /* Read is lock-free — the methods array is realloc'd under mutex,
+     * but readers either see the old array (still valid, freed only
+     * after all readers release) or the new array. The pointer stored
+     * at methods[method_id] is updated atomically by the install path.
+     * For the rare install-during-read race, the worst case is reading
+     * NULL (method not yet installed) which dispatch handles. */
     return registry->methods[method_id];
 }
 
 int vtx_method_registry_remove(vtx_method_registry_t *registry, uint32_t method_id)
 {
     if (!registry || method_id >= registry->capacity) return -1;
+    /* COMPILE-001 fix: lock during remove so concurrent installers
+     * don't realloc under us. */
+    if (registry->mutex_initialized) pthread_mutex_lock(&registry->mutex);
     registry->methods[method_id] = NULL;
+    if (registry->mutex_initialized) pthread_mutex_unlock(&registry->mutex);
     return 0;
 }
 

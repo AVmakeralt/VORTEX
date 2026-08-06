@@ -359,5 +359,9 @@ uint16_t vtx_bytecode_scan_max_locals(const vtx_bytecode_t *bc)
         pc += insn_len;
     }
     (void)any;
-    return max_idx;
+    /* BC-001 fix: return the COUNT (max_idx + 1), not the highest index.
+     * Callers treat this as max_locals (a count) and allocate locals[]
+     * of that size — returning just max_idx leaves the array one slot
+     * short, so STORE_LOCAL N writes one byte out of bounds. */
+    return (uint16_t)(max_idx + 1);
 }

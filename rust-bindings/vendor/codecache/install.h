@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <pthread.h>
 #include "vortex_config.h"
 #include "codecache/cache.h"
 #include "codecache/types.h"
@@ -121,6 +122,15 @@ typedef struct vtx_method_registry {
     uint32_t                capacity_mask;  /* capacity - 1, for fast modulo via bitwise AND */
     uint32_t                clock_hand;     /* current position of the clock hand */
     bool                    malloc_allocated; /* true if methods array was grown with malloc */
+    /* COMPILE-001 fix: mutex serializing install/uninstall/lookup-by-id.
+     * The code cache itself is documented as NOT thread-safe, but
+     * vtx_install_method is called concurrently from threadpool
+     * workers and the main thread — without this lock, the realloc
+     * in vtx_method_registry_add races and causes UAF. The mutex is
+     * only contended on install (rare), not on dispatch (which reads
+     * method->compiled_code directly, not the registry). */
+    pthread_mutex_t         mutex;
+    bool                    mutex_initialized;
 } vtx_method_registry_t;
 
 /**

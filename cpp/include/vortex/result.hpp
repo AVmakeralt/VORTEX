@@ -44,10 +44,18 @@ public:
         return r;
     }
 
-    /* Move constructor/assignment */
+    /* Move constructor/assignment.
+     * CPP-004 fix: clear other.ok_ after move so the moved-from
+     * Result's destructor doesn't double-destroy the (now-moved)
+     * value. The old code left ok_ == true in the source, so when
+     * the source's destructor ran it called ~T() on already-moved
+     * storage — for types like Bytecode that hold raw pointers,
+     * this is a double-free. */
     Result(Result&& other) : ok_(other.ok_) {
         if (ok_) {
             new (&storage_) T(std::move(other.value()));
+            /* Mark source as empty so its destructor doesn't re-destroy. */
+            other.ok_ = false;
         } else {
             error_ = std::move(other.error_);
         }
@@ -58,6 +66,8 @@ public:
             ok_ = other.ok_;
             if (ok_) {
                 new (&storage_) T(std::move(other.value()));
+                /* Mark source as empty so its destructor doesn't re-destroy. */
+                other.ok_ = false;
             } else {
                 error_ = std::move(other.error_);
             }

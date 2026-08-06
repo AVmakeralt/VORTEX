@@ -58,120 +58,139 @@ uint32_t vtx_algebraic_simplify_run(vtx_graph_t *graph)
     vtx_node_table_t *nt = &graph->node_table;
     uint32_t simplified = 0;
 
-    for (uint32_t i = 0; i < nt->count; i++) {
-        vtx_node_t *node = &nt->nodes[i];
-        if (node->dead) continue;
-        if (node->input_count < 1) continue;
+    /* IR-008 fix: iterate to a fixed point. Cascades like
+     * Sub(Add(x,0),0) where the Add is at a HIGHER index than the
+     * Sub miss simplification in a single forward pass. Loop until
+     * no further simplifications occur (cap at 8 iterations to bound
+     * compile time on pathological graphs). */
+    uint32_t pass = 0;
+    while (pass < 8) {
+        uint32_t pass_simplified = 0;
+        /* Reverse-ID order: consumers before producers, so cascades
+         * that flow backward in ID order still get caught in one pass. */
+        for (uint32_t ii = nt->count; ii-- > 0; ) {
+            vtx_node_t *node = &nt->nodes[ii];
+            if (node->dead) continue;
+            if (node->input_count < 1) continue;
 
-        /* Skip float-typed nodes (different semantics) */
-        if (node->type == VTX_TYPE_Float) continue;
+            /* Skip float-typed nodes (different semantics) */
+            if (node->type == VTX_TYPE_Float) continue;
 
-        vtx_nodeid_t lhs = (node->input_count >= 1) ? node->inputs[0] : VTX_NODEID_INVALID;
-        vtx_nodeid_t rhs = (node->input_count >= 2) ? node->inputs[1] : VTX_NODEID_INVALID;
+            vtx_nodeid_t lhs = (node->input_count >= 1) ? node->inputs[0] : VTX_NODEID_INVALID;
+            vtx_nodeid_t rhs = (node->input_count >= 2) ? node->inputs[1] : VTX_NODEID_INVALID;
 
-        int64_t lhs_const, rhs_const;
-        bool lhs_is_const = try_get_const(nt, lhs, &lhs_const);
-        bool rhs_is_const = try_get_const(nt, rhs, &rhs_const);
+            int64_t lhs_const, rhs_const;
+            bool lhs_is_const = try_get_const(nt, lhs, &lhs_const);
+            bool rhs_is_const = try_get_const(nt, rhs, &rhs_const);
 
         switch (node->opcode) {
         /* Add(x, 0) → x, Add(0, x) → x */
         case VTX_OP_Add:
             if (rhs_is_const && rhs_const == 0) {
-                replace_node(nt, i, lhs);
-                simplified++;
+                replace_node(nt, ii, lhs);
+                pass_simplified++;
             } else if (lhs_is_const && lhs_const == 0) {
-                replace_node(nt, i, rhs);
-                simplified++;
+                replace_node(nt, ii, rhs);
+                pass_simplified++;
             }
             break;
 
         /* Sub(x, 0) → x, Sub(x, x) → 0 */
         case VTX_OP_Sub:
             if (rhs_is_const && rhs_const == 0) {
-                replace_node(nt, i, lhs);
-                simplified++;
+                replace_node(nt, ii, lhs);
+                pass_simplified++;
             } else if (lhs == rhs) {
                 /* Sub(x, x) → 0 — create a constant 0 */
+                /* IR-006 fix: check allocation failure before deref. */
                 vtx_nodeid_t zero = vtx_node_create(nt, VTX_OP_Constant);
+                if (zero == VTX_NODEID_INVALID) break;
                 vtx_node_t *z = vtx_node_get(nt, zero);
+                if (z == NULL) break;
                 z->constval.kind = VTX_TYPE_Int;
                 z->constval.as.int_val = 0;
                 z->type = VTX_TYPE_Int;
-                replace_node(nt, i, zero);
-                simplified++;
+                replace_node(nt, ii, zero);
+                pass_simplified++;
             }
             break;
 
         /* Mul(x, 0) → 0, Mul(x, 1) → x, Mul(1, x) → x, Mul(x, -1) → Neg(x) */
         case VTX_OP_Mul:
             if (rhs_is_const && rhs_const == 0) {
-                replace_node(nt, i, rhs);  /* replace with the 0 constant */
-                simplified++;
+                replace_node(nt, ii, rhs);  /* replace with the 0 constant */
+                pass_simplified++;
             } else if (rhs_is_const && rhs_const == 1) {
-                replace_node(nt, i, lhs);
-                simplified++;
+                replace_node(nt, ii, lhs);
+                pass_simplified++;
             } else if (lhs_is_const && lhs_const == 1) {
-                replace_node(nt, i, rhs);
-                simplified++;
+                replace_node(nt, ii, rhs);
+                pass_simplified++;
             } else if (rhs_is_const && rhs_const == -1) {
-                /* Mul(x, -1) → Neg(x) */
+                /* Mul(x, -1) → Neg(x).
+                 * IR-007 fix: properly disconnect the rhs Constant via
+                 * vtx_node_remove_input so its use-def list and
+                 * output_count are updated. The old raw mutation left
+                 * the Constant appearing to have a user (this node),
+                 * so DCE never collected it. */
+                vtx_node_remove_input(nt, (vtx_nodeid_t)ii, 1);
                 node->opcode = VTX_OP_Neg;
-                node->input_count = 1;
-                /* Remove the second input (the -1 constant) */
-                node->inputs[1] = VTX_NODEID_INVALID;
-                simplified++;
+                pass_simplified++;
             }
             break;
 
         /* Div(x, 1) → x */
         case VTX_OP_Div:
             if (rhs_is_const && rhs_const == 1) {
-                replace_node(nt, i, lhs);
-                simplified++;
+                replace_node(nt, ii, lhs);
+                pass_simplified++;
             }
             break;
 
         /* And(x, 0) → 0, And(x, -1) → x */
         case VTX_OP_And:
             if (rhs_is_const && rhs_const == 0) {
-                replace_node(nt, i, rhs);
-                simplified++;
+                replace_node(nt, ii, rhs);
+                pass_simplified++;
             } else if (rhs_is_const && rhs_const == -1) {
-                replace_node(nt, i, lhs);
-                simplified++;
+                replace_node(nt, ii, lhs);
+                pass_simplified++;
             } else if (lhs_is_const && lhs_const == -1) {
-                replace_node(nt, i, rhs);
-                simplified++;
+                replace_node(nt, ii, rhs);
+                pass_simplified++;
             }
             break;
 
         /* Or(x, 0) → x, Or(x, -1) → -1 */
         case VTX_OP_Or:
             if (rhs_is_const && rhs_const == 0) {
-                replace_node(nt, i, lhs);
-                simplified++;
+                replace_node(nt, ii, lhs);
+                pass_simplified++;
             } else if (rhs_is_const && rhs_const == -1) {
-                replace_node(nt, i, rhs);
-                simplified++;
+                replace_node(nt, ii, rhs);
+                pass_simplified++;
             } else if (lhs_is_const && lhs_const == 0) {
-                replace_node(nt, i, rhs);
-                simplified++;
+                replace_node(nt, ii, rhs);
+                pass_simplified++;
             }
             break;
 
         /* Xor(x, 0) → x, Xor(x, x) → 0 */
         case VTX_OP_Xor:
             if (rhs_is_const && rhs_const == 0) {
-                replace_node(nt, i, lhs);
-                simplified++;
+                replace_node(nt, ii, lhs);
+                pass_simplified++;
             } else if (lhs == rhs) {
+                /* IR-006 fix: check allocation failure before deref. */
                 vtx_nodeid_t zero = vtx_node_create(nt, VTX_OP_Constant);
+                if (zero == VTX_NODEID_INVALID) break;
                 vtx_node_t *z = vtx_node_get(nt, zero);
+                if (z == NULL) break;
                 z->constval.kind = VTX_TYPE_Int;
                 z->constval.as.int_val = 0;
                 z->type = VTX_TYPE_Int;
-                replace_node(nt, i, zero);
-                simplified++;
+                replace_node(nt, ii, zero);
+                pass_simplified++;
             }
             break;
 
@@ -180,8 +199,8 @@ uint32_t vtx_algebraic_simplify_run(vtx_graph_t *graph)
         case VTX_OP_Shr:
         case VTX_OP_Sar:
             if (rhs_is_const && rhs_const == 0) {
-                replace_node(nt, i, lhs);
-                simplified++;
+                replace_node(nt, ii, lhs);
+                pass_simplified++;
             }
             break;
 
@@ -192,8 +211,8 @@ uint32_t vtx_algebraic_simplify_run(vtx_graph_t *graph)
                 if (!lhs_node->dead && lhs_node->opcode == VTX_OP_Neg) {
                     /* Neg(Neg(x)) → x */
                     vtx_nodeid_t inner = lhs_node->inputs[0];
-                    replace_node(nt, i, inner);
-                    simplified++;
+                    replace_node(nt, ii, inner);
+                    pass_simplified++;
                 }
             }
             break;
@@ -204,8 +223,8 @@ uint32_t vtx_algebraic_simplify_run(vtx_graph_t *graph)
                 vtx_node_t *lhs_node = &nt->nodes[lhs];
                 if (!lhs_node->dead && lhs_node->opcode == VTX_OP_Not) {
                     vtx_nodeid_t inner = lhs_node->inputs[0];
-                    replace_node(nt, i, inner);
-                    simplified++;
+                    replace_node(nt, ii, inner);
+                    pass_simplified++;
                 }
             }
             break;
@@ -213,6 +232,11 @@ uint32_t vtx_algebraic_simplify_run(vtx_graph_t *graph)
         default:
             break;
         }
+        }
+
+        if (pass_simplified == 0) break;
+        simplified += pass_simplified;
+        pass++;
     }
 
     if (simplified > 0) {

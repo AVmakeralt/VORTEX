@@ -100,13 +100,14 @@ int vtx_feedback_record_decision(vtx_inline_feedback_t *feedback,
         /* Update the existing decision with new features and decision */
         vtx_inline_decision_t *dec = &feedback->decisions[existing];
 
-        /* BS-5 fix: decrement old classification counter before resetting */
+        /* BS-5 fix: decrement old classification counter before resetting.
+         * IR-035 fix: saturating decrement to prevent underflow to UINT32_MAX. */
         if (dec->outcome == VTX_OUTCOME_PROFITABLE) {
-            feedback->profitable_count--;
+            if (feedback->profitable_count > 0) feedback->profitable_count--;
         } else if (dec->outcome == VTX_OUTCOME_UNPROFITABLE) {
-            feedback->unprofitable_count--;
+            if (feedback->unprofitable_count > 0) feedback->unprofitable_count--;
         } else {
-            feedback->unknown_count--;
+            if (feedback->unknown_count > 0) feedback->unknown_count--;
         }
 
         dec->features = *features;
@@ -171,8 +172,9 @@ int vtx_feedback_record_outcome(vtx_inline_feedback_t *feedback,
      * PROFITABLE → UNPROFITABLE (late deopt)
      * UNPROFITABLE → UNPROFITABLE (no change) */
     if (dec->outcome == VTX_OUTCOME_UNKNOWN) {
-        /* Update counters */
-        feedback->unknown_count--;
+        /* Update counters.
+         * IR-035 fix: saturating decrement. */
+        if (feedback->unknown_count > 0) feedback->unknown_count--;
         if (new_outcome == VTX_OUTCOME_PROFITABLE) {
             feedback->profitable_count++;
         } else {
@@ -181,8 +183,9 @@ int vtx_feedback_record_outcome(vtx_inline_feedback_t *feedback,
         dec->outcome = new_outcome;
     } else if (dec->outcome == VTX_OUTCOME_PROFITABLE &&
                new_outcome == VTX_OUTCOME_UNPROFITABLE) {
-        /* Late deopt after previously profitable — downgrade */
-        feedback->profitable_count--;
+        /* Late deopt after previously profitable — downgrade.
+         * IR-035 fix: saturating decrement. */
+        if (feedback->profitable_count > 0) feedback->profitable_count--;
         feedback->unprofitable_count++;
         dec->outcome = VTX_OUTCOME_UNPROFITABLE;
     }
@@ -198,8 +201,9 @@ int vtx_feedback_record_outcome(vtx_inline_feedback_t *feedback,
     if (dec->outcome == VTX_OUTCOME_UNPROFITABLE) {
         uint64_t execs_since_deopt = dec->execution_count - dec->last_deopt_exec_count;
         if (execs_since_deopt > 10000) {
-            /* Decay: reset to UNKNOWN so the inliner can retry */
-            feedback->unprofitable_count--;
+            /* Decay: reset to UNKNOWN so the inliner can retry.
+             * IR-035 fix: saturating decrement. */
+            if (feedback->unprofitable_count > 0) feedback->unprofitable_count--;
             dec->outcome = VTX_OUTCOME_UNKNOWN;
         }
     }
@@ -222,10 +226,11 @@ void vtx_feedback_increment_executions(vtx_inline_feedback_t *feedback,
         dec->execution_count++;
     }
 
-    /* Auto-promote to PROFITABLE after feedback window */
+    /* Auto-promote to PROFITABLE after feedback window.
+     * IR-035 fix: saturating decrement. */
     if (dec->outcome == VTX_OUTCOME_UNKNOWN &&
         dec->execution_count >= VTX_FEEDBACK_WINDOW) {
-        feedback->unknown_count--;
+        if (feedback->unknown_count > 0) feedback->unknown_count--;
         feedback->profitable_count++;
         dec->outcome = VTX_OUTCOME_PROFITABLE;
     }
@@ -251,10 +256,11 @@ void vtx_feedback_increment_deopts(vtx_inline_feedback_t *feedback,
     if (dec->execution_count > 0 && dec->outcome != VTX_OUTCOME_UNPROFITABLE) {
         double deopt_rate = (double)dec->deopt_count / (double)dec->execution_count;
         if (deopt_rate > VTX_INLINE_DEOPT_THRESHOLD) {
+            /* IR-035 fix: saturating decrements. */
             if (dec->outcome == VTX_OUTCOME_UNKNOWN) {
-                feedback->unknown_count--;
+                if (feedback->unknown_count > 0) feedback->unknown_count--;
             } else if (dec->outcome == VTX_OUTCOME_PROFITABLE) {
-                feedback->profitable_count--;
+                if (feedback->profitable_count > 0) feedback->profitable_count--;
             }
             feedback->unprofitable_count++;
             dec->outcome = VTX_OUTCOME_UNPROFITABLE;

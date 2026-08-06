@@ -118,14 +118,20 @@ inline uint32_t register_host_function(const std::string& name, HostFunction fn)
 }
 
 // C-callable trampoline for the VORTEX runtime's CALL_RUNTIME handler.
-// This bridges the C runtime's vtx_runtime_builtin_call to our C++ registry.
-// The runtime calls vtx_runtime_builtin_call(func_id, arg), and this
-// trampoline dispatches to the registered C++ function.
+// This bridges the C runtime's CALL_RUNTIME opcode to our C++ registry.
 //
-// NOTE: The current CALL_RUNTIME only passes a single argument. For
-// multi-arg host functions, we'd need to extend the C runtime to pass
-// a value array. For now, single-arg host functions are supported.
+// CPP-008 fix: The old vtx_cpp_host_call(func_id, arg) signature was
+// called via the legacy single-arg path — multi-arg host functions
+// never received more than one argument. The new trampoline
+// vtx_cpp_host_trampoline() registers itself via vtx_set_runtime_callback()
+// and receives the operand stack pointer, so it can read multiple
+// arguments. vtx_cpp_host_call() is kept for backward compatibility.
 extern "C" vtx_value_t vtx_cpp_host_call(uint32_t func_id, vtx_value_t arg);
+
+// Register the host function trampoline with the C runtime so that
+// CALL_RUNTIME opcodes dispatch to the C++ registry. Call once at
+// embed startup. Safe to call multiple times.
+extern "C" void vtx_cpp_host_init(void);
 
 } // namespace vortex
 

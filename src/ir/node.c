@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdint.h>
 
 /* ========================================================================== */
 /* Opcode metadata table                                                       */
@@ -190,6 +191,7 @@ vtx_nodetype_t vtx_node_default_type(vtx_node_opcode_t opcode)
     case VTX_OP_Mod:
     case VTX_OP_Shl:
     case VTX_OP_Shr:
+    case VTX_OP_Sar:
     case VTX_OP_And:
     case VTX_OP_Or:
     case VTX_OP_Xor:
@@ -490,7 +492,18 @@ static int node_table_grow(vtx_node_table_t *table, uint32_t min_capacity)
         new_cap = doubled;
     }
 
-    vtx_node_t *new_nodes = (vtx_node_t *)realloc(table->nodes, new_cap * sizeof(vtx_node_t));
+    /* IR-025 fix: check that new_cap * sizeof(vtx_node_t) does not
+     * overflow size_t. On 64-bit this is unlikely (would need ~2^32
+     * nodes × ~128B = 512 GB), but on 32-bit builds (or if vtx_node_t
+     * grows large) the multiplication can wrap, causing a small alloc
+     * followed by an OOB memset/write. */
+    size_t alloc_bytes = (size_t)new_cap * sizeof(vtx_node_t);
+    if (new_cap != 0 && alloc_bytes / sizeof(vtx_node_t) != new_cap) {
+        /* Overflow — refuse to grow */
+        return -1;
+    }
+
+    vtx_node_t *new_nodes = (vtx_node_t *)realloc(table->nodes, alloc_bytes);
     if (new_nodes == NULL) {
         return -1;
     }

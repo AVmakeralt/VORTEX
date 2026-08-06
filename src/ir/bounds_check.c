@@ -805,6 +805,12 @@ typedef struct {
     uint32_t     block_idx;    /* block containing this guard           */
     vtx_nodeid_t guard_id;     /* node ID of the guard node             */
     bool         is_nonneg;    /* true if this is a non-negative check  */
+    bool         is_unsigned;  /* IR-014 fix: true if guard condition was
+                                  unsigned (ULT/UGE/ULE/UGT). Only
+                                  unsigned bounds checks prove i >= 0.
+                                  A SIGNED bounds check i < len does
+                                  NOT prove i >= 0 (i could be negative
+                                  and still less than len).              */
 } vtx_guard_record_t;
 
 /* ========================================================================== */
@@ -828,25 +834,23 @@ static void eliminate_guard(vtx_node_table_t *table, vtx_node_t *guard)
     vtx_nodeid_t guard_id = guard->id;
     vtx_nodeid_t control_input = guard->inputs[0];
 
-    /* Redirect all uses of this guard to its control input */
+    /* IR-015 fix: redirect all uses via the use-def list (O(K)) instead
+     * of an O(N) scan over every node in the table. vtx_node_replace_all_uses
+     * iterates the guard's use list and rewires each consumer input to
+     * control_input. */
     if (control_input != VTX_NODEID_INVALID && control_input != guard_id) {
-        for (uint32_t u = 0; u < table->count; u++) {
-            vtx_node_t *user = &table->nodes[u];
-            if (user->dead) continue;
-
-            for (uint32_t j = 0; j < user->input_count; j++) {
-                if (user->inputs[j] == guard_id) {
-                    vtx_node_replace_input(table, u, j, control_input);
-                }
-            }
-        }
+        vtx_node_replace_all_uses(table, guard_id, control_input);
     }
 
-    /* Disconnect all inputs of the guard */
+    /* Disconnect all inputs of the guard.
+     * IR-016 fix: also remove the use-def entry from each producer so
+     * downstream passes traversing use-def lists (GVN, LICM) don't
+     * encounter stale entries pointing at the dead guard. */
     for (uint32_t j = 0; j < guard->input_count; j++) {
         vtx_nodeid_t inp = guard->inputs[j];
         if (inp != VTX_NODEID_INVALID && inp < table->count) {
             vtx_node_t *producer = &table->nodes[inp];
+            vtx_node_remove_use_entry(producer, guard_id, j);
             if (producer->output_count > 0) {
                 producer->output_count--;
             }
@@ -1005,14 +1009,15 @@ static bool is_dominated_guard_redundant(const vtx_guard_record_t *records,
                     return true;
                 }
             } else {
-                /* A bounds check on the same index with unsigned comparison
-                 * implies nonneg.  Check if the record's guard was an
-                 * unsigned comparison.  For simplicity, we check if the
-                 * length_id is valid (bounds check) — in that case the
-                 * guard might have been unsigned, which implies nonneg.
-                 * We conservatively assume any bounds check also proves
-                 * nonneg if it comes from the same index. */
-                if (block_dominates(idom, rec->block_idx, current_block)) {
+                /* IR-014 fix (CRITICAL): A SIGNED bounds check on the
+                 * same index does NOT prove i >= 0. A signed i < len
+                 * is satisfied by negative i too. Only UNSIGNED bounds
+                 * checks (ULT/UGE/ULE/UGT) imply i is non-negative.
+                 * The old code conservatively assumed any bounds check
+                 * also proved nonneg, which allowed negative array
+                 * indices and caused OOB reads/writes. */
+                if (rec->is_unsigned &&
+                    block_dominates(idom, rec->block_idx, current_block)) {
                     return true;
                 }
             }
@@ -1178,6 +1183,18 @@ int vtx_bounds_check_run(vtx_graph_t *graph,
                     rec->block_idx = bi;
                     rec->guard_id  = nid;
                     rec->is_nonneg = false;
+                    /* IR-014 fix: capture the comparison signedness so
+                     * we don't later treat a signed bounds check as
+                     * proving non-negativity. */
+                    rec->is_unsigned = false;
+                    const vtx_node_t *cmp_for_rec = get_guard_condition(node, nt);
+                    if (cmp_for_rec != NULL &&
+                        (cmp_for_rec->cond == VTX_COND_ULT ||
+                         cmp_for_rec->cond == VTX_COND_UGE ||
+                         cmp_for_rec->cond == VTX_COND_ULE ||
+                         cmp_for_rec->cond == VTX_COND_UGT)) {
+                        rec->is_unsigned = true;
+                    }
                 }
 
                 /* A ULT bounds check also implies i >= 0 */

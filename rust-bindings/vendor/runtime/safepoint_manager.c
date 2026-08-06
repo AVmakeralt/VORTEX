@@ -175,7 +175,9 @@ int vtx_safepoint_request_all(vtx_safepoint_manager_t *mgr)
     if (mgr == NULL) return -1;
     pthread_mutex_lock(&mgr->mutex);
 
-    mgr->safepoint_requested = true;
+    /* SP-001 fix: use atomic store so lock-free readers (using
+     * __atomic_load_n with ACQUIRE) don't race. */
+    __atomic_store_n(&mgr->safepoint_requested, true, __ATOMIC_RELEASE);
     mgr->safepoint_id++;
     mgr->safepointed_count = 0;
     mgr->total_safepoints++;
@@ -194,7 +196,8 @@ int vtx_safepoint_release_all(vtx_safepoint_manager_t *mgr)
     if (mgr == NULL) return -1;
     pthread_mutex_lock(&mgr->mutex);
 
-    mgr->safepoint_requested = false;
+    /* SP-001 fix: atomic store — see comment in vtx_safepoint_mgr_begin. */
+    __atomic_store_n(&mgr->safepoint_requested, false, __ATOMIC_RELEASE);
     /* B12 fix: Increment safepoint_id so waiting threads observing it in
      * vtx_safepoint_mgr_check (which loops while safepoint_id == my_safepoint_id)
      * see the safepoint as released and exit the wait loop. Without this
