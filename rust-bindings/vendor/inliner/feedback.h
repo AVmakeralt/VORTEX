@@ -67,6 +67,7 @@ typedef struct {
     vtx_inline_outcome_t    outcome;       /* observed outcome */
     uint64_t                execution_count; /* executions since decision */
     uint64_t                deopt_count;     /* deopts at this site since decision */
+    uint64_t                last_deopt_exec_count; /* exec count at last deopt (for decay) */
     uint64_t                decision_timestamp; /* BS-20 fix: when the decision was made (ns) */
 } vtx_inline_decision_t;
 

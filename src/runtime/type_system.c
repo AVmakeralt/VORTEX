@@ -60,6 +60,13 @@ static int symbol_table_init(vtx_symbol_table_t *st)
  */
 static void symbol_table_destroy(vtx_symbol_table_t *st)
 {
+    /* Free strdup'd symbol names */
+    for (uint32_t i = 0; i < st->symbol_count; i++) {
+        if (st->symbols[i].name) {
+            free((void *)st->symbols[i].name);
+            st->symbols[i].name = NULL;
+        }
+    }
     free(st->symbols);
     st->symbols = NULL;
     free(st->hash_buckets);
@@ -148,7 +155,14 @@ uint32_t vtx_symbol_intern(vtx_type_system_t *ts, const char *name)
     }
 
     uint32_t new_id = st->symbol_count;
-    st->symbols[new_id].name = name;
+    /* BUGFIX (audit): strdup the name so the symbol table owns its copy.
+     * The old code aliased the caller's pointer — if the caller freed
+     * or reused the buffer (e.g., a temporary string), the symbol
+     * table held a dangling pointer → UAF on lookup. */
+    st->symbols[new_id].name = strdup(name);
+    if (!st->symbols[new_id].name) {
+        return VTX_SYMBOL_INVALID; /* OOM */
+    }
     st->symbols[new_id].hash = hash;
     st->symbols[new_id].length = length;
     st->symbol_count++;

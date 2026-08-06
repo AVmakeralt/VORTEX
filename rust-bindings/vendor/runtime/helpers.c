@@ -419,10 +419,22 @@ vtx_value_t vtx_runtime_call_virtual_reg(const vtx_method_desc_t *method,
         return VTX_VALUE_UNDEFINED;
     }
     uint32_t total_arg_count = remaining_count + 1; /* +1 for receiver */
-    vtx_value_t *full_args = (vtx_value_t *)malloc(total_arg_count * sizeof(vtx_value_t));
-    if (full_args == NULL) {
-        return VTX_VALUE_UNDEFINED;
+
+    /* BUGFIX (audit): Use stack allocation (VLA) for small arg counts
+     * instead of malloc per call. malloc is ~50-100ns; VLA is ~0ns.
+     * For large counts (>32), fall back to malloc to avoid stack overflow. */
+    vtx_value_t stack_args[33]; /* receiver + 32 args on stack */
+    vtx_value_t *full_args;
+    bool used_malloc = false;
+
+    if (total_arg_count <= 32) {
+        full_args = stack_args;
+    } else {
+        full_args = (vtx_value_t *)malloc(total_arg_count * sizeof(vtx_value_t));
+        if (full_args == NULL) return VTX_VALUE_UNDEFINED;
+        used_malloc = true;
     }
+
     full_args[0] = receiver;
     if (remaining_count > 0 && remaining_args != NULL) {
         memcpy(full_args + 1, remaining_args, remaining_count * sizeof(vtx_value_t));
@@ -432,7 +444,7 @@ vtx_value_t vtx_runtime_call_virtual_reg(const vtx_method_desc_t *method,
     vtx_profiler_record_invocation(&interp_ptr->profiler, target_method);
 
     vtx_value_t result = vtx_interp_run(interp_ptr, target_method, full_args, total_arg_count);
-    free(full_args);
+    if (used_malloc) free(full_args);
     return result;
 }
 
@@ -481,14 +493,22 @@ vtx_value_t vtx_runtime_call_interface_reg(const vtx_method_desc_t *method,
         return VTX_VALUE_UNDEFINED;
     }
 
-    /* Build the full args array: receiver + remaining args. */
+    /* Build the full args array: receiver + remaining args.
+     * BUGFIX (audit): Use stack allocation for small arg counts. */
     if (remaining_count > UINT32_MAX - 1) {
         return VTX_VALUE_UNDEFINED;
     }
     uint32_t total_arg_count = remaining_count + 1;
-    vtx_value_t *full_args = (vtx_value_t *)malloc(total_arg_count * sizeof(vtx_value_t));
-    if (full_args == NULL) {
-        return VTX_VALUE_UNDEFINED;
+    vtx_value_t stack_args2[33];
+    vtx_value_t *full_args;
+    bool used_malloc2 = false;
+
+    if (total_arg_count <= 32) {
+        full_args = stack_args2;
+    } else {
+        full_args = (vtx_value_t *)malloc(total_arg_count * sizeof(vtx_value_t));
+        if (full_args == NULL) return VTX_VALUE_UNDEFINED;
+        used_malloc2 = true;
     }
     full_args[0] = receiver;
     if (remaining_count > 0 && remaining_args != NULL) {
@@ -499,7 +519,7 @@ vtx_value_t vtx_runtime_call_interface_reg(const vtx_method_desc_t *method,
     vtx_profiler_record_invocation(&interp_ptr->profiler, target_method);
 
     vtx_value_t result = vtx_interp_run(interp_ptr, target_method, full_args, total_arg_count);
-    free(full_args);
+    if (used_malloc2) free(full_args);
     return result;
 }
 

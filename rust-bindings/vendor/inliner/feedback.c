@@ -186,7 +186,23 @@ int vtx_feedback_record_outcome(vtx_inline_feedback_t *feedback,
         feedback->unprofitable_count++;
         dec->outcome = VTX_OUTCOME_UNPROFITABLE;
     }
-    /* UNPROFITABLE stays UNPROFITABLE */
+    /* UNPROFITABLE stays UNPROFITABLE — but with decay.
+     *
+     * BUGFIX (audit Tier B): The old code made UNPROFITABLE permanent.
+     * If a call site was unprofitable due to a transient type instability
+     * (e.g., warmup phase), it stayed UNPROFITABLE forever, preventing
+     * re-inlining even after the types stabilized.
+     *
+     * Fix: After enough executions (10000) without further deopts,
+     * decay UNPROFITABLE back to UNKNOWN so the inliner can retry. */
+    if (dec->outcome == VTX_OUTCOME_UNPROFITABLE) {
+        uint64_t execs_since_deopt = dec->execution_count - dec->last_deopt_exec_count;
+        if (execs_since_deopt > 10000) {
+            /* Decay: reset to UNKNOWN so the inliner can retry */
+            feedback->unprofitable_count--;
+            dec->outcome = VTX_OUTCOME_UNKNOWN;
+        }
+    }
 
     return 0;
 }
@@ -228,6 +244,7 @@ void vtx_feedback_increment_deopts(vtx_inline_feedback_t *feedback,
     /* Saturating increment */
     if (dec->deopt_count < UINT64_MAX) {
         dec->deopt_count++;
+        dec->last_deopt_exec_count = dec->execution_count;
     }
 
     /* Auto-mark as UNPROFITABLE if deopt rate exceeds threshold */
