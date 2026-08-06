@@ -9,6 +9,7 @@
 #include "codecache/cache.h"
 #include "codecache/install.h"
 #include "interp/dispatch.h"
+#include "interp/profiler.h"
 #include "compile/threadpool.h"
 #include "compile/request.h"
 #include "compile/pipeline.h"
@@ -16,6 +17,34 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* ========================================================================== */
+/* Method lookup callback                                                      */
+/* ========================================================================== */
+/* The compile_callback (running on a threadpool worker) needs to find the
+ * vtx_method_desc_t for a given method_id so it can compile it. The runtime
+ * only owns main_method (vtable_index = 0) for now — that's enough for
+ * single-method programs. Frontends that register additional methods via
+ * the type_system should also register them with this lookup.
+ *
+ * The context pointer is the vtx_runtime_t* itself. */
+static const vtx_method_desc_t *runtime_method_lookup(uint32_t method_id,
+                                                       void *context)
+{
+    vtx_runtime_t *rt = (vtx_runtime_t *)context;
+    if (rt == NULL) return NULL;
+
+    /* method_id 0 = main method (the program entry) */
+    if (method_id == 0 && rt->main_method != NULL) {
+        return rt->main_method;
+    }
+
+    /* TODO: support multi-method programs by extending this with a
+     * side table mapping method_id -> vtx_method_desc_t*. For now,
+     * frontends that need multi-method JIT should call
+     * vtx_compile_context_set_method_lookup() with their own callback. */
+    return NULL;
+}
 
 /* ---- Lifecycle ---- */
 
@@ -93,13 +122,38 @@ int vtx_runtime_enable_jit(vtx_runtime_t *rt, uint32_t nthreads)
         return -1;
     }
 
-    /* Wire the threadpool to the compile context */
+    /* Wire the compile context fields that the compile_callback needs.
+     *
+     * BUGFIX: previously, vtx_runtime_enable_jit only called
+     * vtx_compile_context_wire_threadpool() and set rt->use_jit = 1.
+     * It never wired code_cache, method_registry, profiler, or
+     * method_lookup into the compile_ctx — and critically, never
+     * called vtx_interp_set_compile_ctx() to hand the compile_ctx
+     * to the interpreter. The interpreter's dispatch loop checks
+     * `interp->compile_ctx != NULL` before calling
+     * vtx_request_compilation(), so with compile_ctx == NULL the JIT
+     * was never triggered. Result: interpreter-only execution even
+     * when the user called enable_jit(). */
+    rt->compile_ctx->threadpool = rt->threadpool;
+    rt->compile_ctx->code_cache = &rt->code_cache;
+    rt->compile_ctx->method_registry = &rt->method_registry;
+    rt->compile_ctx->profiler = &rt->interp->profiler;
+    rt->compile_ctx->global_arena = &rt->arena;
+    vtx_compile_context_set_method_lookup(rt->compile_ctx,
+                                          runtime_method_lookup, rt);
+
+    /* Wire the threadpool to the compile context (sets the
+     * compile_callback on the threadpool so workers actually compile
+     * tasks instead of discarding them). This requires
+     * compile_ctx->threadpool to be set (done above). */
     vtx_compile_context_wire_threadpool(rt->compile_ctx);
 
-    /* Set the compile callback so the interpreter triggers compilation
-     * on hot methods. The interpreter checks method->compiled_code on
-     * each call and, if NULL, increments an invocation counter. When
-     * the counter exceeds the threshold, it calls this callback. */
+    /* Hand the compile_ctx to the interpreter. This is THE wiring that
+     * makes the dispatch loop call vtx_request_compilation() on hot
+     * methods. Without this, interp->compile_ctx is NULL and the JIT
+     * is never triggered, regardless of rt->use_jit. */
+    vtx_interp_set_compile_ctx(rt->interp, rt->compile_ctx);
+
     rt->use_jit = 1;
 
     return 0;
