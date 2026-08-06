@@ -38,8 +38,10 @@ int vtx_runtime_create(vtx_runtime_t *rt)
     if (!rt->compile_ctx) { free(rt->interp); return -1; }
     vtx_compile_context_init(rt->compile_ctx);
 
+    rt->main_method = NULL;
+    rt->main_method_id = 0;
     rt->use_jit = 0;
-    rt->hot_threshold = 100;  /* compile after 100 invocations */
+    rt->hot_threshold = VORTEX_T1_THRESHOLD;
     rt->initialized = 1;
     return 0;
 }
@@ -57,6 +59,11 @@ void vtx_runtime_destroy(vtx_runtime_t *rt)
         vtx_compile_context_destroy(rt->compile_ctx);
         free(rt->compile_ctx);
         rt->compile_ctx = NULL;
+    }
+    /* Free the heap-allocated main method descriptor */
+    if (rt->main_method) {
+        free(rt->main_method);
+        rt->main_method = NULL;
     }
     if (rt->interp) {
         vtx_interp_destroy(rt->interp);
@@ -100,21 +107,54 @@ int vtx_runtime_enable_jit(vtx_runtime_t *rt, uint32_t nthreads)
 
 /* ---- Execution ---- */
 
+/* Helper: get or create a heap-allocated method descriptor for the
+ * given bytecode. The descriptor persists across calls so that
+ * compiled_code (set by the JIT) survives.
+ *
+ * If the bytecode pointer changes (different program loaded),
+ * a new descriptor is allocated and the old one is freed. */
+static vtx_method_desc_t *get_or_create_method(vtx_runtime_t *rt,
+                                                  const vtx_bytecode_t *bc,
+                                                  uint32_t arg_count)
+{
+    /* If we have an existing descriptor and the bytecode pointer
+     * matches, reuse it. compiled_code persists. */
+    if (rt->main_method && rt->main_method->bytecode == bc) {
+        /* Update arg_count in case it changed */
+        rt->main_method->arg_count = arg_count;
+        return rt->main_method;
+    }
+
+    /* Free the old one if bytecode changed */
+    if (rt->main_method) {
+        free(rt->main_method);
+        rt->main_method = NULL;
+    }
+
+    /* Allocate a new heap-allocated method descriptor */
+    rt->main_method = (vtx_method_desc_t *)malloc(sizeof(vtx_method_desc_t));
+    if (!rt->main_method) return NULL;
+
+    memset(rt->main_method, 0, sizeof(*rt->main_method));
+    rt->main_method->name = "main";
+    rt->main_method->signature = arg_count > 0 ? "(I)I" : "()I";
+    rt->main_method->bytecode = (vtx_bytecode_t *)bc;
+    rt->main_method->compiled_code = NULL;
+    rt->main_method->vtable_index = 0;
+    rt->main_method->arg_count = arg_count;
+    rt->main_method->is_virtual = false;
+
+    return rt->main_method;
+}
+
 vtx_value_t vtx_runtime_run(vtx_runtime_t *rt, const vtx_bytecode_t *bc)
 {
     if (!rt || !bc) return VTX_VALUE_UNDEFINED;
 
-    vtx_method_desc_t method = {
-        .name = "main",
-        .signature = "()I",
-        .bytecode = (vtx_bytecode_t *)bc,
-        .compiled_code = NULL,
-        .vtable_index = 0,
-        .arg_count = 0,
-        .is_virtual = false,
-    };
+    vtx_method_desc_t *method = get_or_create_method(rt, bc, 0);
+    if (!method) return VTX_VALUE_UNDEFINED;
 
-    return vtx_interp_run(rt->interp, &method, NULL, 0);
+    return vtx_interp_run(rt->interp, method, NULL, 0);
 }
 
 vtx_value_t vtx_runtime_run_with_args(vtx_runtime_t *rt,
@@ -124,17 +164,10 @@ vtx_value_t vtx_runtime_run_with_args(vtx_runtime_t *rt,
 {
     if (!rt || !bc) return VTX_VALUE_UNDEFINED;
 
-    vtx_method_desc_t method = {
-        .name = "main",
-        .signature = "(I)I",
-        .bytecode = (vtx_bytecode_t *)bc,
-        .compiled_code = NULL,
-        .vtable_index = 0,
-        .arg_count = arg_count,
-        .is_virtual = false,
-    };
+    vtx_method_desc_t *method = get_or_create_method(rt, bc, arg_count);
+    if (!method) return VTX_VALUE_UNDEFINED;
 
-    return vtx_interp_run(rt->interp, &method, (vtx_value_t *)args, arg_count);
+    return vtx_interp_run(rt->interp, method, (vtx_value_t *)args, arg_count);
 }
 
 /* ---- Eager compilation ---- */

@@ -40,6 +40,15 @@ typedef struct vtx_runtime_t {
     int                       initialized;
     int                       use_jit;       /* 1 = enable JIT compilation */
     uint32_t                  hot_threshold; /* invocations before compile */
+
+    /* BUGFIX: Heap-allocated method descriptor for the main chunk.
+     * The old code created vtx_method_desc_t on the C stack in
+     * vtx_runtime_run(). The JIT wrote compiled_code to the stack
+     * copy, but it was lost when the function returned. Next call
+     * got compiled_code=NULL, so the JIT never dispatched.
+     * This heap copy survives across calls. */
+    vtx_method_desc_t        *main_method;
+    uint32_t                  main_method_id;
 } vtx_runtime_t;
 
 /* ---- Lifecycle ---- */
