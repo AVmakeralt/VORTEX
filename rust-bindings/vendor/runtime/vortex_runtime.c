@@ -40,6 +40,25 @@ int vtx_runtime_create(vtx_runtime_t *rt)
     if (!rt->compile_ctx) { free(rt->interp); return -1; }
     vtx_compile_context_init(rt->compile_ctx);
 
+    /* BUGFIX (audit #29): Wire the compile context so the JIT actually works.
+     *
+     * The old code called vtx_compile_context_init() but never set
+     * ctx->code_cache, ctx->method_registry, ctx->threadpool, or
+     * ctx->profiler. The compile callback in request.c checks
+     * ctx->code_cache == NULL and bails. Result: the JIT was
+     * non-functional when using vortex_runtime_t directly (only
+     * main_new.c wired these manually).
+     *
+     * Fix: wire the runtime's own subsystems into the compile context. */
+    rt->compile_ctx->code_cache = &rt->code_cache;
+    rt->compile_ctx->method_registry = &rt->method_registry;
+    rt->compile_ctx->global_arena = &rt->arena;
+    rt->compile_ctx->profiler = &rt->interp->profiler;
+
+    /* Wire the compile context into the interpreter so hot methods
+     * trigger JIT compilation automatically via tier-up. */
+    vtx_interp_set_compile_ctx(rt->interp, rt->compile_ctx);
+
     rt->use_jit = 0;
     /* BUGFIX (audit #28): Was hardcoded 100, conflicting with
      * VORTEX_T1_THRESHOLD=1000. Use the configured value. */

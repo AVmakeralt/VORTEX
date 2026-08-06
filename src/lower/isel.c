@@ -950,6 +950,24 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
                 bool lhs_is_raw = lhs_prod && vtx_nf_has(lhs_prod->flags, VTX_NF_RAW_INT);
                 if (!lhs_is_mul && !lhs_is_raw) {
                     int64_t c_shifted = rhs_const * 8;
+
+                    /* INC/DEC optimization for Add(x, 1) and Add(x, -1).
+                     * When dst == lhs and c == 1, emit INC (3 bytes, 1 uop)
+                     * instead of ADD imm32 (7 bytes, 1 uop + flag stall).
+                     * SMI(1) = 0x7FF8000000000008, so c_shifted = 8.
+                     * We use INC because SMI(a) + 8 = SMI(a+1) when a+1
+                     * doesn't overflow — and INC adds 8 in SMI representation. */
+                    if (dst == lhs_vreg && c_shifted == 8) {
+                        /* Add(x, 1) → INC dst */
+                        vtx_isel_emit_inst(block, make_r_inst(VTX_X86_INC, dst, node_id, 0), arena);
+                        break;
+                    }
+                    /* Add(x, -1) → DEC dst (SMI(-1) shifts to -8) */
+                    if (dst == lhs_vreg && c_shifted == -8) {
+                        vtx_isel_emit_inst(block, make_r_inst(VTX_X86_DEC, dst, node_id, 0), arena);
+                        break;
+                    }
+
                     if (dst != lhs_vreg) {
                         vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_vreg, node_id), arena);
                     }

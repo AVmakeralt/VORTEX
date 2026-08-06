@@ -121,8 +121,42 @@ void *vtx_code_cache_alloc(vtx_code_cache_t *cache, uint32_t size)
         return NULL; /* Cache full — caller should evict */
     }
 
-    /* Try to allocate from the current segment */
+    /* BUGFIX (audit #30): Try to allocate from the free-list FIRST.
+     *
+     * The old code always bumped the allocation pointer, ignoring
+     * freed regions. This meant freed code was never reused, and
+     * the cache exhausted prematurely under churn (256MB cache fills
+     * up after ~1000 method recompilations even though most old
+     * code was freed).
+     *
+     * Fix: Scan the current segment's free-list for a block that's
+     * big enough. This is O(n) in the free-list size, but the
+     * free-list is typically small (most methods aren't freed). */
     vtx_code_segment_t *seg = cache->current_segment;
+    if (seg && seg->free_list && seg->free_count > 0) {
+        for (uint32_t i = 0; i < seg->free_count; i++) {
+            if (seg->free_list[i].size >= size) {
+                /* Found a free block big enough */
+                void *ptr = seg->memory + seg->free_list[i].offset;
+
+                /* If the block is much larger, split it */
+                if (seg->free_list[i].size >= size + 32) {
+                    seg->free_list[i].offset += size;
+                    seg->free_list[i].size -= size;
+                } else {
+                    /* Use the whole block — remove from free-list */
+                    seg->free_list[i] = seg->free_list[seg->free_count - 1];
+                    seg->free_count--;
+                }
+
+                cache->total_size += size;
+                return ptr;
+            }
+        }
+    }
+
+    /* Try to allocate from the current segment (bump allocator) */
+    seg = cache->current_segment;
     if (seg && seg->writable && (size <= seg->size - seg->used)) {
         /* BUGFIX (audit #19): Align seg->used to 16 bytes before allocating.
          * This ensures function entry points are 16-byte aligned, avoiding
