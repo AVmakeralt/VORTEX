@@ -806,7 +806,12 @@ static vtx_heap_object_t *forward_object(vtx_gc_t *gc, vtx_heap_object_t *obj)
             /* Leave a forwarding pointer in the old location.
              * RT-1 fix: Store the new address in the first 8 bytes
              * and set size to the sentinel value. */
-            *(uintptr_t *)obj = (uintptr_t)new_obj;
+            /* RT-006 fix: use memcpy instead of *(uintptr_t *)obj = ... to avoid
+             * C17 strict-aliasing UB (6.5p7). The old code wrote through a
+             * uintptr_t * lvalue while obj is vtx_heap_object_t *, which
+             * compilers may optimize away or reorder under -O2+. */
+            uintptr_t _fwd_ptr = (uintptr_t)new_obj;
+            memcpy(obj, &_fwd_ptr, sizeof(uintptr_t));
             obj->size = VTX_GC_FORWARDING_SENTINEL;
 
             return new_obj;
@@ -829,7 +834,12 @@ static vtx_heap_object_t *forward_object(vtx_gc_t *gc, vtx_heap_object_t *obj)
     /* Leave a forwarding pointer in the old location.
      * RT-1 fix: Store the new address in the first 8 bytes
      * and set size to the sentinel value. */
-    *(uintptr_t *)obj = (uintptr_t)new_obj;
+    /* RT-006 fix: use memcpy instead of *(uintptr_t *)obj = ... to avoid
+             * C17 strict-aliasing UB (6.5p7). The old code wrote through a
+             * uintptr_t * lvalue while obj is vtx_heap_object_t *, which
+             * compilers may optimize away or reorder under -O2+. */
+            uintptr_t _fwd_ptr = (uintptr_t)new_obj;
+            memcpy(obj, &_fwd_ptr, sizeof(uintptr_t));
     obj->size = VTX_GC_FORWARDING_SENTINEL;
 
     return new_obj;
@@ -894,7 +904,13 @@ static void scan_to_space(vtx_gc_t *gc)
     while (scan_ptr < gc->young_to.current) {
         vtx_heap_object_t *obj = (vtx_heap_object_t *)scan_ptr;
         if (obj->size == 0) {
-            break; /* shouldn't happen, but safety check */
+            /* RT-008 fix: the old code did `break`, which stopped
+             * scanning the entire to-space when ANY object had size 0.
+             * This broke the transitive closure — live objects
+             * referenced only by unscanned objects were collected.
+             * Fix: advance by the header size and continue scanning. */
+            scan_ptr += sizeof(vtx_heap_object_t);
+            continue;
         }
         scan_object(gc, obj);
         scan_ptr += align_up_8(obj->size);
@@ -1070,20 +1086,20 @@ void vtx_gc_collect_young(vtx_gc_t *gc)
             vtx_heap_object_t *new_obj = (vtx_heap_object_t *)new_ptr;
             new_obj->gc_pinned = 0; /* No longer needs to be pinned in new location */
             /* Leave forwarding pointer in old location */
-            *(uintptr_t *)pinned = (uintptr_t)new_obj;
+            /* RT-006 fix: memcpy to avoid strict-aliasing UB. */
+            uintptr_t _fwd_ptr2 = (uintptr_t)new_obj;
+            memcpy(pinned, &_fwd_ptr2, sizeof(uintptr_t));
             pinned->size = VTX_GC_FORWARDING_SENTINEL;
 
-            /* Bug #6 fix: Add the new copy to the remembered set so that
-             * old-gen objects referencing the pinned object will be
-             * rescanned on the next collection. Without this, stale
-             * old→young references to the old (forwarded) pinned location
-             * would not be updated, causing dangling pointers. */
-            if (!new_obj->gc_remembered &&
-                gc->remembered_count < gc->remembered_capacity) {
-                gc->remembered_set[gc->remembered_count].obj = new_obj;
-                gc->remembered_count++;
-                new_obj->gc_remembered = 1;
-            }
+            /* RT-009 fix: the old code added the NEW copy (in young_to)
+             * to the remembered set. The remembered set is for OLD→young
+             * references, but new_obj is in young gen — adding it pollutes
+             * the set with young-gen objects, causing incorrect scanning on
+             * the next collection. The new copy doesn't have any old→young
+             * references yet (it was just allocated); it will be added to
+             * the remembered set naturally if/when an old-gen object later
+             * writes to it (via the write barrier). Skip the remembered-set
+             * add here. */
         }
     }
 

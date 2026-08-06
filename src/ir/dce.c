@@ -13,6 +13,7 @@
 
 #include "ir/dce.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 /* ========================================================================== */
@@ -76,73 +77,82 @@ uint32_t vtx_dce_run(vtx_graph_t *graph)
 
     vtx_node_table_t *nt = &graph->node_table;
     uint32_t total_removed = 0;
-    bool changed = true;
 
-    while (changed) {
-        changed = false;
-
-        for (uint32_t i = 0; i < nt->count; i++) {
-            vtx_node_t *node = &nt->nodes[i];
-
-            /* Skip already-dead nodes */
-            if (node->dead) continue;
-
-            /* A node is dead if it has no outputs and is not essential */
-            if (node->output_count == 0 && !is_node_essential(node)) {
-                /* This node is dead. Disconnect its inputs. */
-                for (uint32_t j = 0; j < node->input_count; j++) {
-                    vtx_nodeid_t inp = node->inputs[j];
-                    if (inp != VTX_NODEID_INVALID && inp < nt->count) {
-                        vtx_node_t *producer = &nt->nodes[inp];
-                        /* Remove this node's use entry from the producer's
-                         * use-def list BEFORE decrementing output_count.
-                         * Without this, the producer's use-def list retains
-                         * stale entries referencing the dead node. */
-                        vtx_node_remove_use_entry(producer, node->id, j);
-                        if (producer->output_count > 0) {
-                            producer->output_count--;
+    /* IR-009 fix: use a worklist of newly-dead nodes instead of O(N²)
+     * rescan. Seed the worklist with all nodes that are already dead
+     * (output_count == 0 and not essential). When we kill a node, we
+     * decrement its producers' output_count and push any producer that
+     * reaches zero. This is O(N) total instead of O(N²). */
+    vtx_nodeid_t *wl = NULL;
+    if (nt->count > 0) {
+        wl = (vtx_nodeid_t *)malloc(nt->count * sizeof(vtx_nodeid_t));
+        if (!wl) {
+            /* OOM — fall back to the old O(N²) scan */
+            bool changed = true;
+            while (changed) {
+                changed = false;
+                for (uint32_t i = 0; i < nt->count; i++) {
+                    vtx_node_t *node = &nt->nodes[i];
+                    if (node->dead) continue;
+                    if (node->output_count == 0 && !is_node_essential(node)) {
+                        for (uint32_t j = 0; j < node->input_count; j++) {
+                            vtx_nodeid_t inp = node->inputs[j];
+                            if (inp != VTX_NODEID_INVALID && inp < nt->count) {
+                                vtx_node_t *producer = &nt->nodes[inp];
+                                vtx_node_remove_use_entry(producer, node->id, j);
+                                if (producer->output_count > 0) producer->output_count--;
+                            }
                         }
+                        node->dead = true;
+                        node->input_count = 0;
+                        node->use_count = 0;
+                        total_removed++;
+                        changed = true;
                     }
                 }
-
-                /* Mark as dead */
-                node->dead = true;
-                node->input_count = 0;
-                /* Clear this node's own use list — no live node should
-                 * reference a dead node, and stale use entries corrupt
-                 * later passes that traverse use-def lists. */
-                node->use_count = 0;
-
-                total_removed++;
-                changed = true;
             }
+            return total_removed;
         }
     }
 
-    /* After DCE, clean up: for any dead node that still has inputs
-     * (shouldn't happen with correct output_count tracking, but be safe),
-     * disconnect them. */
+    uint32_t wl_count = 0;
     for (uint32_t i = 0; i < nt->count; i++) {
         vtx_node_t *node = &nt->nodes[i];
-        if (!node->dead) continue;
-        if (node->input_count > 0) {
-            for (uint32_t j = 0; j < node->input_count; j++) {
-                vtx_nodeid_t inp = node->inputs[j];
-                if (inp != VTX_NODEID_INVALID && inp < nt->count) {
-                    vtx_node_t *producer = &nt->nodes[inp];
-                    /* Remove use entry from producer's use-def list to
-                     * prevent stale references to this dead node. */
-                    vtx_node_remove_use_entry(producer, node->id, j);
-                    if (producer->output_count > 0) {
-                        producer->output_count--;
+        if (!node->dead && node->output_count == 0 && !is_node_essential(node)) {
+            wl[wl_count++] = (vtx_nodeid_t)i;
+        }
+    }
+
+    while (wl_count > 0) {
+        vtx_nodeid_t nid = wl[--wl_count];
+        vtx_node_t *node = &nt->nodes[nid];
+        if (node->dead) continue;
+
+        /* Disconnect inputs */
+        for (uint32_t j = 0; j < node->input_count; j++) {
+            vtx_nodeid_t inp = node->inputs[j];
+            if (inp != VTX_NODEID_INVALID && inp < nt->count) {
+                vtx_node_t *producer = &nt->nodes[inp];
+                vtx_node_remove_use_entry(producer, nid, j);
+                if (producer->output_count > 0) producer->output_count--;
+                /* If the producer is now dead and not essential, push it */
+                if (producer->output_count == 0 && !producer->dead &&
+                    !is_node_essential(producer)) {
+                    /* Guard against worklist overflow — shouldn't happen
+                     * since each node is pushed at most once, but check. */
+                    if (wl_count < nt->count) {
+                        wl[wl_count++] = inp;
                     }
                 }
             }
-            node->input_count = 0;
         }
-        /* Clear this dead node's own use list as well. */
+
+        node->dead = true;
+        node->input_count = 0;
         node->use_count = 0;
+        total_removed++;
     }
 
+    free(wl);
     return total_removed;
 }

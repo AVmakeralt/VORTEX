@@ -295,9 +295,15 @@ void vtx_guard_emit_null_check(vtx_code_buffer_t *buf,
      * Default: test raw pointer.
      */
 
-    /* Compare against VTX_VALUE_NULL — NaN-boxed null is never zero */
-    emit_mov_reg_imm64(buf, VTX_REG_R10, VTX_VALUE_NULL);
-    emit_cmp_reg_reg(buf, obj_reg, VTX_REG_R10);
+    /* Compare against VTX_VALUE_NULL — NaN-boxed null is never zero.
+     *
+     * BASE-006 fix: the old code used R10 as the scratch for the null
+     * constant, but R10 is the codegen's heap-pointer untagging scratch
+     * (see emit_untag_heap_ptr). Clobbering R10 here breaks the next
+     * instruction that uses R10 as the untagged pointer. Use R13 instead
+     * (callee-saved, not used by the codegen for scratch). */
+    emit_mov_reg_imm64(buf, VTX_REG_R13, VTX_VALUE_NULL);
+    emit_cmp_reg_reg(buf, obj_reg, VTX_REG_R13);
 
     /* je deopt_stub (jump if equal to null) */
     uint32_t disp_pos = emit_jcc32(buf, CC_E);

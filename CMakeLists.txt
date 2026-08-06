@@ -19,6 +19,22 @@ add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions> $<$<COMPILE_LANGU
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-fPIC)
 
+    # BUILD-002 fix: VORTEX uses NaN-boxed vtx_value_t (uint64_t) with
+    # type-punning casts (heap pointer → uint64_t) and signed arithmetic
+    # on SMI values that can overflow. Without -fno-strict-aliasing
+    # and -fwrapv, GCC/Clang under -O3 aggressively exploit UB and
+    # may mis-compile the tagged-pointer arithmetic.
+    add_compile_options(-fno-strict-aliasing -fwrapv)
+
+    # BUILD-003 fix: VORTEX parses binary .vtbc files and accepts
+    # untrusted input via CLI tools. Without stack canaries or fortify,
+    # a malformed bytecode file can smash stack buffers and achieve RCE.
+    # Skip under sanitizers (they conflict with fortify).
+    if(NOT CMAKE_C_COMPILER_FLAGS MATCHES "sanitize")
+        add_compile_options(-fstack-protector-strong)
+        add_compile_definitions(_FORTIFY_SOURCE=2)
+    endif()
+
     # ---- Optimization flags for Release builds ----
     # These give 5-20x host throughput improvement over -O0.
     if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")

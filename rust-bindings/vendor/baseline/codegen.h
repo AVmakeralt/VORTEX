@@ -95,10 +95,26 @@ static inline uint32_t vtx_code_buffer_position(const vtx_code_buffer_t *buf)
 
 /**
  * Emit a single byte into the code buffer.
- */
+ *
+ * BASE-008 fix: the old code only had VTX_ASSERT (no-op in release),
+ * so a buffer overflow in release builds wrote past the allocation.
+ * Now we call ensure_capacity(1) which grows the buffer if needed.
+ * This is slower than the assert-only version but prevents heap
+ * corruption. Hot emit paths (emit_byte in tight loops) are already
+ * protected by ensure_capacity(64) calls in the main compile loop,
+ * so the extra check here is a backstop for emit_* helpers that
+ * forgot to pre-reserve. */
 static inline void vtx_code_buffer_emit_byte(vtx_code_buffer_t *buf, uint8_t b)
 {
-    VTX_ASSERT(buf->position < buf->capacity, "code buffer overflow");
+    if (buf->position >= buf->capacity) {
+        /* Buffer full — grow it (or silently drop if grow fails). */
+        if (vtx_code_buffer_ensure_capacity(buf, 1) != 0) {
+            /* OOM — can't grow. Skip the write to avoid heap corruption.
+             * The compile will likely fail downstream; this is a
+             * best-effort safety net. */
+            return;
+        }
+    }
     buf->bytes[buf->position++] = b;
 }
 

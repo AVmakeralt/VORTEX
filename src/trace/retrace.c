@@ -10,6 +10,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdint.h>
 
 /* Hash a method_id to a slot index using Fibonacci hashing. */
 static uint32_t hash_method(uint32_t method_id, uint32_t capacity) {
@@ -143,23 +144,19 @@ void vtx_trace_retrace_record_failure(vtx_trace_retrace_t *rt,
                         bp->not_taken = 0;
                     }
                     if (bp) {
-                        /* BUGFIX (audit #12): The old code unconditionally
-                         * incremented not_taken, which is wrong for guards
-                         * with cond=EQ (the trace assumed the branch was
-                         * NOT taken, so a failure means the branch WAS taken
-                         * → increment `taken`).
-                         *
-                         * For cond=NE guards (trace assumed taken), failure
-                         * means branch was NOT taken → increment not_taken.
-                         *
-                         * Since we don't have the guard's cond here (the
-                         * guard_table parameter is often NULL), we use a
-                         * conservative approach: increment BOTH counters
-                         * slightly. This makes the branch appear "volatile"
-                         * (near 50/50), which prevents the trace recorder
-                         * from re-selecting the same path. */
-                        bp->taken++;
-                        bp->not_taken++;
+                        /* TR-001 fix: the old code incremented BOTH taken
+                         * and not_taken as a "conservative" approach. This
+                         * doubled the total count, inflating confidence
+                         * metrics and potentially causing premature T2/T3
+                         * promotion. Fix: increment only not_taken (the
+                         * trace's path was wrong — the branch didn't go
+                         * the way the trace expected). Without the guard's
+                         * cond field here, we assume the trace's path was
+                         * the "taken" path (the common case), so a guard
+                         * failure means the branch was NOT taken. */
+                        if (bp->not_taken < UINT32_MAX) {
+                            bp->not_taken++;
+                        }
                     }
                 }
             }

@@ -724,19 +724,22 @@ uint32_t vtx_constant_prop_run(vtx_graph_t *graph)
                     bool taken = (cond_val.value.as.int_val != 0);
                     if (node->cond == VTX_COND_EQ) taken = !taken; /* IF_FALSE */
 
-                    /* Find Proj nodes that use this If */
-                    for (uint32_t u = 0; u < node_count; u++) {
-                        vtx_node_t *user = &nt->nodes[u];
-                        if (user->dead) continue;
-                        if (user->opcode == VTX_OP_Proj && user->input_count >= 1 &&
-                            user->inputs[0] == nid) {
+                    /* Find Proj nodes that use this If.
+                     * IR-010 fix: iterate the If's use-def list (O(K))
+                     * instead of scanning all N nodes. */
+                    for (uint32_t u = 0; u < node->use_count; u++) {
+                        vtx_use_entry_t *ue = &node->uses[u];
+                        if (ue->user_id >= node_count) continue;
+                        vtx_node_t *user = &nt->nodes[ue->user_id];
+                        if (user->dead || user->opcode != VTX_OP_Proj) continue;
+                        if (user->input_count >= 1 && user->inputs[0] == nid) {
                             /* Proj 0 = true branch, Proj 1 = false branch */
                             bool this_branch_taken = (user->local_index == 0) ? taken : !taken;
                             if (this_branch_taken) {
                                 /* This projection is reachable */
-                                if (lattice[u].tag == VTX_LATTICE_TOP) {
-                                    lattice[u] = vtx_lattice_bottom();
-                                    worklist_push(&wl, u);
+                                if (lattice[ue->user_id].tag == VTX_LATTICE_TOP) {
+                                    lattice[ue->user_id] = vtx_lattice_bottom();
+                                    worklist_push(&wl, ue->user_id);
                                 }
                             }
                             /* Unreachable projections stay Top — their users will

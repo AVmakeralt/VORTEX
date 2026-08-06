@@ -43,6 +43,10 @@ static vtx_nodeid_t emit_frame_state(vtx_graph_t *graph,
     if (fs == VTX_NODEID_INVALID) return VTX_NODEID_INVALID;
 
     vtx_node_t *fs_node = vtx_node_get(nt, fs);
+    /* IR-023 fix: check for NULL before dereferencing. vtx_node_get
+     * returns NULL if the node table is corrupt or under extreme memory
+     * pressure. Without this check, the next line segfaults. */
+    if (fs_node == NULL) return VTX_NODEID_INVALID;
     fs_node->bytecode_pc = (uint32_t)bytecode_pc;
 
     /* Input 0: current control */
@@ -65,6 +69,8 @@ static vtx_nodeid_t emit_frame_state(vtx_graph_t *graph,
                 vtx_nodeid_t undef = vtx_node_create(nt, VTX_OP_Constant);
                 if (undef == VTX_NODEID_INVALID) return VTX_NODEID_INVALID;
                 vtx_node_t *n = vtx_node_get(nt, undef);
+                /* IR-023 fix: NULL check. */
+                if (n == NULL) return VTX_NODEID_INVALID;
                 n->constval = vtx_constval_void();
                 n->type = VTX_TYPE_Void;
                 vtx_node_add_input(nt, fs, undef);
@@ -109,6 +115,8 @@ static vtx_nodeid_t emit_guard(vtx_graph_t *graph,
     if (guard == VTX_NODEID_INVALID) return VTX_NODEID_INVALID;
 
     vtx_node_t *g = vtx_node_get(nt, guard);
+    /* IR-023 fix: NULL check after vtx_node_get. */
+    if (g == NULL) return VTX_NODEID_INVALID;
     g->cond = guard_cond;
     g->bytecode_pc = (uint32_t)bytecode_pc;
     g->frame_state = fs;

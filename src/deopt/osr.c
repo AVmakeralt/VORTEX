@@ -211,8 +211,18 @@ bool vtx_osr_up(vtx_interp_frame_t *interp,
         return false;
     }
 
-    /* ---- Step 1: Look up the OSR entry point in the side table ---- */
-    void *osr_entry = compiled_code->entry_point;  /* default entry */
+    /* ---- Step 1: Look up the OSR entry point in the side table ----
+     *
+     * DEOPT-003 fix: the old code defaulted osr_entry to the function
+     * entry point, so when no side-table/bc_pc_map entry matched the
+     * requested loop_header_pc, OSR "succeeded" by jumping to the
+     * method entry — re-executing the entire method from PC 0. Side
+     * effects before the loop would run twice, and the interpreter's
+     * assumption that we're at the loop header was violated.
+     *
+     * Fix: start with osr_entry = NULL and return false if no entry
+     * is found, so the interpreter continues interpreting instead. */
+    void *osr_entry = NULL;
 
     if (compiled_code->side_table != NULL) {
         /* Search the side table for an OSR entry point at loop_header_pc.
@@ -241,6 +251,16 @@ bool vtx_osr_up(vtx_interp_frame_t *interp,
                 break;
             }
         }
+    }
+
+    /* DEOPT-003 fix: if no OSR entry was found, fail instead of silently
+     * jumping to the function entry (which would re-execute the prologue
+     * and all code before the loop, violating side-effect-once semantics
+     * and the interpreter's loop-header assumption). */
+    if (osr_entry == NULL) {
+        fprintf(stderr, "[osr] no OSR entry for loop_header_pc=%u — "
+                "continuing in interpreter\n", loop_header_pc);
+        return false;
     }
 
     /* ---- Step 3: Set up the JIT frame with interpreter values ----

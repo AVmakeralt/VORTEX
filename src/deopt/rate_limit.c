@@ -95,13 +95,22 @@ bool vtx_deopt_site_record_failure(vtx_deopt_site_limiter_t *sl, uint64_t now_ns
     site_evict_expired(sl, now_ns);
 
     /* Insert the new failure. If the buffer is full, we evict the oldest
-     * (overwriting it). This is correct because the oldest is by definition
-     * the closest to expiring anyway, and we want to count THIS failure. */
+     * (overwriting it), then re-evict expired entries so the window
+     * reflects the current time — not a stale full buffer.
+     *
+     * DEOPT-008 fix: the old code only overwrote and advanced head
+     * without re-evicting. This meant the buffer was always exactly
+     * capacity once full, so the threshold check (count >= THRESHOLD)
+     * could trigger on the first failure that filled the buffer, even
+     * if those failures spanned 10 seconds. Fix: after overwriting,
+     * call site_evict_expired to tighten the window. */
     if (sl->count == sl->capacity) {
         /* Buffer full — overwrite the oldest. */
         sl->failure_times_ns[sl->head] = now_ns;
         sl->head = (sl->head + 1) % sl->capacity;
         /* count stays at capacity */
+        /* Re-evict expired entries so count reflects the actual window. */
+        site_evict_expired(sl, now_ns);
     } else {
         uint32_t tail = (sl->head + sl->count) % sl->capacity;
         sl->failure_times_ns[tail] = now_ns;

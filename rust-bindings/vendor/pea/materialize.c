@@ -64,14 +64,30 @@ static uint32_t collect_field_values(vtx_graph_t *graph, vtx_nodeid_t alloc_id,
     uint32_t count = 0;
 
     /* Step 1: collect all StoreField node IDs targeting this alloc.
-     * We use a small fixed-size buffer (a single scalar-replaced
-     * allocation in a non-looping graph typically has <32 stores;
-     * loops would have been unrolled before PEA). */
-    const uint32_t MAX_SF = 256;
-    vtx_nodeid_t sf_nodes[256];
+     *
+     * PEA-001 fix: the old code used a fixed [256] buffer and stopped
+     * at sf_count < MAX_SF. An allocation with >256 StoreField nodes
+     * (e.g., after aggressive loop unrolling, or a large initializer)
+     * would silently drop stores beyond 256, producing incorrect
+     * materialization (stale field values). Fix: first count the
+     * stores, then heap-allocate an array sized to the actual count. */
+    uint32_t sf_total = 0;
+    for (uint32_t i = 0; i < table->count; i++) {
+        vtx_node_t *n = &table->nodes[i];
+        if (n->dead || n->opcode != VTX_OP_StoreField) continue;
+        if (n->input_count < 2) continue;
+        vtx_nodeid_t recv = n->inputs[n->input_count - 2];
+        if (recv != alloc_id) continue;
+        sf_total++;
+    }
+
+    if (sf_total == 0) return 0;
+
+    vtx_nodeid_t *sf_nodes = (vtx_nodeid_t *)malloc(sf_total * sizeof(vtx_nodeid_t));
+    if (sf_nodes == NULL) return 0; /* OOM — bail out of PEA for this alloc */
     uint32_t sf_count = 0;
 
-    for (uint32_t i = 0; i < table->count && sf_count < MAX_SF; i++) {
+    for (uint32_t i = 0; i < table->count && sf_count < sf_total; i++) {
         vtx_node_t *node = &table->nodes[i];
         if (node->dead) continue;
         if (node->opcode != VTX_OP_StoreField) continue;
@@ -147,6 +163,8 @@ static uint32_t collect_field_values(vtx_graph_t *graph, vtx_nodeid_t alloc_id,
         cur = next;
     }
 
+    /* PEA-001 fix: free the heap-allocated sf_nodes array. */
+    free(sf_nodes);
     return count;
 }
 

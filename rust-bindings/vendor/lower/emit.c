@@ -147,8 +147,11 @@ static void emit_mem_operand(vtx_x86_emit_t *e, uint8_t reg,
     if (base == 0xFF && index != 0xFF) {
         /* [index*scale + disp32] — mod=00, r/m=4, SIB with base=5 */
         uint8_t scale_bits = 0;
+        /* LOWER-001 fix: add default case so scale_bits is never
+         * uninitialized garbage if scale is not 1/2/4/8. */
         switch (scale) { case 1: scale_bits=0; break; case 2: scale_bits=1; break;
-                         case 4: scale_bits=2; break; case 8: scale_bits=3; break; }
+                         case 4: scale_bits=2; break; case 8: scale_bits=3; break;
+                         default: scale_bits=0; break; }
         emit_modrm(e, 0, reg, 4);
         emit_sib(e, scale_bits, index & 7, 5);
         emit_dword(e, (uint32_t)disp);
@@ -163,7 +166,8 @@ static void emit_mem_operand(vtx_x86_emit_t *e, uint8_t reg,
         uint8_t scale_bits = 0;
         if (index != 0xFF) {
             switch (scale) { case 1: scale_bits=0; break; case 2: scale_bits=1; break;
-                             case 4: scale_bits=2; break; case 8: scale_bits=3; break; }
+                             case 4: scale_bits=2; break; case 8: scale_bits=3; break;
+                             default: scale_bits=0; break; }
         }
 
         if (disp == 0 && base_lo != 5) {

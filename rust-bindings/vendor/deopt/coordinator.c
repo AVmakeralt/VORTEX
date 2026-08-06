@@ -108,14 +108,22 @@ vtx_deopt_decision_t vtx_deopt_coord_on_guard_fail(
     }
 
     /* Step 2: Record in per-site limiter. If poisoned, fall back to
-     * interpreter permanently for this site. */
+     * interpreter permanently for this site.
+     *
+     * DEOPT-009 fix: if get_site_limiter returns NULL (init failure or
+     * hash collision), the old code silently fell through to the batcher
+     * — the site never got poisoned, so it kept deoptlessing forever.
+     * Fail-safe: treat NULL as already-poisoned to stop deopt storms. */
     vtx_deopt_site_limiter_t *sl = get_site_limiter(coord, site_id);
-    if (sl != NULL) {
-        bool poisoned = vtx_deopt_site_record_failure(sl, now_ns);
-        if (poisoned) {
-            coord->total_poisoned++;
-            return DEOPT_COORD_POISONED;
-        }
+    if (sl == NULL) {
+        /* Fail-safe: can't track → assume poisoned to stop storms */
+        coord->total_poisoned++;
+        return DEOPT_COORD_POISONED;
+    }
+    bool poisoned = vtx_deopt_site_record_failure(sl, now_ns);
+    if (poisoned) {
+        coord->total_poisoned++;
+        return DEOPT_COORD_POISONED;
     }
 
     /* Step 3: Add to batcher. If the batcher signals flush, trigger

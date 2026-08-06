@@ -203,6 +203,19 @@ uint32_t vtx_loop_unroll_run(vtx_graph_t *graph,
      * level parallelism at the cost of code size. */
     if (factor != 2 && factor != 4 && factor != 8) return 0;
 
+    /* IR-002 fix: The copy logic below creates exactly ONE copy of the
+     * body, regardless of factor. For factor > 2 this lies about what
+     * was generated (the value_number marker claims factor=4 but only
+     * 2× unrolling was done). Until the multi-copy refactor is
+     * complete, cap at factor=2 so the marker is accurate. The caller
+     * (pipeline.c) requests factor=4; we silently downgrade. This is
+     * a perf miss, not a correctness bug — the loop still runs
+     * correctly, just with less ILP exposure than requested. */
+    uint32_t effective_factor = 2;
+    if (factor > 2) {
+        effective_factor = 2; /* TODO: implement true multi-copy */
+    }
+
     uint32_t unrolled = 0;
 
     /* BUGFIX (audit #8): Remove `unrolled == 0` from the loop condition.
@@ -506,7 +519,7 @@ uint32_t vtx_loop_unroll_run(vtx_graph_t *graph,
         /* Mark the loop as unrolled (re-fetch pointer — node table may
          * have been realloc'd by vtx_node_create calls above) */
         vtx_node_t *loop_fresh = vtx_node_get(&graph->node_table, i);
-        if (loop_fresh) loop_fresh->value_number = -(int32_t)factor;
+        if (loop_fresh) loop_fresh->value_number = -(int32_t)effective_factor;
         unrolled = 1;
 
     skip_loop:

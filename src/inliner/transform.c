@@ -294,12 +294,42 @@ static void handle_returns(vtx_graph_t *caller_graph,
     vtx_node_t *call_node = vtx_node_get(&caller_graph->node_table, call_node_id);
     if (call_node == NULL) return;
 
-    /* Collect all Return nodes in the cloned subgraph */
-    uint32_t return_count = 0;
-    vtx_nodeid_t return_value_nodes[64];  /* reasonable max for Returns in a method */
-    vtx_nodeid_t return_memory_nodes[64];
-    vtx_nodeid_t return_control_nodes[64];
+    /* IR-031 fix: First pass — count Return nodes so we can dynamically
+     * size the arrays. The old code used fixed [64] arrays and silently
+     * dropped Returns 65+, producing wrong-code (those return paths
+     * became dead — the merge Region never received their control
+     * input, so the code after the inlined call was unreachable from
+     * those paths). */
+    uint32_t return_capacity = 0;
+    for (uint32_t callee_id = 0; callee_id < callee_graph_node_count; callee_id++) {
+        vtx_nodeid_t caller_id = nodeid_map_get(id_map, (vtx_nodeid_t)callee_id);
+        if (caller_id == VTX_NODEID_INVALID) continue;
+        vtx_node_t *node = vtx_node_get(&caller_graph->node_table, caller_id);
+        if (node == NULL || node->dead || node->opcode != VTX_OP_Return) continue;
+        return_capacity++;
+    }
 
+    if (return_capacity == 0) {
+        result->return_value_node = VTX_NODEID_INVALID;
+        result->new_memory_node = VTX_NODEID_INVALID;
+        return;
+    }
+
+    /* Allocate arrays sized to the actual return count. */
+    vtx_nodeid_t *return_value_nodes   = (vtx_nodeid_t *)malloc(return_capacity * sizeof(vtx_nodeid_t));
+    vtx_nodeid_t *return_memory_nodes  = (vtx_nodeid_t *)malloc(return_capacity * sizeof(vtx_nodeid_t));
+    vtx_nodeid_t *return_control_nodes = (vtx_nodeid_t *)malloc(return_capacity * sizeof(vtx_nodeid_t));
+    if (!return_value_nodes || !return_memory_nodes || !return_control_nodes) {
+        /* OOM — can't safely merge returns. Mark as no-return so caller
+         * falls back to keeping the call node. */
+        free(return_value_nodes); free(return_memory_nodes); free(return_control_nodes);
+        result->return_value_node = VTX_NODEID_INVALID;
+        result->new_memory_node = VTX_NODEID_INVALID;
+        return;
+    }
+
+    /* Second pass: fill arrays */
+    uint32_t return_count = 0;
     for (uint32_t callee_id = 0; callee_id < callee_graph_node_count; callee_id++) {
         vtx_nodeid_t caller_id = nodeid_map_get(id_map, (vtx_nodeid_t)callee_id);
         if (caller_id == VTX_NODEID_INVALID) continue;
@@ -307,28 +337,20 @@ static void handle_returns(vtx_graph_t *caller_graph,
         vtx_node_t *node = vtx_node_get(&caller_graph->node_table, caller_id);
         if (node == NULL || node->dead || node->opcode != VTX_OP_Return) continue;
 
-        /* Return node inputs:
-         *   input[0] = control predecessor
-         *   input[1] = memory predecessor
-         *   input[2] = return value (if non-void) */
         vtx_nodeid_t ctrl = (node->input_count > 0) ? node->inputs[0] : VTX_NODEID_INVALID;
         vtx_nodeid_t mem  = (node->input_count > 1) ? node->inputs[1] : VTX_NODEID_INVALID;
         vtx_nodeid_t val  = (node->input_count > 2) ? node->inputs[2] : VTX_NODEID_INVALID;
 
-        if (return_count < 64) {
-            return_control_nodes[return_count] = ctrl;
-            return_memory_nodes[return_count] = mem;
-            return_value_nodes[return_count] = val;
-        }
+        return_control_nodes[return_count] = ctrl;
+        return_memory_nodes[return_count] = mem;
+        return_value_nodes[return_count] = val;
         return_count++;
 
-        /* Mark the Return node as dead — it's been replaced by the merge logic */
         node->dead = true;
     }
 
     if (return_count == 0) {
-        /* No returns found — the callee might be infinite loop or abnormal.
-         * Set results to invalid and let caller handle. */
+        free(return_value_nodes); free(return_memory_nodes); free(return_control_nodes);
         result->return_value_node = VTX_NODEID_INVALID;
         result->new_memory_node = VTX_NODEID_INVALID;
         return;
@@ -356,8 +378,9 @@ static void handle_returns(vtx_graph_t *caller_graph,
             return;
         }
 
-        /* Add control inputs to Region from each Return's control predecessor */
-        for (uint32_t i = 0; i < return_count && i < 64; i++) {
+        /* Add control inputs to Region from each Return's control predecessor.
+         * IR-031 fix: removed the `&& i < 64` cap — arrays are now dynamically sized. */
+        for (uint32_t i = 0; i < return_count; i++) {
             if (return_control_nodes[i] != VTX_NODEID_INVALID) {
                 vtx_node_add_input(&caller_graph->node_table, region_id,
                                     return_control_nodes[i]);
@@ -374,8 +397,9 @@ static void handle_returns(vtx_graph_t *caller_graph,
                     phi->flags = VTX_NF_PINNED;
                     /* Add Region as first input */
                     vtx_node_add_input(&caller_graph->node_table, phi_id, region_id);
-                    /* Add return values as Phi inputs */
-                    for (uint32_t i = 0; i < return_count && i < 64; i++) {
+                    /* Add return values as Phi inputs.
+                     * IR-031 fix: removed the `&& i < 64` cap. */
+                    for (uint32_t i = 0; i < return_count; i++) {
                         if (return_value_nodes[i] != VTX_NODEID_INVALID) {
                             vtx_node_add_input(&caller_graph->node_table, phi_id,
                                                 return_value_nodes[i]);
@@ -397,7 +421,8 @@ static void handle_returns(vtx_graph_t *caller_graph,
             if (mem_phi != NULL) {
                 mem_phi->flags = VTX_NF_MEMORY | VTX_NF_PINNED;
                 vtx_node_add_input(&caller_graph->node_table, mem_phi_id, region_id);
-                for (uint32_t i = 0; i < return_count && i < 64; i++) {
+                /* IR-031 fix: removed the `&& i < 64` cap. */
+                for (uint32_t i = 0; i < return_count; i++) {
                     if (return_memory_nodes[i] != VTX_NODEID_INVALID) {
                         vtx_node_add_input(&caller_graph->node_table, mem_phi_id,
                                             return_memory_nodes[i]);
@@ -410,6 +435,11 @@ static void handle_returns(vtx_graph_t *caller_graph,
             result->new_memory_node = VTX_NODEID_INVALID;
         }
     }
+
+    /* IR-031 fix: free the dynamically-allocated arrays. */
+    free(return_value_nodes);
+    free(return_memory_nodes);
+    free(return_control_nodes);
 }
 
 /* ========================================================================== */

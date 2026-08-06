@@ -3331,10 +3331,18 @@ static void compile_call_runtime(vtx_compile_ctx_t *ctx, uint16_t func_id)
     emit_mov_reg_reg64(buf, VTX_REG_RSI, VTX_REG_RAX);
     emit_stack_pop(ctx);
 
-    /* Save caller-saved registers that hold expr stack state */
+    /* Save caller-saved registers that hold expr stack state.
+     *
+     * BASE-009 fix: pushing 3 registers (24 bytes) leaves RSP 8 mod 16.
+     * The subsequent CALL violates the System V ABI requirement of
+     * 0 mod 16 alignment at the CALL instruction — C functions that use
+     * movaps to save XMM registers will segfault. Fix: push a dummy
+     * register after the 3 pushes to re-align RSP to 0 mod 16, and pop
+     * it after the call. */
     emit_push(buf, VTX_REG_RCX);
     emit_push(buf, VTX_REG_RDX);
     emit_push(buf, VTX_REG_RBX);
+    emit_sub_reg_imm32(buf, VTX_REG_RSP, 8); /* re-align to 0 mod 16 */
 
     /* Load func_id into RDI */
     emit_mov_reg_imm32(buf, VTX_REG_RDI, (uint32_t)func_id);
@@ -3348,6 +3356,7 @@ static void compile_call_runtime(vtx_compile_ctx_t *ctx, uint16_t func_id)
     /* Save result to R12 (callee-saved, survives pop) */
     emit_mov_reg_reg64(buf, VTX_REG_R12, VTX_REG_RAX);
 
+    emit_add_reg_imm32(buf, VTX_REG_RSP, 8); /* undo the alignment padding */
     emit_pop(buf, VTX_REG_RBX);
     emit_pop(buf, VTX_REG_RDX);
     emit_pop(buf, VTX_REG_RCX);
@@ -3379,16 +3388,19 @@ vtx_compiled_code_t *vtx_baseline_compile(const vtx_method_desc_t *method,
     ctx.cache = cache;
     ctx.registry = registry;
     ctx.layout = vtx_frame_layout_compute(method);
-    ctx.method_id = method->vtable_index != 0xFFFFFFFF ?
-                     method->vtable_index : (uint32_t)(uintptr_t)method;
-
-    /* If the method_id is absurdly large (e.g., from a truncated pointer
-     * address), use a simple monotonic counter instead. This prevents
-     * vtx_method_registry_add from trying to allocate a huge array. */
-    if (ctx.method_id > 100000) {
-        static uint32_t next_method_id = 1;
-        ctx.method_id = next_method_id++;
+    /* BASE-010 fix: the old code fell back to truncating the method pointer
+     * to 32 bits when vtable_index was 0xFFFFFFFF (uninitialized). With
+     * ASLR, the same method gets a different ID each run, defeating the
+     * T1 cache and causing registry collisions. The fallback counter
+     * (static, non-atomic) was also racy. Fix: refuse to compile if
+     * vtable_index is uninitialized — the caller must initialize it. */
+    if (method->vtable_index == 0xFFFFFFFF) {
+        fprintf(stderr, "[baseline] refusing to compile method '%s': "
+                "vtable_index is uninitialized\n",
+                method->name ? method->name : "(unnamed)");
+        return NULL;
     }
+    ctx.method_id = method->vtable_index;
 
     /* Initialize code buffer */
     if (vtx_code_buffer_init(&ctx.buf, VTX_CODE_BUFFER_INITIAL_CAPACITY) != 0) {
