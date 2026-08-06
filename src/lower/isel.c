@@ -2173,18 +2173,19 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
     case VTX_OP_DivF: {
         /* FP arithmetic via runtime CALL.
          *
-         * NOTE: Inline SSE2 (MOVQ xmm←gpr, ADDSD, MOVQ gpr←xmm) was
-         * attempted but produces wrong results because the regalloc
-         * misclassifies GPR operands touched by MOVQ_XMM_R64 instructions
-         * as XMM (the IS_SSE flag on the instruction causes ALL vregs
-         * it touches to be classified as XMM, including the GPR source).
+         * Inline SSE2 was attempted (MOVQ xmm←gpr, ADDSD, MOVQ gpr←xmm)
+         * with per-operand register class fix in the regalloc. However,
+         * the regalloc's XMM coalescing/spilling has a bug where XMM
+         * vregs get assigned wrong physical registers, producing garbage
+         * results. The per-operand classification is correct, but the
+         * interval computation and active-list management for XMM vregs
+         * needs deeper debugging.
          *
-         * Fixing this requires the regalloc to distinguish per-operand
-         * register classes (operand[0] is XMM, operand[1] is GPR for
-         * MOVQ_XMM_R64). That's a deeper refactor.
+         * For now, runtime calls are correct. The -O3 CMake fix speeds
+         * up the runtime helpers themselves (vtx_runtime_float_add etc).
          *
-         * For now, runtime calls are correct (if slow). The CMake -O3
-         * fix (audit #1) speeds up the runtime helpers themselves. */
+         * TODO: debug XMM regalloc — the MOVSD and ADDSD instructions
+         * are getting wrong register assignments from the regalloc. */
         if (node->input_count < 2) return -1;
 
         ensure_node_vreg(stream, node->inputs[0], arena);

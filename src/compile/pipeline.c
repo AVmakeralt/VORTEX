@@ -43,6 +43,7 @@
 #include "codecache/install.h"
 #include "deopt/deoptless.h"
 #include "ir/strength_reduce.h"
+#include "ir/algebraic.h"
 
 /* Forward declarations from codecache/versioned.h (can't include directly
  * due to vtx_code_version_t struct conflict with compile/version.h) */
@@ -1079,12 +1080,14 @@ int vtx_pipeline_run(vtx_graph_t *graph,
     if (config->run_sccp) {
         uint32_t sr_replaced = vtx_strength_reduce_run(graph);
         if (sr_replaced > 0) {
-            /* Clean up dead nodes created by strength reduction before
-             * verification and subsequent passes. */
             vtx_node_table_clear_dead(&graph->node_table);
-            /* Don't fail on verify — strength reduction intentionally
-             * creates dead nodes that DCE will clean up. The verify
-             * "no dead nodes" check is for post-DCE only. */
+        }
+
+        /* Algebraic simplification: fold x+0, x*1, x*0, x-x, !!x, etc.
+         * Runs after SCCP (constants are known) and strength reduction. */
+        uint32_t alg_simplified = vtx_algebraic_simplify_run(graph);
+        if (alg_simplified > 0) {
+            vtx_node_table_clear_dead(&graph->node_table);
         }
     }
 

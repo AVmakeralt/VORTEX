@@ -106,21 +106,57 @@ static vtx_live_interval_t *compute_live_intervals(vtx_inst_stream_t *stream,
         }
     }
 
-    /* Classify vregs into GPR or XMM register class based on the
-     * VTX_INST_FLAG_IS_SSE flag on instructions that define/use them.
-     * If any instruction with IS_SSE touches this vreg, it's XMM class. */
+    /* Classify vregs into GPR or XMM register class.
+     *
+     * BUGFIX (audit #19): The old code marked ALL vregs in an IS_SSE
+     * instruction as XMM. This is wrong for MOVQ_XMM_R64 (dst=XMM, src=GPR)
+     * and MOVQ_R64_XMM (dst=GPR, src=XMM) — bridge instructions that
+     * cross register classes. The GPR operand was wrongly classified
+     * as XMM, causing the regalloc to assign it an XMM register, then
+     * the emitter would emit a GPR instruction using an XMM register
+     * → garbage results.
+     *
+     * Fix: For bridge instructions (MOVQ_XMM_R64, MOVQ_R64_XMM),
+     * classify per-operand: operand[0] of MOVQ_XMM_R64 is XMM,
+     * operand[1] is GPR. Operand[0] of MOVQ_R64_XMM is GPR,
+     * operand[1] is XMM. For all other IS_SSE instructions, both
+     * operands are XMM (ADDSD, MULSD, etc.). */
     for (uint32_t b = 0; b < stream->block_count; b++) {
         vtx_inst_block_t *blk = &stream->blocks[b];
         for (uint32_t i = 0; i < blk->inst_count; i++) {
             vtx_inst_t *inst = &blk->insts[i];
             if (!(inst->flags & VTX_INST_FLAG_IS_SSE)) continue;
+
             for (int op = 0; op < VTX_INST_MAX_OPERANDS; op++) {
-                if (inst->opnd_kinds[op] == VTX_OPND_VREG) {
-                    uint32_t vreg = inst->operands[op];
-                    if (vreg < vreg_count) {
-                        intervals[vreg].reg_class = VTX_REG_CLASS_XMM;
-                    }
+                if (inst->opnd_kinds[op] != VTX_OPND_VREG) continue;
+                uint32_t vreg = inst->operands[op];
+                if (vreg >= vreg_count) continue;
+
+                /* Determine this operand's register class based on
+                 * the instruction opcode and operand position. */
+                vtx_reg_class_t opnd_class;
+                if (inst->opcode == VTX_X86_MOVQ_XMM_R64) {
+                    /* dst (op=0) is XMM, src (op=1) is GPR */
+                    opnd_class = (op == 0) ? VTX_REG_CLASS_XMM : VTX_REG_CLASS_GPR;
+                } else if (inst->opcode == VTX_X86_MOVQ_R64_XMM) {
+                    /* dst (op=0) is GPR, src (op=1) is XMM */
+                    opnd_class = (op == 0) ? VTX_REG_CLASS_GPR : VTX_REG_CLASS_XMM;
+                } else {
+                    /* All other SSE instructions: both operands XMM */
+                    opnd_class = VTX_REG_CLASS_XMM;
                 }
+
+                /* A vreg might be used in both GPR and XMM contexts
+                 * (e.g., the result of MOVQ_R64_XMM is used as a GPR
+                 * by later instructions). If a vreg appears in BOTH
+                 * classes, keep it as GPR — the bridge instruction
+                 * handles the XMM→GPR transfer. */
+                if (intervals[vreg].reg_class == VTX_REG_CLASS_GPR) {
+                    /* Already classified as GPR by a non-SSE instruction.
+                     * Don't override — the vreg lives in a GPR. */
+                    continue;
+                }
+                intervals[vreg].reg_class = opnd_class;
             }
         }
     }
