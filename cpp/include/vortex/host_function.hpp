@@ -28,6 +28,9 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <shared_mutex>
+#include <mutex>
+#include <atomic>
 
 #include "vortex/value.hpp"
 #include "vortex/result.hpp"
@@ -56,7 +59,14 @@ public:
     // Returns the function ID (used in CALL_RUNTIME bytecode operand).
     // If a function with this name is already registered, returns the
     // existing ID (does NOT replace — use unregister first if needed).
+    //
+    // CPP-007 fix: registration is now thread-safe via a shared_mutex.
+    // call() takes a shared lock (read-only), register/unregister take
+    // a unique lock (exclusive). Once registration is "frozen" via
+    // finalize_registration(), call() becomes truly lock-free (the
+    // atomic frozen flag short-circuits the lock acquisition).
     uint32_t register_function(const std::string& name, HostFunction fn) {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
         auto it = name_to_id_.find(name);
         if (it != name_to_id_.end()) {
             return it->second;
@@ -71,6 +81,7 @@ public:
     // Unregister a function by name. Subsequent calls to this ID from
     // bytecode will return undefined.
     void unregister(const std::string& name) {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
         auto it = name_to_id_.find(name);
         if (it == name_to_id_.end()) return;
         uint32_t id = it->second;
@@ -79,22 +90,42 @@ public:
         id_to_name_.erase(id);
     }
 
+    // Freeze the registry — after this, call() is lock-free.
+    // No further register/unregister calls are allowed.
+    void finalize_registration() {
+        frozen_.store(true, std::memory_order_release);
+    }
+
     // Look up a function ID by name. Returns UINT32_MAX if not found.
     uint32_t lookup(const std::string& name) const {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
         auto it = name_to_id_.find(name);
         return (it != name_to_id_.end()) ? it->second : UINT32_MAX;
     }
 
     // Get the name for a function ID (for debugging).
-    const std::string& name(uint32_t id) const {
-        static const std::string empty;
+    std::string name(uint32_t id) const {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
         auto it = id_to_name_.find(id);
-        return (it != id_to_name_.end()) ? it->second : empty;
+        return (it != id_to_name_.end()) ? it->second : std::string();
     }
 
     // Call a function by ID. This is the trampoline called from
     // the C CALL_RUNTIME handler.
+    //
+    // CPP-007 fix: if frozen_ is set (after finalize_registration),
+    // skip the lock — call() is truly lock-free. Otherwise take a
+    // shared lock so concurrent calls don't race with a concurrent
+    // register (which takes the unique lock).
     Value call(uint32_t id, int argc, const Value* argv) const {
+        if (frozen_.load(std::memory_order_acquire)) {
+            /* Lock-free path — registry is immutable. */
+            if (id >= functions_.size()) return Value::undefined();
+            const auto& fn = functions_[id];
+            if (!fn) return Value::undefined();
+            return fn(argc, argv);
+        }
+        std::shared_lock<std::shared_mutex> lock(mutex_);
         if (id >= functions_.size()) return Value::undefined();
         const auto& fn = functions_[id];
         if (!fn) return Value::undefined();
@@ -102,11 +133,16 @@ public:
     }
 
     // Number of registered functions.
-    size_t count() const { return functions_.size(); }
+    size_t count() const {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+        return functions_.size();
+    }
 
 private:
-    HostFunctionRegistry() = default;
+    HostFunctionRegistry() : frozen_(false) {}
 
+    mutable std::shared_mutex mutex_;
+    std::atomic<bool> frozen_;
     std::vector<HostFunction> functions_;
     std::unordered_map<std::string, uint32_t> name_to_id_;
     std::unordered_map<uint32_t, std::string> id_to_name_;

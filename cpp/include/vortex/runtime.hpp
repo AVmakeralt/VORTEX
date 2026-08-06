@@ -23,6 +23,7 @@
 #define VORTEX_RUNTIME_HPP
 
 #include <cstdint>
+#include <cstdlib>
 #include <vector>
 #include <string>
 #include <functional>
@@ -46,28 +47,52 @@ class Runtime {
 public:
     /* ---- Lifecycle ---- */
 
+    /* CPP-001 fix: vtx_runtime_t contains internal self-pointers
+     * (gc.type_system = &type_system, interp->gc = &gc, etc.).
+     * Moving the struct by value (as the old code did) shifts it to
+     * a new address, invalidating every internal pointer → UAF.
+     * Fix: heap-allocate vtx_runtime_t via unique_ptr so the struct
+     * itself never moves; only the unique_ptr is moved. */
+
     static Result<Runtime> create() {
+        /* Heap-allocate the raw struct so its address is stable. */
         Runtime rt;
-        if (vtx_runtime_create(&rt.raw_) != 0) {
+        rt.raw_ptr_ = static_cast<vtx_runtime_t*>(std::malloc(sizeof(vtx_runtime_t)));
+        if (!rt.raw_ptr_) {
+            return Result<Runtime>::err("out of memory");
+        }
+        if (vtx_runtime_create(rt.raw_ptr_) != 0) {
+            std::free(rt.raw_ptr_);
+            rt.raw_ptr_ = nullptr;
             return Result<Runtime>::err("failed to create runtime");
         }
+        rt.owns_ = true;
         return rt;
     }
 
     ~Runtime() {
-        if (owns_) vtx_runtime_destroy(&raw_);
+        if (owns_ && raw_ptr_) {
+            vtx_runtime_destroy(raw_ptr_);
+            std::free(raw_ptr_);
+            raw_ptr_ = nullptr;
+        }
     }
 
-    // Move-only
+    // Move-only — moving the unique_ptr-like wrapper doesn't relocate raw_.
     Runtime(Runtime&& other) noexcept
-        : raw_(other.raw_), owns_(other.owns_) {
+        : raw_ptr_(other.raw_ptr_), owns_(other.owns_) {
+        other.raw_ptr_ = nullptr;
         other.owns_ = false;
     }
     Runtime& operator=(Runtime&& other) noexcept {
         if (this != &other) {
-            if (owns_) vtx_runtime_destroy(&raw_);
-            raw_ = other.raw_;
+            if (owns_ && raw_ptr_) {
+                vtx_runtime_destroy(raw_ptr_);
+                std::free(raw_ptr_);
+            }
+            raw_ptr_ = other.raw_ptr_;
             owns_ = other.owns_;
+            other.raw_ptr_ = nullptr;
             other.owns_ = false;
         }
         return *this;
@@ -80,13 +105,13 @@ public:
     // Enable the JIT: starts background compilation threads.
     // nthreads = 0 for auto-detect (defaults to 2).
     void enable_jit(uint32_t nthreads = 0) {
-        vtx_runtime_enable_jit(&raw_, nthreads);
+        vtx_runtime_enable_jit(raw_ptr_, nthreads);
     }
 
     // Eagerly compile a method at T1 (baseline JIT).
     Result<void> compile_t1(Bytecode& bc) {
         vtx_method_desc_t m = make_method_desc(bc);
-        int rc = vtx_runtime_compile(&raw_, &m, 1);
+        int rc = vtx_runtime_compile(raw_ptr_, &m, 1);
         if (rc != 0) return Result<void>::err("T1 compilation failed");
         return {};
     }
@@ -95,7 +120,7 @@ public:
     // T2 handles floats and most opcodes; falls back to T1 on failure.
     Result<void> compile_t2(Bytecode& bc) {
         vtx_method_desc_t m = make_method_desc(bc);
-        int rc = vtx_runtime_compile(&raw_, &m, 2);
+        int rc = vtx_runtime_compile(raw_ptr_, &m, 2);
         if (rc != 0) return Result<void>::err("T2 compilation failed");
         return {};
     }
@@ -106,7 +131,7 @@ public:
     // If the method has been compiled (via compile_t1/t2 or tier-up),
     // the interpreter dispatches to JIT-compiled native code.
     Value run(const Bytecode& bc) {
-        return Value(vtx_runtime_run(&raw_, bc.raw()));
+        return Value(vtx_runtime_run(raw_ptr_, bc.raw()));
     }
 
     // Run with arguments. The bytecode's entry method should accept
@@ -116,7 +141,7 @@ public:
         raw_args.reserve(args.size());
         for (auto& a : args) raw_args.push_back(a.raw());
         return Value(vtx_runtime_run_with_args(
-            &raw_, bc.raw(), raw_args.data(), raw_args.size()));
+            raw_ptr_, bc.raw(), raw_args.data(), raw_args.size()));
     }
 
     // Compile + run in one call.
@@ -128,25 +153,25 @@ public:
 
     /* ---- Accessors (for advanced use) ---- */
 
-    vtx_runtime_t& raw() { return raw_; }
-    const vtx_runtime_t& raw() const { return raw_; }
+    vtx_runtime_t& raw() { return *raw_ptr_; }
+    const vtx_runtime_t& raw() const { return *raw_ptr_; }
 
-    vtx_type_system_t* type_system() { return vtx_runtime_type_system(&raw_); }
-    vtx_gc_t*          gc()          { return vtx_runtime_gc(&raw_); }
-    vtx_interp_t*      interp()      { return vtx_runtime_interp(&raw_); }
-    vtx_code_cache_t*  code_cache()  { return vtx_runtime_code_cache(&raw_); }
+    vtx_type_system_t* type_system() { return vtx_runtime_type_system(raw_ptr_); }
+    vtx_gc_t*          gc()          { return vtx_runtime_gc(raw_ptr_); }
+    vtx_interp_t*      interp()      { return vtx_runtime_interp(raw_ptr_); }
+    vtx_code_cache_t*  code_cache()  { return vtx_runtime_code_cache(raw_ptr_); }
 
     /* ---- GC control ---- */
 
     // Force a garbage collection cycle (young generation).
     void gc_collect() {
-        vtx_gc_collect_young(&raw_.gc);
+        vtx_gc_collect_young(&raw_ptr_->gc);
     }
 
     // Force a full GC (young + old generation).
     void gc_collect_full() {
-        vtx_gc_collect_young(&raw_.gc);
-        vtx_gc_collect_old(&raw_.gc);
+        vtx_gc_collect_young(&raw_ptr_->gc);
+        vtx_gc_collect_old(&raw_ptr_->gc);
     }
 
     // Get heap statistics.
@@ -161,13 +186,13 @@ public:
     };
     HeapStats heap_stats() const {
         HeapStats s{};
-        s.young_used = raw_.gc.young_from.current - raw_.gc.young_from.start;
-        s.young_size = raw_.gc.young_from.size;
-        s.old_used  = raw_.gc.old_gen.used;
-        s.old_size  = raw_.gc.old_gen.size;
-        s.collections_done = raw_.gc.collections_done;
+        s.young_used = raw_ptr_->gc.young_from.current - raw_ptr_->gc.young_from.start;
+        s.young_size = raw_ptr_->gc.young_from.size;
+        s.old_used  = raw_ptr_->gc.old_gen.used;
+        s.old_size  = raw_ptr_->gc.old_gen.size;
+        s.collections_done = raw_ptr_->gc.collections_done;
         s.total_allocations = 0;  // GC doesn't track this directly
-        s.total_collections = raw_.gc.collections_done;
+        s.total_collections = raw_ptr_->gc.collections_done;
         return s;
     }
 
@@ -186,7 +211,7 @@ private:
         return m;
     }
 
-    vtx_runtime_t raw_{};
+    vtx_runtime_t* raw_ptr_ = nullptr;
     bool owns_ = false;
 };
 

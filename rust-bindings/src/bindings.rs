@@ -2796,6 +2796,15 @@ pub struct vtx_method_registry {
     pub capacity_mask: u32,
     pub clock_hand: u32,
     pub malloc_allocated: bool,
+    /* COMPILE-001 fix: added pthread_mutex_t mutex + bool mutex_initialized.
+     * pthread_mutex_t on Linux/glibc is 40 bytes with 8-byte alignment.
+     * We use [u64; 5] (40 bytes, align 8) to match the C layout exactly.
+     * Rust will insert 3 bytes of padding after malloc_allocated to
+     * align the u64 array to 8, matching C's struct padding.
+     * On non-glibc/non-Linux platforms this may need adjustment —
+     * enable the `runtime-bindgen` feature for accurate bindings. */
+    pub mutex: [u64; 5],
+    pub mutex_initialized: bool,
 }
 pub type vtx_method_registry_t = vtx_method_registry;
 extern "C" {
@@ -6766,6 +6775,13 @@ pub struct vtx_runtime_t {
     pub initialized: ::std::os::raw::c_int,
     pub use_jit: ::std::os::raw::c_int,
     pub hot_threshold: u32,
+    /* RUST-002 fix: the pre-generated bindings were missing these two
+     * fields (main_method and main_method_id), causing the Rust-side
+     * struct to be 16 bytes smaller than the C struct. vtx_runtime_create
+     * writes past the end of the Rust-allocated storage → stack smashing
+     * or heap corruption. Added to match the C header (vortex_runtime.h). */
+    pub main_method: *mut vtx_method_desc_t,
+    pub main_method_id: u32,
 }
 extern "C" {
     pub fn vtx_runtime_create(rt: *mut vtx_runtime_t) -> ::std::os::raw::c_int;

@@ -50,6 +50,7 @@ target_compile_options(vortex_cpp PRIVATE
 # If they exist as pre-built archives, use them; otherwise compile from source.
 if(EXISTS ${VORTEX_BUILD_DIR}/src/libvortex_runtime.a)
     target_link_libraries(vortex_cpp PUBLIC
+        -Wl,--start-group
         ${VORTEX_BUILD_DIR}/src/libvortex_compile.a
         ${VORTEX_BUILD_DIR}/src/libvortex_midtier.a
         ${VORTEX_BUILD_DIR}/src/libvortex_inliner.a
@@ -67,8 +68,17 @@ if(EXISTS ${VORTEX_BUILD_DIR}/src/libvortex_runtime.a)
         ${VORTEX_BUILD_DIR}/src/libvortex_interp.a
         ${VORTEX_BUILD_DIR}/src/libvortex_runtime.a
         ${VORTEX_BUILD_DIR}/src/libvortex_common.a
+        -Wl,--end-group
         -lm -lpthread
     )
+else()
+    # BUILD-007 fix: fail loudly if pre-built C libraries are not found,
+    # instead of silently producing a vortex_cpp that can't link against
+    # any consumer (hundreds of undefined vtx_* references at link time).
+    message(FATAL_ERROR
+        "Pre-built VORTEX C libraries not found in ${VORTEX_BUILD_DIR}/src/. "
+        "Build the root VORTEX project first: "
+        "cd .. && mkdir -p build && cd build && cmake .. && make -j4")
 endif()
 
 # ---- Example ----

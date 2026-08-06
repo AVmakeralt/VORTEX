@@ -165,13 +165,14 @@ public:
         return Value(vtx_object_get_field(obj_, 1 + index));
     }
 
-    void set(uint32_t index, Value value) {
-        if (!obj_) return;
-        uint32_t len = length();
-        if (index < len) {
-            vtx_object_set_field(obj_, 1 + index, value.raw());
-        }
-        // TODO: grow array if index >= len
+    // CPP-005 fix: return bool indicating whether the write succeeded.
+    // Arrays are fixed-size (no automatic growth); a write at index >= length
+    // returns false instead of silently dropping the value.
+    bool set(uint32_t index, Value value) {
+        if (!obj_) return false;
+        if (index >= length()) return false;
+        vtx_object_set_field(obj_, 1 + index, value.raw());
+        return true;
     }
 
     vtx_heap_object_t* raw() const { return obj_; }

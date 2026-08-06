@@ -18,8 +18,14 @@ use std::os::raw::c_void;
 
 /// A VORTEX runtime instance. Bundles the type system, GC, interpreter,
 /// code cache, and compilation threadpool.
+///
+/// RUST-001 fix: the runtime is heap-allocated via Box so that the
+/// internal self-pointers (gc.type_system = &type_system, etc.) remain
+/// valid across moves. The old code stored ffi::vtx_runtime_t by
+/// value, so moving the Runtime struct relocated the C struct and
+/// dangled every internal pointer.
 pub struct Runtime {
-    inner: ffi::vtx_runtime_t,
+    inner: Box<ffi::vtx_runtime_t>,
 }
 
 /// A bytecode module loaded from a file or constructed in memory.
@@ -48,8 +54,9 @@ impl From<u32> for Tier {
 impl Runtime {
     /// Create a new runtime with default settings.
     pub fn new() -> Result<Self, String> {
-        let mut inner: ffi::vtx_runtime_t = unsafe { std::mem::zeroed() };
-        let rc = unsafe { ffi::vtx_runtime_create(&mut inner) };
+        // RUST-001 fix: Box the runtime so its address is stable.
+        let mut inner = Box::new(unsafe { std::mem::zeroed::<ffi::vtx_runtime_t>() });
+        let rc = unsafe { ffi::vtx_runtime_create(&mut *inner) };
         if rc != 0 {
             return Err("failed to create runtime".to_string());
         }
@@ -61,13 +68,13 @@ impl Runtime {
     ///
     /// `nthreads` = number of compilation threads (0 = auto-detect).
     pub fn enable_jit(&mut self, nthreads: u32) {
-        unsafe { ffi::vtx_runtime_enable_jit(&mut self.inner, nthreads); }
+        unsafe { ffi::vtx_runtime_enable_jit(&mut *self.inner, nthreads); }
     }
 
     /// Eagerly compile a method at T1 (baseline JIT).
     /// After this, `run` dispatches to native code.
     pub fn compile_t1(&mut self, method: &mut ffi::vtx_method_desc_t) -> Result<(), String> {
-        let rc = unsafe { ffi::vtx_runtime_compile(&mut self.inner, method, 1) };
+        let rc = unsafe { ffi::vtx_runtime_compile(&mut *self.inner, method, 1) };
         if rc != 0 { Err("T1 compilation failed".to_string()) } else { Ok(()) }
     }
 
@@ -75,7 +82,7 @@ impl Runtime {
     /// T2 now handles float arithmetic (via runtime helpers), float comparisons,
     /// and float-in-loop patterns. Falls back to T1 only for unsupported opcodes.
     pub fn compile_t2(&mut self, method: &mut ffi::vtx_method_desc_t) -> Result<(), String> {
-        let rc = unsafe { ffi::vtx_runtime_compile(&mut self.inner, method, 2) };
+        let rc = unsafe { ffi::vtx_runtime_compile(&mut *self.inner, method, 2) };
         if rc != 0 { Err("T2 compilation failed".to_string()) } else { Ok(()) }
     }
 
@@ -83,14 +90,14 @@ impl Runtime {
     /// If the method has been compiled (via `compile_t1/t2` or tier-up),
     /// the interpreter dispatches to the JIT-compiled native code.
     pub fn run(&mut self, bc: &Bytecode) -> Value {
-        unsafe { ffi::vtx_runtime_run(&mut self.inner, bc.inner) }
+        unsafe { ffi::vtx_runtime_run(&mut *self.inner, bc.inner) }
     }
 
     /// Run with arguments.
     pub fn run_with_args(&mut self, bc: &Bytecode, args: &[Value]) -> Value {
         unsafe {
             ffi::vtx_runtime_run_with_args(
-                &mut self.inner, bc.inner,
+                &mut *self.inner, bc.inner,
                 args.as_ptr(), args.len() as u32,
             )
         }
@@ -112,7 +119,7 @@ impl Runtime {
     pub fn compile_method(&mut self, bc: &Bytecode, tier: u32) -> Result<Value, String> {
         let mut method = build_method_desc(bc);
         let t = if tier <= 1 { 1 } else { 2 };
-        let rc = unsafe { ffi::vtx_runtime_compile(&mut self.inner, &mut method, t) };
+        let rc = unsafe { ffi::vtx_runtime_compile(&mut *self.inner, &mut method, t) };
         if rc != 0 {
             return Err(format!("T{} compilation failed", t));
         }
@@ -130,7 +137,7 @@ impl Runtime {
     }
 
     /// Get a raw pointer to the internal runtime (for advanced FFI).
-    pub fn as_ptr(&mut self) -> *mut ffi::vtx_runtime_t { &mut self.inner }
+    pub fn as_ptr(&mut self) -> *mut ffi::vtx_runtime_t { &mut *self.inner }
 
     /// Load a .vtbc bytecode file from disk.
     pub fn load_bytecode(path: &str) -> Result<Bytecode, String> {
@@ -146,7 +153,7 @@ impl Runtime {
 
 impl Drop for Runtime {
     fn drop(&mut self) {
-        unsafe { ffi::vtx_runtime_destroy(&mut self.inner); }
+        unsafe { ffi::vtx_runtime_destroy(&mut *self.inner); }
     }
 }
 

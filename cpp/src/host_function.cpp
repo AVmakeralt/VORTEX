@@ -16,7 +16,15 @@
 
 #include "vortex/host_function.hpp"
 #include "vortex/value.hpp"
+
+// CPP-003 workaround: type_system.h (pulled in by dispatch.h) uses
+// 'typeid' as a parameter name, which is a reserved C++ keyword.
+// Use the same #define shim as runtime.hpp and bytecode.hpp.
+#define typeid typeid_
+extern "C" {
 #include "interp/dispatch.h"
+}
+#undef typeid
 
 #include <vector>
 
