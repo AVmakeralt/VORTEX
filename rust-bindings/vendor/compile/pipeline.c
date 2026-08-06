@@ -44,6 +44,7 @@
 #include "deopt/deoptless.h"
 #include "ir/strength_reduce.h"
 #include "ir/algebraic.h"
+#include "ir/cfg_simplify.h"
 
 /* Forward declarations from codecache/versioned.h (can't include directly
  * due to vtx_code_version_t struct conflict with compile/version.h) */
@@ -1119,6 +1120,19 @@ int vtx_pipeline_run(vtx_graph_t *graph,
         if (verify_between_passes(graph, config, "DCE") != 0) {
             result->stats = stats;
             return -1;
+        }
+    }
+
+    /* ================================================================== */
+    /* Phase 2.9: CFG Simplification                                       */
+    /*                                                                    */
+    /* Collapses single-input Regions (from SCCP-folded Ifs), resolves    */
+    /* Goto→Goto chains. Reduces CFG size for better scheduling.          */
+    /* ================================================================== */
+    if (config->run_sccp) {
+        uint32_t cfg_simplified = vtx_cfg_simplify_run(graph);
+        if (cfg_simplified > 0) {
+            vtx_node_table_clear_dead(&graph->node_table);
         }
     }
 

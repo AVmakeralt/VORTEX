@@ -59,6 +59,7 @@ add_library(vortex_ir STATIC
     ir/spec_elim.c
     ir/strength_reduce.c
     ir/algebraic.c
+    ir/cfg_simplify.c
     ir/loop_unroll.c
     ir/smi_tag_elision.c
     ir/rep_infer.c

@@ -2565,33 +2565,19 @@ int vtx_branch_optimize(vtx_inst_stream_t *stream, vtx_x86_emit_t *emit,
 
     /* ---- Phase 3: Short jump detection ----
      *
-     * P0 FIX: Short jump optimization is DISABLED for correctness.
+     * Short jump optimization is DISABLED for correctness.
      *
-     * The problem: estimate_inst_size() estimates instruction sizes using
-     * rel32 encoding (6 bytes for JCC, 5 for JMP). When we mark a jump as
-     * "short" and emit only 2 bytes, all subsequent offsets shift by 4 bytes
-     * (for JCC) or 3 bytes (for JMP). This cascading offset shift can cause
-     * other jumps' targets to move out of rel8 range, producing silent
-     * miscompilation.
+     * The problem: when we mark a jump as "short" (2 bytes instead of 5-6),
+     * all subsequent instruction offsets shift. This cascading shift can
+     * cause other jumps' targets to move out of rel8 range, producing
+     * silent miscompilation. A correct implementation requires a fixpoint
+     * iteration (repeatedly try to shorten, recompute offsets, verify).
      *
-     * A correct implementation requires multi-pass offset computation:
-     *   1. Compute offsets assuming all rel32
-     *   2. Identify candidates that fit in rel8
-     *   3. Re-compute offsets with the smaller sizes
-     *   4. Verify all candidates still fit; iterate if not
+     * The conservative block-distance heuristic was attempted but caused
+     * segfaults because the offset estimation doesn't account for the
+     * size difference between rel8 and rel32 encoding.
      *
-     * Since the code size savings (3-4 bytes per short jump) are minimal
-     * compared to the correctness risk, we skip short jumps entirely.
-     * The rel32 encoding is always correct regardless of offset shifts.
-     *
-     * To re-enable short jumps safely, implement a fixpoint iteration:
-     *   - Start with all jumps as rel32
-     *   - Repeatedly try to shorten jumps that fit in rel8
-     *   - After each shortening, recompute offsets from that point onward
-     *   - If a shortened jump's target moves out of rel8 range, revert it
-     *   - Continue until no more changes occur (fixpoint reached)
-     */
-    /* Short jumps intentionally NOT marked. All branches use rel32 encoding. */
+     * TODO: implement proper fixpoint iteration for short jumps. */
 
     /* ---- Phase 4: Mark loop headers for alignment ---- */
     /* A block is a loop header if it has a back-edge from a later block.

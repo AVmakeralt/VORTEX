@@ -1315,12 +1315,39 @@ vtx_regalloc_result_t *vtx_regalloc_run_target(vtx_inst_stream_t *stream,
      * R12/R13 across the JIT call gets those variables corrupted. */
     /* R12 (VTX_SPILL_TMP_REG) and R13 (memory operand spill scratch) are
      * used by the emitter for spill load/store and IDIV operand reloads.
-     * Always save them — the emitter may use them even when the regalloc's
-     * spill_count is 0 (e.g., for IDIV's fixed-register spills, memory
-     * operand encoding with R12 as base, or MOV coalescing fallbacks).
-     * Not saving them corrupts the caller's R12/R13, causing crashes in
-     * the benchmark harness or any C code that uses these registers. */
-    result->callee_saved_mask = callee_saved_used | (1u << 12) | (1u << 13);
+     *
+     * BUGFIX (audit Tier B): Only save R12/R13 if the function actually
+     * has spills or memory operands that would use them. For leaf functions
+     * with no spills, saving R12/R13 wastes 2 push + 2 pop = 8 bytes of
+     * code and 4 cycles per call.
+     *
+     * We check:
+     *   - spill_count > 0: R12 is used for spill reloads
+     *   - any instruction has HAS_MEM flag: R13 is used for mem operand reloads
+     *   - any IDIV/CQO/IMUL_FULL: R12 used for fixed-register spills
+     * If none of these, R12/R13 are not clobbered, so don't save them. */
+    {
+        bool need_r12_r13 = (result->spill_count > 0);
+        if (!need_r12_r13) {
+            /* Check for memory operands or IDIV */
+            for (uint32_t b = 0; b < stream->block_count && !need_r12_r13; b++) {
+                vtx_inst_block_t *blk = &stream->blocks[b];
+                for (uint32_t i = 0; i < blk->inst_count; i++) {
+                    vtx_inst_t *inst = &blk->insts[i];
+                    if (inst->flags & VTX_INST_FLAG_HAS_MEM) { need_r12_r13 = true; break; }
+                    if (inst->opcode == VTX_X86_IDIV || inst->opcode == VTX_X86_CQO ||
+                        inst->opcode == VTX_X86_IMUL_FULL || inst->opcode == VTX_X86_MUL) {
+                        need_r12_r13 = true; break;
+                    }
+                }
+            }
+        }
+        if (need_r12_r13) {
+            result->callee_saved_mask = callee_saved_used | (1u << 12) | (1u << 13);
+        } else {
+            result->callee_saved_mask = callee_saved_used;
+        }
+    }
 
     /* Detect leaf functions (no CALL instructions).
      * Leaf functions can use a lighter prologue (skip JIT header pushes). */
