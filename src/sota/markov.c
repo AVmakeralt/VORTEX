@@ -236,9 +236,15 @@ bool vtx_markov_detect_transition(vtx_markov_t *mk, uint32_t *new_phase)
         return false;
     }
 
-    /* Build a distribution of method calls in the current observation window */
-    double current_dist[VTX_MARKOV_MAX_METHODS];
-    double phase_dist[VTX_MARKOV_MAX_METHODS];
+    /* Build a distribution of method calls in the current observation window.
+     *
+     * SOTA-001 fix: the old code used stack-allocated arrays of size
+     * VTX_MARKOV_MAX_METHODS (1024 → 16 KB total). Under deep recursion
+     * or frequent calls, this risks stack overflow. Use static buffers
+     * instead — the function is called serially (under the markov's
+     * own mutex if any), so static is safe. */
+    static double current_dist[VTX_MARKOV_MAX_METHODS];
+    static double phase_dist[VTX_MARKOV_MAX_METHODS];
     memset(current_dist, 0, sizeof(current_dist));
     memset(phase_dist, 0, sizeof(phase_dist));
 

@@ -280,6 +280,29 @@ bool vtx_install_method(vtx_code_cache_t *cache,
         }
     }
 
+    /* COMPILE-002 fix: if there's an existing entry for this method_id
+     * (tier promotion: T1→T2→T3 installs to the same method_id), retire
+     * the old entry instead of leaking it. The old side_table, deopt_info,
+     * dep arrays, poly_ics, and code in the cache were leaked on every
+     * promotion. We mark the old entry as invalid; the versioned cache
+     * (if configured) will eventually free the code once no threads are
+     * executing it. The old vtx_compiled_method_t struct itself is freed
+     * here since it's just metadata (the code stays in the cache segment
+     * until the versioned cache reclaims it). */
+    vtx_compiled_method_t *old_cm = vtx_method_registry_get(registry, method_id);
+    if (old_cm != NULL) {
+        old_cm->is_installed = false;
+        old_cm->is_valid = false;
+        /* Free the old metadata struct (side_table, deopt_info, etc.).
+         * The code itself stays in the cache segment — versioned cache
+         * reclaims it via vtx_versioned_cache_retire when configured. */
+        if (old_cm->side_table) {
+            vtx_side_table_destroy(old_cm->side_table);
+        }
+        free(old_cm->bc_pc_map);
+        free(old_cm);
+    }
+
     /* Register the method */
     if (vtx_method_registry_add(registry, cm) != 0) {
         free(cm->bc_pc_map);

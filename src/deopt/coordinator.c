@@ -130,11 +130,12 @@ vtx_deopt_decision_t vtx_deopt_coord_on_guard_fail(
      * recompilation via the callback. */
     bool should_flush = vtx_deopt_batcher_add(&coord->batcher, site_id, now_ns);
     if (should_flush) {
-        uint32_t sites[VTX_DEOPT_BATCH_MAX_PENDING];
-        uint32_t n = vtx_deopt_batcher_flush(&coord->batcher, sites,
+        /* DEOPT-010 fix: use the struct-embedded scratch buffer instead
+         * of a 256-byte stack array. */
+        uint32_t n = vtx_deopt_batcher_flush(&coord->batcher, coord->flush_scratch,
                                               VTX_DEOPT_BATCH_MAX_PENDING, now_ns);
         if (n > 0 && coord->recompile_fn != NULL) {
-            coord->recompile_fn(sites, n, coord->recompile_user_data);
+            coord->recompile_fn(coord->flush_scratch, n, coord->recompile_user_data);
         }
         coord->total_batches_flushed++;
     }
@@ -166,11 +167,11 @@ uint32_t vtx_deopt_coord_flush(vtx_deopt_coord_t *coord, uint64_t now_ns)
     /* Force flush: ignore the should_flush check. The caller (e.g. a
      * safepoint handler) wants to flush NOW, regardless of window state. */
     if (coord->batcher.count == 0) return 0;
-    uint32_t sites[VTX_DEOPT_BATCH_MAX_PENDING];
-    uint32_t n = vtx_deopt_batcher_flush(&coord->batcher, sites,
+    /* DEOPT-010 fix: use the struct-embedded scratch buffer. */
+    uint32_t n = vtx_deopt_batcher_flush(&coord->batcher, coord->flush_scratch,
                                           VTX_DEOPT_BATCH_MAX_PENDING, now_ns);
     if (n > 0 && coord->recompile_fn != NULL) {
-        coord->recompile_fn(sites, n, coord->recompile_user_data);
+        coord->recompile_fn(coord->flush_scratch, n, coord->recompile_user_data);
     }
     coord->total_batches_flushed++;
     return n;

@@ -8,6 +8,7 @@
 #include "codecache/cache.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -303,7 +304,15 @@ int vtx_code_cache_free(vtx_code_cache_t *cache, void *code_ptr, uint32_t code_s
                 if (cache->current_segment == seg) {
                     cache->current_segment = NULL;
                 }
-                cache->total_size -= (code_size + 15u) & ~15u;
+                /* CACHE-003 fix: saturating subtract to prevent underflow
+                 * on double-free or wrong-size free. */
+                uint32_t aligned = (code_size + 15u) & ~15u;
+                if (cache->total_size >= aligned) {
+                    cache->total_size -= aligned;
+                } else {
+                    cache->total_size = 0;
+                    fprintf(stderr, "[cache] total_size underflow (double-free?)\n");
+                }
                 cache->segment_count--;
                 segment_free(seg);
             } else {
@@ -327,12 +336,25 @@ int vtx_code_cache_free(vtx_code_cache_t *cache, void *code_ptr, uint32_t code_s
                 }
 
                 if (seg->free_count < seg->free_capacity) {
+                    /* CACHE-002 fix: store the ALIGNED size in the free-list
+                     * so a future alloc request (already 16-aligned) matches.
+                     * The old code stored the unaligned code_size, so a
+                     * freed 17-byte block was recorded as 17 but a 32-byte
+                     * request would skip it, leading to fragmentation. */
+                    uint32_t aligned_size = (code_size + 15u) & ~15u;
                     seg->free_list[seg->free_count].offset = freed_offset;
-                    seg->free_list[seg->free_count].size = code_size;
+                    seg->free_list[seg->free_count].size = aligned_size;
                     seg->free_count++;
                 }
 
-                cache->total_size -= (code_size + 15u) & ~15u;
+                /* CACHE-003 fix: saturating subtract. */
+                uint32_t aligned = (code_size + 15u) & ~15u;
+                if (cache->total_size >= aligned) {
+                    cache->total_size -= aligned;
+                } else {
+                    cache->total_size = 0;
+                    fprintf(stderr, "[cache] total_size underflow (double-free?)\n");
+                }
             }
             return 0;
         }

@@ -376,6 +376,13 @@ int vtx_deoptless_table_init(vtx_deoptless_table_t *table,
     table->versions = NULL;
     table->version_count = 0;
 
+    /* BASE-014 fix: init the per-table mutex. */
+    if (pthread_mutex_init(&table->mutex, NULL) != 0) {
+        table->mutex_initialized = false;
+        return -1;
+    }
+    table->mutex_initialized = true;
+
     return 0;
 }
 
@@ -395,6 +402,12 @@ void vtx_deoptless_table_destroy(vtx_deoptless_table_t *table)
 
     /* Free failed guard tracking array (Proposal #3) */
     free(table->failed_guards);
+
+    /* BASE-014 fix: destroy the per-table mutex. */
+    if (table->mutex_initialized) {
+        pthread_mutex_destroy(&table->mutex);
+        table->mutex_initialized = false;
+    }
 
     memset(table, 0, sizeof(*table));
 }
@@ -421,6 +434,14 @@ vtx_deoptless_version_t *vtx_deoptless_add_version(
 {
     if (!table) return NULL;
 
+    /* BASE-014 fix: lock the table for the entire add+evict operation.
+     * Without this, two concurrent add_version calls for different
+     * guards could both pass the >= MAX check, both call evict_oldest
+     * (evicting 2 instead of 1), then both increment → wrong count. */
+    if (table->mutex_initialized) {
+        pthread_mutex_lock(&table->mutex);
+    }
+
     /* Check if we already have a version for this guard */
     vtx_deoptless_version_t *existing =
         vtx_deoptless_find_version(table, failed_guard_id);
@@ -428,6 +449,7 @@ vtx_deoptless_version_t *vtx_deoptless_add_version(
         /* Update the existing version's code */
         existing->continuation_code = continuation_code;
         existing->continuation_size = continuation_size;
+        if (table->mutex_initialized) pthread_mutex_unlock(&table->mutex);
         return existing;
     }
 
@@ -438,7 +460,10 @@ vtx_deoptless_version_t *vtx_deoptless_add_version(
 
     /* Create new version */
     vtx_deoptless_version_t *v = calloc(1, sizeof(vtx_deoptless_version_t));
-    if (!v) return NULL;
+    if (!v) {
+        if (table->mutex_initialized) pthread_mutex_unlock(&table->mutex);
+        return NULL;
+    }
 
     v->method_id = table->method_id;
     v->failed_guard_id = failed_guard_id;
@@ -459,6 +484,7 @@ vtx_deoptless_version_t *vtx_deoptless_add_version(
     table->versions = v;
     table->version_count++;
 
+    if (table->mutex_initialized) pthread_mutex_unlock(&table->mutex);
     return v;
 }
 

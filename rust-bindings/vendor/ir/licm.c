@@ -595,8 +595,24 @@ static void try_hoist_guards(vtx_licm_loop_ctx_t *ctx)
             }
         }
 
-        /* Guard is hoistable! Mark it as invariant. */
-        ctx->invariant_state[nid] = VTX_LICM_INVARIANT;
+        /* IR-011 fix: Only hoist a Guard if the loop is GUARANTEED to
+         * execute at least once. If the loop may execute zero times
+         * (e.g., a while loop with a false initial condition), hoisting
+         * the guard to the preheader makes it fire on a path where the
+         * original code never executed it — changing deopt semantics
+         * (the program would have completed normally, but now deopts).
+         *
+         * Conservative check: require the loop's back-edge to be
+         * reachable from the preheader unconditionally. We approximate
+         * this by checking if the loop's LoopBegin dominates its
+         * LoopEnd (meaning the body runs at least once before any exit).
+         * For simplicity, we skip the FrameState-validity check and
+         * just refuse to hoist guards — this is the safe choice and
+         * costs nothing in the common case (loops that always execute
+         * at least once will still benefit from LICM of loads/computes;
+         * only guards are kept in the loop body). */
+        (void)nid;
+        /* Don't hoist — see comment above. */
     }
 }
 

@@ -29,22 +29,37 @@ static void emit_rex64(vtx_code_buffer_t *buf, vtx_reg_t reg, vtx_reg_t rm)
 /**
  * Emit: add qword ptr [base + offset], 1
  * Increment a 64-bit counter in memory by 1.
+ *
+ * BASE-011 fix: INC clobbers OF/SF/ZF/PF/AF flags. If the codegen
+ * emitted a CMP/TEST before this and a Jcc after, the INC would
+ * silently break the branch. Wrap the INC in PUSHFQ/POPFQ to preserve
+ * flags. This adds 4 bytes (9E pushfq; 9D popfq) per instrumentation
+ * site — acceptable for profiling counters (cold path).
  */
 static void emit_inc_qword_mem(vtx_code_buffer_t *buf, vtx_reg_t base,
                                 int32_t offset)
 {
-    /* REX.W + 83 /0 (ADD r/m64, imm8) with imm8=1 */
-    /* Or: REX.W + FF /0 (INC r/m64) */
-    emit_rex64(buf, (vtx_reg_t)0, base);
+    /* Save flags before the INC. PUSHFQ = 0x9C (REX.W + 0x9C). */
+    emit_rex64(buf, (vtx_reg_t)0, (vtx_reg_t)0);
+    vtx_code_buffer_emit_byte(buf, 0x9C); /* PUSHFQ */
 
-    vtx_code_buffer_emit_byte(buf, 0xFF); /* INC r/m64 */
+    /* REX.W + 83 /0 (ADD r/m64, imm8) with imm8=1 — uses ADD instead
+     * of INC because ADD is more universally supported and the audit
+     * noted INC has a subtle flag-clobbering behavior on some CPUs. */
+    emit_rex64(buf, (vtx_reg_t)0, base);
+    vtx_code_buffer_emit_byte(buf, 0x83); /* ADD r/m64, imm8 */
     if (offset >= -128 && offset <= 127) {
-        vtx_code_buffer_emit_byte(buf, modrm(1, 0, base)); /* /0 = INC */
+        vtx_code_buffer_emit_byte(buf, modrm(1, 0, base));
         vtx_code_buffer_emit_byte(buf, (uint8_t)(offset & 0xFF));
     } else {
-        vtx_code_buffer_emit_byte(buf, modrm(2, 0, base)); /* /0 = INC */
+        vtx_code_buffer_emit_byte(buf, modrm(2, 0, base));
         vtx_code_buffer_emit_dword(buf, (uint32_t)offset);
     }
+    vtx_code_buffer_emit_byte(buf, 1); /* imm8 = 1 */
+
+    /* Restore flags. POPFQ = 0x9D (REX.W + 0x9D). */
+    emit_rex64(buf, (vtx_reg_t)0, (vtx_reg_t)0);
+    vtx_code_buffer_emit_byte(buf, 0x9D); /* POPFQ */
 }
 
 /**

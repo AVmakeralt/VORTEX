@@ -41,6 +41,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
+#include <stdatomic.h>
 
 #include "ir/gvn.h"
 #include "ir/dce.h"
@@ -54,8 +55,15 @@
 /**
  * Global mid-tier statistics.  Persists across calls to vtx_midtier_compile()
  * so that cumulative counters are not lost when the local cfg goes out of scope.
+ *
+ * IR-026 fix: made atomic so concurrent compilation workers don't race
+ * on the counters. The old code used plain uint64_t/uint32_t increments
+ * which lost updates under concurrent compilation.
  */
-static vtx_midtier_config_t g_midtier_stats;
+static _Atomic uint64_t g_midtier_compilation_time_ns = 0;
+static _Atomic uint32_t g_midtier_methods_compiled = 0;
+static _Atomic uint32_t g_midtier_sites_specialized = 0;
+static _Atomic uint32_t g_midtier_guards_inserted = 0;
 
 /* ========================================================================== */
 /* Timing helpers                                                              */
@@ -349,6 +357,9 @@ vtx_midtier_result_t *vtx_midtier_compile(
     /* Step 7: Register allocation */
     vtx_regalloc_result_t *ra_result = vtx_regalloc_run(stream, arena);
     if (ra_result == NULL) {
+        /* IR-027 fix: stream and ra_result are arena-allocated, so the
+         * arena will reclaim them when the caller destroys it. Document
+         * this contract so callers know to reset the arena. */
         vtx_schedule_destroy(&schedule);
         vtx_graph_destroy(&graph);
         free(result);
@@ -361,6 +372,7 @@ vtx_midtier_result_t *vtx_midtier_compile(
     /* Step 9: Emit x86-64 machine code */
     vtx_x86_emit_t emit;
     if (vtx_x86_emit_init(&emit, VTX_EMIT_INITIAL_CAPACITY) != 0) {
+        /* IR-027: stream/ra_result are arena-allocated — see note above. */
         vtx_schedule_destroy(&schedule);
         vtx_graph_destroy(&graph);
         free(result);
@@ -368,6 +380,7 @@ vtx_midtier_result_t *vtx_midtier_compile(
     }
 
     if (vtx_x86_emit_function(&emit, stream, ra_result, arena) != 0) {
+        /* IR-027: stream/ra_result are arena-allocated — see note above. */
         vtx_x86_emit_destroy(&emit);
         vtx_schedule_destroy(&schedule);
         vtx_graph_destroy(&graph);
@@ -388,11 +401,12 @@ vtx_midtier_result_t *vtx_midtier_compile(
     result->guards_inserted = guards_inserted;
     result->sites_specialized = sites_specialized;
 
-    /* Record timing — store in the global stats struct, not the local cfg */
-    g_midtier_stats.compilation_time_ns += (uint64_t)(midtier_now_ns() - start_time);
-    g_midtier_stats.methods_compiled++;
-    g_midtier_stats.sites_specialized += sites_specialized;
-    g_midtier_stats.guards_inserted += guards_inserted;
+    /* Record timing — store in the atomic globals (IR-026 fix). */
+    atomic_fetch_add(&g_midtier_compilation_time_ns,
+                     (uint64_t)(midtier_now_ns() - start_time));
+    atomic_fetch_add(&g_midtier_methods_compiled, 1);
+    atomic_fetch_add(&g_midtier_sites_specialized, sites_specialized);
+    atomic_fetch_add(&g_midtier_guards_inserted, guards_inserted);
 
     /* Cleanup */
     vtx_x86_emit_destroy(&emit);

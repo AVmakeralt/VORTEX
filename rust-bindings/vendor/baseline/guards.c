@@ -339,11 +339,16 @@ void vtx_guard_emit_bounds_check(vtx_code_buffer_t *buf,
      * index >= length. But we need the SMI value, which is the
      * actual integer index. The SMI value needs to be untagged first.
      *
-     * In the baseline JIT, index_reg and length_reg hold raw int64_t
-     * values (already untagged from SMI). We compare using:
-     *   cmp index_reg, length_reg  (64-bit)
-     *   jae deopt
-     */
+     * BASE-007 fix (documentation): index_reg and length_reg MUST be
+     * passed UNTAGGED. The baseline codegen's compile_array_length emits
+     * a tagged SMI into RAX — callers must untag before calling this
+     * function. The CMP below assumes raw int64_t values. If tagged
+     * SMIs are passed, the comparison is incorrect for negative indices
+     * (the tag bit flips the sign interpretation) and for cross-format
+     * comparisons (tagged SMI vs raw int from array header).
+     *
+     * Contract: caller ensures index_reg and length_reg hold untagged
+     * int64_t values before calling this function. */
 
     /* cmp index_reg, length_reg
      * CMP r/m64, r64 (opcode 0x39): modrm.reg = length_reg (source),

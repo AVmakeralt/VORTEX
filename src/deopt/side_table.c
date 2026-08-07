@@ -76,11 +76,19 @@ uint32_t vtx_side_table_add_entry(vtx_side_table_t *table,
 {
     if (!table) return UINT32_MAX;
 
-    /* Validate ordering: entries must be added in increasing PC order */
+    /* DEOPT-007 fix: VTX_ASSERT is a no-op in release builds, so the
+     * ordering invariant was unenforced. Replace with a real check that
+     * rejects out-of-order entries (returns UINT32_MAX). Out-of-order
+     * entries would break the binary search in vtx_side_table_lookup. */
     if (table->entry_count > 0) {
         uint32_t last_pc = table->entries[table->entry_count - 1].native_pc_offset;
-        VTX_ASSERT(native_pc_offset >= last_pc,
-                   "side table entries must be added in increasing PC order");
+        if (native_pc_offset < last_pc) {
+            /* Out of order — refuse to add. This indicates a bug in the
+             * codegen (emitting side-table entries out of PC order). */
+            VTX_ASSERT(native_pc_offset >= last_pc,
+                       "side table entries must be added in increasing PC order");
+            return UINT32_MAX;
+        }
     }
 
     /* Grow if needed */

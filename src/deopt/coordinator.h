@@ -104,6 +104,15 @@ typedef struct {
     uint64_t total_full_deopts;
     uint64_t total_suppressed;
     uint64_t total_batches_flushed;
+
+    /* DEOPT-010 fix: scratch buffer for vtx_deopt_coord_flush, which is
+     * documented as safepoint-callable. The old code used a 256-byte
+     * stack array (uint32_t sites[64]); under deep recursion (e.g.,
+     * safepoint handler already using ~1 KB of ucontext_t), this could
+     * push close to the per-thread guard page on small stacks. Moving
+     * the scratch into the struct avoids the stack allocation. Protected
+     * by the existing mutex (caller holds it during flush). */
+    uint32_t flush_scratch[VTX_DEOPT_BATCH_MAX_PENDING];
 } vtx_deopt_coord_t;
 
 /* Initialize the coordinator. The recompile_fn is called when the batcher

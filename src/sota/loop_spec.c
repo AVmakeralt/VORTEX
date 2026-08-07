@@ -104,7 +104,12 @@ void vtx_sota_loop_spec_destroy(vtx_sota_loop_spec_t *spec)
 
 double vtx_loop_cv(const uint64_t *trip_counts, uint32_t count)
 {
-    if (trip_counts == NULL || count == 0) return INFINITY;
+    /* SOTA-002 fix: return a large finite value (1e18) instead of INFINITY.
+     * Downstream code comparing cv < VTX_LOOP_CV_THRESHOLD treats INFINITY
+     * as "above threshold" (correct), but arithmetic on INFINITY produces
+     * NaN, which can propagate. A large finite value avoids NaN while
+     * still being above any reasonable threshold. */
+    if (trip_counts == NULL || count == 0) return 1e18;
 
     /* Compute mean */
     double sum = 0.0;
@@ -113,7 +118,7 @@ double vtx_loop_cv(const uint64_t *trip_counts, uint32_t count)
     }
     double mean = sum / (double)count;
 
-    if (mean == 0.0) return INFINITY;
+    if (mean == 0.0) return 1e18;
 
     /* Compute variance */
     double var_sum = 0.0;

@@ -289,6 +289,18 @@ static void gvn_table_destroy(vtx_gvn_table_t *t)
     t->count = 0;
 }
 
+/* IR-021 fix: clear the table in-place (zero the entry array) instead
+ * of destroy+init (which frees and re-callocs the same size). This
+ * avoids O(N) malloc/free on every fixed-point iteration — the table
+ * is reused, only the slot contents are reset. */
+static void gvn_table_clear(vtx_gvn_table_t *t)
+{
+    if (t->entries != NULL && t->capacity > 0) {
+        memset(t->entries, 0, t->capacity * sizeof(vtx_gvn_entry_t));
+    }
+    t->count = 0;
+}
+
 /**
  * Grow the GVN table when load factor exceeds 0.7.
  */
@@ -450,11 +462,12 @@ uint32_t vtx_gvn_run(vtx_graph_t *graph)
         changed = false;
         iteration++;
 
-        /* Rebuild the GVN table for this iteration */
-        gvn_table_destroy(&gvn);
-        if (gvn_table_init(&gvn, gvn_cap) != 0) {
-            return eliminated;
-        }
+        /* IR-021 fix: clear the table in-place instead of destroy+init.
+         * The old code freed and re-calloc'd the entry array on every
+         * fixed-point iteration — for a 5000-node graph with 5 iterations,
+         * that's 5 malloc + 5 free + 5 calloc of ~40 KB each. The clear
+         * reuses the existing allocation. */
+        gvn_table_clear(&gvn);
 
         /* Clear value numbers */
         for (uint32_t i = 0; i < nt->count; i++) {

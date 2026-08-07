@@ -2359,7 +2359,13 @@ dispatch_VT_OP_NEWARRAY:
 
         vtx_typeid_t elem_type = (vtx_typeid_t)operand;
         size_t alloc_size = vtx_heap_object_alloc_size(total_fields);
-        vtx_heap_object_t *arr = vtx_gc_alloc(interp->gc, alloc_size, elem_type);
+        /* INTERP-002 fix: allocate with VTX_TYPE_ARRAY, not elem_type.
+         * The array is NOT an instance of elem_type — using elem_type
+         * confused the GC's type-directed scanning. The element type
+         * is tracked separately if needed (e.g., for type-specialized
+         * array operations). */
+        (void)elem_type; /* preserved for future use; not passed to alloc */
+        vtx_heap_object_t *arr = vtx_gc_alloc(interp->gc, alloc_size, VTX_TYPE_ARRAY);
 
         if (arr == NULL) {
             *sp++ = VTX_VALUE_NULL;

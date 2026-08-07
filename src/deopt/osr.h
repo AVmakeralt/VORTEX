@@ -81,7 +81,14 @@ typedef struct {
     vtx_value_t     *stack;          /* operand stack */
     uint32_t         stack_top;      /* current stack depth */
     uint32_t         stack_capacity; /* max stack depth */
-    vtx_frame_state_t *caller;       /* caller's interpreter frame (or NULL) */
+    /* DEOPT-005 fix: changed from vtx_frame_state_t * to void * to avoid
+     * type-punning UB. The caller field is overloaded: it stores either
+     * a vtx_frame_state_t * (when built from a FrameState chain) or a
+     * vtx_interp_frame_t * (when built from an interpreter frame chain).
+     * Using void * + explicit casts at the use sites is well-defined;
+     * type-punning through incompatible pointer types is UB under
+     * C17 strict aliasing (6.5p7) and is flagged by -fsanitize=undefined. */
+    void             *caller;       /* caller's frame (vtx_frame_state_t * or vtx_interp_frame_t *) */
     bool             osr_active;     /* true after OSR up: frame is superseded by JIT code */
 
     /* --- Enhanced fields (matching src/interp/frame.h) --- */

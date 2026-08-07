@@ -322,7 +322,15 @@ static vtx_live_interval_t *compute_live_intervals(vtx_inst_stream_t *stream,
                     if (pred == b) continue;       /* stop at header */
                     if (in_loop[pred]) continue;   /* already visited */
                     in_loop[pred] = true;
-                    stack[sp++] = pred;
+                    /* RA-002 fix: bounds-check sp before pushing. The stack
+                     * is sized to sched->count, but a pathological graph
+                     * with many predecessors could overflow. Each block is
+                     * pushed at most once (guarded by in_loop), so the
+                     * stack can never exceed sched->count entries — but
+                     * check anyway to be safe. */
+                    if (sp < sched->count) {
+                        stack[sp++] = pred;
+                    }
                 }
             }
 

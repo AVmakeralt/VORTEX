@@ -316,6 +316,26 @@ int vtx_type_system_init(vtx_type_system_t *ts)
 
     ts->type_count = 2; /* VTX_TYPE_INVALID (0) + VTX_TYPE_OBJECT (1) */
 
+    /* INTERP-002 fix: register the synthetic VTX_TYPE_ARRAY type so the
+     * GC can recognize arrays (which use a different shape than objects).
+     * Arrays are allocated with type_id = VTX_TYPE_ARRAY; the element
+     * type is tracked separately (in a field on the heap object). */
+    vtx_type_desc_t *arr_td = &ts->types[VTX_TYPE_ARRAY];
+    arr_td->name            = "Array";
+    arr_td->type_id         = VTX_TYPE_ARRAY;
+    arr_td->parent_type     = VTX_TYPE_OBJECT; /* Array extends Object */
+    arr_td->field_count     = 0;               /* dynamic: field[0] = length */
+    arr_td->fields          = NULL;
+    arr_td->method_count    = 0;
+    arr_td->methods         = NULL;
+    arr_td->shape_id        = VTX_SHAPE_OBJECT; /* reuse OBJECT shape */
+    arr_td->instance_size   = (uint32_t)VTX_HEAP_OBJECT_HEADER_SIZE;
+    arr_td->vtable          = NULL;
+    arr_td->vtable_size     = 0;
+    arr_td->interface_count = 0;
+    arr_td->interfaces      = NULL;
+    ts->type_count = 3; /* INVALID + OBJECT + ARRAY */
+
     return 0;
 }
 

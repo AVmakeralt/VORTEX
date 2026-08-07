@@ -541,10 +541,27 @@ int vtx_invalidate_guard_fine_grained(uint32_t typeid_,
          * so we add 1 to compensate for the shorter instruction. */
         int32_t new_rel32 = old_rel32 + 1;
 
+        /* COMPILE-005 fix: the code page is PROT_EXEC|PROT_READ after
+         * install (vtx_code_cache_make_exec in vtx_install_method).
+         * Writing to it without mprotect triggers SIGSEGV on x86-64.
+         * Wrap the patch in make_writable / make_exec, and add a
+         * release fence so concurrent threads on other cores see the
+         * complete 6-byte patch atomically (not torn). */
+        if (vtx_code_cache_make_writable(cache, jcc_addr, 6) != 0) {
+            continue; /* mprotect failed — skip this guard */
+        }
+
         /* Write the patched instruction: E9 [rel32] 90 */
         jcc_addr[0] = 0xE9;  /* near JMP rel32 */
         memcpy(jcc_addr + 1, &new_rel32, sizeof(int32_t));
         jcc_addr[5] = 0x90;  /* NOP padding */
+
+        /* Memory fence: ensure the 6-byte patch is visible to all cores
+         * before we flip the page back to exec-only. */
+        __atomic_thread_fence(__ATOMIC_RELEASE);
+
+        /* Restore execute permission. */
+        vtx_code_cache_make_exec(cache, jcc_addr, 6);
 
         patched++;
     }

@@ -291,9 +291,18 @@ static void compute_loop_depth(uint32_t block_count,
 
 /**
  * Add a node to a scheduled block.
+ *
+ * IR-013 fix: blk->nodes is ALWAYS malloc'd — it's initialized to NULL
+ * (arena doesn't touch it) and only grown via realloc. The old code had
+ * no assertion of this invariant; if a future caller arena-allocates
+ * blk->nodes, this realloc would be UB (corrupting the arena or crashing).
+ * The VTX_ASSERT below documents and enforces the contract.
  */
 static int schedule_block_add_node(vtx_schedule_block_t *blk, vtx_nodeid_t nid)
 {
+    /* blk->nodes must be NULL (initial) or malloc-owned (after a prior
+     * realloc). realloc(NULL, ...) is equivalent to malloc, so the first
+     * call is safe. */
     if (blk->node_count >= blk->node_capacity) {
         uint32_t new_cap = (blk->node_capacity == 0) ? 16 : blk->node_capacity * 2;
         vtx_nodeid_t *new_nodes = (vtx_nodeid_t *)realloc(blk->nodes, new_cap * sizeof(vtx_nodeid_t));

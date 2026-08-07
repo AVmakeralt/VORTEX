@@ -16,6 +16,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <pthread.h>
 #include "vortex_config.h"
 #include "ir/node.h"
 #include "ir/graph.h"
@@ -125,6 +126,13 @@ typedef struct vtx_deoptless_table_struct {
     /* Profile-guarded specialization (Proposal #13) */
     uint64_t            decision_vector_hash;  /* hash of (guard_id, assumption) pairs */
     uint64_t            compiled_profile_hash; /* hash of the profile at compilation time */
+
+    /* BASE-014 fix: mutex protecting version_count, versions list, and
+     * failed_guards array. Without this, concurrent deoptless installs
+     * for different guards of the same method race on version_count++
+     * and evict_oldest, leading to wrong counts and double-eviction. */
+    pthread_mutex_t     mutex;
+    bool                mutex_initialized;
 } vtx_deoptless_table_t;
 
 /* ========================================================================== */

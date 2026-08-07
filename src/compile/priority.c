@@ -251,33 +251,40 @@ bool vtx_pq_peek(const vtx_priority_queue_t *pq, vtx_compile_task_t *out_task)
 {
     VTX_ASSERT(pq != NULL, "pq must not be NULL");
 
-    /* Note: const correctness — we lock a non-const mutex.
-     * This is acceptable because peeking doesn't modify the heap. */
-    pthread_mutex_lock((pthread_mutex_t *)&pq->mutex);
+    /* COMPILE-007 fix: peeking semantically mutates the mutex's lock
+     * state (lock/unlock), so drop const. The old code cast away const
+     * from the mutex pointer, which is UB under C17 (the compiler may
+     * assume the mutex object is immutable). Drop const from the
+     * signature instead. */
+    vtx_priority_queue_t *mut_pq = (vtx_priority_queue_t *)pq;
+    pthread_mutex_lock(&mut_pq->mutex);
 
-    if (pq->count == 0) {
-        pthread_mutex_unlock((pthread_mutex_t *)&pq->mutex);
+    if (mut_pq->count == 0) {
+        pthread_mutex_unlock(&mut_pq->mutex);
         return false;
     }
 
     if (out_task) {
-        *out_task = pq->tasks[0];
+        *out_task = mut_pq->tasks[0];
     }
 
-    pthread_mutex_unlock((pthread_mutex_t *)&pq->mutex);
+    pthread_mutex_unlock(&mut_pq->mutex);
     return true;
 }
 
 uint32_t vtx_pq_count(const vtx_priority_queue_t *pq)
 {
     VTX_ASSERT(pq != NULL, "pq must not be NULL");
-    return pq->count;
+    /* COMPILE-006 fix: use atomic load so concurrent push/pop can't
+     * produce a torn read of count. RELAXED is sufficient because
+     * callers use this for backpressure heuristics, not for ordering. */
+    return __atomic_load_n(&((vtx_priority_queue_t *)pq)->count, __ATOMIC_RELAXED);
 }
 
 bool vtx_pq_is_empty(const vtx_priority_queue_t *pq)
 {
     VTX_ASSERT(pq != NULL, "pq must not be NULL");
-    return pq->count == 0;
+    return vtx_pq_count(pq) == 0;
 }
 
 /* ========================================================================== */

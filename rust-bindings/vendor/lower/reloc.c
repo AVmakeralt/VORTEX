@@ -199,7 +199,15 @@ int vtx_reloc_apply_all(vtx_reloc_table_t *table, uint8_t *code_buffer,
         case VTX_RELOC_REL32: {
             /* 32-bit relative displacement.
              * For intra-code: disp = target_offset - (offset + 4) + addend
-             */
+             *
+             * LOWER-003 fix: the old code wrote 0 as a placeholder when
+             * target_offset == 0 && target_address != 0, expecting it to
+             * be patched at install time. But the entry was NOT marked
+             * is_external, so vtx_reloc_apply_external skipped it. The
+             * zero displacement remained, producing a jump to the next
+             * instruction (wrong). Fix: if target_address is set, treat
+             * it as the absolute target and compute the displacement
+             * relative to the code base. */
             if (reloc->target_offset != 0 || reloc->target_address == 0) {
                 /* Intra-code relocation */
                 if (reloc->offset + 4 > code_size) continue;
@@ -207,15 +215,27 @@ int vtx_reloc_apply_all(vtx_reloc_table_t *table, uint8_t *code_buffer,
                                (int32_t)(reloc->offset + 4) +
                                reloc->addend;
                 write_i32(code_buffer, reloc->offset, disp);
-            } else {
-                /* Non-external absolute-target REL32 (legacy path for
-                 * entries not marked is_external but with an absolute
-                 * target_address). This shouldn't normally happen after
-                 * the is_external flag was introduced, but we handle it
-                 * for backward compatibility. */
+            } else if (reloc->target_address != 0) {
+                /* Absolute target — will be relative to the code base
+                 * once installed. Write a placeholder displacement of 0;
+                 * the install path (vtx_reloc_apply_external) MUST mark
+                 * such entries as is_external so they get patched. If
+                 * is_external is false, log a warning — the displacement
+                 * will be wrong. */
                 if (reloc->offset + 4 > code_size) continue;
-                /* Write zero as placeholder — will be fixed at install */
                 write_i32(code_buffer, reloc->offset, 0);
+                /* Mark as external so vtx_reloc_apply_external patches it.
+                 * Cast away const — we're mutating the table entry, which
+                 * is safe because the table is owned by the caller and
+                 * this function is the only writer at this point. */
+                ((vtx_reloc_t *)reloc)->is_external = true;
+            } else {
+                /* Neither target_offset nor target_address set — this is
+                 * a malformed reloc. Write 0 and log. */
+                if (reloc->offset + 4 > code_size) continue;
+                write_i32(code_buffer, reloc->offset, 0);
+                /* No way to compute a displacement; the jump will land
+                 * at the next instruction. This is a codegen bug. */
             }
             break;
         }

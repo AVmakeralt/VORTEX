@@ -28,6 +28,12 @@ typedef uint32_t vtx_shapeid_t;
 #define VTX_TYPE_INVALID 0
 #define VTX_TYPE_OBJECT  1
 #define VTX_TYPE_SMI     2   /* Small Integer (tagged pointer integer type) */
+/* INTERP-002 fix: dedicated type_id for arrays. The old code allocated
+ * arrays with their element type as the type_id, confusing the GC's
+ * type-directed scanning (the array is NOT an instance of elem_type).
+ * VTX_TYPE_ARRAY is a synthetic type_id that the GC recognizes as
+ * "array of vtx_value_t" — fields are scanned as heap pointers. */
+#define VTX_TYPE_ARRAY   3
 /* First user-defined type starts at 3 */
 
 #define VTX_SHAPE_INVALID 0

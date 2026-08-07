@@ -40,19 +40,39 @@ vtx_value_t vtx_osr_resolve_node(vtx_nodeid_t node_id,
                                    const vtx_value_t *register_map,
                                    uint32_t map_size)
 {
+    /* DEOPT-004 fix: the old code did
+     *   const vtx_node_value_pair_t *pairs = (const vtx_node_value_pair_t *)register_map;
+     * which type-puns vtx_value_t[] as vtx_node_value_pair_t[] — strict
+     * aliasing UB. Fix: read each pair via memcpy so the compiler can't
+     * mis-optimize. The map layout is:
+     *   [count: uint32_t in first vtx_value_t's low 32 bits]
+     *   [pair[0].node_id, pair[0].value, pair[1].node_id, pair[1].value, ...]
+     * Each element is sizeof(vtx_value_t) bytes. The first element's low
+     * 32 bits are the count; the remaining elements form (node_id, value)
+     * pairs of 2 vtx_value_t each. */
     if (!register_map || map_size == 0) return VTX_VALUE_UNDEFINED;
 
-    /* The register_map is an array of vtx_node_value_pair_t entries,
-     * preceded by a count. We search linearly for the matching NodeID.
-     * In production this would use a hash map for O(1) lookup, but
-     * the linear scan is correct and sufficient for correctness. */
-    const vtx_node_value_pair_t *pairs =
-        (const vtx_node_value_pair_t *)register_map;
-    uint32_t pair_count = map_size / 2; /* each pair is 2 vtx_value_t wide */
+    /* Validate we have at least the count header + 1 pair. */
+    if (map_size < 3) return VTX_VALUE_UNDEFINED;
 
+    /* Read the count via memcpy (no type punning). */
+    uint32_t pair_count;
+    vtx_value_t first_elem = register_map[0];
+    memcpy(&pair_count, &first_elem, sizeof(uint32_t));
+
+    /* Validate pair_count against map_size (1 header + 2*pair_count). */
+    if ((uint64_t)1 + (uint64_t)pair_count * 2ULL > (uint64_t)map_size) {
+        return VTX_VALUE_UNDEFINED;
+    }
+
+    /* Linear scan via memcpy — no type punning. */
     for (uint32_t i = 0; i < pair_count; i++) {
-        if (pairs[i].node_id == node_id) {
-            return pairs[i].value;
+        vtx_value_t id_elem = register_map[1 + i * 2];
+        vtx_value_t val_elem = register_map[1 + i * 2 + 1];
+        vtx_nodeid_t this_id;
+        memcpy(&this_id, &id_elem, sizeof(vtx_nodeid_t));
+        if (this_id == node_id) {
+            return val_elem;
         }
     }
 
@@ -558,7 +578,8 @@ vtx_interp_frame_t *vtx_osr_down(vtx_interp_frame_t *interp,
             /* Clean up already-built frames */
             vtx_interp_frame_t *f = new_frame;
             while (f) {
-                vtx_interp_frame_t *next = (vtx_interp_frame_t *)(void *)f->caller;
+                /* DEOPT-005 fix: caller is void * now, cast directly. */
+                vtx_interp_frame_t *next = (vtx_interp_frame_t *)f->caller;
                 free(f->locals);
                 free(f->stack);
                 free(f);
@@ -566,8 +587,9 @@ vtx_interp_frame_t *vtx_osr_down(vtx_interp_frame_t *interp,
             }
             return NULL;
         }
-        /* B24 fix: store through void* to avoid type punning */
-        current->caller = (vtx_frame_state_t *)(void *)caller_frame;
+        /* DEOPT-005 fix: caller is void *, store the interp frame pointer
+         * directly (no type punning). */
+        current->caller = caller_frame;
         current = caller_frame;
         caller_fs = caller_fs->caller;
     }

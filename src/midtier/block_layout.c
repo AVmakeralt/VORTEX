@@ -139,9 +139,18 @@ uint32_t vtx_block_layout_run(vtx_schedule_t *schedule,
                 /* For s=0 (taken/hot): prob = branch_prob
                  * For s=1 (not-taken/cold): prob = 1.0 - branch_prob
                  * We want the COLD successor as fallthrough, so pick the
-                 * one with LOWER probability. */
+                 * one with LOWER probability.
+                 *
+                 * IR-030 fix: when no profile data is available,
+                 * get_branch_probability returns 0.5. The old code used
+                 * strict `<`, so when both successors had prob 0.5, s=0
+                 * (taken/hot) was picked as fallthrough — wrong, because
+                 * the schedule.c convention puts the hot path as the
+                 * branch target (succ[0]), not the fallthrough. Using `<=`
+                 * makes s=1 (cold) win the tie, which is the correct
+                 * default for no-profile blocks. */
                 double succ_prob = (s == 0) ? branch_prob : (1.0 - branch_prob);
-                if (best_succ == UINT32_MAX || succ_prob < best_prob) {
+                if (best_succ == UINT32_MAX || succ_prob <= best_prob) {
                     best_prob = succ_prob;
                     best_succ = succ;
                 }

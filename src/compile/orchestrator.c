@@ -132,21 +132,23 @@ static void check_phase_detection(vtx_orchestrator_t *orch)
 
     /* If phase-reactive version manager is available, try reactivation */
     if (orch->phase_react != NULL && predicted != VTX_PHASE_NONE) {
-        /* Compute the phase hash from the current type feedback.
-         * This hash identifies the current execution phase and is used
-         * to look up parked (previously compiled but deactivated)
-         * versions that match this phase. If a parked version exists,
-         * we can reactivate it in O(1) — no recompilation needed. */
-        vtx_phase_hash_t phase_hash = vtx_phase_react_compute_hash(
-            orch->type_feedback, 0 /* method_id computed per-method */);
-
         /* Attempt to reactivate parked versions for the predicted phase.
          * We iterate over the hot methods in the current profile and
          * try to reactivate each one. If no parked version exists for
-         * a method, the Markov check will queue it for compilation. */
+         * a method, the Markov check will queue it for compilation.
+         *
+         * COMPILE-019 fix: the phase hash must be computed PER-METHOD
+         * (with the actual method_id as salt), not once with method_id=0.
+         * The old code computed the hash with salt 0 then tried to
+         * reactivate methods by their real method_id — they never
+         * matched, so reactivation always failed. */
         if (orch->profile != NULL && orch->threadpool != NULL) {
             for (uint32_t i = 0; i < orch->profile->method_count && i < VTX_ORCHESTRATOR_PROACTIVE_COMPILE_LIMIT; i++) {
                 uint32_t method_id = orch->profile->methods[i].method_id;
+
+                /* Compute the phase hash with the actual method_id as salt. */
+                vtx_phase_hash_t phase_hash = vtx_phase_react_compute_hash(
+                    orch->type_feedback, method_id);
 
                 /* Try reactivation for this method. If a parked version
                  * exists for the current phase, reactivate it. If not,
@@ -160,8 +162,6 @@ static void check_phase_detection(vtx_orchestrator_t *orch)
                 }
             }
         }
-
-        (void)phase_hash; /* used by vtx_phase_react_try_reactivate above */
     }
 
     /* If proactive compilation is needed (no parked version), the

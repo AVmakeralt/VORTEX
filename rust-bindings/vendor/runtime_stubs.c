@@ -562,16 +562,30 @@ static vtx_monitor_entry_t *monitor_get_or_create(uintptr_t key)
 {
     uint32_t bucket = monitor_hash(key) % VTX_MONITOR_TABLE_BUCKETS;
 
-    /* Search existing chain */
+    /* H-003 fix: hold the global lock for the ENTIRE search+create.
+     * The old code searched WITHOUT the lock, then took the lock only
+     * for the insert. Two threads racing to create an entry for the
+     * same key both allocated, both searched again under the lock (but
+     * the first inserter's entry was now visible), and the second
+     * inserter's entry was leaked (inserted at head without checking
+     * for duplicates). Fix: hold the lock for search+create so the
+     * duplicate check and insert are atomic. */
+    pthread_mutex_lock(&monitor_global_lock);
+
+    /* Search existing chain (under lock). */
     vtx_monitor_entry_t *entry = monitor_table[bucket];
     while (entry != NULL) {
-        if (entry->key == key) return entry;
+        if (entry->key == key) {
+            pthread_mutex_unlock(&monitor_global_lock);
+            return entry;
+        }
         entry = entry->next;
     }
 
-    /* Not found — create a new entry */
+    /* Not found — create a new entry (still under lock). */
     entry = (vtx_monitor_entry_t *)malloc(sizeof(vtx_monitor_entry_t));
     if (!entry) {
+        pthread_mutex_unlock(&monitor_global_lock);
         VTX_ASSERT(false, "monitor entry allocation failed");
         return NULL;
     }
@@ -581,8 +595,7 @@ static vtx_monitor_entry_t *monitor_get_or_create(uintptr_t key)
     entry->recursion_count = 0;
     pthread_mutex_init(&entry->mutex, NULL);
 
-    /* Insert at head of chain (under global lock for thread safety) */
-    pthread_mutex_lock(&monitor_global_lock);
+    /* Insert at head of chain (still under lock). */
     entry->next = monitor_table[bucket];
     monitor_table[bucket] = entry;
     pthread_mutex_unlock(&monitor_global_lock);
