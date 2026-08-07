@@ -1,0 +1,42 @@
+#!/bin/sh
+
+# Protected branches that should never be force-pushed to
+PROTECTED_BRANCH="main"
+MAX_DELETION_PERCENT=10
+
+# Read stdin for push details: local_ref local_sha remote_ref remote_sha
+while read local_ref local_sha remote_ref remote_sha
+do
+    # Extract branch name
+    branch_name=$(echo "$remote_ref" | sed 's#refs/heads/##')
+
+    # 1. Block force pushes to protected branches
+    if [ "$branch_name" = "$PROTECTED_BRANCH" ]; then
+        # Check if this is a force push (remote_sha is not an ancestor of local_sha)
+        if [ "$local_sha" != "0000000000000000000000000000000000000000" ] && [ "$remote_sha" != "0000000000000000000000000000000000000000" ]; then
+            git merge-base --is-ancestor "$remote_sha" "$local_sha"
+            if [ $? -ne 0 ]; then
+                echo "🛑 SAFETY ERROR: Force pushing to '$PROTECTED_BRANCH' is blocked by pre-push hook!"
+                exit 1
+            fi
+        fi
+    fi
+
+    # 2. Check for massive file deletions (anti-wipe check)
+    if [ "$remote_sha" != "0000000000000000000000000000000000000000" ]; then
+        # Count how many files are deleted in this push range
+        deleted_count=$(git diff --name-only --diff-filter=D "$remote_sha" "$local_sha" | wc -l)
+        total_files=$(git ls-files | wc -l)
+
+        if [ "$total_files" -gt 0 ]; then
+            percent_deleted=$(( (deleted_count * 100) / total_files ))
+            if [ "$percent_deleted" -ge "$MAX_DELETION_PERCENT" ]; then
+                echo "🛑 SAFETY ERROR: This push deletes $deleted_count files ($percent_deleted% of the repository)."
+                echo "If this was intentional, bypass the hook using: git push --no-verify"
+                exit 1
+            fi
+        fi
+    fi
+done
+
+exit 0
