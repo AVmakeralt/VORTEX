@@ -48,6 +48,7 @@
 #include "ir/graph.h"
 #include "ir/node.h"
 #include "ir/schedule.h"
+#include "ir/gvn.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -197,24 +198,28 @@ uint32_t vtx_loop_unroll_run(vtx_graph_t *graph,
                               uint32_t factor)
 {
     if (!graph || !schedule || !arena) return 0;
-    /* BUGFIX (audit #8): Allow factors 2, 4, and 8 instead of only 2.
-     * The unroll logic is generic — it copies the body N times and
-     * rewires Phi back-edges. Higher factors give more instruction-
-     * level parallelism at the cost of code size. */
     if (factor != 2 && factor != 4 && factor != 8) return 0;
 
-    /* IR-002 fix: The copy logic below creates exactly ONE copy of the
-     * body, regardless of factor. For factor > 2 this lies about what
-     * was generated (the value_number marker claims factor=4 but only
-     * 2× unrolling was done). Until the multi-copy refactor is
-     * complete, cap at factor=2 so the marker is accurate. The caller
-     * (pipeline.c) requests factor=4; we silently downgrade. This is
-     * a perf miss, not a correctness bug — the loop still runs
-     * correctly, just with less ILP exposure than requested. */
-    uint32_t effective_factor = 2;
-    if (factor > 2) {
-        effective_factor = 2; /* TODO: implement true multi-copy */
-    }
+    /* 1.4 fix: Implement TRUE multi-copy unrolling.
+     *
+     * The old code created exactly ONE copy (effective_factor=2) regardless
+     * of the requested factor. For factor=4, we need 3 copies (factor-1).
+     * For factor=8, we need 7 copies.
+     *
+     * V8's loop unroller (loop-unroller.cc) creates factor-1 copies by
+     * repeating the body duplication, threading each copy's outputs as
+     * the next copy's inputs (the Phi back-edge values). HotSpot's
+     * PhaseIdealLoop::do_unroll does the same.
+     *
+     * After unrolling, we re-run GVN to CSE common subexpressions exposed
+     * across the duplicated copies (per audit 1.4: "After unroll, GVN is
+     * not re-run on the duplicated body, so common subexpressions across
+     * the two copies survive").
+     *
+     * For tiny trip counts (< 8), we could do a full unroll (eliminating
+     * the loop entirely). That's a separate optimization — for now, we
+     * focus on partial unrolling with the correct factor. */
+    uint32_t effective_factor = factor;  /* Use the actual requested factor */
 
     uint32_t unrolled = 0;
 
@@ -349,17 +354,45 @@ uint32_t vtx_loop_unroll_run(vtx_graph_t *graph,
         }
         if (body_node_count == 0) continue;
 
-        /* === Phase 1: Copy body data nodes ===
-         * Build a mapping: orig_id → copy_id.
-         * For the copy's inputs, replace loop Phi references with the
-         * Phi's back-edge value (the original body's output). This makes
-         * the copy compute iteration i+1's values from iteration i's outputs. */
+        /* === Phase 1-6: Copy the body (first copy) ===
+         *
+         * The first copy is the existing logic: copy body nodes, rewire
+         * inputs using the original body's Phi back-edge values, copy
+         * the exit If, create Proj nodes, rewire LoopEnd, create exit
+         * merge Region, rewrite Phi back-edges.
+         *
+         * For multi-copy unrolling (factor > 2), we repeat this process
+         * for each additional copy. Each subsequent copy uses the
+         * PREVIOUS copy's outputs as its Phi back-edge inputs. */
         uint32_t map_size = graph->node_table.count;
         vtx_nodeid_t *mapping = (vtx_nodeid_t *)vtx_arena_alloc(
             arena, map_size * sizeof(vtx_nodeid_t));
         if (!mapping) continue;
         for (uint32_t m = 0; m < map_size; m++) mapping[m] = VTX_NODEID_INVALID;
 
+        /* 1.4: Multi-copy loop. For factor=N, we create N-1 copies.
+         * The first copy (copy_num=0) uses the original body's outputs
+         * as Phi back-edge values. Subsequent copies use the previous
+         * copy's mapping to find the back-edge values. */
+        vtx_nodeid_t *prev_mapping = NULL;  /* previous copy's mapping */
+        vtx_nodeid_t *cur_phi_be_val = phi_be_val;  /* current back-edges */
+
+        for (uint32_t copy_num = 0; copy_num < effective_factor - 1; copy_num++) {
+            /* Reset mapping for this copy */
+            for (uint32_t m = 0; m < map_size; m++) mapping[m] = VTX_NODEID_INVALID;
+
+            /* If this is NOT the first copy, update the Phi back-edge
+             * values to point at the PREVIOUS copy's versions. */
+            if (prev_mapping != NULL) {
+                for (uint32_t p = 0; p < phi_count; p++) {
+                    vtx_nodeid_t orig_be = phi_be_val[p];
+                    if (orig_be < map_size && prev_mapping[orig_be] != VTX_NODEID_INVALID) {
+                        cur_phi_be_val[p] = prev_mapping[orig_be];
+                    }
+                }
+            }
+
+        /* Phase 1: Copy body data nodes */
         for (uint32_t b = 0; b < body_node_count; b++) {
             vtx_nodeid_t new_id = copy_body_node(graph, body_nodes[b]);
             if (new_id == VTX_NODEID_INVALID) goto skip_loop;
@@ -507,14 +540,44 @@ uint32_t vtx_loop_unroll_run(vtx_graph_t *graph,
          * Each Phi's back-edge value is replaced with the copy's version
          * of that value. The copy computed iteration i+1's result; the
          * Phi's back-edge now points at it, so the next loop iteration
-         * starts from i+2 (for factor=2). */
-        for (uint32_t p = 0; p < phi_count; p++) {
-            vtx_nodeid_t orig_back_val = phi_be_val[p];
-            if (orig_back_val < map_size && mapping[orig_back_val] != VTX_NODEID_INVALID) {
-                vtx_node_replace_input(&graph->node_table, phi_ids[p],
-                                       phi_be_idx[p], mapping[orig_back_val]);
+         * starts from i+2 (for factor=2).
+         *
+         * For multi-copy (factor > 2): only the LAST copy's outputs
+         * should be wired to the Phi back-edges, because the last copy
+         * produces the values that the next loop iteration should start
+         * from. Intermediate copies are wired to each other via the
+         * Proj/If/LoopEnd rewire above. */
+        if (copy_num == effective_factor - 2) {
+            /* This is the last copy — wire its outputs to the Phi back-edges */
+            for (uint32_t p = 0; p < phi_count; p++) {
+                vtx_nodeid_t orig_back_val = phi_be_val[p];
+                if (orig_back_val < map_size && mapping[orig_back_val] != VTX_NODEID_INVALID) {
+                    vtx_node_replace_input(&graph->node_table, phi_ids[p],
+                                           phi_be_idx[p], mapping[orig_back_val]);
+                }
             }
         }
+
+        /* Save this copy's mapping for the next iteration */
+        prev_mapping = mapping;
+        /* Allocate a new mapping array for the next copy (arena-allocated,
+         * so the old one is still valid until the arena is reset). */
+        if (copy_num < effective_factor - 2) {
+            mapping = (vtx_nodeid_t *)vtx_arena_alloc(
+                arena, map_size * sizeof(vtx_nodeid_t));
+            if (!mapping) goto skip_loop;
+        }
+
+        } /* end multi-copy loop */
+
+        /* 1.4: Re-run GVN after unrolling to CSE common subexpressions
+         * exposed across the duplicated copies. V8 does this in
+         * LoopUnroller::Unroll (calls Simplifier after unrolling);
+         * HotSpot does it in PhaseIdealLoop::do_unroll (runs IGVN).
+         * Without GVN, duplicated constants and shared computations
+         * survive as redundant nodes, increasing code size and
+         * reducing ILP. */
+        vtx_gvn_run(graph);
 
         /* Mark the loop as unrolled (re-fetch pointer — node table may
          * have been realloc'd by vtx_node_create calls above) */
