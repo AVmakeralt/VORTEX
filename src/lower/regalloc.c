@@ -925,6 +925,33 @@ vtx_regalloc_result_t *vtx_regalloc_run_target(vtx_inst_stream_t *stream,
     /* Next spill slot */
     uint32_t next_spill_slot = 0;
 
+    /* 1.1 fix: Deferred-children queue for split intervals.
+     *
+     * When the linear scan can't allocate a register for `current`, it
+     * splits `current` at the blocking interval's end position. The
+     * second half (the split child) needs to be re-inserted into the
+     * scan so it can get a register when the blocking interval expires.
+     *
+     * V8's register allocator (regalloc.cc) uses a "pending" queue for
+     * this — split children are inserted into the pending queue and
+     * processed in start-position order. Cranelift uses a similar
+     * approach (the "unprocessed" queue in regalloc.rs).
+     *
+     * We implement a simple sorted-insert deferred queue. The queue is
+     * checked at the top of each loop iteration: if a deferred child's
+     * start position is <= current position, it's merged into the scan.
+     * This is O(D) per iteration where D is the number of deferred
+     * children — typically small (<10), so the overhead is negligible. */
+    vtx_live_interval_t **deferred = NULL;
+    uint32_t deferred_count = 0;
+    uint32_t deferred_capacity = 0;
+    if (valid_count > 0) {
+        deferred_capacity = valid_count;  /* worst case: every interval splits */
+        deferred = (vtx_live_interval_t **)vtx_arena_alloc(
+            arena, deferred_capacity * sizeof(vtx_live_interval_t *));
+        if (!deferred) deferred_capacity = 0;
+    }
+
     /* Linear scan: iterate over the compacted, sorted valid_intervals array.
      * The original bug (G1) iterated over the raw vreg-indexed intervals[]
      * array, which is NOT sorted by start position. The linear scan algorithm
@@ -936,6 +963,34 @@ vtx_regalloc_result_t *vtx_regalloc_run_target(vtx_inst_stream_t *stream,
      * so they never compete for the same registers. */
     for (uint32_t i = 0; i < valid_count; i++) {
         vtx_live_interval_t *current = &valid_intervals[i];
+
+        /* 1.1 fix: Process deferred split children whose start position
+         * has arrived. We process them BEFORE the current interval so
+         * they compete for registers on equal footing. This is the
+         * V8/Cranelift pattern — split children are not lost. */
+        if (deferred && deferred_count > 0) {
+            /* Simple bubble-sort insertion isn't needed — we process
+             * in order of the deferred array, which we maintain sorted. */
+            for (uint32_t d = 0; d < deferred_count; d++) {
+                if (deferred[d]->start <= current->start) {
+                    /* This deferred child should be processed NOW.
+                     * Move it to the front and process it as `current`. */
+                    vtx_live_interval_t *child = deferred[d];
+                    /* Shift remaining deferred entries left */
+                    for (uint32_t s = d; s < deferred_count - 1; s++) {
+                        deferred[s] = deferred[s + 1];
+                    }
+                    deferred_count--;
+                    d--;  /* re-check this slot */
+
+                    /* Process the split child as if it were the current
+                     * interval. We reuse the same allocation logic by
+                     * setting `current` to the child and falling through. */
+                    current = child;
+                    break;  /* process one child, then continue main loop */
+                }
+            }
+        }
 
         /* Skip intervals that were coalesced into another */
         if (current->coalesce_src != VTX_VREG_INVALID) continue;
@@ -1284,6 +1339,31 @@ vtx_regalloc_result_t *vtx_regalloc_run_target(vtx_inst_stream_t *stream,
                          * if one is available. */
                         second_half->phys_reg = 0xFF; /* temporary */
                         /* Don't set is_spilled — let the fallback handle it */
+
+                        /* 1.1 fix: Insert the split child into the deferred
+                         * queue so the linear scan processes it when its start
+                         * position arrives. This is the V8/Cranelift pattern
+                         * — split children are not lost, they get a second
+                         * chance at allocation when the blocking interval
+                         * expires and frees its register. */
+                        if (deferred && deferred_count < deferred_capacity) {
+                            /* Insert in sorted order by start position.
+                             * Linear search is fine — D is small (<10). */
+                            uint32_t insert_pos = deferred_count;
+                            for (uint32_t d = 0; d < deferred_count; d++) {
+                                if (deferred[d]->start > second_half->start) {
+                                    insert_pos = d;
+                                    break;
+                                }
+                            }
+                            /* Shift right to make room */
+                            for (uint32_t s = deferred_count; s > insert_pos; s--) {
+                                deferred[s] = deferred[s - 1];
+                            }
+                            deferred[insert_pos] = second_half;
+                            deferred_count++;
+                        }
+
                         result->vreg_to_phys[second_half->vreg] = 0xFF;
 
                         did_split = true;
