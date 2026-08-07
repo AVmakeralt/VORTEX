@@ -52,6 +52,9 @@ typedef struct vtx_coroutine {
     ucontext_t            *caller_ctx;   /* resumer's context (for yield) */
     void                  *stack;         /* allocated stack memory */
     size_t                 stack_size;
+    /* 3.5: mmap base and size for munmap on destroy (guard page support) */
+    void                  *stack_mmap_base;  /* NULL if stack was malloc'd */
+    size_t                 stack_mmap_size;
     vtx_coroutine_status_t status;
     vtx_coroutine_fn       fn;            /* the function to run */
     void                  *user_data;     /* passed to fn */

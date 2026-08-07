@@ -5,6 +5,8 @@
 #include "runtime/coroutine.h"
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 /* Thread-local current coroutine pointer.
  * NULL when running on the main thread (not in a coroutine). */
@@ -51,12 +53,45 @@ vtx_coroutine_t *vtx_coroutine_create(vtx_coroutine_fn fn,
     vtx_coroutine_t *co = (vtx_coroutine_t *)calloc(1, sizeof(*co));
     if (!co) return NULL;
 
-    co->stack = malloc(stack_size);
-    if (!co->stack) {
+    /* 3.5: Allocate the coroutine stack via mmap with a PROT_NONE guard
+     * page at the bottom. This catches stack overflows — without it,
+     * a stack overflow silently corrupts the heap.
+     *
+     * Layout: [PROT_NONE guard page] [PROT_READ|PROT_WRITE stack]
+     *
+     * V8 uses a similar approach for its AsyncStackTrace stacks.
+     * Go uses a guard page for goroutine stacks. Rust's std::thread
+     * uses the OS-provided guard page.
+     *
+     * We mmap (guard_size + stack_size) bytes, mprotect the first
+     * page as PROT_NONE, and use the rest as the stack. */
+    size_t page_size = (size_t)sysconf(_SC_PAGESIZE);
+    size_t guard_size = page_size;  /* one guard page */
+    size_t total_size = guard_size + stack_size;
+    /* Align total_size to page boundary */
+    total_size = (total_size + page_size - 1) & ~(page_size - 1);
+
+    /* mmap the full region PROT_READ|PROT_WRITE */
+    void *mapped = mmap(NULL, total_size, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mapped == MAP_FAILED) {
         free(co);
         return NULL;
     }
-    co->stack_size = stack_size;
+
+    /* mprotect the first page (guard page) as PROT_NONE.
+     * Any access to this page triggers SIGSEGV — catching stack overflow. */
+    if (mprotect(mapped, guard_size, PROT_NONE) != 0) {
+        munmap(mapped, total_size);
+        free(co);
+        return NULL;
+    }
+
+    /* The stack starts AFTER the guard page */
+    co->stack = (char *)mapped + guard_size;
+    co->stack_size = total_size - guard_size;  /* usable stack */
+    co->stack_mmap_base = mapped;               /* for munmap on destroy */
+    co->stack_mmap_size = total_size;           /* for munmap on destroy */
 
     co->fn = fn;
     co->user_data = user_data;
@@ -87,7 +122,13 @@ vtx_coroutine_t *vtx_coroutine_create(vtx_coroutine_fn fn,
 void vtx_coroutine_destroy(vtx_coroutine_t *co)
 {
     if (!co) return;
-    free(co->stack);
+    /* 3.5: munmap the stack (including guard page) */
+    if (co->stack_mmap_base) {
+        munmap(co->stack_mmap_base, co->stack_mmap_size);
+    } else {
+        /* Fallback: old malloc'd stack */
+        free(co->stack);
+    }
     free(co);
 }
 
