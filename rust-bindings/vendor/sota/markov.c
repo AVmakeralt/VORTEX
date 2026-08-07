@@ -306,3 +306,99 @@ bool vtx_markov_detect_transition(vtx_markov_t *mk, uint32_t *new_phase)
 
     return false;
 }
+
+/* ========================================================================== */
+/* 3.2: Persist/restore                                                       */
+/* ========================================================================== */
+
+#include <stdio.h>
+
+#define VTX_MARKOV_MAGIC 0x564F4D4Bu  /* "VOMK" */
+#define VTX_MARKOV_VERSION 1u
+
+bool vtx_markov_save(const vtx_markov_t *mk, const char *filename)
+{
+    if (!mk || !filename) return false;
+
+    FILE *f = fopen(filename, "wb");
+    if (!f) return false;
+
+    /* Header: magic + version */
+    uint32_t magic = VTX_MARKOV_MAGIC;
+    uint32_t version = VTX_MARKOV_VERSION;
+    fwrite(&magic, sizeof(magic), 1, f);
+    fwrite(&version, sizeof(version), 1, f);
+
+    /* Transition matrix: 16×16 uint32 = 1KB */
+    fwrite(mk->transition_matrix, sizeof(mk->transition_matrix), 1, f);
+
+    /* Phase descriptors */
+    fwrite(mk->phases, sizeof(mk->phases), 1, f);
+    fwrite(&mk->phase_count, sizeof(mk->phase_count), 1, f);
+
+    /* Method→phase map: VTX_MARKOV_MAX_METHODS × uint32 */
+    fwrite(mk->method_phase_map, sizeof(mk->method_phase_map), 1, f);
+
+    /* Scalar fields */
+    fwrite(&mk->current_phase, sizeof(mk->current_phase), 1, f);
+    fwrite(&mk->total_transitions, sizeof(mk->total_transitions), 1, f);
+    fwrite(&mk->is_trained, sizeof(mk->is_trained), 1, f);
+    fwrite(&mk->min_observations, sizeof(mk->min_observations), 1, f);
+
+    fclose(f);
+    return true;
+}
+
+bool vtx_markov_load(vtx_markov_t *mk, const char *filename)
+{
+    if (!mk || !filename) return false;
+
+    FILE *f = fopen(filename, "rb");
+    if (!f) return false;
+
+    /* Header: magic + version */
+    uint32_t magic, version;
+    if (fread(&magic, sizeof(magic), 1, f) != 1 || magic != VTX_MARKOV_MAGIC) {
+        fclose(f);
+        return false;
+    }
+    if (fread(&version, sizeof(version), 1, f) != 1 || version != VTX_MARKOV_VERSION) {
+        fclose(f);
+        return false;
+    }
+
+    /* Transition matrix */
+    if (fread(mk->transition_matrix, sizeof(mk->transition_matrix), 1, f) != 1) {
+        fclose(f);
+        return false;
+    }
+
+    /* Phase descriptors */
+    if (fread(mk->phases, sizeof(mk->phases), 1, f) != 1 ||
+        fread(&mk->phase_count, sizeof(mk->phase_count), 1, f) != 1) {
+        fclose(f);
+        return false;
+    }
+
+    /* Method→phase map */
+    if (fread(mk->method_phase_map, sizeof(mk->method_phase_map), 1, f) != 1) {
+        fclose(f);
+        return false;
+    }
+
+    /* Scalar fields */
+    if (fread(&mk->current_phase, sizeof(mk->current_phase), 1, f) != 1 ||
+        fread(&mk->total_transitions, sizeof(mk->total_transitions), 1, f) != 1 ||
+        fread(&mk->is_trained, sizeof(mk->is_trained), 1, f) != 1 ||
+        fread(&mk->min_observations, sizeof(mk->min_observations), 1, f) != 1) {
+        fclose(f);
+        return false;
+    }
+
+    /* Reset current observation window (don't persist transient state) */
+    memset(mk->current_phase_method_calls, 0, sizeof(mk->current_phase_method_calls));
+    mk->current_phase_total_calls = 0;
+
+    fclose(f);
+    return true;
+}

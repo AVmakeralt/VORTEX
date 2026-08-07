@@ -100,4 +100,19 @@ uint32_t vtx_markov_predict_hot_methods(vtx_markov_t *mk, uint32_t next_phase,
 /* Detect if a phase transition has occurred */
 bool vtx_markov_detect_transition(vtx_markov_t *mk, uint32_t *new_phase);
 
+/* 3.2: Persist/restore the Markov transition matrix.
+ *
+ * The Markov model needs 10 transitions before is_trained=true.
+ * Persisting it alongside the profile means the first run benefits
+ * from previous-run learning — no warmup needed for phase prediction.
+ *
+ * The matrix is ~1KB (16×16 uint32 = 1024 bytes), plus method_phase_map
+ * (4KB) and phase descriptors (~1KB) = ~6KB total. Negligible I/O. */
+
+/* Save the Markov model to a file. Returns true on success. */
+bool vtx_markov_save(const vtx_markov_t *mk, const char *filename);
+
+/* Load the Markov model from a file. Returns true on success. */
+bool vtx_markov_load(vtx_markov_t *mk, const char *filename);
+
 #endif /* VORTEX_SOTA_MARKOV_H */
