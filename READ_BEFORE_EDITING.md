@@ -171,6 +171,10 @@ These projects represent years of engineering and real-world optimization:
   - https://github.com/pypy/pypy
   - Meta-tracing JIT demonstrating alternative optimization strategies.
 
+ **lueJIT** 
+ needs no introduction
+    https://github.com/LuaJIT/LuaJIT
+
 Studying these implementations before designing new features is strongly encouraged.
 
 Do not copy code directly. Instead, understand the design decisions, tradeoffs, and algorithms that make these systems successful.
