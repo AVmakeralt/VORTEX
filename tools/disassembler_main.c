@@ -116,7 +116,18 @@ int main(int argc, char **argv)
                     | ((uint32_t)data[offset + 3] << 24);
         offset += 4;
 
-        if (const_count > 0 && offset + const_count * 8 <= read_bytes) {
+        /* TOOL-004 fix: if the declared const_count extends beyond EOF,
+         * error out instead of leaving consts = NULL with const_count > 0
+         * (which causes a NULL deref in the disassembler when it tries
+         * to print constants). */
+        if (const_count > 0) {
+            if (offset + (size_t)const_count * 8 > read_bytes) {
+                fprintf(stderr, "vortex_disasm: constant pool extends beyond file "
+                        "(declared %u constants, need %zu bytes, have %zu)\n",
+                        const_count, (size_t)const_count * 8, read_bytes - offset);
+                free(data);
+                return 1;
+            }
             consts = (vtx_value_t *)(data + offset);
         }
     }

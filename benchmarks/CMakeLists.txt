@@ -97,7 +97,7 @@ target_link_libraries(bench_t2 PRIVATE
     vortex_inliner
     vortex_pea
     vortex_guard
-    vortex_sota
+    $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota>
     vortex_region
     vortex_trace
     vortex_midtier
@@ -127,7 +127,7 @@ target_link_libraries(bench_scimark PRIVATE
     vortex_inliner
     vortex_pea
     vortex_guard
-    vortex_sota
+    $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota>
     vortex_region
     vortex_trace
     vortex_midtier

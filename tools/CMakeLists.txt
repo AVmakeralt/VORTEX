@@ -38,7 +38,11 @@ target_link_libraries(vortex_disasm PRIVATE vortex_disassembler vortex_runtime)
 add_executable(vortex-profile
     profile_dump.c
 )
+# BUILD-010 fix: add m and pthread — profile/persist.c uses crc32
+# (often in -lm) and the profile code may acquire locks (pthread).
 target_link_libraries(vortex-profile PRIVATE
     vortex_profile
     vortex_runtime
+    m
+    pthread
 )

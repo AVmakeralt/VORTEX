@@ -291,15 +291,28 @@ int vtx_asm_line(vtx_assembler_t *asm_, const char *line)
             if (pool_idx == 0xFFFF) return -1;
             operand_val = pool_idx;
         } else if (opcode == VT_OP_LOAD_CONST_STR) {
-            /* String operand: the rest of the line is the string value */
+            /* String operand: the rest of the line is the string value.
+             *
+             * TOOL-001 fix: the old code emitted 0xDEAD0000 as a placeholder
+             * pointer, which segfaults when the bytecode is executed. Fix:
+             * malloc a copy of the string and store it as a heap pointer
+             * constant. The string is intentionally leaked (the assembler
+             * owns it for the program's lifetime) — matching the .const str
+             * handling in program mode. */
             const char *str_start = p;
             size_t slen = strlen(str_start);
-            /* For simplicity, store the string pointer as a heap pointer constant */
-            /* In a real assembler, we'd intern the string. Here we just add a
-             * pointer constant. For testing, this is sufficient. */
-            uint16_t pool_idx = vtx_asm_add_const(asm_, vtx_make_heap_ptr(
-                (void *)(uintptr_t)0xDEAD0000)); /* placeholder */
-            (void)str_start; (void)slen;
+            char *str_copy = (char *)malloc(slen + 1);
+            if (!str_copy) {
+                snprintf(asm_->error_msg, sizeof(asm_->error_msg),
+                         "out of memory for string constant");
+                return -1;
+            }
+            memcpy(str_copy, str_start, slen + 1);
+            uint16_t pool_idx = vtx_asm_add_const(asm_, vtx_make_heap_ptr(str_copy));
+            if (pool_idx == 0xFFFF) {
+                free(str_copy);
+                return -1;
+            }
             operand_val = pool_idx;
         } else {
             /* Standard numeric operand */
@@ -322,11 +335,19 @@ int vtx_asm_line(vtx_assembler_t *asm_, const char *line)
             operand_val = (uint16_t)val;
         }
 
-        /* Emit operand based on size */
+        /* Emit operand based on size.
+         * TOOL-002 fix: add else branch to error on unsupported sizes. */
         if (info->operand_size == 2) {
             if (asm_emit_u16(asm_, operand_val) != 0) return -1;
         } else if (info->operand_size == 1) {
             if (asm_emit_byte(asm_, (uint8_t)(operand_val & 0xFF)) != 0) return -1;
+        } else if (info->operand_size == 0) {
+            /* No operand — nothing to emit. */
+        } else {
+            snprintf(asm_->error_msg, sizeof(asm_->error_msg),
+                     "unsupported operand_size %u for opcode %s",
+                     info->operand_size, info->name);
+            return -1;
         }
 
         /* Track max_locals for load_local/store_local */
@@ -715,6 +736,11 @@ static int asm_program_line(vtx_assembler_t *asm_, const char *line, int line_no
                 asm_error(asm_, line_no, "code buffer overflow");
                 return -1;
             }
+        } else if (info->operand_size == 0) {
+            /* No operand — nothing to emit. */
+        } else {
+            asm_error(asm_, line_no, "unsupported operand_size");
+            return -1;
         }
         /* Track max_locals */
         if (opcode == VT_OP_LOAD_LOCAL || opcode == VT_OP_STORE_LOCAL) {
@@ -747,11 +773,17 @@ int vtx_asm_program(vtx_assembler_t *asm_, const char *text)
         while (*line_end != '\0' && *line_end != '\n') {
             line_end++;
         }
-        /* Copy line into a buffer */
+        /* Copy line into a buffer.
+         *
+         * TOOL-003 fix: the old code silently truncated lines > 511 bytes.
+         * If the truncated line happened to look like a valid instruction
+         * (e.g., LOAD_CONST_STR with a 600-byte string), the assembler
+         * would emit wrong bytecode. Fix: error out instead of truncating. */
         size_t line_len = (size_t)(line_end - line_start);
         char line_buf[512];
         if (line_len >= sizeof(line_buf)) {
-            line_len = sizeof(line_buf) - 1;
+            asm_error(asm_, line_no, "line too long (max 511 chars)");
+            return -1;
         }
         memcpy(line_buf, line_start, line_len);
         line_buf[line_len] = '\0';

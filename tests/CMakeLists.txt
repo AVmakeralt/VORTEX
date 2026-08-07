@@ -165,7 +165,7 @@ target_link_libraries(test_smi_arith PRIVATE
     vortex_lower
     vortex_inliner
     vortex_pea
-    vortex_sota
+    $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota>
     vortex_midtier
     vortex_trace
     vortex_region
@@ -225,7 +225,7 @@ target_link_libraries(test_jit_e2e PRIVATE
     vortex_lower
     vortex_inliner
     vortex_pea
-    vortex_sota
+    $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota>
     vortex_midtier
     vortex_trace
     vortex_region
@@ -284,7 +284,7 @@ target_link_libraries(test_tier_equivalence PRIVATE
     vortex_lower
     vortex_inliner
     vortex_pea
-    vortex_sota
+    $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota>
     vortex_midtier
     vortex_trace
     vortex_region
@@ -377,7 +377,7 @@ add_executable(test_pgo_sprint1
 target_link_libraries(test_pgo_sprint1 PRIVATE
     vortex_test_framework
     vortex_profile
-    vortex_sota
+    $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota>
     vortex_runtime
     m
     pthread
@@ -513,7 +513,7 @@ target_link_libraries(test_stress_compile_lower PRIVATE
     vortex_inliner
     vortex_lower
     vortex_codecache
-    vortex_sota
+    $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota>
     vortex_pea
     vortex_ir
     vortex_runtime
@@ -573,10 +573,138 @@ target_link_libraries(test_opcodes_b4_b8 PRIVATE
     vortex_compile
     vortex_guard
     vortex_midtier
-    vortex_sota
+    $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota>
     vortex_common
     m
     pthread
 -Wl,--end-group
 )
 add_test(NAME test_opcodes_b4_b8 COMMAND test_opcodes_b4_b8)
+
+# ==========================================================================
+# TEST-001 fix: Build the orphaned test files in tests/opcode/ that were
+# previously not declared as add_executable() targets.
+# ==========================================================================
+
+# test_jit_deopt: JIT compilation + interpreter→JIT re-enter + deopt
+add_executable(test_jit_deopt
+    opcode/test_jit_deopt.c
+)
+target_link_libraries(test_jit_deopt PRIVATE
+-Wl,--start-group
+    vortex_test_framework
+    vortex_interp
+    vortex_ir
+    vortex_runtime
+    vortex_baseline
+    vortex_trace
+    vortex_region
+    vortex_pea
+    vortex_deopt
+    vortex_inliner
+    vortex_profile
+    vortex_lower
+    vortex_codecache
+    vortex_compile
+    vortex_guard
+    vortex_midtier
+    $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota>
+    vortex_common
+    m
+    pthread
+-Wl,--end-group
+)
+add_test(NAME test_jit_deopt COMMAND test_jit_deopt)
+
+# test_mul5_trace: T2 pipeline mul5 trace bug test
+add_executable(test_mul5_trace
+    opcode/test_mul5_trace.c
+)
+target_link_libraries(test_mul5_trace PRIVATE
+-Wl,--start-group
+    vortex_test_framework
+    vortex_interp
+    vortex_ir
+    vortex_runtime
+    vortex_baseline
+    vortex_trace
+    vortex_region
+    vortex_pea
+    vortex_deopt
+    vortex_inliner
+    vortex_profile
+    vortex_lower
+    vortex_codecache
+    vortex_compile
+    vortex_guard
+    vortex_midtier
+    $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota>
+    vortex_common
+    m
+    pthread
+-Wl,--end-group
+)
+add_test(NAME test_mul5_trace COMMAND test_mul5_trace)
+
+# test_rep_infer: rep_infer pass test
+add_executable(test_rep_infer
+    opcode/test_rep_infer.c
+)
+target_link_libraries(test_rep_infer PRIVATE
+-Wl,--start-group
+    vortex_test_framework
+    vortex_interp
+    vortex_ir
+    vortex_runtime
+    vortex_baseline
+    vortex_trace
+    vortex_region
+    vortex_pea
+    vortex_deopt
+    vortex_inliner
+    vortex_profile
+    vortex_lower
+    vortex_codecache
+    vortex_compile
+    vortex_guard
+    vortex_midtier
+    $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota>
+    vortex_common
+    m
+    pthread
+-Wl,--end-group
+)
+add_test(NAME test_rep_infer COMMAND test_rep_infer)
+
+# test_deopt_dynamic: dynamic deopt system test
+add_executable(test_deopt_dynamic
+    opcode/test_deopt_dynamic.c
+)
+target_link_libraries(test_deopt_dynamic PRIVATE
+-Wl,--start-group
+    vortex_test_framework
+    vortex_interp
+    vortex_ir
+    vortex_runtime
+    vortex_baseline
+    vortex_trace
+    vortex_region
+    vortex_pea
+    vortex_deopt
+    vortex_inliner
+    vortex_profile
+    vortex_lower
+    vortex_codecache
+    vortex_compile
+    vortex_guard
+    vortex_midtier
+    $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota>
+    vortex_common
+    m
+    pthread
+-Wl,--end-group
+)
+add_test(NAME test_deopt_dynamic COMMAND test_deopt_dynamic)
+
+# Note: tests/opcode/test_opcodes.c is intentionally NOT built — it uses
+# popen() to invoke /tmp/vortex (TEST-003), which is not portable.

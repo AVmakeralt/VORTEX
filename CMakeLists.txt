@@ -68,6 +68,31 @@ option(VORTEX_ENABLE_SOTA "Enable SOTA features" ON)
 option(VORTEX_ENABLE_TESTS "Build tests" ON)
 option(VORTEX_ENABLE_BENCHMARKS "Build benchmarks" ON)
 
+# CONFIG-001 fix: sanitizer options. Enable with -DVORTEX_ENABLE_ASAN=ON.
+# Note: sanitizers conflict with _FORTIFY_SOURCE (already skipped above
+# when CMAKE_C_COMPILER_FLAGS matches "sanitize"), and with -flto.
+option(VORTEX_ENABLE_ASAN "Enable AddressSanitizer" OFF)
+option(VORTEX_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
+option(VORTEX_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
+option(VORTEX_ENABLE_FUZZING "Enable fuzzing mode (libFuzzer)" OFF)
+set(VORTEX_TARGET_ARCH "x86_64" CACHE STRING "Target architecture (x86_64, arm64, riscv64)")
+
+if(VORTEX_ENABLE_ASAN)
+    add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address)
+endif()
+if(VORTEX_ENABLE_UBSAN)
+    add_compile_options(-fsanitize=undefined -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=undefined)
+endif()
+if(VORTEX_ENABLE_TSAN)
+    add_compile_options(-fsanitize=thread -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=thread)
+endif()
+if(VORTEX_ENABLE_FUZZING)
+    add_compile_options(-fsanitize=fuzzer-no-link)
+endif()
+
 set(VORTEX_CACHE_MAX_SIZE 268435456 CACHE STRING "Maximum code cache size in bytes")
 set(VORTEX_T1_THRESHOLD 1000 CACHE STRING "Method heat threshold for T1")
 set(VORTEX_T2_THRESHOLD 10000 CACHE STRING "Trace heat threshold for T2")
