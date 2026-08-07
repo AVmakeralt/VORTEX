@@ -1911,6 +1911,28 @@ void vtx_x86_emit_prologue(vtx_x86_emit_t *e, uint32_t frame_size,
                             uint32_t arg_count, uint32_t max_locals,
                             bool is_leaf)
 {
+    /* 1.3: VZEROUPPER at function entry.
+     *
+     * Per Intel SDM Vol 1 §14.2: if any function uses AVX2 (256-bit YMM
+     * registers), it must execute VZEROUPPER before calling any function
+     * that uses SSE (128-bit XMM). Without VZEROUPPER, the AVX→SSE
+     * transition costs ~70 cycles per call.
+     *
+     * V8 emits VZEROUPPER in TurboAssembler::VZeroUpper at function
+     * entry if the function uses AVX2. HotSpot does it in
+     * MacroAssembler::vzerupper.
+     *
+     * We emit VZEROUPPER unconditionally at entry — it's 3 bytes
+     * (VEX.128 0F 77) and 1-2 cycles, negligible compared to the 70-
+     * cycle penalty it avoids. This is simpler than scanning the
+     * instruction stream for AVX2 usage and is the approach recommended
+     * by Intel's optimization guide for JIT compilers. */
+    /* VEX.128 0F 77 = VZEROUPPER
+     * VEX 2-byte form: C5 F8 77 (3 bytes — the 0F is implicit in the
+     * VEX 2-byte prefix, so we only emit the opcode byte 0x77). */
+    emit_byte(e, 0xC5);
+    emit_byte(e, 0xF8);
+    emit_byte(e, 0x77);
     /* JIT calling convention prologue — matches T1 baseline layout:
      *
      *   Entry: RDI = method pointer (1st arg, System V ABI)
@@ -2142,6 +2164,12 @@ void vtx_x86_emit_epilogue(vtx_x86_emit_t *e, uint32_t callee_saved_mask,
     if (!is_leaf) {
         vtx_x86_emit_add_ri(e, 4, 24);  /* RSP += 24 */
     }
+
+    /* 1.3: VZEROUPPER before RET — clears upper YMM bits so the caller's
+     * SSE code doesn't pay the 70-cycle AVX→SSE transition penalty. */
+    emit_byte(e, 0xC5);
+    emit_byte(e, 0xF8);
+    emit_byte(e, 0x77);
 
     /* ret */
     vtx_x86_emit_ret(e);
@@ -2452,6 +2480,7 @@ static uint32_t estimate_inst_size(const vtx_inst_t *inst)
         if (inst->flags & VTX_INST_FLAG_HAS_IMM && inst->imm > 4096)
             return 12;  /* MOV RAX, imm64 (10) + JMP RAX (2) */
         return 5;  /* E9 + rel32 */
+    case VTX_X86_VZEROUPPER: return 3;  /* C5 F8 77 */
     case VTX_X86_CQO:    return 2;  /* REX.W 99 */
     case VTX_X86_MOV:
         if (inst->flags & VTX_INST_FLAG_HAS_IMM) {
