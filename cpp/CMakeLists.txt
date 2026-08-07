@@ -74,5 +74,9 @@ add_executable(test_property_ic tests/test_property_ic.cpp)
 target_link_libraries(test_property_ic PRIVATE vortex_cpp)
 add_test(NAME test_property_ic COMMAND test_property_ic)
 
+add_executable(test_fuzz_property_access tests/test_fuzz_property_access.cpp)
+target_link_libraries(test_fuzz_property_access PRIVATE vortex_cpp)
+add_test(NAME test_fuzz_property_access COMMAND test_fuzz_property_access)
+
 install(TARGETS vortex_cpp ARCHIVE DESTINATION lib)
 install(DIRECTORY include/ DESTINATION include)

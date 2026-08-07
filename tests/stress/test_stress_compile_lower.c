@@ -43,7 +43,9 @@
 #include "runtime/bytecode.h"
 #include "ir/node.h"
 #include "ir/graph.h"
+#include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 #include <stdio.h>
 
 /* ========================================================================== */

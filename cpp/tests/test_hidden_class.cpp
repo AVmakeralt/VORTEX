@@ -10,7 +10,9 @@
 #include "vortex/hidden_class.hpp"
 
 #define typeid typeid_
-extern "C" { #include "runtime/type_system.h" }
+extern "C" {
+#include "runtime/type_system.h"
+}
 #undef typeid
 
 static int g_pass = 0, g_fail = 0;

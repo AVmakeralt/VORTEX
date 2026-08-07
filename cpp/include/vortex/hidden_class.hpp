@@ -12,13 +12,9 @@
 #include <unordered_map>
 #include <vector>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-struct vtx_type_system_t;
-#ifdef __cplusplus
-}
-#endif
+/* Forward-declare the C type system. The actual type is a typedef of
+ * an anonymous struct, so we can't forward-declare it by struct tag.
+ * Use void* in the C API and cast internally. */
 
 namespace vortex {
 

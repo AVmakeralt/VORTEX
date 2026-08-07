@@ -13,6 +13,24 @@
 #include <limits.h>
 #include <math.h>
 
+/* Property IC — declared in cpp/src/property_ic.cpp (C++ extern "C").
+ * When libvortex_cpp.a is linked, these resolve to the real IC.
+ * When not linked (C-only builds), the weak symbols default to no-op
+ * stubs that always miss (return UINT32_MAX / do nothing), so the
+ * interpreter falls back to the bytecode operand — correct but slower. */
+extern uint32_t vtx_property_ic_lookup(uint32_t site_id, uint32_t shape_id) __attribute__((weak));
+extern void vtx_property_ic_update(uint32_t site_id, uint32_t shape_id, uint32_t offset) __attribute__((weak));
+
+/* Weak fallback stubs — used when libvortex_cpp.a is not linked.
+ * These make the IC a no-op: lookup always misses, update does nothing. */
+__attribute__((weak)) uint32_t vtx_property_ic_lookup(uint32_t site_id, uint32_t shape_id) {
+    (void)site_id; (void)shape_id;
+    return UINT32_MAX;  /* always miss — fall back to bytecode operand */
+}
+__attribute__((weak)) void vtx_property_ic_update(uint32_t site_id, uint32_t shape_id, uint32_t offset) {
+    (void)site_id; (void)shape_id; (void)offset;  /* no-op */
+}
+
 /* ========================================================================== */
 /* CALL_RUNTIME callback hook                                                  */
 /* ========================================================================== */
@@ -1071,23 +1089,37 @@ dispatch_VT_OP_STORE_LOCAL:
 dispatch_VT_OP_LOAD_FIELD:
     operand = read_operand(code, pc);
     a = *--sp;
-    /* INTERP-001 fix: the old code had VTX_ASSERT(false, ...) which
-             * aborts in debug and falls through to a NULL deref in release.
-             * Neither matches the documented "deopt" intent. Fix: push
-             * UNDEFINED and continue — the bytecode will see an undefined
-             * value and either return it or hit a downstream type check
-             * that triggers a proper deopt. This is safe because the
-             * operand stack is restored to a valid state. */
-            if (!vtx_helpers_null_check(a)) { *sp++ = VTX_VALUE_UNDEFINED; DISPATCH_NEXT(); }
+    if (!vtx_helpers_null_check(a)) { *sp++ = VTX_VALUE_UNDEFINED; DISPATCH_NEXT(); }
     {
         vtx_heap_object_t *obj = (vtx_heap_object_t *)vtx_heap_ptr(a);
-        VTX_ASSERT(operand < obj->field_count, "field offset out of bounds");
-        val = vtx_object_get_field(obj, operand);
-        *sp++ = val;
+
+        /* Property IC fast path: check if this site has cached the
+         * field offset for this object's shape_id. If so, use the
+         * cached offset instead of the bytecode operand. This is the
+         * V8/JSC IC fast path — a single shape_id compare.
+         *
+         * The IC is keyed on (site_id, shape_id) → offset. The site_id
+         * is derived from the method + PC (same hash used for type
+         * feedback). If the IC misses, we fall through to the
+         * bytecode operand (the compile-time-known offset) and update
+         * the IC for future hits. */
+        uint32_t site_id = vtx_hash_site_index(frame->method, (uint32_t)pc);
+        uint32_t ic_offset = vtx_property_ic_lookup(site_id, obj->shape_id);
+        if (ic_offset != UINT32_MAX && ic_offset < obj->field_count) {
+            /* IC HIT — use cached offset */
+            *sp++ = vtx_object_get_field(obj, ic_offset);
+        } else {
+            /* IC MISS — use bytecode operand and update IC */
+            VTX_ASSERT(operand < obj->field_count, "field offset out of bounds");
+            val = vtx_object_get_field(obj, operand);
+            *sp++ = val;
+            /* Update the IC so future accesses at this site with the
+             * same shape_id hit the fast path. */
+            vtx_property_ic_update(site_id, obj->shape_id, operand);
+        }
         /* Record field shape for profiling */
         vtx_profiler_record_field_shape(&interp->profiler, frame->method,
                                          (uint32_t)pc, obj->shape_id);
-        /* Record field in type feedback */
         vtx_type_feedback_record_field(&interp->type_feedback,
                                         vtx_hash_site_index(frame->method, (uint32_t)pc),
                                         obj->shape_id,
@@ -1100,20 +1132,26 @@ dispatch_VT_OP_STORE_FIELD:
     operand = read_operand(code, pc);
     val = *--sp;  /* value */
     a = *--sp;    /* object */
-    /* INTERP-001 fix: the old code had VTX_ASSERT(false, ...) which
-             * aborts in debug and falls through to a NULL deref in release.
-             * Neither matches the documented "deopt" intent. Fix: push
-             * UNDEFINED and continue — the bytecode will see an undefined
-             * value and either return it or hit a downstream type check
-             * that triggers a proper deopt. This is safe because the
-             * operand stack is restored to a valid state. */
-            if (!vtx_helpers_null_check(a)) { *sp++ = VTX_VALUE_UNDEFINED; DISPATCH_NEXT(); }
+    if (!vtx_helpers_null_check(a)) { *sp++ = VTX_VALUE_UNDEFINED; DISPATCH_NEXT(); }
     {
         vtx_heap_object_t *obj = (vtx_heap_object_t *)vtx_heap_ptr(a);
-        VTX_ASSERT(operand < obj->field_count, "field offset out of bounds");
-        vtx_object_set_field(obj, operand, val);
+
+        /* Property IC fast path for stores — same pattern as loads. */
+        uint32_t site_id = vtx_hash_site_index(frame->method, (uint32_t)pc);
+        uint32_t ic_offset = vtx_property_ic_lookup(site_id, obj->shape_id);
+        uint32_t field_offset;
+        if (ic_offset != UINT32_MAX && ic_offset < obj->field_count) {
+            /* IC HIT — use cached offset */
+            field_offset = ic_offset;
+        } else {
+            /* IC MISS — use bytecode operand and update IC */
+            VTX_ASSERT(operand < obj->field_count, "field offset out of bounds");
+            field_offset = operand;
+            vtx_property_ic_update(site_id, obj->shape_id, operand);
+        }
+        vtx_object_set_field(obj, field_offset, val);
         /* Write barrier for GC */
-        vtx_gc_write_barrier(interp->gc, obj, operand, val);
+        vtx_gc_write_barrier(interp->gc, obj, field_offset, val);
         /* Record field shape for profiling */
         vtx_profiler_record_field_shape(&interp->profiler, frame->method,
                                          (uint32_t)pc, obj->shape_id);
