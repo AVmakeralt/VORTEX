@@ -2396,7 +2396,114 @@ uint32_t vtx_peephole_optimize(vtx_inst_stream_t *stream,
                 continue;
             }
 
-            /* ---- Pattern 8: Dead store elimination ----
+            /* ---- Pattern 8: Add(reg, Const k) → LEA reg, [reg+k] ----
+             *
+             * 2.4: LEA computes reg+k in a single uop without clobbering
+             * flags (unlike ADD). This saves a uop on every two-operand
+             * add where the source must be preserved. V8 and HotSpot both
+             * use this pattern (V8: peephole.cc, HotSpot: as_x86.cpp).
+             *
+             * LEA is only applicable when:
+             *   - The ADD has an immediate operand (not reg+reg)
+             *   - The immediate fits in int32 (LEA disp32 limit)
+             *   - The source register is different from the destination
+             *     (otherwise LEA [reg+k], reg is the same as ADD reg, k
+             *     but with different register allocation constraints)
+             *
+             * We also apply this to SUB reg, k → LEA reg, [reg-k]
+             * (LEA supports negative displacements). */
+            if ((inst->opcode == VTX_X86_ADD || inst->opcode == VTX_X86_SUB) &&
+                (inst->flags & VTX_INST_FLAG_HAS_IMM) &&
+                inst->opnd_kinds[0] == VTX_OPND_PREG &&
+                inst->imm >= INT32_MIN && inst->imm <= INT32_MAX) {
+                /* Convert to LEA: LEA dst, [src + disp]
+                 * For ADD: disp = +imm
+                 * For SUB: disp = -imm */
+                int32_t disp = (inst->opcode == VTX_X86_ADD)
+                               ? (int32_t)inst->imm
+                               : (int32_t)(-inst->imm);
+
+                /* Only convert if src != dst (LEA with src==dst is
+                 * equivalent to ADD/SUB reg, imm — no benefit, and
+                 * it changes the instruction from 3-operand to
+                 * 2-operand form which confuses the emitter). */
+                if (inst->opnd_kinds[1] != VTX_OPND_PREG ||
+                    inst->operands[1] != inst->operands[0]) {
+                    /* Need a source register — check if operand 1 is a PREG */
+                    if (inst->opnd_kinds[1] == VTX_OPND_PREG) {
+                        inst->opcode = VTX_X86_LEA;
+                        inst->flags &= ~VTX_INST_FLAG_HAS_IMM;
+                        inst->flags |= VTX_INST_FLAG_HAS_MEM;
+                        inst->mem.base_phys = (uint8_t)inst->operands[1];
+                        inst->mem.index_phys = 0xFF;  /* no index */
+                        inst->mem.scale = 0;
+                        inst->mem.disp = disp;
+                        eliminated++;  /* count as optimization */
+                        continue;
+                    }
+                }
+            }
+
+            /* ---- Pattern 9: Mul(reg, 2^k) → SHL reg, k ----
+             *
+             * 2.4: Integer multiply by a power of 2 is equivalent to
+             * a left shift. SHL is 1 uop (3-cycle latency); IMUL is
+             * 3-5 uops (3-4 cycle latency on modern x86). V8 does this
+             * in peephole.cc; HotSpot does it in as_x86.cpp.
+             *
+             * Only applies when the multiply has an immediate operand
+             * that is a power of 2 (and > 0). */
+            if (inst->opcode == VTX_X86_IMUL &&
+                (inst->flags & VTX_INST_FLAG_HAS_IMM) &&
+                inst->opnd_kinds[0] == VTX_OPND_PREG &&
+                inst->imm > 0 && (inst->imm & (inst->imm - 1)) == 0) {
+                /* imm is a power of 2 — convert to SHL */
+                int shift = 0;
+                int64_t v = inst->imm;
+                while (v > 1) { v >>= 1; shift++; }
+                inst->opcode = VTX_X86_SHL;
+                inst->imm = shift;
+                inst->opnd_kinds[1] = 0;  /* immediate shift count */
+                eliminated++;
+                continue;
+            }
+
+            /* ---- Pattern 10: MOV→MOV chain collapse ----
+             *
+             * 2.4: If we see MOV A, B followed by MOV C, A, where A is
+             * not used after the second MOV, we can collapse to MOV C, B.
+             * This eliminates one instruction. V8 does this in
+             * peephole.cc (RedundantMoveElimination). */
+            if (inst->opcode == VTX_X86_MOV &&
+                !(inst->flags & VTX_INST_FLAG_HAS_IMM) &&
+                !(inst->flags & VTX_INST_FLAG_HAS_MEM) &&
+                inst->opnd_kinds[0] == VTX_OPND_PREG &&
+                inst->opnd_kinds[1] == VTX_OPND_PREG &&
+                i + 1 < blk->inst_count) {
+                vtx_inst_t *next = &blk->insts[i + 1];
+                if (next->opcode == VTX_X86_MOV &&
+                    !(next->flags & VTX_INST_FLAG_HAS_IMM) &&
+                    !(next->flags & VTX_INST_FLAG_HAS_MEM) &&
+                    next->opnd_kinds[0] == VTX_OPND_PREG &&
+                    next->opnd_kinds[1] == VTX_OPND_PREG &&
+                    next->operands[1] == inst->operands[0]) {
+                    /* Check that the intermediate register (inst->operands[0])
+                     * is not read after the second MOV */
+                    if (!is_reg_read_after(blk, i + 1, (uint8_t)inst->operands[0])) {
+                        /* Collapse: next->operands[1] = inst->operands[1] */
+                        next->operands[1] = inst->operands[1];
+                        /* NOP the first MOV */
+                        inst->opcode = VTX_X86_NOP;
+                        inst->flags = 0;
+                        memset(inst->opnd_kinds, 0, sizeof(inst->opnd_kinds));
+                        memset(inst->operands, 0, sizeof(inst->operands));
+                        eliminated++;
+                        continue;
+                    }
+                }
+            }
+
+            /* ---- Pattern 11: Dead store elimination (cross-block safe) ----
              *
              * DISABLED (audit #3, tier-equivalence): This pattern incorrectly
              * eliminates Constants' MOV imm instructions. It only checks
