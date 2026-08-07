@@ -171,7 +171,7 @@ These projects represent years of engineering and real-world optimization:
   - https://github.com/pypy/pypy
   - Meta-tracing JIT demonstrating alternative optimization strategies.
 
- **lueJIT** 
+ **luaJIT** 
  needs no introduction
     https://github.com/LuaJIT/LuaJIT
 
