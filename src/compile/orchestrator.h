@@ -26,6 +26,7 @@
 #include "profile/phase_partition.h"
 #include "inliner/feedback.h"
 #include "deopt/deoptless.h"  /* vtx_deoptless_table_t */
+#include "guard/metadata.h"   /* vtx_guard_meta_table_t — 1.6 EWMA retrace */
 
 #ifdef VORTEX_ENABLE_SOTA
 #include "sota/markov.h"
@@ -169,6 +170,13 @@ typedef struct vtx_orchestrator_struct {
      * when the failure rate exceeds the threshold. See trace/retrace.h. */
     vtx_trace_retrace_t       *trace_retrace;
     uint64_t                   total_trace_retraces;
+
+    /* 1.6: Guard metadata table for EWMA-based re-trace decisions.
+     * The guard metadata tracks per-guard execution counts and failure
+     * rates using an EWMA (exponentially weighted moving average). The
+     * retrace system uses this to decide whether a guard's failure rate
+     * is high enough to warrant re-tracing at T2/T3. */
+    vtx_guard_meta_table_t    *guard_meta_table;
 
     /* AOT background compilation manager.
      * Serializes traces for background compilation, generates bailout

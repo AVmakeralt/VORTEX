@@ -7,6 +7,7 @@
 #include "compile/decision.h"
 #include "profile/data.h"
 #include "guard/metadata.h"
+#include "guard/ewma.h"           /* vtx_ewma_value — 1.6 EWMA retrace */
 
 #include <string.h>
 #include <stdlib.h>
@@ -205,10 +206,46 @@ uint32_t vtx_trace_retrace_check(vtx_trace_retrace_t *rt,
          *       { submit re-trace }
          */
 
-        /* Check if the failure count exceeds the re-trace threshold.
-         * This replaces the guard metadata table check — we track
-         * failures directly in the re-trace state. */
-        if (s->failure_count >= VTX_RETRACE_MIN_FAILURES) {
+        /* 1.6: Use the guard metadata table (EWMA) to decide re-tracing.
+         *
+         * The old code used a simple failure_count >= 10 heuristic. This
+         * caused spurious retraces on stable code (10 failures over 1M
+         * executions is not significant) and missed retraces on
+         * polymorphic code (failures spread across many guards, each
+         * with < 10 failures individually).
+         *
+         * V8 uses guard failure rates (collected via the IC miss
+         * counter) to decide when to re-trace. HotSpot uses the
+         * MethodData's trap history (an EWMA of deopt rates).
+         *
+         * We use the guard metadata table's EWMA failure rate:
+         *   meta = vtx_guard_meta_lookup(guard_table, s->last_failed_guard)
+         *   if meta exists AND execution_count >= MIN_EXECUTIONS AND
+         *      failure_rate >= THRESHOLD → submit re-trace.
+         *
+         * If no guard_meta_table is wired (NULL), fall back to the
+         * old failure_count heuristic for backward compatibility. */
+        bool should_retrace = false;
+
+        if (orch->guard_meta_table != NULL && s->last_failed_guard != 0) {
+            vtx_guard_meta_t *meta = vtx_guard_meta_lookup(
+                orch->guard_meta_table, s->last_failed_guard);
+            if (meta != NULL) {
+                /* Use the EWMA failure rate */
+                double failure_rate = vtx_ewma_value(&meta->failure_rate_ewma);
+                if (meta->execution_count >= VTX_RETRACE_MIN_EXECUTIONS &&
+                    failure_rate >= VTX_RETRACE_FAILURE_RATE_THRESHOLD) {
+                    should_retrace = true;
+                }
+            }
+        } else {
+            /* Fallback: old failure_count heuristic */
+            if (s->failure_count >= VTX_RETRACE_MIN_FAILURES) {
+                should_retrace = true;
+            }
+        }
+
+        if (should_retrace) {
             vtx_compile_task_t task;
             memset(&task, 0, sizeof(task));
             task.method_id = s->method_id;
