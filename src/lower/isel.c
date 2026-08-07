@@ -2787,6 +2787,43 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
 
     /* ---- Calls ---- */
     case VTX_OP_CallStatic: {
+        /* 1.2: Tail-call detection.
+         *
+         * Check if this CallStatic is in tail position — i.e., its
+         * result feeds directly into a Return node, with no stack
+         * cleanup needed. If so, emit VTX_X86_TAILCALL (JMP) instead
+         * of VTX_X86_CALL + VTX_X86_RET. This eliminates the CALL+RET
+         * overhead and reuses the caller's frame.
+         *
+         * V8 detects tail position in the graph builder (graph_builder.cc)
+         * by checking if a Call's only output feeds a Return. HotSpot
+         * detects it in the LIR generator (LIRGenerator::do_Return).
+         *
+         * We check the use list: if the only data user is a Return
+         * node, and there are no extra stack arguments to clean up
+         * (data_arg_idx <= 6, all args in registers), it's a tail call. */
+        bool is_tail_call = false;
+        if (node->use_count == 1) {
+            vtx_use_entry_t *use = &node->uses[0];
+            if (use->user_id < graph->node_table.count) {
+                vtx_node_t *user = &graph->node_table.nodes[use->user_id];
+                if (user->opcode == VTX_OP_Return && !user->dead) {
+                    /* Check: no extra stack args (all in registers) */
+                    uint32_t data_arg_count = 0;
+                    for (uint32_t i = 0; i < node->input_count; i++) {
+                        const vtx_node_t *inp = vtx_node_get_const(
+                            &graph->node_table, node->inputs[i]);
+                        if (inp && !vtx_nf_has(inp->flags, VTX_NF_CONTROL) &&
+                            !vtx_nf_has(inp->flags, VTX_NF_MEMORY))
+                            data_arg_count++;
+                    }
+                    if (data_arg_count <= 6) {
+                        is_tail_call = true;
+                    }
+                }
+            }
+        }
+
         uint32_t data_arg_idx = 0;
         for (uint32_t i = 0; i < node->input_count; i++) {
             const vtx_node_t *inp = vtx_node_get_const(&graph->node_table, node->inputs[i]);
@@ -2805,7 +2842,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         }
         vtx_inst_t call_inst;
         memset(&call_inst, 0, sizeof(call_inst));
-        call_inst.opcode = VTX_X86_CALL;
+        call_inst.opcode = is_tail_call ? VTX_X86_TAILCALL : VTX_X86_CALL;
         call_inst.opnd_kinds[0] = VTX_OPND_IMM;
         call_inst.imm = (int64_t)node->method_index;
         call_inst.flags = VTX_INST_FLAG_HAS_IMM | VTX_INST_FLAG_IS_CALL |
@@ -2816,6 +2853,18 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
                           VTX_INST_FLAG_CLOBBER_R11;
         call_inst.source_node = node_id;
         vtx_isel_emit_inst(block, call_inst, arena);
+
+        if (is_tail_call) {
+            /* 1.2: Tail call — the TAILCALL instruction (JMP) was just
+             * emitted. The callee's RET will return to our caller.
+             * Map the call node's result to RAX (the callee's return
+             * value register) so any subsequent Return node can use it. */
+            uint32_t rax_vreg = vtx_isel_alloc_vreg_fixed(stream, arena, 0);
+            vtx_isel_map_node_vreg(stream, node_id, rax_vreg, arena);
+            /* No stack cleanup needed — tail call reuses the frame. */
+            return 0;
+        }
+
         uint32_t rax_vreg = vtx_isel_alloc_vreg_fixed(stream, arena, 0);
         vtx_isel_map_node_vreg(stream, node_id, rax_vreg, arena);
         if (data_arg_idx > 6) {
