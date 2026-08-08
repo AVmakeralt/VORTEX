@@ -464,3 +464,393 @@ It is complete when it is correctly integrated, tested, observable, maintainable
 Do not leave functionality dangling, unwired, or dependent on future integration.
 
 Missing GC registration, stale metadata, incorrect deoptimization state, broken ownership, missing barriers, or incomplete runtime wiring are correctness failures, not cleanup tasks.
+
+VORTEX C++ Code Style Standards
+
+VORTEX follows the Google C++ Style Guide as the baseline standard for formatting, naming, structure, and general C++ practices.
+
+Google C++ Style Guide
+
+VORTEX-specific requirements take precedence where they differ from Google's recommendations.
+
+1. Formatting
+
+All C++ code MUST follow Google's formatting conventions.
+
+Use clang-format with the repository's approved configuration.
+Do not manually format code differently from the project standard.
+Indentation, brace placement, spacing, line wrapping, and declaration formatting MUST be consistent.
+Avoid excessively long functions or deeply nested control flow.
+Do not introduce formatting-only changes into unrelated files.
+
+Formatting should be automatically enforceable wherever practical.
+
+2. Naming
+
+Follow Google's naming conventions.
+
+Types
+
+Use PascalCase:
+
+class GarbageCollector;
+struct MachineState;
+enum class CompilationTier;
+Functions
+
+Use PascalCase:
+
+CompileFunction();
+CollectGarbage();
+LowerInstruction();
+Variables
+
+Use snake_case:
+
+auto bytecode_offset = 42;
+auto compilation_state = GetState();
+Constants
+
+Use kPascalCase:
+
+constexpr int kMaxInlineDepth = 32;
+constexpr size_t kPageSize = 4096;
+Class Members
+
+Use snake_case_:
+
+class Compiler {
+ private:
+    IRGraph* graph_;
+    CompilationTier tier_;
+};
+Names Must Describe Meaning
+
+Prefer:
+
+auto bytecode_offset = GetOffset();
+
+over:
+
+auto x = GetOffset();
+
+Prefer:
+
+bool is_deoptimized = state.IsDeoptimized();
+
+over:
+
+bool flag = state.IsDeoptimized();
+
+Names should make code understandable without requiring the reader to inspect the implementation of every function.
+
+3. Classes
+
+Classes should have a clear responsibility.
+
+Avoid giant “god classes” that simultaneously handle:
+
+parsing,
+IR construction,
+optimization,
+code generation,
+memory management,
+and runtime execution.
+
+If a class has too many unrelated responsibilities, split it.
+
+Public Interface First
+
+Follow Google's convention of generally placing the public interface before implementation details:
+
+class Compiler {
+ public:
+    Compiler(Context* context);
+
+    CompilationResult Compile(const Function& function);
+
+ private:
+    void Optimize();
+    void Lower();
+
+    Context* context_;
+};
+4. Functions
+
+Functions should do one coherent thing.
+
+Prefer:
+
+IRGraph* BuildGraph(const Bytecode& bytecode);
+void RunOptimizationPasses(IRGraph* graph);
+MachineCode GenerateMachineCode(IRGraph* graph);
+
+over a 900-line function called:
+
+CompileEverythingAndHopeNothingExplodes();
+Function Length
+
+There is no arbitrary hard line limit, but excessively large functions MUST be treated as a code-review warning.
+
+A function should be split when:
+
+it performs multiple logically distinct operations,
+control flow becomes difficult to follow,
+error handling becomes tangled,
+local state becomes difficult to reason about,
+or understanding one part requires mentally tracking unrelated parts.
+5. Comments
+
+Comments should explain why, not merely repeat what the code does.
+
+Bad:
+
+// Increment i.
+++i;
+
+Good:
+
+// Keep this index stable because the deoptimizer stores the bytecode
+// offset before entering this loop.
+++bytecode_index;
+
+Comments MUST NOT be used to justify incorrect or unnecessarily complicated code.
+
+If something is surprising because of a compiler, GC, ABI, or hardware constraint, document the reason.
+
+6. Header Hygiene
+
+Headers are expensive dependencies in a large C++ codebase.
+
+Prefer forward declarations when appropriate:
+
+class GarbageCollector;
+class ThreadState;
+
+over unnecessarily including entire headers.
+
+Include what you use.
+
+Do not rely on transitive includes.
+
+A file should generally compile correctly based on its own explicit dependencies.
+
+7. Ownership
+
+Ownership MUST be explicit.
+
+Prefer:
+
+std::unique_ptr<IRGraph> graph;
+
+when a single owner exists.
+
+Use raw pointers for non-owning references where appropriate:
+
+IRNode* parent_;
+
+The ownership semantics must be obvious from the API.
+
+Do not use:
+
+void* data;
+
+as a substitute for designing an actual type.
+
+8. Avoid Clever C++
+
+Code should optimize for maintainability and correctness, not how impressive it looks in a code review.
+
+Prefer:
+
+if (node->IsConstant()) {
+    return FoldConstant(node);
+}
+
+over an unnecessarily clever template/metaprogramming construction that requires three PhDs and a blood sacrifice to understand.
+
+Use advanced C++ features when they provide a real benefit.
+
+Do not use them merely because they exist.
+
+9. Explicit Control Flow
+
+Prefer straightforward control flow.
+
+Good:
+
+if (!IsValid(node)) {
+    return Error::InvalidNode;
+}
+
+if (!CanOptimize(node)) {
+    return KeepNode(node);
+}
+
+return Optimize(node);
+
+Avoid deeply nested structures:
+
+if (valid) {
+    if (optimized) {
+        if (has_type) {
+            if (reachable) {
+                ...
+            }
+        }
+    }
+}
+
+Use early returns where they make the logic clearer.
+
+10. Type Safety
+
+Prefer strong types over primitive values when values have different meanings.
+
+Avoid:
+
+void Compile(int offset, int size, int tier);
+
+when those values represent fundamentally different concepts.
+
+Prefer dedicated types where appropriate:
+
+void Compile(BytecodeOffset offset,
+             BytecodeSize size,
+             CompilationTier tier);
+
+The compiler should prevent invalid states whenever practical.
+
+11. const Correctness
+
+Use const consistently.
+
+Prefer:
+
+const IRNode* node;
+
+when mutation is not required.
+
+Member functions that do not modify object state should be const:
+
+bool IsConstant() const;
+
+Do not remove const merely because it is inconvenient.
+
+12. C++ Features
+
+Prefer modern C++ facilities over C-style constructs.
+
+Use:
+
+nullptr
+
+not:
+
+NULL
+
+Use:
+
+enum class
+
+rather than unscoped enums.
+
+Use:
+
+std::array
+std::vector
+std::string
+std::span
+std::unique_ptr
+
+where appropriate rather than reinventing equivalent structures.
+
+C-style casts are prohibited in new code.
+
+Prefer:
+
+static_cast<uint32_t>(value)
+
+over:
+
+(uint32_t)value
+13. Error Handling
+
+Errors should be explicit and predictable.
+
+Do not silently ignore failures.
+
+Avoid APIs where the caller cannot determine whether an operation succeeded.
+
+For operations where failure is expected, use the project's standard result/error type rather than relying on obscure side effects.
+
+Every failure path must leave the system in a valid state.
+
+14. Dead Code
+
+Do not leave commented-out implementations in the codebase.
+
+Bad:
+
+// Old implementation.
+// auto result = DoSomethingOld();
+// ...
+
+Use version control.
+
+Likewise, unused:
+
+variables,
+functions,
+parameters,
+classes,
+fields,
+includes,
+compatibility hacks
+
+should be removed unless there is a documented reason for their existence.
+
+15. TODOs
+
+TODOs MUST NOT be used to hide incomplete production functionality.
+
+Bad:
+
+// TODO: connect this to the GC.
+
+if the feature is already being merged.
+
+If GC integration is required for correctness, the implementation is not finished until it is connected to the GC.
+
+TODOs may be used for genuinely non-blocking future improvements, preferably with enough context to explain what remains and why.
+
+16. Code Review Standard
+
+A reviewer should be able to answer:
+
+Can I understand what this code does without reverse-engineering the entire subsystem?
+
+If not, the code needs improvement.
+
+Reviewers should specifically look for:
+
+unclear ownership
+excessive complexity
+unnecessary abstraction
+duplicated logic
+hidden state
+misleading names
+stale comments
+unsafe casts
+missing error handling
+missing integration
+incomplete lifecycle handling
+unnecessary allocations
+accidental hot-path costs
+VORTEX Rule of Clean Code
+
+Clean code is code whose behavior, ownership, invariants, and integration points can be understood without relying on tribal knowledge.
+
+Google's style guide gives us the syntax and conventions.
+
+VORTEX's engineering standards define the correctness bar.
