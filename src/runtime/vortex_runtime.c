@@ -49,10 +49,18 @@ static const vtx_method_desc_t *runtime_method_lookup(uint32_t method_id,
 /* ---- Lifecycle ---- */
 
 /* Property IC — declared in cpp/src/property_ic.cpp (C++ extern "C").
- * Weak stubs in dispatch.c make it a no-op when libvortex_cpp.a is
- * not linked. When linked, these init/destroy the IC table. */
-extern int vtx_property_ic_init(uint32_t max_sites);
-extern void vtx_property_ic_destroy(void);
+ * Weak stubs so C-only builds work without libvortex_cpp.a.
+ * When the C++ lib is linked, the real implementations override these. */
+extern int vtx_property_ic_init(uint32_t max_sites) __attribute__((weak));
+extern void vtx_property_ic_destroy(void) __attribute__((weak));
+
+__attribute__((weak)) int vtx_property_ic_init(uint32_t max_sites) {
+    (void)max_sites;
+    return 0;  /* no-op */
+}
+__attribute__((weak)) void vtx_property_ic_destroy(void) {
+    /* no-op */
+}
 
 int vtx_runtime_create(vtx_runtime_t *rt)
 {
