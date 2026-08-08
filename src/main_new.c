@@ -3124,6 +3124,10 @@ int main(int argc, char *argv[])
         vtx_markov_t markov;
         vtx_markov_init(&markov);
 
+        /* §3.2: Markov load is deferred to after the PGO block below,
+         * where dir, hash_hex, and pgo_enabled are in scope. */
+        bool markov_load_done = false;
+
         vtx_phase_graph_t phase_graph;
         memset(&phase_graph, 0, sizeof(phase_graph));
         vtx_arena_t phase_arena;
@@ -3252,6 +3256,23 @@ int main(int argc, char *argv[])
                                 t1_file);
                     }
                 }
+            }
+
+            /* §3.2: Load persisted Markov transition matrix.
+             * The model needs 10 transitions before is_trained=true.
+             * Loading the previous run's matrix means the first run
+             * benefits from prior learning. */
+            if (!markov_load_done) {
+                char markov_file[600];
+                snprintf(markov_file, sizeof(markov_file), "%s/%s.markov",
+                         dir ? dir : ".", hash_hex);
+                if (vtx_markov_load(&markov, markov_file)) {
+                    fprintf(stderr, "[pgo] Loaded Markov model from %s "
+                            "(trained=%d, transitions=%lu)\n",
+                            markov_file, markov.is_trained,
+                            (unsigned long)markov.total_transitions);
+                }
+                markov_load_done = true;
             }
 
             /* Sprint 3: Ensemble profiles (opt-in via VORTEX_ENSEMBLE=1).
@@ -3470,6 +3491,27 @@ int main(int argc, char *argv[])
         vtx_sota_recomp_destroy(&recomp);
         vtx_sota_phase_destroy(&phase);
         vtx_arena_destroy(&phase_arena);
+
+        /* §3.2: Save Markov transition matrix for next run. */
+        if (pgo_enabled && !vtx_deterministic_disable_persistence()) {
+            const char *mk_dir = getenv("VORTEX_PROFILE_DIR");
+            if (!mk_dir) mk_dir = ".";
+            char mk_hash_hex[33];
+            for (int i = 0; i < 32; i++) {
+                snprintf(mk_hash_hex + i * 2, 3, "%02x", bytecode_hash[i]);
+            }
+            mk_hash_hex[64] = '\0';
+
+            char markov_file[600];
+            snprintf(markov_file, sizeof(markov_file), "%s/%s.markov",
+                     mk_dir, mk_hash_hex);
+            if (vtx_markov_save(&markov, markov_file)) {
+                fprintf(stderr, "[pgo] Saved Markov model to %s "
+                        "(trained=%d, transitions=%lu)\n",
+                        markov_file, markov.is_trained,
+                        (unsigned long)markov.total_transitions);
+            }
+        }
         /* markov has no destroy function — it's stack-allocated and
          * holds no heap resources beyond what arena manages */
 #endif

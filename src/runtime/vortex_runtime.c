@@ -48,6 +48,12 @@ static const vtx_method_desc_t *runtime_method_lookup(uint32_t method_id,
 
 /* ---- Lifecycle ---- */
 
+/* Property IC — declared in cpp/src/property_ic.cpp (C++ extern "C").
+ * Weak stubs in dispatch.c make it a no-op when libvortex_cpp.a is
+ * not linked. When linked, these init/destroy the IC table. */
+extern int vtx_property_ic_init(uint32_t max_sites);
+extern void vtx_property_ic_destroy(void);
+
 int vtx_runtime_create(vtx_runtime_t *rt)
 {
     if (!rt) return -1;
@@ -67,6 +73,12 @@ int vtx_runtime_create(vtx_runtime_t *rt)
     if (!rt->compile_ctx) { free(rt->interp); return -1; }
     vtx_compile_context_init(rt->compile_ctx);
 
+    /* §3.2: Wire property IC into the runtime lifecycle.
+     * The IC table is a global singleton in the C++ layer; init/destroy
+     * are idempotent (safe to call even if libvortex_cpp.a is not linked,
+     * because the weak stubs are no-ops). */
+    vtx_property_ic_init(4096);
+
     rt->main_method = NULL;
     rt->main_method_id = 0;
     rt->use_jit = 0;
@@ -78,6 +90,9 @@ int vtx_runtime_create(vtx_runtime_t *rt)
 void vtx_runtime_destroy(vtx_runtime_t *rt)
 {
     if (!rt || !rt->initialized) return;
+
+    /* §3.2: Destroy property IC before freeing the runtime. */
+    vtx_property_ic_destroy();
 
     if (rt->threadpool) {
         vtx_threadpool_shutdown(rt->threadpool);

@@ -494,6 +494,23 @@ int vtx_orchestrator_init(vtx_orchestrator_t *orch,
         vtx_trace_retrace_init(orch->trace_retrace, 256);
     }
 
+    /* §3.2: Wire guard metadata table into the orchestrator lifecycle.
+     *
+     * The EWMA retrace path (1.6) checks orch->guard_meta_table for
+     * per-guard failure-rate data. Without this allocation, the table
+     * is always NULL and the EWMA path falls back to the old
+     * failure_count heuristic — making the 1.6 fix a no-op.
+     *
+     * The table is heap-allocated and owned by the orchestrator. */
+    orch->guard_meta_table = (vtx_guard_meta_table_t *)
+        calloc(1, sizeof(vtx_guard_meta_table_t));
+    if (orch->guard_meta_table != NULL) {
+        if (vtx_guard_meta_table_init(orch->guard_meta_table) != 0) {
+            free(orch->guard_meta_table);
+            orch->guard_meta_table = NULL;
+        }
+    }
+
     /* AOT background compilation: initialize the AOT manager.
      * The code cache and method registry are wired later via
      * vtx_aot_init() when the runtime creates them. For now,
@@ -589,6 +606,13 @@ void vtx_orchestrator_destroy(vtx_orchestrator_t *orch)
         vtx_trace_retrace_destroy(orch->trace_retrace);
         free(orch->trace_retrace);
         orch->trace_retrace = NULL;
+    }
+
+    /* §3.2: Clean up the guard metadata table */
+    if (orch->guard_meta_table != NULL) {
+        vtx_guard_meta_table_destroy(orch->guard_meta_table);
+        free(orch->guard_meta_table);
+        orch->guard_meta_table = NULL;
     }
 
     /* Clean up the AOT manager */
