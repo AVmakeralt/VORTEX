@@ -2596,6 +2596,7 @@ static uint32_t estimate_inst_size(const vtx_inst_t *inst)
 {
     switch (inst->opcode) {
     case VTX_X86_NOP:    return 1;  /* 1-byte NOP */
+    case VTX_X86_PREFETCHT0: return 8;  /* 0F 18 /1 + modrm + disp32 (RIP-relative) */
     case VTX_X86_RET:    return 1;  /* C3 */
     case VTX_X86_PUSH:   return 2;  /* REX + 50+rd (or 1 byte) */
     case VTX_X86_POP:    return 2;  /* REX + 58+rd */
@@ -2953,6 +2954,26 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
 
     case VTX_X86_NOP:
         vtx_x86_emit_nop(e);
+        break;
+
+    case VTX_X86_PREFETCHT0:
+        /* §3.6: PREFETCHT0 [rip + rel32]
+         * Encoding: 0F 18 /1 (ModRM byte: mod=00, reg=001, r/m=101)
+         * followed by a 4-byte displacement.
+         * 0F 18 = prefetch opcode, /1 = ModRM.reg = 001 (prefetcht0)
+         * mod=00, r/m=101 = RIP-relative addressing.
+         *
+         * The displacement is patched by the relocation system to
+         * point at the target block's first instruction.
+         *
+         * V8: code-generator.cc PrefetchInstructionData.
+         * HotSpot: as_x86.cpp (prefetch_prefix). */
+        emit_byte(e, 0x0F);
+        emit_byte(e, 0x18);
+        /* ModRM: mod=00, reg=001 (prefetcht0), r/m=101 (RIP-relative) */
+        emit_byte(e, 0x0D);  /* 00 001 101 = 0x0D */
+        /* 4-byte displacement (patched by relocation) */
+        emit_dword(e, 0);
         break;
 
     case VTX_X86_ADD:
