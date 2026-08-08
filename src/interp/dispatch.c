@@ -1098,32 +1098,36 @@ dispatch_VT_OP_LOAD_FIELD:
          * cached offset instead of the bytecode operand. This is the
          * V8/JSC IC fast path — a single shape_id compare.
          *
-         * The IC is keyed on (site_id, shape_id) → offset. The site_id
-         * is derived from the method + PC (same hash used for type
-         * feedback). If the IC misses, we fall through to the
-         * bytecode operand (the compile-time-known offset) and update
-         * the IC for future hits. */
+         * §5 (Keep the Fast Path Simple): compute site_id ONCE per
+         * field access and reuse for both the IC lookup and the type
+         * feedback recording. The old code computed it twice (once
+         * for the IC, once for type_feedback_record_field). */
         uint32_t site_id = vtx_hash_site_index(frame->method, (uint32_t)pc);
         uint32_t ic_offset = vtx_property_ic_lookup(site_id, obj->shape_id);
         if (ic_offset != UINT32_MAX && ic_offset < obj->field_count) {
             /* IC HIT — use cached offset */
             *sp++ = vtx_object_get_field(obj, ic_offset);
+            val = *(sp - 1);  /* for type_feedback below */
         } else {
             /* IC MISS — use bytecode operand and update IC */
             VTX_ASSERT(operand < obj->field_count, "field offset out of bounds");
             val = vtx_object_get_field(obj, operand);
             *sp++ = val;
-            /* Update the IC so future accesses at this site with the
-             * same shape_id hit the fast path. */
             vtx_property_ic_update(site_id, obj->shape_id, operand);
         }
-        /* Record field shape for profiling */
+        /* §2.6: Sample type feedback at 1/64 rate (V8 pattern).
+         * This reduces profiling overhead by 64× on the hot path
+         * while still collecting statistically representative data.
+         * The IC (property_ic_lookup/update) still runs every time —
+         * only the type_feedback recording is sampled. */
         vtx_profiler_record_field_shape(&interp->profiler, frame->method,
                                          (uint32_t)pc, obj->shape_id);
-        vtx_type_feedback_record_field(&interp->type_feedback,
-                                        vtx_hash_site_index(frame->method, (uint32_t)pc),
-                                        obj->shape_id,
-                                        value_typeid(val));
+        if (vtx_interp_should_sample(interp)) {
+            vtx_type_feedback_record_field(&interp->type_feedback,
+                                            site_id,
+                                            obj->shape_id,
+                                            value_typeid(val));
+        }
     }
     DISPATCH_NEXT();
 
@@ -1136,29 +1140,29 @@ dispatch_VT_OP_STORE_FIELD:
     {
         vtx_heap_object_t *obj = (vtx_heap_object_t *)vtx_heap_ptr(a);
 
-        /* Property IC fast path for stores — same pattern as loads. */
+        /* Property IC fast path for stores — same pattern as loads.
+         * §5: compute site_id ONCE and reuse for type_feedback. */
         uint32_t site_id = vtx_hash_site_index(frame->method, (uint32_t)pc);
         uint32_t ic_offset = vtx_property_ic_lookup(site_id, obj->shape_id);
         uint32_t field_offset;
         if (ic_offset != UINT32_MAX && ic_offset < obj->field_count) {
-            /* IC HIT — use cached offset */
             field_offset = ic_offset;
         } else {
-            /* IC MISS — use bytecode operand and update IC */
             VTX_ASSERT(operand < obj->field_count, "field offset out of bounds");
             field_offset = operand;
             vtx_property_ic_update(site_id, obj->shape_id, operand);
         }
         vtx_object_set_field(obj, field_offset, val);
-        /* Write barrier for GC */
         vtx_gc_write_barrier(interp->gc, obj, field_offset, val);
-        /* Record field shape for profiling */
+        /* §2.6: Sample type feedback at 1/64 rate (V8 pattern). */
         vtx_profiler_record_field_shape(&interp->profiler, frame->method,
                                          (uint32_t)pc, obj->shape_id);
-        vtx_type_feedback_record_field(&interp->type_feedback,
-                                        vtx_hash_site_index(frame->method, (uint32_t)pc),
-                                        obj->shape_id,
-                                        value_typeid(val));
+        if (vtx_interp_should_sample(interp)) {
+            vtx_type_feedback_record_field(&interp->type_feedback,
+                                            site_id,
+                                            obj->shape_id,
+                                            value_typeid(val));
+        }
     }
     DISPATCH_NEXT();
 

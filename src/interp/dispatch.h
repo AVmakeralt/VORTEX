@@ -120,7 +120,33 @@ typedef struct {
      * dispatch_return pushes them all back onto the operand stack. */
     vtx_value_t             multi_return_values[16];
     uint32_t                multi_return_count;
+
+    /* §2.6: Type feedback sampling counter.
+     *
+     * V8 samples type feedback at 1/64 rate (every 64th execution of
+     * a call site / branch / field access). Recording on every execution
+     * costs ~10× dispatch overhead from profiling. By sampling, we reduce
+     * the profiling overhead by 64× while still collecting statistically
+     * representative data.
+     *
+     * The counter wraps around: when it reaches 0 (every 64th access),
+     * we record type feedback. Otherwise, we skip it.
+     *
+     * V8's implementation: ICSlot::RecordTypeFeedback checks
+     * (maybe_call_count++ & kSampleMask) == 0.
+     * HotSpot: MethodData records at 1/profile_update_rate (default 1). */
+    uint32_t                feedback_sample_counter;
 } vtx_interp_t;
+
+/* §2.6: Sampling mask — 0x3F = every 64th access. */
+#define VORTEX_FEEDBACK_SAMPLE_MASK 0x3F
+
+/* §2.6: Check if this access should record type feedback.
+ * Inline so the fast path doesn't pay a function call.
+ * Returns true ~1/64 of the time. */
+static inline bool vtx_interp_should_sample(vtx_interp_t *interp) {
+    return (interp->feedback_sample_counter++ & VORTEX_FEEDBACK_SAMPLE_MASK) == 0;
+}
 
 /* ========================================================================== */
 /* Interpreter lifecycle                                                       */

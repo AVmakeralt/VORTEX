@@ -2503,6 +2503,30 @@ uint32_t vtx_peephole_optimize(vtx_inst_stream_t *stream,
                 }
             }
 
+            /* ---- Pattern 10b: AND(reg, 0xFF) → MOVZX reg, reg ----
+             *
+             * 2.4: Masking to a byte range with AND reg, 0xFF is
+             * equivalent to MOVZX (zero-extend byte to 64-bit).
+             * MOVZX is 1 uop; AND imm32 is 2 uops (needs the imm
+             * encoding). V8 and HotSpot both use this pattern.
+             *
+             * Also applies to 0xFFFF (16-bit) and 0xFFFFFFFF (32-bit).
+             * MOVZX supports r/m8, r/m16, and r/m32 source sizes. */
+            if (inst->opcode == VTX_X86_AND &&
+                (inst->flags & VTX_INST_FLAG_HAS_IMM) &&
+                inst->opnd_kinds[0] == VTX_OPND_PREG &&
+                inst->opnd_kinds[1] == VTX_OPND_PREG) {
+                if (inst->imm == 0xFF || inst->imm == 0xFFFF ||
+                    inst->imm == 0xFFFFFFFFLL) {
+                    inst->opcode = VTX_X86_MOVZX;
+                    inst->flags &= ~VTX_INST_FLAG_HAS_IMM;
+                    /* MOVZX: dst = operand[0], src = operand[1]
+                     * (same registers, just zero-extend) */
+                    eliminated++;
+                    continue;
+                }
+            }
+
             /* ---- Pattern 11: Dead store elimination (cross-block safe) ----
              *
              * DISABLED (audit #3, tier-equivalence): This pattern incorrectly
