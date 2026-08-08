@@ -134,6 +134,26 @@ typedef enum {
     /* Runtime calls */
     VT_OP_CALL_RUNTIME,    /* call into runtime helper */
 
+    /* §2.6: Superinstructions — fused common bytecode pairs.
+     *
+     * CPython 3.11 got ~20% from superinstructions (LOAD_FAST__LOAD_FAST,
+     * BINARY_OP_ADD_INT, etc.). V8 fuses bytecode in the interpreter
+     * (Ignition's bytecode linter fuses pairs).
+     *
+     * Each superinstruction combines two opcodes into one, eliminating:
+     *   - One dispatch (computed goto / switch)
+     *   - One read_operand call
+     *   - One stack push/pop pair
+     *
+     * These are emitted by a pre-decode pass that scans the bytecode
+     * and replaces qualifying pairs with the superinstruction.
+     *
+     * Encoding: superinstructions use a 4-byte operand (two 2-byte
+     * operands packed together) to carry both original operands. */
+    VT_OP_LOAD_CONST_INT__IADD,    /* 4-byte operand: [const_idx][unused] */
+    VT_OP_LOAD_LOCAL__LOAD_LOCAL,  /* 4-byte operand: [local_a][local_b] */
+    VT_OP_LOAD_LOCAL__STORE_FIELD, /* 4-byte operand: [local_idx][field_off] */
+
     /* Total opcode count */
     VT_OP_COUNT
 } vtx_opcode_t;
