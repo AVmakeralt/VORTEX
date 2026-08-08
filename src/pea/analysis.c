@@ -386,65 +386,147 @@ static void transfer_node(vtx_node_t *node, vtx_node_table_t *table,
 }
 
 /* ========================================================================== */
-/* Internal: apply transfer function to all nodes in a block                   */
+/* Internal: pre-compute block-to-node mapping (§2.1 — fix O(N×B) scan)      */
 /* ========================================================================== */
+/*
+ * PEA audit: transfer_block re-scans ALL N nodes for EVERY block to find
+ * which nodes belong to that block. For a graph with B blocks and N nodes,
+ * this is O(N×B) per dataflow iteration — for T2 graphs with 5000 nodes
+ * and 50 blocks, that's 250K comparisons per iteration × ~10 iterations
+ * = 2.5M comparisons.
+ *
+ * GraalVM's PEA uses a pre-computed BlockMap (BlockBag in
+ * EscapeAnalysisPhase). V8's escape analysis uses a schedule
+ * (Schedule::rpo_order) to iterate nodes per-block.
+ *
+ * Fix: pre-compute a block→node-list mapping once before the worklist,
+ * then iterate only the relevant nodes in transfer_block. */
+typedef struct {
+    vtx_nodeid_t *nodes;    /* node IDs belonging to this block */
+    uint32_t      count;    /* number of nodes in this block */
+} vtx_block_node_list_t;
 
-static void transfer_block(vtx_graph_t *graph, uint32_t block_idx,
-                            vtx_pea_block_state_t *bs,
-                            vtx_node_table_t *table)
+static vtx_block_node_list_t *build_block_node_lists(vtx_graph_t *graph,
+                                                       vtx_arena_t *arena)
+{
+    uint32_t block_count = graph->block_count;
+    uint32_t node_count = graph->node_table.count;
+
+    /* Allocate per-block lists */
+    vtx_block_node_list_t *lists = vtx_arena_alloc(arena,
+        block_count * sizeof(vtx_block_node_list_t));
+    if (!lists) return NULL;
+    memset(lists, 0, block_count * sizeof(vtx_block_node_list_t));
+
+    /* First pass: count nodes per block */
+    for (uint32_t i = 0; i < node_count; i++) {
+        vtx_node_t *node = &graph->node_table.nodes[i];
+        if (node->dead) continue;
+
+        /* Determine which block this node belongs to */
+        for (uint32_t b = 0; b < block_count; b++) {
+            vtx_block_info_t *block = &graph->blocks[b];
+            bool belongs = false;
+
+            if (node->id == block->region_node ||
+                node->id == block->control_node ||
+                node->id == block->memory_node) {
+                belongs = true;
+            } else {
+                for (uint32_t j = 0; j < node->input_count; j++) {
+                    if (node->inputs[j] == block->region_node ||
+                        node->inputs[j] == block->control_node ||
+                        node->inputs[j] == block->memory_node) {
+                        belongs = true;
+                        break;
+                    }
+                }
+                if (!belongs && block->region_node < node_count) {
+                    vtx_node_t *region = &graph->node_table.nodes[block->region_node];
+                    if (node->bytecode_pc == region->bytecode_pc) {
+                        belongs = true;
+                    }
+                }
+            }
+
+            if (belongs) {
+                lists[b].count++;
+                break;  /* each node belongs to at most one block */
+            }
+        }
+    }
+
+    /* Allocate arrays */
+    for (uint32_t b = 0; b < block_count; b++) {
+        if (lists[b].count > 0) {
+            lists[b].nodes = vtx_arena_alloc(arena,
+                lists[b].count * sizeof(vtx_nodeid_t));
+            if (!lists[b].nodes) return NULL;
+            lists[b].count = 0;  /* reset for second pass */
+        }
+    }
+
+    /* Second pass: fill arrays */
+    for (uint32_t i = 0; i < node_count; i++) {
+        vtx_node_t *node = &graph->node_table.nodes[i];
+        if (node->dead) continue;
+
+        for (uint32_t b = 0; b < block_count; b++) {
+            vtx_block_info_t *block = &graph->blocks[b];
+            bool belongs = false;
+
+            if (node->id == block->region_node ||
+                node->id == block->control_node ||
+                node->id == block->memory_node) {
+                belongs = true;
+            } else {
+                for (uint32_t j = 0; j < node->input_count; j++) {
+                    if (node->inputs[j] == block->region_node ||
+                        node->inputs[j] == block->control_node ||
+                        node->inputs[j] == block->memory_node) {
+                        belongs = true;
+                        break;
+                    }
+                }
+                if (!belongs && block->region_node < node_count) {
+                    vtx_node_t *region = &graph->node_table.nodes[block->region_node];
+                    if (node->bytecode_pc == region->bytecode_pc) {
+                        belongs = true;
+                    }
+                }
+            }
+
+            if (belongs) {
+                lists[b].nodes[lists[b].count++] = node->id;
+                break;
+            }
+        }
+    }
+
+    return lists;
+}
+
+/* ========================================================================== */
+/* Internal: fast transfer function using pre-computed block-node lists        */
+/* ========================================================================== */
+/*
+ * §2.1: Uses the pre-computed block_node_lists to iterate only the nodes
+ * that belong to this block, instead of scanning all N nodes.
+ * GraalVM: EscapeAnalysisPhase uses BlockBag for per-block iteration.
+ * V8: EscapeAnalysis uses Schedule::rpo_order for per-block iteration.
+ */
+static void transfer_block_fast(vtx_graph_t *graph, uint32_t block_idx,
+                                 vtx_pea_block_state_t *bs,
+                                 vtx_node_table_t *table,
+                                 const vtx_block_node_list_t *block_lists)
 {
     /* Start from entry state */
     copy_escape_states(bs->exit_state, bs->entry_state, bs->state_count);
 
-    vtx_block_info_t *block = &graph->blocks[block_idx];
-
-    /* Walk only the nodes that belong to this block.
-     * We determine block membership by checking each node's control input
-     * chain: a node belongs to a block if it is the block's region_node,
-     * or if its control input (inputs[0]) traces back to this block's
-     * region_node. For data nodes without control inputs, we use the
-     * bytecode_pc to assign them to the block whose region_node has the
-     * closest preceding bytecode_pc. */
-    for (uint32_t i = 0; i < table->count; i++) {
-        vtx_node_t *node = &table->nodes[i];
+    const vtx_block_node_list_t *list = &block_lists[block_idx];
+    for (uint32_t i = 0; i < list->count; i++) {
+        vtx_node_t *node = &table->nodes[list->nodes[i]];
         if (node->dead) continue;
-
-        /* Check if this node belongs to this block */
-        bool belongs = false;
-
-        /* Region node of this block always belongs */
-        if (node->id == block->region_node) {
-            belongs = true;
-        }
-        /* Control/memory nodes of this block belong */
-        else if (node->id == block->control_node ||
-                 node->id == block->memory_node) {
-            belongs = true;
-        }
-        /* Nodes that have the block's region_node as a direct input belong
-         * to this block (they are control projections or data nodes
-         * scheduled under this block's control flow). */
-        else {
-            for (uint32_t j = 0; j < node->input_count; j++) {
-                if (node->inputs[j] == block->region_node ||
-                    node->inputs[j] == block->control_node ||
-                    node->inputs[j] == block->memory_node) {
-                    belongs = true;
-                    break;
-                }
-            }
-            /* Also check by bytecode_pc: if the node's bytecode_pc matches
-             * this block's region_node's bytecode_pc, it belongs here. */
-            if (!belongs && block->region_node < table->count) {
-                vtx_node_t *region = &table->nodes[block->region_node];
-                if (node->bytecode_pc == region->bytecode_pc) {
-                    belongs = true;
-                }
-            }
-        }
-
-        if (!belongs) continue;
-
         transfer_node(node, table, bs->exit_state, bs->state_count);
     }
 }
@@ -547,6 +629,13 @@ vtx_pea_analysis_t *vtx_pea_run(vtx_graph_t *graph, vtx_arena_t *arena)
     uint32_t rpo_count = 0;
     uint32_t *rpo = compute_reverse_postorder(graph, arena, &rpo_count);
 
+    /* §2.1: Pre-compute block-to-node lists to avoid O(N×B) scan
+     * in transfer_block. This is built once before the worklist loop.
+     * GraalVM: BlockBag in EscapeAnalysisPhase.
+     * V8: Schedule::rpo_order in EscapeAnalysis. */
+    vtx_block_node_list_t *block_lists = build_block_node_lists(graph, arena);
+    if (!block_lists) return NULL;
+
     /* Step 4: Initialize worklist with all blocks in RPO */
     /* We use a simple flag-based worklist: a block is on the worklist
      * if its `entry_changed` flag is true. */
@@ -627,7 +716,8 @@ vtx_pea_analysis_t *vtx_pea_run(vtx_graph_t *graph, vtx_arena_t *arena)
         if (!old_exit) return NULL;
         copy_escape_states(old_exit, bs->exit_state, state_count);
 
-        transfer_block(graph, block_idx, bs, table);
+        /* §2.1: Use fast transfer with pre-computed block-node lists */
+        transfer_block_fast(graph, block_idx, bs, table, block_lists);
 
         bool exit_changed = escape_states_differ(bs->exit_state, old_exit,
                                                    state_count);

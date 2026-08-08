@@ -1639,6 +1639,35 @@ int vtx_pipeline_run(vtx_graph_t *graph,
     }
 
     /* ================================================================== */
+    /* Phase 9.8: Post-optimization PEA re-run                            */
+    /*                                                                    */
+    /* §3.2/PEA audit: PEA should be re-run after inlining and loop       */
+    /* unrolling because these transforms expose new allocation patterns.  */
+    /* Inlining can merge allocation sites from callees into the caller,  */
+    /* and loop unrolling can duplicate allocations that are now eligible */
+    /* for scalar replacement.                                            */
+    /*                                                                    */
+    /* GraalVM runs PEA after inlining (EscapeAnalysisPhase runs after    */
+    /* InliningPhase). V8 runs escape analysis after inlining and         */
+    /* simplification (EscapeAnalysis runs after JSInlining).             */
+    /*                                                                    */
+    /* We only re-run if the first PEA pass found at least one            */
+    /* scalar-replaceable allocation (no point re-running if there are   */
+    /* no allocations to analyze).                                        */
+    /* ================================================================== */
+    if (config->run_pea && stats.pea_allocs_eliminated > 0) {
+        int64_t pea2_start = now_ns();
+        uint32_t pea2_eliminated = run_pea_pass(
+            graph, arena, &stats.pea_time_ns);
+        stats.pea_allocs_eliminated += pea2_eliminated;
+        stats.pea_time_ns += elapsed_ns(pea2_start);
+
+        if (config->run_dce) {
+            run_dce_pass(graph, 1, &stats.dce_time_ns, false);
+        }
+    }
+
+    /* ================================================================== */
     /* Phase 10: Lowering (isel -> regalloc -> emit)                        */
     /*                                                                    */
     /* Converts the optimized SoN graph into x86-64 machine code:         */
