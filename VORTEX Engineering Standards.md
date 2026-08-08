@@ -1,568 +1,159 @@
-### VORTEX Engineering Standards
-1. Language and Implementation
-1.1 New Code
-All new implementation code MUST be written in C++.
-Rust is permitted only for bindings/integration layers where explicitly approved.
-C is permitted only for legacy code, maintenance, or compatibility work.
-New C code MUST NOT be introduced merely because an existing component happens to be written in C.
-1.2 Modern C++
-Use RAII for resource ownership.
-Prefer std::unique_ptr and std::shared_ptr where ownership semantics actually require them.
-Avoid raw owning pointers.
-Prefer references, spans, views, and value types for non-owning access.
-Use enum class instead of unscoped enums.
-Use nullptr, never NULL.
-Use constexpr, const, and noexcept where appropriate.
-Prefer compile-time validation over runtime validation when practical.
-Avoid unnecessary heap allocation in hot paths.
-Avoid exceptions in latency-sensitive runtime/JIT paths unless explicitly justified.
-Do not use undefined behavior as an optimization strategy.
-1.3 Ownership Must Be Obvious
+
+
+# VORTEX Engineering Standards
+
+> **VORTEX code must be written as if it will be deployed to production immediately.**
+>
+> A feature is not complete when its implementation exists. It is complete when it is correctly integrated, tested, maintainable, and safe under the runtime conditions it will encounter.
+>
+> **Do not leave functionality dangling, unwired, or dependent on future integration.**
+>
+> Missing GC registration, stale metadata, incorrect deoptimization state, broken ownership, missing barriers, or incomplete runtime wiring are **correctness failures**, not cleanup tasks.
+
+---
+
+## 1. Language and Implementation
+
+### 1.1 Language Requirements
+
+- All new implementation code **MUST** be written in **C++**.
+- Rust is permitted only for explicitly approved bindings or integration layers.
+- C is permitted only for legacy code, maintenance, compatibility, or other explicitly justified cases.
+- New C code **MUST NOT** be introduced simply because the surrounding code is written in C.
+
+### 1.2 Modern C++
+
+New C++ code should use modern C++ facilities appropriately.
+
+- Use RAII for resource ownership.
+- Prefer `std::unique_ptr` and `std::shared_ptr` when their ownership semantics are appropriate.
+- Avoid raw owning pointers.
+- Use references, pointers, `std::span`, views, and value types for non-owning access where appropriate.
+- Use `enum class` instead of unscoped enums.
+- Use `nullptr`, never `NULL`.
+- Use `const`, `constexpr`, and `noexcept` where appropriate.
+- Prefer compile-time validation when practical.
+- Avoid unnecessary heap allocation in hot paths.
+- Avoid exceptions in latency-sensitive runtime/JIT paths unless explicitly justified.
+- C-style casts are prohibited in new code.
+- Undefined behavior **MUST NOT** be used as an optimization technique.
+
+### 1.3 Ownership
+
+Ownership and lifetime must be obvious.
 
 Every object must have a clear answer to:
 
-Who owns this? Who may mutate it? When does it die?
+1. Who owns it?
+2. Who may mutate it?
+3. When is it destroyed?
+4. Can it move?
+5. Can it be collected?
+6. Can another thread access it?
 
-If that answer cannot be determined by reading the surrounding code, the implementation is not finished.
+If these questions cannot be answered from the surrounding code and API, the implementation is not sufficiently clear.
 
-2. Production-Readiness Rule
-Everything MUST Be Treated As Production Code
+---
 
-Code is not considered complete merely because:
+## 2. C++ Code Style
 
-it compiles,
-a unit test passes,
-the feature exists,
-the API exists,
-or the implementation “works” in isolation.
+VORTEX follows the **[Google C++ Style Guide](https://google.github.io/styleguide/cppguide.html)** as its baseline for formatting, naming, structure, and general C++ practices.
 
-A feature is complete only when it is fully integrated into the system it belongs to.
+VORTEX-specific requirements override the Google style guide where explicitly stated.
 
-This includes:
+### 2.1 Formatting
 
-GC integration
-object lifetime management
-deoptimization
-exception handling
-safepoints
-write barriers
-threading
-profiling
-invalidation
-code generation
-serialization/deserialization
-diagnostics
-error propagation
-shutdown/destruction
-API registration
-runtime registration
-build configuration
-2.1 No Dangling Features
+- Use `clang-format` with the repository's approved configuration.
+- Formatting must be consistent across the codebase.
+- Do not introduce formatting-only changes into unrelated files.
+- Avoid excessively long functions and deeply nested control flow.
 
-Do not leave functionality dangling or partially wired.
-
-For example:
-
-class MyObject : public GCObject {
-    Value child;
-};
-
-is not complete merely because child exists.
-
-If child contains a GC-managed reference, the implementation must also correctly integrate that reference with:
-
-tracing,
-barriers,
-relocation/forwarding if applicable,
-object scanning,
-lifetime rules,
-and every other mechanism required by the collector.
-
-A missing GC edge is not a minor bug.
-
-It is heap corruption waiting for a sufficiently unlucky workload.
-
-2.2 Integration Checklist
-
-Every new subsystem/component must answer:
-
-Where is it constructed?
-Where is it registered?
-Who owns it?
-Who destroys it?
-How does it interact with the GC?
-How does it interact with threads?
-How does it interact with exceptions?
-How does it interact with deoptimization?
-How does it interact with profiling?
-What happens when initialization fails?
-What happens during shutdown?
-What happens under malformed input?
-What happens when assumptions become invalid?
-
-If any answer is “it doesn't,” that must be intentional and documented.
-
-3. Implementation Logic Must Be Verified
-
-VORTEX implementations MUST NOT be judged solely against their intended algorithm.
-
-For significant compiler/runtime components, verify the implementation against established production systems.
-
-Primary References
-V8
-HotSpot
-GraalVM
-PyPy
-
-These are not necessarily implementation templates. They are sanity checks against decades of compiler engineering experience.
-
-For relevant subsystems, compare:
-
-algorithmic structure
-optimization opportunities
-invalidation behavior
-deoptimization behavior
-memory management
-threading
-representation choices
-edge cases
-correctness invariants
-performance characteristics
-
-If VORTEX behaves differently from these systems, the difference should be explainable.
-
-“We did it differently” is not a justification.
-
-The justification is why the difference is correct and beneficial.
-
-4. Performance Validation
-
-A performance-sensitive implementation MUST be benchmarked.
-
-Do not optimize based on intuition.
-
-For hot code:
-
-Establish a baseline.
-Implement the change.
-Benchmark representative workloads.
-Profile the generated code.
-Identify regressions.
-Compare against appropriate reference implementations.
-
-For JIT/compiler work, comparisons should include appropriate combinations of:
-
-VORTEX interpreter
-VORTEX baseline JIT
-VORTEX optimized tiers
-native C/C++ where applicable
-V8
-HotSpot
-GraalVM
-PyPy where applicable
-4.1 Performance Regression Rule
-
-A change that makes a hot path slower MUST either:
-
-be rejected,
-be optimized further,
-or include a documented reason why the regression is necessary.
-
-Do not merge:
-
-“It's only 8% slower.”
-
-That sentence has murdered many perfectly good runtimes.
-
-5. Tests Must Be Difficult
-Tests MUST attempt to break the implementation.
-
-Do not write tests merely demonstrating that the happy path works.
-
-Tests should target:
-
-malformed input
-pathological input
-integer overflow
-unusual type combinations
-empty structures
-extremely large structures
-deep recursion
-recursion limits
-invalid assumptions
-GC pressure
-allocation pressure
-thread races
-deoptimization
-invalidation
-exceptions
-interrupted execution
-repeated recompilation
-tier transitions
-unusual control flow
-aliasing
-speculative optimization failures
-5.1 Tests Must Exercise Integration
-
-A component test is insufficient when the feature interacts with the runtime.
-
-For example:
-
-allocate object
-    ↓
-store GC reference
-    ↓
-trigger collection
-    ↓
-move object
-    ↓
-continue execution
-    ↓
-read reference
-
-That test is considerably more valuable than:
-
-object.child == expected_child
-
-because computers apparently enjoy behaving correctly until the garbage collector gets involved.
-
-6. Compiler Correctness
-
-Every optimization MUST preserve observable program behavior.
-
-For an optimization:
-
-Before:
-A → B → C
-
-After:
-A → C
-
-there must be a demonstrated reason that removing B cannot change:
-
-program results,
-exceptions,
-memory effects,
-observable ordering,
-GC behavior,
-deoptimization state,
-synchronization,
-or other runtime-visible behavior.
-6.1 Speculation
-
-Speculative optimizations MUST have:
-
-an explicit assumption,
-a mechanism for detecting assumption failure,
-a recovery path,
-and tests covering assumption failure.
-
-Never write:
-
-if (likely(is_integer(value))) {
-    // assume integer forever
-}
-
-without answering what happens when that assumption stops being true.
-
-7. IR Standards
-
-Every IR transformation should preserve documented invariants.
-
-Passes MUST clearly define:
-
-Input invariants
-Output invariants
-Required analyses
-Invalidated analyses
-Required metadata
-
-If a pass invalidates:
-
-DominatorTree
-AliasAnalysis
-LoopAnalysis
-TypeInformation
-
-then that invalidation must be explicitly represented.
-
-Do not silently leave stale analysis results lying around.
-
-8. GC Standards
-
-GC integration gets its own section because heap corruption is not a personality trait.
-
-Every GC-managed reference MUST have a defined tracing/lifetime policy.
-
-New object types must explicitly specify:
-
-fields containing GC references,
-tracing behavior,
-write-barrier requirements,
-allocation mechanism,
-finalization behavior if applicable,
-relocation behavior,
-interaction with weak references,
-interaction with thread-local roots,
-interaction with JIT-generated references.
-8.1 GC Safety Rule
-
-If an object can contain a GC reference, the GC must know about it.
-
-No exceptions without an explicit, documented reason.
-
-8.2 JIT/GC Interaction
-
-Generated code must correctly handle:
-
-safepoints,
-stack maps,
-GC roots,
-relocated objects,
-barriers,
-deoptimization metadata.
-
-A JIT optimization that is mathematically correct but causes the collector to miss a live object is incorrect.
-
-9. Threading
-
-Shared mutable state MUST have explicit synchronization semantics.
-
-Every shared object should make clear whether it is:
-
-thread-local,
-immutable,
-externally synchronized,
-internally synchronized,
-lock-free,
-atomic,
-or otherwise concurrency-safe.
-
-Do not introduce atomics simply because they make the compiler stop complaining.
-
-Do not introduce locks into hot paths without measuring their cost.
-
-9.1 Race Testing
-
-Concurrent components should be tested under:
-
-ThreadSanitizer
-stress workloads
-repeated scheduling
-high contention
-shutdown races
-compilation/execution races
-10. Error Handling
-
-Errors MUST propagate correctly.
-
-Do not:
-
-bool compile(...) {
-    if (!something()) {
-        return false;
-    }
-
-    // continue anyway
-}
-
-unless ignoring the failure is explicitly correct.
-
-Errors must not silently become:
-
-corrupted state,
-invalid IR,
-stale metadata,
-leaked resources,
-invalid machine code,
-or undefined behavior.
-11. Assertions and Invariants
-
-Use assertions aggressively for internal invariants.
-
-assert(block->isLinked());
-assert(value->type() != Type::Invalid);
-assert(state.isConsistent());
-
-Assertions should catch programmer errors as close to their origin as possible.
-
-But:
-
-Assertions MUST NOT be the only defense against malformed or hostile runtime input.
-
-Internal invariant:
-
-assert(index < table.size());
-
-External input:
-
-if (index >= table.size()) {
-    return Error::InvalidIndex;
-}
-
-Different problems require different defenses.
-
-12. Code Review Standards
-
-Every non-trivial change should answer:
-
-Correctness
-What invariant does this rely on?
-What invariant does it establish?
-What happens when its assumptions fail?
-Integration
-What systems does this touch?
-What systems need to know this exists?
-Did every required registration/wiring point get updated?
-Memory
-Who owns the data?
-Can it move?
-Can it be collected?
-Can another thread access it?
-Compiler
-Does it affect IR correctness?
-Does it invalidate analysis?
-Does it affect deoptimization?
-Performance
-Is this on a hot path?
-What does profiling say?
-What is the benchmark result?
-Testing
-What breaks this?
-Is the failure tested?
-Is the integration path tested?
-13. Definition of Done
-
-A VORTEX change is not complete until all applicable conditions are satisfied:
-
-[ ] Implementation is in the correct language.
-[ ] Ownership is explicit.
-[ ] Lifetime is correct.
-[ ] All required subsystems are wired.
-[ ] GC integration is complete.
-[ ] Threading behavior is defined.
-[ ] Error paths are handled.
-[ ] Compiler invariants are preserved.
-[ ] Relevant analyses are updated/invalidated.
-[ ] Deoptimization behavior is correct.
-[ ] Production reference implementations were consulted.
-[ ] Performance was benchmarked where applicable.
-[ ] Adversarial tests exist.
-[ ] Integration tests exist.
-[ ] Debug/assertion checks exist where appropriate.
-[ ] No known dangling functionality remains.
-[ ] No known TODO is required for basic correctness.
-The Core Rule
-
-I'd put this at the very top of the document in giant letters:
-
-VORTEX code must be written as if it will be deployed to production immediately.
-
-A feature is not complete when its implementation exists.
-It is complete when it is correctly integrated, tested, observable, maintainable, and safe under the runtime conditions it will encounter.
-
-Do not leave functionality dangling, unwired, or dependent on future integration.
-
-Missing GC registration, stale metadata, incorrect deoptimization state, broken ownership, missing barriers, or incomplete runtime wiring are correctness failures, not cleanup tasks.
-
-VORTEX C++ Code Style Standards
-
-VORTEX follows the Google C++ Style Guide as the baseline standard for formatting, naming, structure, and general C++ practices.
-
-Google C++ Style Guide
-
-VORTEX-specific requirements take precedence where they differ from Google's recommendations.
-
-1. Formatting
-
-All C++ code MUST follow Google's formatting conventions.
-
-Use clang-format with the repository's approved configuration.
-Do not manually format code differently from the project standard.
-Indentation, brace placement, spacing, line wrapping, and declaration formatting MUST be consistent.
-Avoid excessively long functions or deeply nested control flow.
-Do not introduce formatting-only changes into unrelated files.
-
-Formatting should be automatically enforceable wherever practical.
-
-2. Naming
+### 2.2 Naming
 
 Follow Google's naming conventions.
 
-Types
+#### Types
 
-Use PascalCase:
+Use `PascalCase`:
 
+```cpp
 class GarbageCollector;
 struct MachineState;
 enum class CompilationTier;
-Functions
+````
 
-Use PascalCase:
+#### Functions
 
+Use `PascalCase`:
+
+```cpp
 CompileFunction();
 CollectGarbage();
 LowerInstruction();
-Variables
+```
 
-Use snake_case:
+#### Variables
 
-auto bytecode_offset = 42;
+Use `snake_case`:
+
+```cpp
+auto bytecode_offset = GetOffset();
 auto compilation_state = GetState();
-Constants
+```
 
-Use kPascalCase:
+#### Constants
 
+Use `kPascalCase`:
+
+```cpp
 constexpr int kMaxInlineDepth = 32;
 constexpr size_t kPageSize = 4096;
-Class Members
+```
 
-Use snake_case_:
+#### Data Members
 
+Use a trailing underscore:
+
+```cpp
 class Compiler {
  private:
     IRGraph* graph_;
     CompilationTier tier_;
 };
-Names Must Describe Meaning
+```
+
+Names must describe meaning.
 
 Prefer:
 
-auto bytecode_offset = GetOffset();
-
-over:
-
-auto x = GetOffset();
-
-Prefer:
-
+```cpp
 bool is_deoptimized = state.IsDeoptimized();
+```
 
 over:
 
+```cpp
 bool flag = state.IsDeoptimized();
+```
 
-Names should make code understandable without requiring the reader to inspect the implementation of every function.
-
-3. Classes
+### 2.3 Classes
 
 Classes should have a clear responsibility.
 
-Avoid giant “god classes” that simultaneously handle:
+Avoid classes that simultaneously handle unrelated concerns such as:
 
-parsing,
-IR construction,
-optimization,
-code generation,
-memory management,
-and runtime execution.
+* parsing,
+* IR construction,
+* optimization,
+* code generation,
+* memory management,
+* and runtime execution.
 
-If a class has too many unrelated responsibilities, split it.
+Split unrelated responsibilities into appropriate components.
 
-Public Interface First
+Public interfaces should generally appear before implementation details:
 
-Follow Google's convention of generally placing the public interface before implementation details:
-
+```cpp
 class Compiler {
  public:
     Compiler(Context* context);
@@ -575,110 +166,124 @@ class Compiler {
 
     Context* context_;
 };
-4. Functions
+```
 
-Functions should do one coherent thing.
+### 2.4 Functions
+
+Functions should perform one coherent operation.
 
 Prefer:
 
+```cpp
 IRGraph* BuildGraph(const Bytecode& bytecode);
 void RunOptimizationPasses(IRGraph* graph);
 MachineCode GenerateMachineCode(IRGraph* graph);
+```
 
-over a 900-line function called:
+over a single function responsible for the entire compilation pipeline.
 
-CompileEverythingAndHopeNothingExplodes();
-Function Length
+There is no arbitrary maximum function length, but excessive size is a code-review warning. Split functions when:
 
-There is no arbitrary hard line limit, but excessively large functions MUST be treated as a code-review warning.
+* they perform multiple logically distinct operations,
+* control flow becomes difficult to follow,
+* error handling becomes tangled,
+* local state becomes difficult to reason about,
+* or understanding one section requires tracking unrelated state.
 
-A function should be split when:
+### 2.5 Comments
 
-it performs multiple logically distinct operations,
-control flow becomes difficult to follow,
-error handling becomes tangled,
-local state becomes difficult to reason about,
-or understanding one part requires mentally tracking unrelated parts.
-5. Comments
-
-Comments should explain why, not merely repeat what the code does.
+Comments should explain **why**, not merely repeat **what** the code does.
 
 Bad:
 
+```cpp
 // Increment i.
 ++i;
+```
 
 Good:
 
+```cpp
 // Keep this index stable because the deoptimizer stores the bytecode
 // offset before entering this loop.
 ++bytecode_index;
+```
 
-Comments MUST NOT be used to justify incorrect or unnecessarily complicated code.
+Document surprising behavior caused by:
 
-If something is surprising because of a compiler, GC, ABI, or hardware constraint, document the reason.
+* compiler constraints,
+* GC requirements,
+* ABI requirements,
+* hardware behavior,
+* JIT assumptions,
+* or other non-obvious implementation constraints.
 
-6. Header Hygiene
+Comments must not be used to justify unnecessarily complicated or incorrect code.
 
-Headers are expensive dependencies in a large C++ codebase.
+### 2.6 Header Hygiene
 
-Prefer forward declarations when appropriate:
+* Include what you use.
+* Do not rely on transitive includes.
+* Prefer forward declarations where appropriate.
+* Avoid unnecessary header dependencies.
 
-class GarbageCollector;
-class ThreadState;
+A source file should compile correctly using its own explicit dependencies.
 
-over unnecessarily including entire headers.
+### 2.7 Type Safety
 
-Include what you use.
+Prefer strong types when values represent different concepts.
 
-Do not rely on transitive includes.
+Avoid:
 
-A file should generally compile correctly based on its own explicit dependencies.
+```cpp
+void Compile(int offset, int size, int tier);
+```
 
-7. Ownership
-
-Ownership MUST be explicit.
-
-Prefer:
-
-std::unique_ptr<IRGraph> graph;
-
-when a single owner exists.
-
-Use raw pointers for non-owning references where appropriate:
-
-IRNode* parent_;
-
-The ownership semantics must be obvious from the API.
-
-Do not use:
-
-void* data;
-
-as a substitute for designing an actual type.
-
-8. Avoid Clever C++
-
-Code should optimize for maintainability and correctness, not how impressive it looks in a code review.
+when the values have distinct meanings.
 
 Prefer:
 
-if (node->IsConstant()) {
-    return FoldConstant(node);
-}
+```cpp
+void Compile(BytecodeOffset offset,
+             BytecodeSize size,
+             CompilationTier tier);
+```
 
-over an unnecessarily clever template/metaprogramming construction that requires three PhDs and a blood sacrifice to understand.
+The type system should prevent invalid states whenever practical.
+
+### 2.8 `const` Correctness
+
+Use `const` consistently.
+
+```cpp
+const IRNode* node;
+```
+
+Member functions that do not modify object state should be `const`:
+
+```cpp
+bool IsConstant() const;
+```
+
+Do not remove `const` merely for convenience.
+
+### 2.9 Avoid Clever C++
+
+Code should prioritize correctness, readability, and maintainability over cleverness.
 
 Use advanced C++ features when they provide a real benefit.
 
-Do not use them merely because they exist.
+Do not introduce complex template metaprogramming, abstractions, or language tricks merely because they are possible.
 
-9. Explicit Control Flow
+The preferred implementation is the simplest implementation that correctly satisfies the requirements.
 
-Prefer straightforward control flow.
+### 2.10 Control Flow
 
-Good:
+Prefer straightforward control flow and early returns where they improve readability.
 
+Prefer:
+
+```cpp
 if (!IsValid(node)) {
     return Error::InvalidNode;
 }
@@ -688,169 +293,525 @@ if (!CanOptimize(node)) {
 }
 
 return Optimize(node);
+```
 
-Avoid deeply nested structures:
+over deeply nested conditionals.
 
-if (valid) {
-    if (optimized) {
-        if (has_type) {
-            if (reachable) {
-                ...
-            }
-        }
-    }
-}
-
-Use early returns where they make the logic clearer.
-
-10. Type Safety
-
-Prefer strong types over primitive values when values have different meanings.
-
-Avoid:
-
-void Compile(int offset, int size, int tier);
-
-when those values represent fundamentally different concepts.
-
-Prefer dedicated types where appropriate:
-
-void Compile(BytecodeOffset offset,
-             BytecodeSize size,
-             CompilationTier tier);
-
-The compiler should prevent invalid states whenever practical.
-
-11. const Correctness
-
-Use const consistently.
-
-Prefer:
-
-const IRNode* node;
-
-when mutation is not required.
-
-Member functions that do not modify object state should be const:
-
-bool IsConstant() const;
-
-Do not remove const merely because it is inconvenient.
-
-12. C++ Features
-
-Prefer modern C++ facilities over C-style constructs.
-
-Use:
-
-nullptr
-
-not:
-
-NULL
-
-Use:
-
-enum class
-
-rather than unscoped enums.
-
-Use:
-
-std::array
-std::vector
-std::string
-std::span
-std::unique_ptr
-
-where appropriate rather than reinventing equivalent structures.
-
-C-style casts are prohibited in new code.
-
-Prefer:
-
-static_cast<uint32_t>(value)
-
-over:
-
-(uint32_t)value
-13. Error Handling
-
-Errors should be explicit and predictable.
-
-Do not silently ignore failures.
-
-Avoid APIs where the caller cannot determine whether an operation succeeded.
-
-For operations where failure is expected, use the project's standard result/error type rather than relying on obscure side effects.
-
-Every failure path must leave the system in a valid state.
-
-14. Dead Code
+### 2.11 Dead Code
 
 Do not leave commented-out implementations in the codebase.
 
+Use version control instead.
+
+Unused variables, functions, parameters, classes, fields, includes, and compatibility code should be removed unless their existence is intentional and documented.
+
+---
+
+## 3. Production-Readiness
+
+### 3.1 Production Rule
+
+Everything must be treated as production code.
+
+Code is not complete merely because:
+
+* it compiles,
+* a unit test passes,
+* the API exists,
+* the feature exists,
+* or it works in isolation.
+
+A feature is complete only when it is fully integrated into every system that depends on it.
+
+Depending on the component, this may include:
+
+* GC integration
+* object lifetime management
+* deoptimization
+* exception handling
+* safepoints
+* write barriers
+* threading
+* profiling
+* invalidation
+* code generation
+* serialization/deserialization
+* diagnostics
+* error propagation
+* shutdown/destruction
+* API registration
+* runtime registration
+* build configuration
+
+### 3.2 No Dangling Features
+
+Functionality must not be left partially implemented or unwired.
+
+For example:
+
+```cpp
+class MyObject : public GCObject {
+    Value child;
+};
+```
+
+is not complete if `child` contains a GC-managed reference but the collector cannot discover or correctly manage it.
+
+Required integration may include:
+
+* tracing,
+* write barriers,
+* relocation/forwarding,
+* object scanning,
+* lifetime management,
+* root registration,
+* and any other collector-specific requirements.
+
+A missing GC edge is a **correctness bug**, not a cleanup task.
+
+### 3.3 Integration Checklist
+
+Every new subsystem or runtime component must have defined answers for:
+
+* Where is it constructed?
+* Where is it registered?
+* Who owns it?
+* Who destroys it?
+* How does it interact with the GC?
+* How does it interact with threads?
+* How does it interact with exceptions?
+* How does it interact with deoptimization?
+* How does it interact with profiling?
+* What happens if initialization fails?
+* What happens during shutdown?
+* What happens with malformed input?
+* What happens when an assumption becomes invalid?
+
+If a subsystem does not interact with one of these mechanisms, that should be intentional and documented.
+
+---
+
+## 4. Implementation Verification
+
+VORTEX implementations must not be judged solely against the intended algorithm.
+
+For significant compiler and runtime components, compare the design and implementation against established production systems:
+
+* V8
+* HotSpot
+* GraalVM
+* PyPy
+
+These systems are reference points, not necessarily implementation templates.
+
+Comparison should consider:
+
+* algorithmic structure,
+* optimization opportunities,
+* representation choices,
+* memory management,
+* invalidation,
+* deoptimization,
+* threading,
+* edge cases,
+* correctness invariants,
+* and performance.
+
+If VORTEX deliberately differs from an established implementation, the difference must have a technical justification.
+
+> **“We did it differently” is not a justification.**
+>
+> The justification is why the difference is correct, necessary, or beneficial.
+
+---
+
+## 5. Performance
+
+Performance-sensitive code must be benchmarked.
+
+Do not optimize based solely on intuition.
+
+For significant performance changes:
+
+1. Establish a baseline.
+2. Implement the change.
+3. Benchmark representative workloads.
+4. Profile the relevant code.
+5. Identify regressions.
+6. Compare against appropriate reference implementations.
+
+Depending on the workload, comparisons should include:
+
+* VORTEX interpreter
+* VORTEX baseline JIT
+* VORTEX optimized tiers
+* native C/C++
+* V8
+* HotSpot
+* GraalVM
+* PyPy
+
+### 5.1 Performance Regressions
+
+A change that slows a hot path must be:
+
+* rejected,
+* optimized further,
+* or accompanied by a documented technical justification.
+
+Performance regressions must not be dismissed merely because they appear small.
+
+---
+
+## 6. Testing
+
+Tests must attempt to break the implementation, not merely demonstrate the happy path.
+
+Tests should cover applicable cases including:
+
+* malformed input,
+* pathological input,
+* integer overflow,
+* unusual type combinations,
+* empty structures,
+* extremely large structures,
+* deep recursion,
+* recursion limits,
+* invalid assumptions,
+* GC pressure,
+* allocation pressure,
+* race conditions,
+* deoptimization,
+* invalidation,
+* exceptions,
+* interrupted execution,
+* repeated recompilation,
+* tier transitions,
+* unusual control flow,
+* aliasing,
+* speculative optimization failures.
+
+### 6.1 Integration Testing
+
+Component tests are insufficient for features that interact with the runtime.
+
+For example, a GC-sensitive object should be tested through a lifecycle such as:
+
+```text
+Allocate object
+    ↓
+Store GC reference
+    ↓
+Trigger collection
+    ↓
+Relocate object
+    ↓
+Continue execution
+    ↓
+Read reference
+```
+
+The test must verify the complete runtime behavior, not merely that the reference works immediately after assignment.
+
+---
+
+## 7. Compiler Correctness
+
+Every optimization must preserve observable program behavior.
+
+For example:
+
+```text
+Before:
+A → B → C
+
+After:
+A → C
+```
+
+The optimization must demonstrate that removing `B` cannot incorrectly change:
+
+* program results,
+* exceptions,
+* memory effects,
+* observable ordering,
+* GC behavior,
+* deoptimization state,
+* synchronization,
+* or other runtime-visible behavior.
+
+### 7.1 Speculative Optimization
+
+Every speculative optimization must define:
+
+1. The assumption being made.
+2. How assumption failure is detected.
+3. The recovery/deoptimization path.
+4. Tests covering assumption failure.
+
+Speculation without a valid failure path is incorrect.
+
+---
+
+## 8. IR Standards
+
+Every IR transformation must preserve documented invariants.
+
+Each pass must clearly define:
+
+* input invariants,
+* output invariants,
+* required analyses,
+* invalidated analyses,
+* required metadata.
+
+For example, if a pass invalidates:
+
+```text
+DominatorTree
+AliasAnalysis
+LoopAnalysis
+TypeInformation
+```
+
+that invalidation must be explicitly represented.
+
+Stale analysis results must never be silently reused.
+
+---
+
+## 9. Garbage Collection
+
+GC correctness is a hard requirement.
+
+Every GC-managed reference must have a defined tracing and lifetime policy.
+
+New GC-managed object types must account for:
+
+* GC reference fields,
+* tracing,
+* write barriers,
+* allocation,
+* finalization where applicable,
+* relocation,
+* forwarding,
+* weak references,
+* thread-local roots,
+* JIT-generated references.
+
+### 9.1 GC Safety Rule
+
+> **If an object can contain a GC reference, the GC must know about it.**
+
+Exceptions require explicit documentation and a demonstrated reason they are safe.
+
+### 9.2 JIT/GC Interaction
+
+Generated code must correctly handle:
+
+* safepoints,
+* stack maps,
+* GC roots,
+* relocated objects,
+* write barriers,
+* deoptimization metadata.
+
+A mathematically correct optimization that causes the collector to lose track of a live object is **incorrect**.
+
+---
+
+## 10. Threading
+
+Shared mutable state must have explicit synchronization semantics.
+
+Every shared object should have a clearly defined concurrency model:
+
+* thread-local,
+* immutable,
+* externally synchronized,
+* internally synchronized,
+* atomic,
+* lock-free,
+* or another explicitly defined model.
+
+Do not introduce atomics or locks without understanding their correctness and performance implications.
+
+Locks in hot paths must be benchmarked.
+
+### 10.1 Concurrency Testing
+
+Concurrent components should be tested with:
+
+* ThreadSanitizer,
+* stress workloads,
+* repeated scheduling,
+* high contention,
+* shutdown races,
+* compilation/execution races.
+
+---
+
+## 11. Error Handling
+
+Errors must propagate correctly.
+
+Do not silently ignore failures.
+
 Bad:
 
-// Old implementation.
-// auto result = DoSomethingOld();
-// ...
+```cpp
+bool Compile(...) {
+    if (!something()) {
+        return false;
+    }
 
-Use version control.
+    // Continue anyway.
+}
+```
 
-Likewise, unused:
+unless continuing is explicitly correct.
 
-variables,
-functions,
-parameters,
-classes,
-fields,
-includes,
-compatibility hacks
+Errors must not silently become:
 
-should be removed unless there is a documented reason for their existence.
+* corrupted state,
+* invalid IR,
+* stale metadata,
+* leaked resources,
+* invalid machine code,
+* or undefined behavior.
 
-15. TODOs
+Every failure path must leave the system in a valid state.
 
-TODOs MUST NOT be used to hide incomplete production functionality.
+---
+
+## 12. Assertions and Invariants
+
+Use assertions to enforce internal invariants close to their source.
+
+```cpp
+assert(block->isLinked());
+assert(value->type() != Type::Invalid);
+assert(state.isConsistent());
+```
+
+Assertions are not a substitute for validating external or malformed input.
+
+For internal invariants:
+
+```cpp
+assert(index < table.size());
+```
+
+For external input:
+
+```cpp
+if (index >= table.size()) {
+    return Error::InvalidIndex;
+}
+```
+
+The distinction must be preserved.
+
+---
+
+## 13. TODOs
+
+TODOs must not hide incomplete production functionality.
 
 Bad:
 
+```cpp
 // TODO: connect this to the GC.
+```
 
-if the feature is already being merged.
+when the feature is already being merged.
 
-If GC integration is required for correctness, the implementation is not finished until it is connected to the GC.
+If GC integration is required for correctness, the implementation is incomplete until the integration exists.
 
-TODOs may be used for genuinely non-blocking future improvements, preferably with enough context to explain what remains and why.
+TODOs are acceptable for genuinely non-blocking future improvements when the remaining work and reason are clear.
 
-16. Code Review Standard
+---
 
-A reviewer should be able to answer:
+## 14. Code Review
 
-Can I understand what this code does without reverse-engineering the entire subsystem?
+Every non-trivial change should be reviewable in terms of:
 
-If not, the code needs improvement.
+### Correctness
 
-Reviewers should specifically look for:
+* What invariants does this rely on?
+* What invariants does it establish?
+* What happens when its assumptions fail?
 
-unclear ownership
-excessive complexity
-unnecessary abstraction
-duplicated logic
-hidden state
-misleading names
-stale comments
-unsafe casts
-missing error handling
-missing integration
-incomplete lifecycle handling
-unnecessary allocations
-accidental hot-path costs
-VORTEX Rule of Clean Code
+### Integration
 
-Clean code is code whose behavior, ownership, invariants, and integration points can be understood without relying on tribal knowledge.
+* What systems does this touch?
+* What systems need to know it exists?
+* Has every required registration and wiring point been updated?
 
-Google's style guide gives us the syntax and conventions.
+### Memory
 
-VORTEX's engineering standards define the correctness bar.
+* Who owns the data?
+* Can it move?
+* Can it be collected?
+* Can another thread access it?
+
+### Compiler
+
+* Does it affect IR correctness?
+* Does it invalidate analysis?
+* Does it affect deoptimization?
+
+### Performance
+
+* Is this on a hot path?
+* What does profiling show?
+* What are the benchmark results?
+
+### Testing
+
+* What breaks this?
+* Is that failure tested?
+* Is the integration path tested?
+
+A reviewer should be able to understand the implementation without reverse-engineering the entire subsystem.
+
+---
+
+## 15. Definition of Done
+
+A VORTEX change is complete only when all applicable requirements are satisfied:
+
+* [ ] Implementation uses the correct language.
+* [ ] Code follows the VORTEX/Google C++ style standards.
+* [ ] Ownership and lifetime are explicit.
+* [ ] Required subsystems are fully wired.
+* [ ] GC integration is complete.
+* [ ] Threading behavior is defined.
+* [ ] Error paths are handled.
+* [ ] Compiler invariants are preserved.
+* [ ] Relevant analyses are updated or invalidated.
+* [ ] Deoptimization behavior is correct.
+* [ ] Reference implementations were consulted where applicable.
+* [ ] Performance was benchmarked where applicable.
+* [ ] Adversarial tests exist where applicable.
+* [ ] Integration tests exist where applicable.
+* [ ] Assertions and invariant checks exist where appropriate.
+* [ ] No dangling functionality remains.
+* [ ] No TODO is required for basic correctness.
+
+---
+
+## Core Principle
+
+> **Clean code is code whose behavior, ownership, invariants, and integration points can be understood without relying on tribal knowledge.**
+
+The Google C++ Style Guide defines how VORTEX code should be structured and presented.
+
+These engineering standards define what that code must **do**.
+
+**Readable code that corrupts the heap is not clean code.
+Fast code that violates compiler invariants is not good code.
+A correctly implemented feature that is not wired into the runtime is not a finished feature.**
+
+**VORTEX code must be correct, integrated, measurable, and maintainable.**
+
