@@ -577,11 +577,15 @@ uint32_t vtx_constant_prop_run(vtx_graph_t *graph)
 
     if (node_count == 0) return 0;
 
-    /* Allocate lattice state: one lattice value per node */
-    vtx_lattice_val_t *lattice = (vtx_lattice_val_t *)malloc(node_count * sizeof(vtx_lattice_val_t));
+    /* §2.1: Use NodeMap for lattice allocation.
+     * The old code used malloc + free per SCCP invocation.
+     * Since constant_prop_run doesn't take an arena parameter,
+     * we use calloc (which is zeroed — VTX_LATTICE_TOP is {0}). */
+    vtx_lattice_val_t *lattice = (vtx_lattice_val_t *)calloc(node_count, sizeof(vtx_lattice_val_t));
     if (lattice == NULL) return 0;
 
-    /* Initialize all to Top */
+    /* Initialize all to Top (NodeMap zeroes to 0, which is VTX_LATTICE_TOP
+     * if the first field is 0 — but we must be explicit). */
     for (uint32_t i = 0; i < node_count; i++) {
         lattice[i] = vtx_lattice_top();
     }
@@ -952,7 +956,8 @@ uint32_t vtx_constant_prop_run(vtx_graph_t *graph)
      * SCCP's job is to propagate constants and simplify pure data flow,
      * not to make safety decisions. */
 
-    free(lattice);
+    
     worklist_destroy(&wl);
+    free(lattice);
     return simplified;
 }
