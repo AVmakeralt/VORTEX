@@ -190,25 +190,14 @@ inline RepSelectionResult run_representation_selection(vtx_graph_t* graph) {
                 if (user->dead) continue;
                 has_consumer = true;
 
-                /* For Phis: VERY conservative — only mark if ALL consumers
-                 * are pure arithmetic (Add/Sub/Mul/etc). NOT Cmp (because
-                 * Cmp feeds If, and the Cmp+If fusion path is buggy with
-                 * mixed representations), NOT Return (because the retag
-                 * boundary is tricky at merge Phis).
-                 *
-                 * This means ONLY Phis that feed other arithmetic ops
-                 * (loop-carried accumulators) get RAW_INT. The loop counter
-                 * Phi (which feeds Cmp → If) stays tagged.
-                 *
-                 * This is safe but limited. The full fix requires fixing
-                 * the Cmp+If fusion path to handle mixed representations. */
                 if (node->opcode == VTX_OP_Phi) {
                     /* Only mark Phi as RAW_INT if ALL consumers are:
                      * - Pure arithmetic (Add/Sub/Mul/etc)
                      * - Phi (another Phi in the chain)
                      * - Return (the Return isel handles retag)
-                     * NOT Cmp (Cmp feeds If, and the Cmp+If fusion is
-                     * buggy with mixed representations). */
+                     * - Cmp (the Cmp isel handles mixed representations
+                     *   in the non-fusion path; fusion path also handles it)
+                     * NOT Sar/Shr/Shl (shifts always untag inputs) */
                     if (user->opcode != VTX_OP_Add &&
                         user->opcode != VTX_OP_Sub &&
                         user->opcode != VTX_OP_Mul &&
@@ -216,12 +205,22 @@ inline RepSelectionResult run_representation_selection(vtx_graph_t* graph) {
                         user->opcode != VTX_OP_Or &&
                         user->opcode != VTX_OP_Xor &&
                         user->opcode != VTX_OP_Phi &&
-                        user->opcode != VTX_OP_Return) {
+                        user->opcode != VTX_OP_Return &&
+                        user->opcode != VTX_OP_Cmp &&
+                        user->opcode != VTX_OP_CmpP) {
                         all_consumers_ok = false;
                         break;
                     }
                 } else {
-                    /* Non-Phi arithmetic: same rules as before */
+                    /* Non-Phi arithmetic: don't mark if ANY consumer is
+                     * a shift (Sar/Shr/Shl) — shifts always untag their
+                     * inputs, which corrupts RAW_INT values. */
+                    if (user->opcode == VTX_OP_Sar ||
+                        user->opcode == VTX_OP_Shr ||
+                        user->opcode == VTX_OP_Shl) {
+                        all_consumers_ok = false;
+                        break;
+                    }
                     if (needs_tagged(user->opcode) ||
                         (user->type == VTX_TYPE_Float)) {
                         all_consumers_ok = false;
