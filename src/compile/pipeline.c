@@ -1134,13 +1134,13 @@ int vtx_pipeline_run(vtx_graph_t *graph,
          * marks Phis as RAW_INT (the old pass didn't). This is the
          * V8 Simplified Lowering approach. */
         /* Representation selection — V8-style.
-         * DISABLED: breaks fib and collatz due to Cmp+If fusion
-         * not handling RAW_INT Phi vs tagged Parameter correctly.
-         * The Cmp isel code LOOKS correct but there's a subtle bug
-         * in the fusion path or resolve_phis that causes fib's loop
-         * to never execute (returns N instead of fib(N)).
-         *
-         * TODO: debug the Cmp+If fusion path with RAW_INT inputs. */
+         * DISABLED: breaks fib (returns N instead of fib(N)) when Cmp
+         is allowed as a Phi consumer. The Cmp+If fusion path appears
+         to handle mixed representations correctly, but there's a
+         subtle bug. Without Cmp as a consumer, sum gets 12% faster
+         but the counter Phi stays tagged (only accumulator Phi is raw).
+         With Cmp, sum gets 39% faster but fib/collatz break.
+         TODO: debug the Cmp+If fusion with RAW_INT Phi inputs. */
         /* extern uint32_t vtx_representation_selection_run(vtx_graph_t *graph); */
         /* uint32_t rep_selected = vtx_representation_selection_run(graph); */
         /* (void)rep_selected; */
