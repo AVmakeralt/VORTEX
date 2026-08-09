@@ -1133,9 +1133,12 @@ int vtx_pipeline_run(vtx_graph_t *graph,
         /* Then run the new representation selection pass which also
          * marks Phis as RAW_INT (the old pass didn't). This is the
          * V8 Simplified Lowering approach. */
+        /* Representation selection — V8-style representation selection.
+         * Marks Phis as RAW_INT when safe. Currently conservative: only
+         * marks Phis whose consumers are arithmetic + Return (not Cmp). */
         extern uint32_t vtx_representation_selection_run(vtx_graph_t *graph);
         uint32_t rep_selected = vtx_representation_selection_run(graph);
-        (void)rep_selected;  /* stats TODO */
+        (void)rep_selected;
     }
 
     /* ================================================================== */

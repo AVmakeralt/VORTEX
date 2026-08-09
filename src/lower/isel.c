@@ -1990,11 +1990,18 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         uint32_t dst = ensure_node_vreg(stream, node_id, arena);
         if (val_vreg == VTX_VREG_INVALID || cnt_vreg == VTX_VREG_INVALID) return -1;
 
-        /* SAR = arithmetic shift right (sign-extends). Same untag/retag
-         * as SHR, but emits VTX_X86_SAR instead of VTX_X86_SHR. */
+        /* SAR = arithmetic shift right (sign-extends). */
+        /* Check if value input is already RAW_INT. If so, skip untag. */
+        const vtx_node_t *val_node_sar = vtx_node_get_const(&graph->node_table, node->inputs[0]);
+        bool val_is_raw_sar = val_node_sar && vtx_nf_has(val_node_sar->flags, VTX_NF_RAW_INT);
         {
-            uint32_t val_untagged = vtx_isel_alloc_vreg(stream, arena);
-            emit_smi_untag(stream, block, val_untagged, val_vreg, node_id, arena);
+            uint32_t val_untagged;
+            if (val_is_raw_sar) {
+                val_untagged = val_vreg;
+            } else {
+                val_untagged = vtx_isel_alloc_vreg(stream, arena);
+                emit_smi_untag(stream, block, val_untagged, val_vreg, node_id, arena);
+            }
 
             const vtx_node_t *cnt_node = vtx_node_get_const(&graph->node_table, node->inputs[1]);
             if (cnt_node && cnt_node->opcode == VTX_OP_Constant &&
@@ -2002,6 +2009,13 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
                 vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, val_untagged, node_id), arena);
                 vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, dst,
                                    cnt_node->constval.as.int_val, node_id), arena);
+                /* TODO: retag output to produce tagged SMI.
+                 * Currently DISABLED — causes collatz infinite loop.
+                 * The retag should produce SMI(n/2) from raw n/2, but
+                 * something about the interaction with the Cmp+If
+                 * fusion or the regalloc causes an infinite loop.
+                 * Without retag, collatz is off by 1 (112 vs 111). */
+                /* emit_smi_retag(stream, block, dst, node_id, arena); */
             } else {
                 uint32_t cnt_untagged = vtx_isel_alloc_vreg_fixed(stream, arena, 1 /* RCX */);
                 emit_smi_untag(stream, block, cnt_untagged, cnt_vreg, node_id, arena);
