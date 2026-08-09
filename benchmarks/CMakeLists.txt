@@ -323,3 +323,33 @@ target_link_libraries(bench_scaling PRIVATE
     m
     pthread
 )
+
+# ---- Dump sum assembly for inspection ----
+add_executable(dump_sum_asm
+    dump_sum_asm.c
+)
+target_link_libraries(dump_sum_asm PRIVATE
+    -Wl,--start-group
+    vortex_compile
+    vortex_codecache
+    vortex_lower
+    vortex_interp
+    vortex_runtime
+    vortex_ir
+    vortex_deopt
+    vortex_baseline
+    vortex_inliner
+    vortex_pea
+    vortex_guard
+    $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota>
+    vortex_region
+    vortex_trace
+    vortex_midtier
+    vortex_profile
+    vortex_assembler
+    vortex_common
+    $<$<BOOL:${VORTEX_ENABLE_CPP}>:vortex_cpp>
+    -Wl,--end-group
+    m
+    pthread
+)
