@@ -3117,18 +3117,32 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
                 uint32_t val_vreg = vtx_isel_node_vreg(stream, node->inputs[i]);
                 if (val_vreg != VTX_VREG_INVALID) {
                     uint32_t rax_vreg = vtx_isel_alloc_vreg_fixed(stream, arena, 0);
-                    /* Mark NO_COALESCE so the Return's MOV RAX, val_vreg isn't
-                     * coalesced with val_vreg (which would extend val_vreg's
-                     * live range to include RAX, but val_vreg is already dead
-                     * at the Return — coalescing is safe but might cause the
-                     * regalloc to put val_vreg in RAX, which is fine).
+
+                    /* BUGFIX (T2 SMI tag elision): If the input is RAW_INT
+                     * (from an elided arithmetic chain), we must retag it
+                     * to a NaN-boxed SMI before returning. The caller
+                     * expects a tagged value in RAX.
                      *
-                     * Actually, NOT marking NO_COALESCE lets the coalescer
-                     * merge val_vreg with RAX when val_vreg is dead after
-                     * this MOV — which is the desired optimization (the value
-                     * ends up in RAX without an explicit MOV). */
-                    vtx_inst_t mov_ret = make_rr_inst(VTX_X86_MOV, rax_vreg, val_vreg, node_id);
-                    vtx_isel_emit_inst(block, mov_ret, arena);
+                     * This is the consumer-side boundary handling that
+                     * complements the resolve_phis INSERT_RETAG for the
+                     * Phi back-edge. Together, these allow ALL arithmetic
+                     * nodes to be marked RAW_INT (skipping per-op retag)
+                     * while ensuring tagged consumers always receive
+                     * properly tagged values.
+                     *
+                     * V8 calls this "ChangeInt32ToTagged" in Simplified
+                     * Lowering. We emit the same AND+SHL+OR sequence as
+                     * emit_smi_retag. */
+                    if (vtx_nf_has(inp->flags, VTX_NF_RAW_INT)) {
+                        /* Move raw value to RAX, then retag in-place. */
+                        vtx_inst_t mov_raw = make_rr_inst(VTX_X86_MOV, rax_vreg, val_vreg, node_id);
+                        vtx_isel_emit_inst(block, mov_raw, arena);
+                        emit_smi_retag(stream, block, rax_vreg, node_id, arena);
+                    } else {
+                        /* Tagged value — plain MOV to RAX. */
+                        vtx_inst_t mov_ret = make_rr_inst(VTX_X86_MOV, rax_vreg, val_vreg, node_id);
+                        vtx_isel_emit_inst(block, mov_ret, arena);
+                    }
                 }
                 break;
             }
