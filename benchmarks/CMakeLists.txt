@@ -173,3 +173,32 @@ target_link_libraries(bench_v8_comparison PRIVATE
     pthread
 )
 
+
+# ---- T2 JIT vs V8 comparison ----
+add_executable(bench_t2_vs_v8
+    bench_t2_vs_v8.c
+)
+target_link_libraries(bench_t2_vs_v8 PRIVATE
+    -Wl,--start-group
+    vortex_compile
+    vortex_codecache
+    vortex_lower
+    vortex_interp
+    vortex_runtime
+    vortex_ir
+    vortex_deopt
+    vortex_baseline
+    vortex_inliner
+    vortex_pea
+    vortex_guard
+    $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota>
+    vortex_region
+    vortex_trace
+    vortex_midtier
+    vortex_profile
+    vortex_assembler
+    vortex_common
+    -Wl,--end-group
+    m
+    pthread
+)
