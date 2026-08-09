@@ -4042,6 +4042,53 @@ static int resolve_phis(vtx_inst_stream_t *stream, const vtx_schedule_t *schedul
                 pred_blk->inst_count += 4; \
             } while(0)
 
+            /* Helper: insert an SMI retag sequence for tagged-Phi copies
+             * where the source is RAW_INT (from an elided arithmetic chain).
+             *
+             * BUGFIX (T2 correctness): When a tagged Phi (not RAW_INT) has
+             * a back-edge from a RAW_INT node (e.g., an elided Add that
+             * feeds both a loop-carried Phi AND a Return), the plain MOV
+             * copied a raw int into the tagged Phi's vreg. The Return then
+             * read a raw int instead of a tagged SMI, producing wrong
+             * results (e.g., sum(n) returned n instead of the sum).
+             *
+             * The retag sequence converts raw int → tagged SMI:
+             *   tmp ← src
+             *   AND tmp, smi_mask_vreg  (truncate to 48-bit data)
+             *   SHL tmp, 3              (shift into SMI position)
+             *   OR  tmp, smi_scratch_vreg (install NaN-box header)
+             *   phi ← tmp
+             *
+             * We use a fresh temp vreg to avoid corrupting the source if
+             * the regalloc coalesces phi_vreg == src_vreg. */
+            #define INSERT_RETAG(dst, src, node_id, offset) do { \
+                uint32_t _tmp = vtx_isel_alloc_vreg(stream, arena); \
+                vtx_inst_t _mov1 = make_rr_inst(VTX_X86_MOV, _tmp, (src), (node_id)); \
+                _mov1.flags |= VTX_INST_FLAG_PHI_COPY | VTX_INST_FLAG_NO_COALESCE; \
+                vtx_inst_t _and = make_rr_inst(VTX_X86_AND, _tmp, stream->smi_mask_vreg, (node_id)); \
+                _and.flags |= VTX_INST_FLAG_PHI_COPY; \
+                vtx_inst_t _shl = make_ri_inst(VTX_X86_SHL, _tmp, 3, (node_id)); \
+                _shl.flags |= VTX_INST_FLAG_PHI_COPY; \
+                vtx_inst_t _or  = make_rr_inst(VTX_X86_OR, _tmp, stream->smi_scratch_vreg, (node_id)); \
+                _or.flags |= VTX_INST_FLAG_PHI_COPY; \
+                vtx_inst_t _mov2 = make_rr_inst(VTX_X86_MOV, (dst), _tmp, (node_id)); \
+                _mov2.flags |= VTX_INST_FLAG_PHI_COPY; \
+                stream->uses_smi = true; \
+                if (vtx_isel_block_ensure_capacity(pred_blk, 5, arena) != 0) return -1; \
+                for (int _i = 0; _i < 5; _i++) { \
+                    if ((offset) + _i < pred_blk->inst_count) { \
+                        memmove(&pred_blk->insts[(offset) + _i + 1], &pred_blk->insts[(offset) + _i], \
+                                (pred_blk->inst_count - ((offset) + _i)) * sizeof(vtx_inst_t)); \
+                    } \
+                } \
+                pred_blk->insts[(offset)] = _mov1; \
+                pred_blk->insts[(offset) + 1] = _and; \
+                pred_blk->insts[(offset) + 2] = _shl; \
+                pred_blk->insts[(offset) + 3] = _or; \
+                pred_blk->insts[(offset) + 4] = _mov2; \
+                pred_blk->inst_count += 5; \
+            } while(0)
+
             uint32_t cur_insert = insert_pos;
 
             /* ---- Parallel copy algorithm (correct for multiple cycles) ----
@@ -4265,14 +4312,54 @@ static int resolve_phis(vtx_inst_stream_t *stream, const vtx_schedule_t *schedul
                         cur_insert++;
                     }
                 } else {
-                    /* Normal Phi: plain MOV */
-                    INSERT_MOV(copy_dst[i], copy_src[i], copy_node[i], cur_insert);
-                    cur_insert++;
+                    /* Normal (tagged) Phi. Check if the source is RAW_INT.
+                     *
+                     * BUGFIX (T2 correctness): When a tagged Phi has a
+                     * back-edge from a RAW_INT node (e.g., an elided Add
+                     * that also feeds a Return), the old code did a plain
+                     * MOV — copying raw int into the tagged Phi's vreg.
+                     * The Return then read a raw int instead of a tagged
+                     * SMI, producing wrong results (e.g., sum(n) returned
+                     * n instead of the sum).
+                     *
+                     * Fix: If the source is RAW_INT, insert a retag
+                     * sequence (AND + SHL + OR) to convert raw int back
+                     * to a tagged SMI before copying into the Phi. */
+                    bool src_is_raw = false;
+                    if (sched_blk->is_loop_header) {
+                        uint32_t data_idx = 0;
+                        for (uint32_t pi = 0; pi < phi_node->input_count; pi++) {
+                            vtx_nodeid_t inp_id = phi_node->inputs[pi];
+                            if (inp_id == VTX_NODEID_INVALID || inp_id >= graph->node_table.count) continue;
+                            const vtx_node_t *inp_node = vtx_node_get_const(&graph->node_table, inp_id);
+                            if (inp_node && (inp_node->opcode == VTX_OP_Region ||
+                                             inp_node->opcode == VTX_OP_LoopBegin ||
+                                             inp_node->opcode == VTX_OP_Proj)) {
+                                continue;
+                            }
+                            if (data_idx == p) {
+                                src_is_raw = inp_node && vtx_nf_has(inp_node->flags, VTX_NF_RAW_INT);
+                                break;
+                            }
+                            data_idx++;
+                        }
+                    }
+
+                    if (src_is_raw) {
+                        /* Source is raw int → need retag to produce tagged SMI */
+                        INSERT_RETAG(copy_dst[i], copy_src[i], copy_node[i], cur_insert);
+                        cur_insert += 5;
+                    } else {
+                        /* Both tagged → plain MOV */
+                        INSERT_MOV(copy_dst[i], copy_src[i], copy_node[i], cur_insert);
+                        cur_insert++;
+                    }
                 }
             }
 
             #undef INSERT_MOV
             #undef INSERT_UNTAG
+            #undef INSERT_RETAG
             #undef MAX_PHI_COPIES
         }
     }

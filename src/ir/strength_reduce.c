@@ -178,10 +178,36 @@ uint32_t vtx_strength_reduce_run(vtx_graph_t *graph)
                 sc->type = VTX_TYPE_Int;
                 sc->bytecode_pc = orig_pc;
 
+                /* Replace: Div → Sar(corrected, k)
+                 *
+                 * BUGFIX (T2 correctness — collatz infinite loop):
+                 * The old code did:
+                 *   vtx_node_remove_input(nt, i, 1);  // remove rhs
+                 *   vtx_node_add_input(nt, i, shift_const);  // add shift
+                 *   vtx_node_replace_input(nt, i, 0, add_id);  // replace lhs
+                 *
+                 * But if the Div had a control input (e.g. [lhs, rhs, ctrl]),
+                 * removing index 1 (rhs) left [lhs, ctrl], then adding
+                 * shift_const at the end gave [lhs, ctrl, shift_const], and
+                 * replacing index 0 gave [add_id, ctrl, shift_const].
+                 *
+                 * The isel for Sar expects inputs [value, shift_amount].
+                 * With the control input at index 1, the isel read the
+                 * Proj node as the shift amount — garbage, causing the
+                 * Sar to produce wrong results. For collatz, this made
+                 * n/2 produce a huge value, so n never reached 1 →
+                 * infinite loop.
+                 *
+                 * Fix: Replace input 0 (lhs) with add_id, and replace
+                 * input 1 (rhs) with shift_const — in place, without
+                 * removing/adding. This preserves the control input
+                 * at its original position (index 2). */
                 node->opcode = VTX_OP_Sar;
-                vtx_node_remove_input(nt, (vtx_nodeid_t)i, 1);
-                vtx_node_add_input(nt, (vtx_nodeid_t)i, shift_const);
+                /* Also clear the SIDE_EFFECT flag — Sar is a pure
+                 * arithmetic op, unlike Div which can trap on div-by-zero. */
+                node->flags &= ~(VTX_NF_SIDE_EFFECT);
                 vtx_node_replace_input(nt, (vtx_nodeid_t)i, 0, add_id);
+                vtx_node_replace_input(nt, (vtx_nodeid_t)i, 1, shift_const);
                 replaced++;
                 continue;
             }

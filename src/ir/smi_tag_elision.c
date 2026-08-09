@@ -72,24 +72,32 @@ static bool can_produce_raw_int(vtx_node_opcode_t op) {
     case VTX_OP_Neg:
         return true;
     case VTX_OP_Phi:
-        /* BUGFIX (audit #7): Phi nodes CAN produce raw int.
+        /* BUGFIX (T2 correctness): Phi nodes are NOT marked RAW_INT.
          *
-         * The old code excluded Phi, meaning every loop iteration
-         * retagged the loop variable (10-30% perf loss on int loops).
+         * The resolve_phis function in isel.c does NOT correctly handle
+         * all cases of RAW_INT Phis:
+         *   - Forward edge (tagged → raw): INSERT_UNTAG works ✓
+         *   - Back-edge raw→tagged for tagged Phi: INSERT_RETAG added ✓
+         *   - But the Add/Sub isel still emits raw output to a RAW_INT
+         *     Phi's vreg, and when that Phi is also consumed by a tagged
+         *     user (like a Return), the boundary is not correctly
+         *     handled at the consumer site.
          *
-         * The key insight: the isel's resolve_phis already handles
-         * RAW_INT Phis correctly — it emits an untag sequence (SHL+SAR)
-         * for the forward-edge (preheader) and a plain MOV for the
-         * back-edge (where the value is already raw int from the
-         * elided Add/Sub). The Cmp isel also handles RAW_INT inputs
-         * by skipping the untag. So Phi elision is safe as long as:
-         *   1. All Phi data inputs are SMI producers or RAW_INT
-         *   2. All Phi consumers are eligible arithmetic ops (not
-         *      chain terminators like Return/Store/If)
+         * Rather than risk subtle miscompilations, we disable Phi RAW_INT
+         * marking entirely. This costs ~10-30% on int-heavy loops but
+         * guarantees correctness. The Add/Sub/Mul nodes in the chain are
+         * still marked RAW_INT — the per-op retag is skipped, and the
+         * boundary retag happens at the consumer (Return/Store/Cmp) via
+         * the isel's existing retag path.
          *
-         * The all_consumers_arith check below ensures condition 2.
-         * The phi_inputs_ok check ensures condition 1. */
-        return true;
+         * To re-enable safely, the following must be verified:
+         *   1. resolve_phis correctly inserts untag on EVERY tagged→raw edge
+         *   2. resolve_phis correctly inserts retag on EVERY raw→tagged edge
+         *   3. The regalloc doesn't coalesce away the temp vregs used by
+         *      INSERT_UNTAG/INSERT_RETAG
+         *   4. Non-loop Phis (merge points) are also handled correctly
+         */
+        return false;
     default:
         return false;
     }

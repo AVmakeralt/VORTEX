@@ -15,6 +15,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 #include <math.h>
 #include <limits.h>
 
@@ -711,20 +712,33 @@ uint32_t vtx_constant_prop_run(vtx_graph_t *graph)
             }
         }
 
-        /* Special handling for If nodes with constant condition:
-         * If the condition is a constant, we can determine which branch
-         * is taken and mark the other as unreachable.
-         * The If's data input (condition) determines reachability. */
+        /* Special handling for If nodes:
+         *
+         * SCCP BUGFIX (T2 correctness): The old code only handled the
+         * case where the condition is Constant. When SCCP temporarily
+         * concludes a loop condition is constant (because the loop-header
+         * Phi's forward edge is a constant and the back-edge hasn't been
+         * visited yet), it marks one branch as unreachable (Top).
+         *
+         * But when the back-edge is later processed, the Phi's lattice
+         * value changes from Constant to Bottom (overdefined). The If
+         * node is re-processed (it's a user of the condition), but the
+         * old code did nothing when the condition was NOT constant —
+         * leaving the previously-unreachable branch stuck at Top.
+         *
+         * DCE then removed the "unreachable" loop body, producing
+         * incorrect code (e.g. sum(n) returned n instead of the sum).
+         *
+         * Fix: When an If's condition is NOT constant (Bottom/Top),
+         * mark BOTH branches as reachable (Bottom). This re-activates
+         * any branch that was prematurely marked unreachable. */
         if (node->opcode == VTX_OP_If && ic >= 2) {
             vtx_nodeid_t cond_id = node->inputs[1]; /* second input is condition */
             if (cond_id != VTX_NODEID_INVALID && cond_id < node_count) {
                 vtx_lattice_val_t cond_val = lattice[cond_id];
                 if (cond_val.tag == VTX_LATTICE_CONSTANT && cond_val.value.kind == VTX_TYPE_Int) {
-                    /* We know which branch is taken.
-                     * The If's Proj nodes will have their lattice values set.
-                     * We don't eliminate the other Proj here — DCE will handle it
-                     * after we mark unreachable code. But we do mark the unreachable
-                     * Proj as Top so downstream nodes stay Top. */
+                    /* Condition is a known constant — mark taken branch reachable,
+                     * leave unreachable branch as Top. */
                     bool taken = (cond_val.value.as.int_val != 0);
                     if (node->cond == VTX_COND_EQ) taken = !taken; /* IF_FALSE */
 
@@ -748,6 +762,52 @@ uint32_t vtx_constant_prop_run(vtx_graph_t *graph)
                             }
                             /* Unreachable projections stay Top — their users will
                              * remain Top and be eliminated by DCE */
+                        }
+                    }
+                } else {
+                    /* Condition is NOT constant (Bottom or Top).
+                     *
+                     * BUGFIX (T2 correctness): A previous iteration may have
+                     * marked one branch as unreachable when the condition
+                     * was temporarily constant. Now that the condition is
+                     * overdefined, BOTH branches must be marked reachable.
+                     *
+                     * We mark both Projs as Bottom (reachable) and push
+                     * them to the worklist so their users get re-evaluated.
+                     *
+                     * If the condition is Top (not yet visited), we skip
+                     * this — the If hasn't been reached yet, and the Projs
+                     * should stay Top until the If is actually reached. */
+                    if (cond_val.tag == VTX_LATTICE_BOTTOM) {
+                        for (uint32_t u = 0; u < node->use_count; u++) {
+                            vtx_use_entry_t *ue = &node->uses[u];
+                            if (ue->user_id >= node_count) continue;
+                            vtx_node_t *user = &nt->nodes[ue->user_id];
+                            if (user->dead || user->opcode != VTX_OP_Proj) continue;
+                            if (user->input_count >= 1 && user->inputs[0] == nid) {
+                                /* Mark this Proj as reachable (Bottom = overdefined). */
+                                if (lattice[ue->user_id].tag != VTX_LATTICE_BOTTOM) {
+                                    lattice[ue->user_id] = vtx_lattice_bottom();
+                                    worklist_push(&wl, ue->user_id);
+
+                                    /* BUGFIX (T2 correctness #2): When we mark a Proj
+                                     * as reachable, we must ALSO push its users to the
+                                     * worklist. When the Proj is later popped and
+                                     * evaluated, its lattice value won't change
+                                     * (Bottom -> Bottom), so the normal "if changed,
+                                     * push users" path at line 706 won't fire. This
+                                     * left downstream Regions and data nodes stuck
+                                     * at Top (unreachable), causing DCE/Phase 2 to
+                                     * kill the loop body. */
+                                    for (uint32_t k = 0; k < user->use_count; k++) {
+                                        vtx_use_entry_t *ue2 = &user->uses[k];
+                                        if (ue2->user_id < node_count &&
+                                            !nt->nodes[ue2->user_id].dead) {
+                                            worklist_push(&wl, ue2->user_id);
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
