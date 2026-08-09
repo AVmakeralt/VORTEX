@@ -204,6 +204,8 @@ vtx_pipeline_config_t vtx_pipeline_config_t2(void)
     cfg.run_block_layout  = true;   /* profile-guided block layout */
     cfg.run_rep_infer     = true;
     cfg.run_partial_virt = true;  /* partial virtualization (field → constant) */
+    cfg.run_temporal_const = true;  /* temporal constant propagation */
+    cfg.run_cross_func_virt = true;  /* cross-function virtual continuation */
     cfg.markov            = NULL;
     return cfg;
 }
@@ -249,6 +251,8 @@ vtx_pipeline_config_t vtx_pipeline_config_t3(void)
     cfg.run_block_layout  = true;   /* profile-guided block layout */
     cfg.run_rep_infer     = true;   /* representation inference (UnboxInt/BoxInt) */
     cfg.run_partial_virt = true;   /* partial virtualization (field → constant) */
+    cfg.run_temporal_const = true;   /* temporal constant propagation */
+    cfg.run_cross_func_virt = true;   /* cross-function virtual continuation */
     cfg.markov            = NULL;
     return cfg;
 }
@@ -1351,6 +1355,40 @@ int vtx_pipeline_run(vtx_graph_t *graph,
                 result->stats = stats;
                 return -1;
             }
+        }
+    }
+
+    /* ================================================================== */
+    /* Phase 6.5: Temporal Constant Propagation                            */
+    /*                                                                    */
+    /* Identifies "phase-stable" fields: values that are mutable during   */
+    /* startup but become constant after initialization completes.        */
+    /* ================================================================== */
+    if (config->run_temporal_const) {
+        extern uint32_t vtx_temporal_constant_run(vtx_graph_t *graph);
+        int64_t tc_start = now_ns();
+        uint32_t tc_replaced = vtx_temporal_constant_run(graph);
+        stats.block_layout_time_ns += elapsed_ns(tc_start);
+        if (tc_replaced > 0 && config->run_dce) {
+            run_dce_pass(graph, 1, &stats.dce_time_ns, false);
+        }
+    }
+
+    /* ================================================================== */
+    /* Phase 6.6: Cross-Function Virtual Object Continuation               */
+    /*                                                                    */
+    /* Pushes PEA across call boundaries. After inlining, identifies        */
+    /* virtual objects that flow through the (now-inlined) call chain     */
+    /* and maintains their virtual representation. Fully virtualizes       */
+    /* objects where ALL fields are constant (removes the Allocate).       */
+    /* ================================================================== */
+    if (config->run_cross_func_virt) {
+        extern uint32_t vtx_cross_function_virtual_run(vtx_graph_t *graph);
+        int64_t cfv_start = now_ns();
+        uint32_t cfv_objects = vtx_cross_function_virtual_run(graph);
+        stats.block_layout_time_ns += elapsed_ns(cfv_start);
+        if (cfv_objects > 0 && config->run_dce) {
+            run_dce_pass(graph, 1, &stats.dce_time_ns, false);
         }
     }
 
