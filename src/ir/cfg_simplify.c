@@ -21,6 +21,8 @@
 #include "ir/node.h"
 #include "vortex_config.h"
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 
 uint32_t vtx_cfg_simplify_run(vtx_graph_t *graph)
 {
@@ -159,6 +161,78 @@ uint32_t vtx_cfg_simplify_run(vtx_graph_t *graph)
                     simplified++;
                 }
             }
+        }
+    }
+
+    /* ---- A2: Additional CFG simplification passes ---- */
+
+    /* 4. Block merging: DISABLED for correctness.
+     *
+     * The block merging logic (replacing a single-pred Region with the
+     * predecessor's Goto input) is tricky in VORTEX's Sea-of-Nodes because:
+     *   - The Goto's input[0] is the predecessor's entry control, not the
+     *     predecessor's exit control
+     *   - Other nodes in the predecessor block reference the Goto
+     *   - Killing the Goto may orphan those references
+     *
+     * V8 does this in CFGBuilder::MergeBlocks but with a different IR
+     * structure (block-based, not pure SoN). Implementing it correctly
+     * requires walking all nodes in the predecessor block and rewiring
+     * their control inputs. Left as a TODO.
+     */
+
+    /* 5. Unreachable-block elimination: Remove blocks not reachable
+     * from Start. After SCCP + DCE, some blocks may be orphaned.
+     * A simple reachability scan from Start marks all reachable nodes;
+     * any dead-but-not-marked nodes are truly unreachable.
+     *
+     * This is safe — it only removes nodes that no control path reaches.
+     * V8 does this in CFGBuilder::EliminateUnreachableBlocks. */
+    {
+        /* Mark all nodes reachable from Start via control edges */
+        bool *reachable = (bool *)calloc(nt->count, sizeof(bool));
+        if (reachable) {
+            /* Find Start node */
+            for (uint32_t i = 0; i < nt->count; i++) {
+                vtx_node_t *node = &nt->nodes[i];
+                if (!node->dead && node->opcode == VTX_OP_Start) {
+                    /* BFS from Start */
+                    uint32_t *worklist = (uint32_t *)malloc(nt->count * sizeof(uint32_t));
+                    if (worklist) {
+                        uint32_t wl_head = 0, wl_tail = 0;
+                        worklist[wl_tail++] = i;
+                        reachable[i] = true;
+                        while (wl_head < wl_tail) {
+                            uint32_t cur = worklist[wl_head++];
+                            vtx_node_t *cn = &nt->nodes[cur];
+                            /* Walk users (forward edges in SoN) */
+                            for (uint32_t u = 0; u < cn->use_count; u++) {
+                                vtx_use_entry_t *ue = &cn->uses[u];
+                                if (ue->user_id >= nt->count) continue;
+                                if (reachable[ue->user_id]) continue;
+                                vtx_node_t *user = &nt->nodes[ue->user_id];
+                                if (user->dead) continue;
+                                /* Follow control edges and data edges
+                                 * that don't cross block boundaries */
+                                reachable[ue->user_id] = true;
+                                worklist[wl_tail++] = ue->user_id;
+                            }
+                        }
+                        free(worklist);
+                    }
+                    break;
+                }
+            }
+            /* Mark unreachable control nodes as dead */
+            for (uint32_t i = 0; i < nt->count; i++) {
+                vtx_node_t *node = &nt->nodes[i];
+                if (node->dead) continue;
+                if (!reachable[i] && vtx_nf_has(node->flags, VTX_NF_CONTROL)) {
+                    node->dead = true;
+                    simplified++;
+                }
+            }
+            free(reachable);
         }
     }
 

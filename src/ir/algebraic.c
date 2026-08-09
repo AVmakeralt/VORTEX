@@ -229,6 +229,70 @@ uint32_t vtx_algebraic_simplify_run(vtx_graph_t *graph)
             }
             break;
 
+        /* Cmp(Constant, Constant) → Constant (0 or 1)
+         *
+         * A4 — Common operator reducer. V8's common-operator-reducer.cc
+         * does this. When both operands of a comparison are compile-time
+         * constants, fold the comparison to its result. This exposes
+         * downstream opportunities (e.g., constant-If folding in
+         * cfg_simplify.c). */
+        case VTX_OP_Cmp:
+        case VTX_OP_CmpP: {
+            if (lhs_is_const && rhs_is_const) {
+                bool result = false;
+                int64_t a = lhs_const, b = rhs_const;
+                switch (node->cond) {
+                case VTX_COND_EQ:  result = (a == b); break;
+                case VTX_COND_NE:  result = (a != b); break;
+                case VTX_COND_LT:  result = (a < b);  break;
+                case VTX_COND_LE:  result = (a <= b); break;
+                case VTX_COND_GT:  result = (a > b);  break;
+                case VTX_COND_GE:  result = (a >= b); break;
+                default: break;
+                }
+                /* Replace this Cmp with a Constant(result) */
+                vtx_nodeid_t c_id = vtx_node_create(nt, VTX_OP_Constant);
+                if (c_id != VTX_NODEID_INVALID) {
+                    vtx_node_t *c = vtx_node_get(nt, c_id);
+                    if (c) {
+                        c->constval.kind = VTX_TYPE_Int;
+                        c->constval.as.int_val = result ? 1 : 0;
+                        c->type = VTX_TYPE_Int;
+                        replace_node(nt, ii, c_id);
+                        pass_simplified++;
+                    }
+                }
+            }
+            /* Cmp(x, x) → Constant(1) for EQ, Constant(0) for NE,
+             * Constant(1) for GE/LE, Constant(0) for GT/LT.
+             * Only valid when x is not a float (NaN != NaN). */
+            if (node->type != VTX_TYPE_Float && lhs == rhs &&
+                lhs != VTX_NODEID_INVALID) {
+                bool result = false;
+                switch (node->cond) {
+                case VTX_COND_EQ:  result = true;  break;
+                case VTX_COND_NE:  result = false; break;
+                case VTX_COND_LE:  result = true;  break;
+                case VTX_COND_GE:  result = true;  break;
+                case VTX_COND_LT:  result = false; break;
+                case VTX_COND_GT:  result = false; break;
+                default: break;
+                }
+                vtx_nodeid_t c_id = vtx_node_create(nt, VTX_OP_Constant);
+                if (c_id != VTX_NODEID_INVALID) {
+                    vtx_node_t *c = vtx_node_get(nt, c_id);
+                    if (c) {
+                        c->constval.kind = VTX_TYPE_Int;
+                        c->constval.as.int_val = result ? 1 : 0;
+                        c->type = VTX_TYPE_Int;
+                        replace_node(nt, ii, c_id);
+                        pass_simplified++;
+                    }
+                }
+            }
+            break;
+        }
+
         default:
             break;
         }
