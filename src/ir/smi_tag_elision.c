@@ -74,29 +74,23 @@ static bool can_produce_raw_int(vtx_node_opcode_t op) {
     case VTX_OP_Phi:
         /* BUGFIX (T2 correctness): Phi nodes are NOT marked RAW_INT.
          *
-         * The resolve_phis function in isel.c does NOT correctly handle
-         * all cases of RAW_INT Phis:
-         *   - Forward edge (tagged → raw): INSERT_UNTAG works ✓
-         *   - Back-edge raw→tagged for tagged Phi: INSERT_RETAG added ✓
-         *   - But the Add/Sub isel still emits raw output to a RAW_INT
-         *     Phi's vreg, and when that Phi is also consumed by a tagged
-         *     user (like a Return), the boundary is not correctly
-         *     handled at the consumer site.
+         * While the resolve_phis function handles forward-edge untag
+         * (INSERT_UNTAG) and back-edge retag (INSERT_RETAG), there are
+         * edge cases where tagged consumers (Return, Store) read a
+         * RAW_INT Phi without a retag. The all_consumers_arith check
+         * should prevent this, but in practice the Return's input chain
+         * can bypass the check via intermediate nodes.
          *
-         * Rather than risk subtle miscompilations, we disable Phi RAW_INT
-         * marking entirely. This costs ~10-30% on int-heavy loops but
-         * guarantees correctness. The Add/Sub/Mul nodes in the chain are
-         * still marked RAW_INT — the per-op retag is skipped, and the
-         * boundary retag happens at the consumer (Return/Store/Cmp) via
-         * the isel's existing retag path.
+         * The callee-saved fix resolved the register clobber, but the
+         * representation boundary is still not fully correct. Disabling
+         * Phi RAW_INT is the safe choice — Add/Sub/Mul nodes are still
+         * RAW_INT (the per-op retag is skipped), and the boundary retag
+         * happens at the Phi resolution via INSERT_RETAG.
          *
-         * To re-enable safely, the following must be verified:
-         *   1. resolve_phis correctly inserts untag on EVERY tagged→raw edge
-         *   2. resolve_phis correctly inserts retag on EVERY raw→tagged edge
-         *   3. The regalloc doesn't coalesce away the temp vregs used by
-         *      INSERT_UNTAG/INSERT_RETAG
-         *   4. Non-loop Phis (merge points) are also handled correctly
-         */
+         * Performance impact: ~10-30% on int-heavy loops vs. full
+         * representation selection. A proper V8-style representation
+         * selection pass (with explicit ChangeTaggedToInt32 /
+         * ChangeInt32ToTagged nodes) would close this gap. */
         return false;
     default:
         return false;
@@ -119,6 +113,21 @@ static bool can_consume_raw_int(vtx_node_opcode_t op) {
      * on inputs if they're already raw. The Cmp isel has been updated to
      * skip untag when inputs are RAW_INT. */
     if (op == VTX_OP_Cmp || op == VTX_OP_CmpP) return true;
+    /* Phi: a tagged Phi CAN be a consumer of raw int — the resolve_phis
+     * function in isel.c inserts a retag (INSERT_RETAG) on the edge
+     * from the raw source to the tagged Phi's vreg. So from the SMI tag
+     * elision pass's perspective, a tagged Phi is a valid consumer.
+     *
+     * This is the key insight from V8's Simplified Lowering: the
+     * representation change (retag) happens on the EDGE, not at the
+     * producer or consumer. The resolve_phis function is the edge
+     * handler for Phi merges.
+     *
+     * Without this, Add/Sub/Mul nodes that feed a loop-carried Phi
+     * can NEVER be marked RAW_INT, because the Phi is their only
+     * consumer and it's tagged. This defeats the entire purpose of
+     * SMI tag elision for loops. */
+    if (op == VTX_OP_Phi) return true;
     return false;
 }
 
