@@ -104,6 +104,7 @@ target_link_libraries(bench_t2 PRIVATE
     vortex_profile
     vortex_assembler
     vortex_common
+    $<$<BOOL:${VORTEX_ENABLE_CPP}>:vortex_cpp>
     -Wl,--end-group
     m
     pthread

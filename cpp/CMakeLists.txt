@@ -82,5 +82,9 @@ add_executable(test_superinstruction tests/test_superinstruction.cpp)
 target_link_libraries(test_superinstruction PRIVATE vortex_cpp)
 add_test(NAME test_superinstruction COMMAND test_superinstruction)
 
+add_executable(test_partial_virtualization tests/test_partial_virtualization.cpp)
+target_link_libraries(test_partial_virtualization PRIVATE vortex_cpp)
+add_test(NAME test_partial_virtualization COMMAND test_partial_virtualization)
+
 install(TARGETS vortex_cpp ARCHIVE DESTINATION lib)
 install(DIRECTORY include/ DESTINATION include)

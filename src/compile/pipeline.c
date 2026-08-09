@@ -203,6 +203,7 @@ vtx_pipeline_config_t vtx_pipeline_config_t2(void)
     cfg.run_midtier       = false;
     cfg.run_block_layout  = true;   /* profile-guided block layout */
     cfg.run_rep_infer     = true;
+    cfg.run_partial_virt = true;  /* partial virtualization (field → constant) */
     cfg.markov            = NULL;
     return cfg;
 }
@@ -247,6 +248,7 @@ vtx_pipeline_config_t vtx_pipeline_config_t3(void)
     cfg.run_midtier       = false;
     cfg.run_block_layout  = true;   /* profile-guided block layout */
     cfg.run_rep_infer     = true;   /* representation inference (UnboxInt/BoxInt) */
+    cfg.run_partial_virt = true;   /* partial virtualization (field → constant) */
     cfg.markov            = NULL;
     return cfg;
 }
@@ -1288,6 +1290,34 @@ int vtx_pipeline_run(vtx_graph_t *graph,
                 result->stats = stats;
                 return -1;
             }
+        }
+    }
+
+    /* ================================================================== */
+    /* Phase 5.5: Partial Virtualization (field → constant)                */
+    /*                                                                    */
+    /* Identifies object fields that always hold compile-time constant     */
+    /* values and replaces field loads with the constants directly.        */
+    /* This is the "cross-constant optimization + partial virtualization"  */
+    /* combination: known constants propagate through the computation      */
+    /* graph, killing branches and enabling further virtualization.        */
+    /*                                                                    */
+    /* Runs BEFORE PEA (Phase 6) so that PEA sees the simplified graph     */
+    /* (objects with constant fields are more likely to become fully       */
+    /* virtualizable). Also runs BEFORE SCCP's re-run so SCCP can         */
+    /* propagate the exposed constants.                                   */
+    /*                                                                    */
+    /* T2-safe: no speculation — only replaces fields proven to always     */
+    /* hold the same constant value. A T3 variant (future) can use type    */
+    /* feedback to speculate field values with guards.                    */
+    /* ================================================================== */
+    if (config->run_partial_virt) {
+        extern uint32_t vtx_partial_virtualize_run(vtx_graph_t *graph);
+        int64_t pv_start = now_ns();
+        uint32_t pv_fields = vtx_partial_virtualize_run(graph);
+        stats.block_layout_time_ns += elapsed_ns(pv_start);  /* reuse stats field */
+        if (pv_fields > 0 && config->run_dce) {
+            run_dce_pass(graph, 1, &stats.dce_time_ns, false);
         }
     }
 
