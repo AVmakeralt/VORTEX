@@ -1430,12 +1430,42 @@ vtx_regalloc_result_t *vtx_regalloc_run_target(vtx_inst_stream_t *stream,
                 }
             }
         }
-        if (need_r12_r13) {
-            result->callee_saved_mask = callee_saved_used | (1u << 12) | (1u << 13);
-        } else {
-            result->callee_saved_mask = callee_saved_used;
-        }
-    }
+        /* BUGFIX (T2 callee-saved register clobber — bench_t2 segfault):
+     *
+     * The old code conservatively saved R12/R13 only when spills or
+     * memory operands were present. But the JIT can ALSO clobber
+     * callee-saved registers in code paths the regalloc doesn't track:
+     *
+     *   - resolve_phis INSERT_UNTAG/INSERT_RETAG macros emit instructions
+     *     directly into predecessor blocks, including SHL/SAR/AND/OR
+     *     that use temp vregs. If the regalloc assigns a temp vreg to
+     *     RBX/R14/R15, it tracks it. But the temp vregs are allocated
+     *     AFTER the main isel pass, and the regalloc might assign them
+     *     to registers it thinks are free.
+     *
+     *   - The SMI retag/untag code uses R10/R11 (caller-saved, fine)
+     *     but the RESULT vreg might be assigned to a callee-saved reg.
+     *
+     * With -O2 + LTO, the C compiler keeps caller variables in callee-saved
+     * registers (RBX, R12-R15) across the JIT call. If the JIT clobbers
+     * any of these without saving/restoring, the caller's variables are
+     * corrupted.
+     *
+     * Fix: ALWAYS save ALL callee-saved registers (RBX, R12-R15) in
+     * the JIT prologue. This is what V8, LuaJIT, and HotSpot do — they
+     * conservatively save all callee-saved registers because the JIT
+     * code can use any register for temp values.
+     *
+     * Cost: 5 pushes + 5 pops = 10 instructions per JIT call (~20-50ns).
+     * This is negligible compared to the JIT compilation time (~100µs)
+     * and the benefit (correctness on all optimization levels). */
+    result->callee_saved_mask = callee_saved_used
+                                | (1u << 3)   /* RBX */
+                                | (1u << 12)  /* R12 */
+                                | (1u << 13)  /* R13 */
+                                | (1u << 14)  /* R14 */
+                                | (1u << 15); /* R15 */
+    } /* closes outer block opened at line 1417 */
 
     /* Detect leaf functions (no CALL instructions).
      * Leaf functions can use a lighter prologue (skip JIT header pushes). */
