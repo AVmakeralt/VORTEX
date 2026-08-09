@@ -1114,17 +1114,28 @@ int vtx_pipeline_run(vtx_graph_t *graph,
     }
 
     /* ================================================================== */
-    /* Phase 2.6: SMI Tag Elision                                         */
+    /* Phase 2.6: SMI Tag Elision + Representation Selection              */
     /*                                                                    */
-    /* Marks straight-line arithmetic chains as RAW_INT so the isel skips */
-    /* per-op untag/retag. One untag at chain entry, one retag at exit.  */
-    /* This is the single highest-ROI optimization for SMI-heavy loops.  */
+    /* Marks arithmetic chains AND Phis as RAW_INT so the isel skips      */
+    /* per-op untag/retag. The representation_selection pass (C++) does   */
+    /* V8-style representation selection: it marks Phis as RAW_INT when   */
+    /* safe, and the boundary conversions are handled by resolve_phis   */
+    /* (INSERT_UNTAG on forward edge, INSERT_RETAG at tagged consumers). */
+    /* This collapses per-iteration tag/untag overhead in hot loops.     */
     /* ================================================================== */
     if (config->run_sccp) {
+        /* First run the old smi_tag_elision for backward compat */
         uint32_t elided = vtx_smi_tag_elision_run(graph);
         if (elided > 0) {
             verify_between_passes(graph, config, "SMITagElision");
         }
+
+        /* Then run the new representation selection pass which also
+         * marks Phis as RAW_INT (the old pass didn't). This is the
+         * V8 Simplified Lowering approach. */
+        extern uint32_t vtx_representation_selection_run(vtx_graph_t *graph);
+        uint32_t rep_selected = vtx_representation_selection_run(graph);
+        (void)rep_selected;  /* stats TODO */
     }
 
     /* ================================================================== */

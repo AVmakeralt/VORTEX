@@ -4328,35 +4328,34 @@ static int resolve_phis(vtx_inst_stream_t *stream, const vtx_schedule_t *schedul
                 } else {
                     /* Normal (tagged) Phi. Check if the source is RAW_INT.
                      *
-                     * BUGFIX (T2 correctness): When a tagged Phi has a
-                     * back-edge from a RAW_INT node (e.g., an elided Add
-                     * that also feeds a Return), the old code did a plain
-                     * MOV — copying raw int into the tagged Phi's vreg.
-                     * The Return then read a raw int instead of a tagged
-                     * SMI, producing wrong results (e.g., sum(n) returned
-                     * n instead of the sum).
+                     * REPRESENTATION SELECTION: When a tagged Phi has a
+                     * source that is RAW_INT (from an elided arithmetic
+                     * chain), we must retag it before copying into the
+                     * tagged Phi's vreg. This handles BOTH loop-header
+                     * Phis AND non-loop merge Phis (at Regions).
                      *
-                     * Fix: If the source is RAW_INT, insert a retag
-                     * sequence (AND + SHL + OR) to convert raw int back
-                     * to a tagged SMI before copying into the Phi. */
+                     * The old code only handled loop headers, missing
+                     * the merge-Phi case (fib's base_case return path). */
                     bool src_is_raw = false;
-                    if (sched_blk->is_loop_header) {
-                        uint32_t data_idx = 0;
-                        for (uint32_t pi = 0; pi < phi_node->input_count; pi++) {
-                            vtx_nodeid_t inp_id = phi_node->inputs[pi];
-                            if (inp_id == VTX_NODEID_INVALID || inp_id >= graph->node_table.count) continue;
-                            const vtx_node_t *inp_node = vtx_node_get_const(&graph->node_table, inp_id);
-                            if (inp_node && (inp_node->opcode == VTX_OP_Region ||
-                                             inp_node->opcode == VTX_OP_LoopBegin ||
-                                             inp_node->opcode == VTX_OP_Proj)) {
-                                continue;
-                            }
-                            if (data_idx == p) {
-                                src_is_raw = inp_node && vtx_nf_has(inp_node->flags, VTX_NF_RAW_INT);
-                                break;
-                            }
-                            data_idx++;
+
+                    /* Scan the Phi's inputs to find the source node for
+                     * predecessor p. Works for both loop headers and
+                     * non-loop merge Phis. */
+                    uint32_t data_idx = 0;
+                    for (uint32_t pi = 0; pi < phi_node->input_count; pi++) {
+                        vtx_nodeid_t inp_id = phi_node->inputs[pi];
+                        if (inp_id == VTX_NODEID_INVALID || inp_id >= graph->node_table.count) continue;
+                        const vtx_node_t *inp_node = vtx_node_get_const(&graph->node_table, inp_id);
+                        if (inp_node && (inp_node->opcode == VTX_OP_Region ||
+                                         inp_node->opcode == VTX_OP_LoopBegin ||
+                                         inp_node->opcode == VTX_OP_Proj)) {
+                            continue;
                         }
+                        if (data_idx == p) {
+                            src_is_raw = inp_node && vtx_nf_has(inp_node->flags, VTX_NF_RAW_INT);
+                            break;
+                        }
+                        data_idx++;
                     }
 
                     if (src_is_raw) {
