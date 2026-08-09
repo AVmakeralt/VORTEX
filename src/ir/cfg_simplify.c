@@ -74,21 +74,70 @@ uint32_t vtx_cfg_simplify_run(vtx_graph_t *graph)
             }
         }
 
-        /* 2. If with constant condition → replace with Goto
+        /* 2. If with constant condition → replace with Goto to taken branch
          *
-         * If the condition input is a Constant, we know which branch
-         * is taken. Replace the If with a Goto to the taken successor. */
+         * BUGFIX (cfg_simplify TODO at line 91): The old code had a
+         * TODO marking this as unimplemented. V8's branch-elimination.cc
+         * (~1500 lines) does this plus much more (If-If merging, empty-
+         * block elimination, critical-edge splitting).
+         *
+         * We implement the core case: If the condition is a Constant
+         * node with an Int value, determine which Proj (true/false)
+         * is the taken branch, then replace the If with the taken
+         * Proj and mark the untaken Proj as dead.
+         *
+         * The If's cond field determines the branch semantics:
+         *   VTX_COND_NE = IF_TRUE (branch if cond != 0)
+         *   VTX_COND_EQ = IF_FALSE (branch if cond == 0)
+         *
+         * Proj local_index 0 = true branch, 1 = false branch.
+         *
+         * After this transform, the untaken Proj and everything it
+         * reaches becomes dead — DCE cleans it up. The taken Proj
+         * becomes the If's replacement (a control-flow passthrough). */
         if (node->opcode == VTX_OP_If && node->input_count >= 2) {
             vtx_nodeid_t cond_id = node->inputs[1];
             if (cond_id != VTX_NODEID_INVALID && cond_id < nt->count) {
                 vtx_node_t *cond_node = &nt->nodes[cond_id];
-                if (!cond_node->dead && cond_node->opcode == VTX_OP_Constant) {
-                    /* Constant condition — fold the If */
-                    /* We can't easily determine which Proj (true/false)
-                     * is the taken branch without walking the Proj users.
-                     * For now, just mark the If as dead — the GVN/DCE
-                     * passes will clean up the untaken branch. */
-                    /* TODO: properly redirect control flow */
+                if (!cond_node->dead && cond_node->opcode == VTX_OP_Constant &&
+                    cond_node->constval.kind == VTX_TYPE_Int) {
+                    /* Determine taken branch:
+                     *   cond != 0 → true branch taken (for IF_TRUE / VTX_COND_NE)
+                     *   cond == 0 → false branch taken (for IF_TRUE)
+                     *   For IF_FALSE (VTX_COND_EQ): inverted */
+                    bool cond_truthy = (cond_node->constval.as.int_val != 0);
+                    bool taken_is_true = (node->cond == VTX_COND_EQ) ? !cond_truthy : cond_truthy;
+
+                    /* Find the Proj nodes for this If.
+                     * Proj local_index 0 = true branch, 1 = false branch. */
+                    vtx_nodeid_t taken_proj = VTX_NODEID_INVALID;
+                    vtx_nodeid_t untaken_proj = VTX_NODEID_INVALID;
+                    uint8_t taken_index = taken_is_true ? 0 : 1;
+                    for (uint32_t u = 0; u < node->use_count; u++) {
+                        vtx_use_entry_t *ue = &node->uses[u];
+                        if (ue->user_id >= nt->count) continue;
+                        vtx_node_t *user = &nt->nodes[ue->user_id];
+                        if (user->dead || user->opcode != VTX_OP_Proj) continue;
+                        if (user->input_count >= 1 && user->inputs[0] == (vtx_nodeid_t)i) {
+                            if (user->local_index == taken_index)
+                                taken_proj = ue->user_id;
+                            else
+                                untaken_proj = ue->user_id;
+                        }
+                    }
+
+                    if (taken_proj != VTX_NODEID_INVALID) {
+                        /* Replace the If with the taken Proj.
+                         * All users of the If now point to the taken Proj. */
+                        vtx_node_replace_all_uses(nt, (vtx_nodeid_t)i, taken_proj);
+
+                        /* Mark the If and untaken Proj as dead */
+                        node->dead = true;
+                        if (untaken_proj != VTX_NODEID_INVALID) {
+                            nt->nodes[untaken_proj].dead = true;
+                        }
+                        simplified++;
+                    }
                 }
             }
         }
