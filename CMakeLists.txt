@@ -67,6 +67,7 @@ option(VORTEX_ENABLE_PROFILING "Enable profiling in interpreter and T1" ON)
 option(VORTEX_ENABLE_SOTA "Enable SOTA features" ON)
 option(VORTEX_ENABLE_TESTS "Build tests" ON)
 option(VORTEX_ENABLE_BENCHMARKS "Build benchmarks" ON)
+option(VORTEX_ENABLE_CPP "Build C++ embedding library (vortex_cpp) and C++ runtime features (superinstructions, hidden classes, property IC)" ON)
 
 # CONFIG-001 fix: sanitizer options. Enable with -DVORTEX_ENABLE_ASAN=ON.
 # Note: sanitizers conflict with _FORTIFY_SOURCE (already skipped above
@@ -112,6 +113,14 @@ set(VORTEX_INCLUDE_DIRS
 
 # Subdirectories
 add_subdirectory(src)
+
+if(VORTEX_ENABLE_CPP)
+    # C++ embedding library + runtime features (hidden classes,
+    # property IC, superinstruction pre-decode).
+    # Must come BEFORE tests/benchmarks so the vortex_cpp target is
+    # available for them to link against.
+    add_subdirectory(cpp)
+endif()
 
 if(VORTEX_ENABLE_TESTS)
     enable_testing()
