@@ -203,3 +203,33 @@ target_link_libraries(bench_t2_vs_v8 PRIVATE
     m
     pthread
 )
+
+# ---- Object-heavy benchmark (partial virtualization) ----
+add_executable(bench_object_heavy
+    bench_object_heavy.c
+)
+target_link_libraries(bench_object_heavy PRIVATE
+    -Wl,--start-group
+    vortex_compile
+    vortex_codecache
+    vortex_lower
+    vortex_interp
+    vortex_runtime
+    vortex_ir
+    vortex_deopt
+    vortex_baseline
+    vortex_inliner
+    vortex_pea
+    vortex_guard
+    $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota>
+    vortex_region
+    vortex_trace
+    vortex_midtier
+    vortex_profile
+    vortex_assembler
+    vortex_common
+    $<$<BOOL:${VORTEX_ENABLE_CPP}>:vortex_cpp>
+    -Wl,--end-group
+    m
+    pthread
+)
