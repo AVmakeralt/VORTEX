@@ -298,6 +298,14 @@ int vtx_invalidate_dependencies(uint64_t typeid_,
         cm->dep_type_count = 0;
         cm->dep_shape_ids = NULL;
         cm->dep_shape_count = 0;
+        /* BUGFIX (audit High #25): Null out code_start to prevent dangling
+         * pointer, and free remaining metadata to prevent leaks. */
+        cm->code_start = NULL;
+        cm->code_size = 0;
+        cm->poly_ics = NULL;
+        cm->reloc_table = NULL;
+        cm->deopt_info = NULL;
+        cm->bc_pc_map = NULL;
 
         /* Remove from registry (but don't free cm — the code cache
          * owns the code memory, and freeing cm here would lose the

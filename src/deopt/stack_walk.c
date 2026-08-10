@@ -605,7 +605,7 @@ uint8_t *vtx_frame_compress(const vtx_reconstructed_frame_t *frame)
     if (!frame->locals && !frame->stack) return NULL;
 
     /* Worst-case size: every value is unique, so we need an entry per value.
-     * Total values = local_count + stack_count.
+     * Total values = (size_t)local_count + (size_t)stack_count.
      * Each entry = VTX_RLE_ENTRY_SIZE bytes. */
     uint32_t total_values = frame->local_count + frame->stack_count;
     if (total_values == 0) return NULL;

@@ -933,7 +933,7 @@ static void constrain_after_bounds_check(vtx_range_t *ranges,
 
     /* If the length is a constant, we know the exact bound */
     if (len_range.is_const) {
-        int64_t bound = safe_dec(len_range.min);
+        int64_t bound = safe_dec(len_range.max);
         if (bound < idx_range->max) {
             idx_range->max = bound;
             idx_range->is_const = (idx_range->min == idx_range->max);

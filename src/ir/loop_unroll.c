@@ -376,6 +376,7 @@ uint32_t vtx_loop_unroll_run(vtx_graph_t *graph,
          * copy's mapping to find the back-edge values. */
         vtx_nodeid_t *prev_mapping = NULL;  /* previous copy's mapping */
         vtx_nodeid_t *cur_phi_be_val = phi_be_val;  /* current back-edges */
+        vtx_nodeid_t cur_proj_true = proj_true;  /* current true-Proj for chaining */
 
         for (uint32_t copy_num = 0; copy_num < effective_factor - 1; copy_num++) {
             /* Reset mapping for this copy */
@@ -424,13 +425,19 @@ uint32_t vtx_loop_unroll_run(vtx_graph_t *graph,
                     continue;
                 }
                 /* If input is a loop Phi → use the Phi's back-edge value
-                 * (the original body's output for that loop-carried variable).
-                 * This is the KEY fix: the copy reads the previous iteration's
-                 * result, not the Phi (which holds the current iteration's value). */
+                 * (the PREVIOUS copy's output for that loop-carried variable).
+                 *
+                 * BUGFIX (audit Critical #2): The old code used phi_be_val[p]
+                 * (the ORIGINAL back-edge values) instead of cur_phi_be_val[p]
+                 * (the UPDATED back-edge values for this copy). Copy 2 read
+                 * copy 0's values instead of copy 1's — producing wrong results
+                 * for multi-copy unrolling (factor ≥ 3).
+                 * Fix: use cur_phi_be_val[p] which is updated at the top of
+                 * each iteration to point at the previous copy's versions. */
                 bool found_phi = false;
                 for (uint32_t p = 0; p < phi_count; p++) {
                     if (phi_ids[p] == orig_inp) {
-                        vtx_node_add_input(&graph->node_table, new_id, phi_be_val[p]);
+                        vtx_node_add_input(&graph->node_table, new_id, cur_phi_be_val[p]);
                         found_phi = true;
                         break;
                     }
@@ -442,8 +449,15 @@ uint32_t vtx_loop_unroll_run(vtx_graph_t *graph,
         }
 
         /* === Phase 2: Copy the exit If ===
-         * The copy's control input is the original If's true-Proj (the
-         * "continue" path). The copy's data input is the copied Cmp. */
+         * The copy's control input is the PREVIOUS copy's true-Proj (or
+         * the original's true-Proj for the first copy).
+         *
+         * BUGFIX (audit Critical #3): The old code always used proj_true
+         * (the ORIGINAL If's true-Proj) for the control input. Copies 1
+         * and 2 fired off the original's Proj, not chained through the
+         * previous copy — so they executed unconditionally instead of
+         * being gated by the previous copy's exit test.
+         * Fix: use cur_proj_true which tracks the previous copy's Proj. */
         vtx_nodeid_t new_if = copy_body_node(graph, exit_if);
         if (new_if == VTX_NODEID_INVALID) goto skip_loop;
         mapping[exit_if] = new_if;
@@ -453,9 +467,9 @@ uint32_t vtx_loop_unroll_run(vtx_graph_t *graph,
             for (uint32_t inp = 0; inp < orig_if_node->input_count; inp++) {
                 vtx_nodeid_t orig_inp = orig_if_node->inputs[inp];
                 if (orig_inp == VTX_NODEID_INVALID) continue;
-                /* Control input: use original If's true-Proj */
+                /* Control input: use PREVIOUS copy's true-Proj (chained) */
                 if (orig_inp == proj_true) {
-                    vtx_node_add_input(&graph->node_table, new_if, proj_true);
+                    vtx_node_add_input(&graph->node_table, new_if, cur_proj_true);
                     continue;
                 }
                 /* Data input: use copied body node if available */
@@ -463,11 +477,11 @@ uint32_t vtx_loop_unroll_run(vtx_graph_t *graph,
                     vtx_node_add_input(&graph->node_table, new_if, mapping[orig_inp]);
                     continue;
                 }
-                /* Loop Phi → back-edge value */
+                /* Loop Phi → back-edge value (use cur_phi_be_val, not phi_be_val) */
                 bool found_phi = false;
                 for (uint32_t p = 0; p < phi_count; p++) {
                     if (phi_ids[p] == orig_inp) {
-                        vtx_node_add_input(&graph->node_table, new_if, phi_be_val[p]);
+                        vtx_node_add_input(&graph->node_table, new_if, cur_phi_be_val[p]);
                         found_phi = true;
                         break;
                     }
@@ -558,8 +572,11 @@ uint32_t vtx_loop_unroll_run(vtx_graph_t *graph,
             }
         }
 
-        /* Save this copy's mapping for the next iteration */
+        /* Save this copy's mapping and Proj_true for the next iteration.
+         * BUGFIX (audit Critical #3): Track cur_proj_true so the next
+         * copy's If is chained through this copy's Proj, not the original. */
         prev_mapping = mapping;
+        cur_proj_true = new_proj_true;
         /* Allocate a new mapping array for the next copy (arena-allocated,
          * so the old one is still valid until the arena is reset). */
         if (copy_num < effective_factor - 2) {

@@ -226,6 +226,10 @@ uint32_t vtx_markov_predict_hot_methods(vtx_markov_t *mk, uint32_t next_phase,
 /* Phase transition detection                                                  */
 /* ========================================================================== */
 
+/* BUGFIX (audit Critical #14): This function is dead code.
+ * The phases[] array is never populated anywhere in the codebase.
+ * The function always returns false (no transition detected).
+ * To activate: populate phases[] from profiling data. */
 bool vtx_markov_detect_transition(vtx_markov_t *mk, uint32_t *new_phase)
 {
     if (mk == NULL || new_phase == NULL) return false;
