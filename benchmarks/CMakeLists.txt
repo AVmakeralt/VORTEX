@@ -372,3 +372,12 @@ target_link_libraries(dump_collatz PRIVATE
     vortex_sota vortex_region vortex_trace vortex_midtier vortex_profile
     vortex_assembler vortex_common vortex_cpp
     -Wl,--end-group m pthread)
+
+add_executable(test_t1_crash test_t1_crash.c)
+target_link_libraries(test_t1_crash PRIVATE
+    -Wl,--start-group
+    vortex_compile vortex_codecache vortex_lower vortex_interp vortex_runtime
+    vortex_ir vortex_deopt vortex_baseline vortex_inliner vortex_pea vortex_guard
+    vortex_sota vortex_region vortex_trace vortex_midtier vortex_profile
+    vortex_assembler vortex_common
+    -Wl,--end-group m pthread)
