@@ -13,6 +13,7 @@
 
 #include "guard/ewma.h"
 #include <math.h>
+#include <stddef.h>
 
 /* ========================================================================== */
 /* Lifecycle                                                                   */

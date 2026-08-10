@@ -2082,8 +2082,10 @@ static void compile_if_true(vtx_compile_ctx_t *ctx, uint16_t target_pc)
     /* If not NaN-boxed, jump to raw double check */
     uint32_t jcc_to_raw = emit_jcc32(buf, CC_NE);
 
-    /* Step 2: NaN-boxed path — check if data bits are zero */
-    /* (val & ~0x7) == VTX_NAN_BOX_HEADER  ⟹  data == 0  ⟹  falsy */
+    /* Step 2: NaN-boxed path — check if data bits are zero.
+     * (val & ~0x7) == VTX_NAN_BOX_HEADER ⟹ data == 0 ⟹ falsy.
+     * ~0x7 = 0xFFFFFFFFFFFFFFF8 clears the 3-bit tag, keeping all data bits.
+     * If the result equals HEADER, the data bits (bits 3-50) were all zero. */
     emit_mov_reg_imm64(buf, VTX_REG_R10, 0xFFFFFFFFFFFFFFF8ULL);
     emit_mov_reg_reg64(buf, VTX_REG_R11, VTX_REG_RAX);
     emit_and_reg_reg(buf, VTX_REG_R11, VTX_REG_R10);

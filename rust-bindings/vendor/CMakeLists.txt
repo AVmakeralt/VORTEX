@@ -14,6 +14,7 @@ add_library(vortex_runtime STATIC
     runtime/helpers.c
     runtime/bytecode.c
     runtime/safepoint_manager.c
+    runtime/coroutine.c
     runtime/vortex_runtime.c
 )
 target_include_directories(vortex_runtime PUBLIC ${VORTEX_INCLUDE_DIRS})
@@ -57,6 +58,8 @@ add_library(vortex_ir STATIC
     ir/tbaa.c
     ir/spec_elim.c
     ir/strength_reduce.c
+    ir/algebraic.c
+    ir/cfg_simplify.c
     ir/loop_unroll.c
     ir/smi_tag_elision.c
     ir/rep_infer.c
@@ -70,6 +73,7 @@ add_library(vortex_trace STATIC
     trace/recorder.c
     trace/tree.c
     trace/side_exit.c
+    trace/retrace.c
 )
 target_include_directories(vortex_trace PUBLIC ${VORTEX_INCLUDE_DIRS})
 target_link_libraries(vortex_trace PUBLIC vortex_runtime vortex_ir vortex_profile)
@@ -143,6 +147,7 @@ add_library(vortex_lower STATIC
     lower/emit.c
     lower/guard_emit.c
     lower/reloc.c
+    lower/target.c
 )
 target_include_directories(vortex_lower PUBLIC ${VORTEX_INCLUDE_DIRS})
 target_link_libraries(vortex_lower PUBLIC vortex_ir vortex_deopt)
@@ -172,6 +177,7 @@ add_library(vortex_compile STATIC
     compile/decision.c
     compile/request.c
     compile/callee_lookup.c
+    compile/aot.c
 )
 target_include_directories(vortex_compile PUBLIC ${VORTEX_INCLUDE_DIRS})
 target_link_libraries(vortex_compile PUBLIC
