@@ -61,6 +61,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include "vortex/constval_equal.hpp"
 #include <unordered_map>
 #include <vector>
 
@@ -188,8 +189,7 @@ inline PartialVirtualizationResult partial_virtualize(vtx_graph_t* graph) {
                     } else {
                         // Already has a constant — check it matches
                         // (if not, mark as runtime-write to be safe)
-                        if (fi.constant_value.kind != val_node->constval.kind ||
-                            fi.constant_value.as.int_val != val_node->constval.as.int_val) {
+                        if (!vortex::vtx_constval_equal(fi.constant_value, val_node->constval)) {
                             fi.has_constant_value = false;
                             fi.has_runtime_write = true;
                         }

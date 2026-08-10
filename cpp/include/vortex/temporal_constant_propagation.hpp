@@ -43,6 +43,13 @@
 // T2 (this pass): only replaces fields where ALL stores write the
 //   same constant value (provably stable). No speculation.
 //
+//   NOTE: The current implementation does NOT prove loop exclusion
+//   (checking whether a store is inside a loop). This is a TODO that
+//   requires schedule info. The pass is still safe because it only
+//   replaces fields where ALL stores write the SAME constant — if a
+//   store inside a loop writes a different value, the conflicting-write
+//   check catches it.
+//
 // T3 (future): uses profiling to identify fields that are USUALLY
 //   constant, inserts a guard check, and specializes the steady
 //   state. Deoptimizes if the guard fails.
@@ -54,6 +61,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include "vortex/constval_equal.hpp"
 #include <unordered_map>
 #include <vector>
 
@@ -164,8 +172,7 @@ inline TemporalConstantResult temporal_constant_propagate(vtx_graph_t* graph) {
                     if (!fi.has_constant_value) {
                         fi.has_constant_value = true;
                         fi.constant_value = val_node->constval;
-                    } else if (fi.constant_value.kind != val_node->constval.kind ||
-                               fi.constant_value.as.int_val != val_node->constval.as.int_val) {
+                    } else if (!vortex::vtx_constval_equal(fi.constant_value, val_node->constval)) {
                         fi.has_constant_value = false;
                         fi.has_runtime_store = true;
                     }

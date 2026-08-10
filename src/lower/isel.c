@@ -2009,21 +2009,21 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
                 vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, val_untagged, node_id), arena);
                 vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, dst,
                                    cnt_node->constval.as.int_val, node_id), arena);
-                /* The Sar output is raw. We should retag it to produce a
-                 * tagged SMI, but the retag causes an infinite loop.
-                 * Root cause: R10/R11 ARE loaded in block 0, but the
-                 * retag AND clobbers R11 (DATA_MASK), which is also
-                 * used by the next retag in the same block. The fix
-                 * is to use a temp vreg for the retag destination
-                 * instead of modifying dst in-place.
+                /* The Sar output is raw. We need to retag it, but the retag
+                 * causes an infinite loop in collatz. The root cause is
+                 * unknown — possibly the retag changes the instruction count
+                 * which shifts branch offsets, or the regalloc assigns
+                 * the retag's temp vreg to a register that's still live.
                  *
-                 * For now: don't retag. The Sar produces a raw value.
-                 * This causes collatz off-by-1 (112 vs 111) because
-                 * the raw n/2 value flows into the tagged n Phi.
-                 * The shift exclusion in rep selection prevents the
-                 * strength reduction's Add from being RAW_INT, but
-                 * the Sar itself still produces raw output. */
-                /* emit_smi_retag(stream, block, dst, node_id, arena); */
+                 * For now: DISABLE the retag. The Sar produces a raw value.
+                 * This causes collatz off-by-1 (112 vs 111). The shift
+                 * exclusion in rep selection prevents most RAW_INT issues,
+                 * but the strength reduction's Sar still produces raw output.
+                 *
+                 * TODO: investigate why the retag causes an infinite loop.
+                 * The retag code itself is correct (AND+SHL+OR = SMI).
+                 * The issue is likely in the regalloc or emit phase. */
+                /* RETAG DISABLED */
             } else {
                 uint32_t cnt_untagged = vtx_isel_alloc_vreg_fixed(stream, arena, 1 /* RCX */);
                 emit_smi_untag(stream, block, cnt_untagged, cnt_vreg, node_id, arena);

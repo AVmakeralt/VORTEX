@@ -59,6 +59,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include "vortex/constval_equal.hpp"
 #include <unordered_map>
 #include <vector>
 
@@ -159,8 +160,7 @@ inline CrossFunctionVirtualResult cross_function_virtualize(vtx_graph_t* graph) 
                     if (!fw.is_constant) {
                         fw.is_constant = true;
                         fw.value = val->constval;
-                    } else if (fw.value.kind != val->constval.kind ||
-                               fw.value.as.int_val != val->constval.as.int_val) {
+                    } else if (!vortex::vtx_constval_equal(fw.value, val->constval)) {
                         fw.is_constant = false;
                         fw.has_runtime_write = true;
                     }
