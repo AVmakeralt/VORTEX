@@ -68,7 +68,7 @@ void vtx_embed_runtime_destroy(vtx_embed_runtime_t* rt) {
 int vtx_embed_runtime_enable_jit(vtx_embed_runtime_t* rt, uint32_t nthreads) {
     if (!rt || !rt->rt) { set_error("null runtime"); return -1; }
     rt->rt->enable_jit(nthreads);
-    return 0;
+    return 1; /* H21: return actual success */
 }
 
 int vtx_embed_runtime_compile_t1(vtx_embed_runtime_t* rt, vtx_embed_bytecode_t* bc) {

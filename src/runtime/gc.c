@@ -1063,6 +1063,11 @@ void vtx_gc_collect_young(vtx_gc_t *gc)
      * before swapping, so they survive the swap. */
     for (uint32_t i = 0; i < gc->pinned_count; i++) {
         vtx_heap_object_t *pinned = gc->pinned_objects[i];
+        /* C3 BUGFIX: Skip old-gen pinned objects — they must NOT be
+         * copied into young semi-space. Copying an old-gen object
+         * into young gen corrupts old-gen heap metadata and breaks
+         * card-table / mark bitmap. */
+        if (vtx_gc_in_old(gc, pinned)) continue;
         /* Pinned objects are still in from-space. Copy them to to-space
          * so they survive the swap. We can't move them (they're pinned),
          * so we copy them and leave a forwarding pointer. But wait —

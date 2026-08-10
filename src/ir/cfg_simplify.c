@@ -132,6 +132,8 @@ uint32_t vtx_cfg_simplify_run(vtx_graph_t *graph)
                         /* Replace the If with the taken Proj.
                          * All users of the If now point to the taken Proj. */
                         vtx_node_replace_all_uses(nt, (vtx_nodeid_t)i, taken_proj);
+                        /* C12: Fix self-loop */
+                        vtx_node_replace_input(nt, taken_proj, 0, node->inputs[0]);
 
                         /* Mark the If and untaken Proj as dead */
                         node->dead = true;

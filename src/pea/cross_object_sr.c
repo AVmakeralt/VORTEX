@@ -544,7 +544,7 @@ static int rewrite_scalar_replacements(vtx_graph_t *graph,
 
             /* Find the scalar local for this field */
             vtx_nodeid_t local_id = VTX_NODEID_INVALID;
-            for (uint32_t m = 0; m < result->mapping_count; m++) {
+            for (int32_t m = (int32_t)result->mapping_count - 1; m >= 0; m--) {
                 if (result->mappings[m].alloc_id == alloc_id &&
                     result->mappings[m].field_offset == node->field_offset) {
                     local_id = result->mappings[m].local_id;

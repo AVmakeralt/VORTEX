@@ -47,16 +47,23 @@ extern "C" int32_t vtx_cpp_host_trampoline(uint32_t func_id,
     (void)user_data;
     if (sp_ptr == nullptr || *sp_ptr == nullptr) return 0;
 
-    // Legacy single-arg convention: argv[0] = top-of-stack.
-    // For multi-arg support, the bytecode would need an extended opcode
-    // that encodes the argc in its operand. For now we read 1 arg.
+    // C18 FIX: Extract argc from the operand. The operand is packed as
+    // (fn_id << 6) | argc by the luajit-2 frontend. We unpack argc here.
+    uint32_t fn_id = func_id >> 6;
+    uint32_t argc = func_id & 0x3F;
+    if (argc == 0) argc = 1; /* default to 1 for legacy callers */
+
     vtx_value_t *sp = *sp_ptr;
     if (sp == nullptr) return 0;
 
-    // Pop one argument.
-    vortex::Value argv[1] = { vortex::Value(*--sp) };
+    // Pop argc arguments from the stack.
+    vortex::Value argv[64];
+    for (uint32_t i = 0; i < argc && i < 64; i++) {
+        argv[i] = vortex::Value(*--sp);
+    }
+
     vortex::Value result = vortex::HostFunctionRegistry::instance().call(
-        func_id, 1, argv);
+        fn_id, argc, argv);
 
     // Push result back onto the stack (single return value).
     *sp++ = result.raw();

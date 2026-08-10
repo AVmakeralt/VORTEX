@@ -136,7 +136,7 @@ static uint64_t x86_allocatable_mask(const vtx_target_description_t *self,
         return (VTX_CALLER_SAVED_MASK | VTX_CALLEE_SAVED_MASK) & ~VTX_REG_RESERVED_MASK;
     }
     if (cls == VTX_REG_CLASS_XMM) {
-        return VTX_XMM_ALL_MASK;  /* all 16 XMM regs */
+        return VTX_XMM_ALL_MASK & ~((1u << 14) | (1u << 15));  /* C8: exclude XMM14/15 spill scratch */
     }
     return 0;
 }

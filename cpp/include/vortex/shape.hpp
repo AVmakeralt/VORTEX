@@ -67,7 +67,9 @@ class ShapeTable {
 public:
     ShapeTable() {
         // Shape 0 is reserved (INVALID), shape 1 is the root (empty).
+        /* C15: Save fields before emplace_back to avoid UAF on vector realloc */
         shapes_.emplace_back();  // index 0 = invalid
+        /* C15: Save fields before emplace_back to avoid UAF on vector realloc */
         shapes_.emplace_back();  // index 1 = root empty shape
         root_shape_ = 1;
     }
@@ -100,7 +102,8 @@ public:
 
         // Create new child shape
         uint32_t new_id = static_cast<uint32_t>(shapes_.size());
-        ShapeData& child = shapes_.emplace_back();
+        ShapeData& child = /* C15: Save fields before emplace_back to avoid UAF on vector realloc */
+        shapes_.emplace_back();
         child.properties = parent.properties;  // copy parent's properties
         child.properties.push_back({symbol_id, static_cast<uint32_t>(child.properties.size())});
         child.parent_shape_id = parent_shape_id;

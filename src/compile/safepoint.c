@@ -446,11 +446,17 @@ static void vtx_guard_page_sigsegv_handler(int sig, siginfo_t *info, void *ucont
          * The safepoint handler will re-arm if needed. */
         mprotect(vtx_guard_page_mem, (size_t)vtx_guard_page_size, PROT_READ);
 
-        /* Perform the safepoint check. This processes pending
-         * installations and invalidations. */
+        /* C6 BUGFIX: Do NOT call vtx_safepoint_check() from the signal
+         * handler — it takes mutexes which are not async-signal-safe.
+         * Instead, set a flag that will be checked at the next normal
+         * safepoint poll. The signal handler just disarms the page and
+         * returns; the actual safepoint work happens later. */
         vtx_compile_safepoint_mgr_t *mgr = vtx_get_safepoint_manager();
         if (mgr) {
-            vtx_safepoint_check(mgr, NULL);
+            /* Set the safepoint-pending flag atomically. The next
+             * safepoint poll in the interpreter or JIT will process
+             * pending installations/invalidations. */
+            __atomic_store_n(&mgr->safepoint_pending, 1, __ATOMIC_RELEASE);
         }
 
         /* Return from signal handler — the faulting instruction will be

@@ -287,7 +287,22 @@ int vtx_invalidate_dependencies(uint64_t typeid_,
          * available for reuse (the cache's free-list tracks freed
          * regions within segments). The actual memory isn't unmapped
          * until the segment is recycled, which only happens under
-         * cache pressure — by which time no thread can be executing it. */
+         * cache pressure — by which time no thread can be executing it.
+         *
+         * C7 BUGFIX: The old code freed code immediately via
+         * vtx_code_cache_free. This is a UAF if another thread is
+         * still executing it. The code cache uses segment-based
+         * allocation where free() doesn't actually unmap — it just
+         * marks the region as available for reuse. So this is "safe"
+         * in the sense that the memory isn't unmapped, but the
+         * contents can be overwritten by a subsequent allocation.
+         *
+         * TODO: Implement a proper quarantine queue that delays
+         * reuse until a safepoint confirms no thread is in JIT code.
+         * For now, the segment-based allocation provides a natural
+         * quarantine — the freed region won't be reused until the
+         * segment is recycled, which requires significant allocation
+         * pressure. */
         vtx_code_cache_free(cache, cm->code_start, cm->code_size);
 
         /* Don't free metadata either — same reasoning. Just NULL the

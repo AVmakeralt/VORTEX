@@ -103,7 +103,7 @@ vtx_coroutine_t *vtx_coroutine_create(vtx_coroutine_fn fn,
 
     /* Set up the ucontext */
     if (getcontext(&co->ctx) != 0) {
-        free(co->stack);
+        munmap(co->stack_mmap_base, co->stack_mmap_size);
         free(co);
         return NULL;
     }
@@ -127,7 +127,7 @@ void vtx_coroutine_destroy(vtx_coroutine_t *co)
         munmap(co->stack_mmap_base, co->stack_mmap_size);
     } else {
         /* Fallback: old malloc'd stack */
-        free(co->stack);
+        munmap(co->stack_mmap_base, co->stack_mmap_size);
     }
     free(co);
 }

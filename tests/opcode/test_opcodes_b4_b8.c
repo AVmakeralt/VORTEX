@@ -45,7 +45,7 @@ static void b_init(builder_t *b, vtx_arena_t *arena, size_t cap) {
 }
 
 static void b_op(builder_t *b, uint8_t op) {
-    if (b->pos >= b->cap) { /* grow */ }
+    if (b->pos >= b->cap) { assert(b->pos < b->cap && "buffer overflow"); }
     b->buf[b->pos++] = op;
 }
 

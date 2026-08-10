@@ -420,6 +420,10 @@ static vtx_lattice_val_t evaluate_node(vtx_node_opcode_t opcode,
                 case VTX_COND_LE:  result = (a <= b); break;
                 case VTX_COND_GT:  result = (a > b);  break;
                 case VTX_COND_GE:  result = (a >= b); break;
+                case VTX_COND_ULT: result = ((uint64_t)a < (uint64_t)b); break;
+                case VTX_COND_ULE: result = ((uint64_t)a <= (uint64_t)b); break;
+                case VTX_COND_UGT: result = ((uint64_t)a > (uint64_t)b); break;
+                case VTX_COND_UGE: result = ((uint64_t)a >= (uint64_t)b); break;
                 default: break;
                 }
                 return vtx_lattice_const_int(result ? 1 : 0);
@@ -461,6 +465,10 @@ static vtx_lattice_val_t evaluate_node(vtx_node_opcode_t opcode,
                 case VTX_COND_LE:  result = (a <= b); break;
                 case VTX_COND_GT:  result = (a > b);  break;
                 case VTX_COND_GE:  result = (a >= b); break;
+                case VTX_COND_ULT: result = ((uint64_t)a < (uint64_t)b); break;
+                case VTX_COND_ULE: result = ((uint64_t)a <= (uint64_t)b); break;
+                case VTX_COND_UGT: result = ((uint64_t)a > (uint64_t)b); break;
+                case VTX_COND_UGE: result = ((uint64_t)a >= (uint64_t)b); break;
                 default: break;
                 }
                 return vtx_lattice_const_int(result ? 1 : 0);

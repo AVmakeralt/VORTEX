@@ -684,11 +684,11 @@ void vtx_x86_emit_ucomisd(vtx_x86_emit_t *e, uint8_t dst, uint8_t src)
      * For R8-R15 registers, use REX.R and REX.B */
     int r = reg_hi(src);
     int b = reg_hi(dst);
-    /* Emit REX prefix if needed for extended registers */
+    /* C10 BUGFIX: mandatory prefix MUST come before REX per Intel SDM */
+    emit_byte(e, 0x66);  /* SSE prefix for scalar double */
     if (r || b) {
         emit_rex(e, 0, r, 0, b);
     }
-    emit_byte(e, 0x66);  /* SSE prefix for scalar double */
     emit_byte(e, 0x0F);  /* Two-byte opcode escape */
     emit_byte(e, 0x2E);  /* UCOMISD opcode */
     emit_modrm(e, 3, src & 7, dst & 7);  /* mod=11 (reg-reg) */
@@ -712,11 +712,11 @@ static void emit_sse_sd_rr(vtx_x86_emit_t *e, uint8_t opcode,
 {
     int r = reg_hi(src);
     int b = reg_hi(dst);
-    /* Emit REX prefix if needed for extended registers */
+    /* C10 BUGFIX: mandatory prefix MUST come before REX per Intel SDM */
+    emit_byte(e, 0xF2);  /* scalar double prefix */
     if (r || b) {
         emit_rex(e, 0, r, 0, b);
     }
-    emit_byte(e, 0xF2);  /* scalar double prefix */
     emit_byte(e, 0x0F);  /* Two-byte opcode escape */
     emit_byte(e, opcode);
     emit_modrm(e, 3, src & 7, dst & 7);  /* mod=11 (reg-reg) */
@@ -5255,6 +5255,7 @@ int vtx_x86_emit_function(vtx_x86_emit_t *emit, vtx_inst_stream_t *stream,
             if (src_off < emit->position) {
                 uint8_t byte0 = emit->buffer[src_off];
                 bool is_short_jcc = (byte0 >= 0x70 && byte0 <= 0x7F);
+            /* H10: byte0 is the opcode byte at source_offset, not the displacement */
                 bool is_short_jmp = (byte0 == 0xEB);
                 if (is_short_jcc || is_short_jmp) {
                     /* Short jump: rel8 = target - (patch_offset + 1)

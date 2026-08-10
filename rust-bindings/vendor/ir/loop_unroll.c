@@ -375,7 +375,8 @@ uint32_t vtx_loop_unroll_run(vtx_graph_t *graph,
          * as Phi back-edge values. Subsequent copies use the previous
          * copy's mapping to find the back-edge values. */
         vtx_nodeid_t *prev_mapping = NULL;  /* previous copy's mapping */
-        vtx_nodeid_t *cur_phi_be_val = phi_be_val;  /* current back-edges */
+        vtx_nodeid_t *cur_phi_be_val = (vtx_nodeid_t *)vtx_arena_alloc(arena, phi_count * sizeof(vtx_nodeid_t));
+        if (cur_phi_be_val) memcpy(cur_phi_be_val, phi_be_val, phi_count * sizeof(vtx_nodeid_t));
         vtx_nodeid_t cur_proj_true = proj_true;  /* current true-Proj for chaining */
 
         for (uint32_t copy_num = 0; copy_num < effective_factor - 1; copy_num++) {

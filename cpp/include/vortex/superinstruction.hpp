@@ -204,9 +204,14 @@ struct FusedInsn {
 
 inline bool try_fuse_pair(const uint8_t* code, size_t pc, size_t length,
                           FusedInsn* out) {
-    if (pc + 1 >= length) return false;
+    /* C17 BUGFIX: Tighten bounds checks to prevent OOB reads.
+     * Each pattern reads up to pc + 1 + 2 + 2 = pc + 5 bytes.
+     * Require pc + needed_bytes <= length for each pattern. */
+    if (pc + 3 > length) return false; /* minimum: op1 + 2-byte operand + op2 */
     uint8_t op1 = code[pc];
-    uint8_t op2 = code[pc + 1 + 2];  // skip op1 + its 2-byte operand
+    /* op2 is at pc + 1 + operand_size(2) = pc + 3 */
+    if (pc + 3 >= length) return false;
+    uint8_t op2 = code[pc + 3];
 
     // Pattern 1: LOAD_CONST_INT k ; IADD
     //   LOAD_CONST_INT has 2-byte operand (const_idx)
@@ -220,16 +225,18 @@ inline bool try_fuse_pair(const uint8_t* code, size_t pc, size_t length,
     }
     // Pattern 2: LOAD_LOCAL a ; LOAD_LOCAL b
     if (op1 == si_op::LOAD_LOCAL && op2 == si_op::LOAD_LOCAL) {
+        if (pc + 5 > length) return false; /* C17: bounds check for 2nd operand */
         out->opcode = si_op::LOAD_LOCAL__LOAD_LOCAL;
         out->op_a = read_op2(code, pc);            // local a
-        out->op_b = read_op2(code, pc + 1 + 2);    // local b
+        out->op_b = read_op2(code, pc + 3);        // local b
         return true;
     }
     // Pattern 3: LOAD_LOCAL k ; STORE_FIELD off
     if (op1 == si_op::LOAD_LOCAL && op2 == si_op::STORE_FIELD) {
+        if (pc + 5 > length) return false; /* C17: bounds check for 2nd operand */
         out->opcode = si_op::LOAD_LOCAL__STORE_FIELD;
         out->op_a = read_op2(code, pc);            // local idx
-        out->op_b = read_op2(code, pc + 1 + 2);    // field off
+        out->op_b = read_op2(code, pc + 3);        // field off
         return true;
     }
     return false;
@@ -303,7 +310,10 @@ inline int predecode(const vtx_bytecode_t* bc, PreDecodeResult* out) {
         }
         // Not fusable — copy verbatim.
         pc_map[pc] = new_pc;
-        std::memcpy(new_code + new_pc, bc->code + pc, orig_len);
+        /* C16: bounds check before memcpy */
+            size_t copy_len = orig_len;
+            if (pc + copy_len > bc->length) copy_len = bc->length - pc;
+            std::memcpy(new_code + new_pc, bc->code + pc, copy_len);
         new_pc += orig_len;
         pc += orig_len;
     }

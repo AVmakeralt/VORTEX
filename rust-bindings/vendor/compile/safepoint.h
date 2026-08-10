@@ -246,6 +246,9 @@ typedef struct {
     uint64_t                     total_installations; /* number of installations performed */
     uint64_t                     total_invalidations; /* number of invalidations performed */
     uint64_t                     total_time_ns;       /* cumulative time in safe point handlers */
+
+    /* C6 BUGFIX: Atomic flag set by SIGSEGV handler, checked at next safepoint */
+    volatile int                 safepoint_pending;
 } vtx_compile_safepoint_mgr_t;
 
 /* ========================================================================== */
