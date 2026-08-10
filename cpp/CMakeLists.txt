@@ -28,7 +28,7 @@ target_compile_options(vortex_cpp PRIVATE
     -Wall -Wextra -Wno-unused-parameter -Wno-unused-variable
 )
 
-if(EXISTS ${VORTEX_BUILD_DIR}/src/libvortex_runtime.a)
+if(EXISTS ${VORTEX_BUILD_DIR}/src/libvortex_runtime.a OR TARGET vortex_runtime)
     target_link_libraries(vortex_cpp PUBLIC
         -Wl,--start-group
         ${VORTEX_BUILD_DIR}/src/libvortex_compile.a
@@ -52,10 +52,31 @@ if(EXISTS ${VORTEX_BUILD_DIR}/src/libvortex_runtime.a)
         -lm -lpthread
     )
 else()
-    message(FATAL_ERROR
-        "Pre-built VORTEX C libraries not found in ${VORTEX_BUILD_DIR}/src/. "
-        "Build the root VORTEX project first: "
-        "cd .. && mkdir -p build && cd build && cmake .. && make -j4")
+    # Libraries not built yet — link against the cmake targets directly.
+    # This allows building cpp/ in the same cmake invocation as src/.
+    target_link_libraries(vortex_cpp PUBLIC
+        -Wl,--start-group
+        vortex_compile
+        vortex_codecache
+        vortex_lower
+        vortex_interp
+        vortex_runtime
+        vortex_ir
+        vortex_deopt
+        vortex_baseline
+        vortex_inliner
+        vortex_pea
+        vortex_guard
+        vortex_sota
+        vortex_region
+        vortex_trace
+        vortex_midtier
+        vortex_profile
+        vortex_assembler
+        vortex_common
+        -Wl,--end-group
+        -lm -lpthread
+    )
 endif()
 
 add_executable(vortex_cpp_example examples/hello.cpp)

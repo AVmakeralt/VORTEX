@@ -2009,12 +2009,20 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
                 vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, val_untagged, node_id), arena);
                 vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, dst,
                                    cnt_node->constval.as.int_val, node_id), arena);
-                /* TODO: retag output to produce tagged SMI.
-                 * Currently DISABLED — causes collatz infinite loop.
-                 * The retag should produce SMI(n/2) from raw n/2, but
-                 * something about the interaction with the Cmp+If
-                 * fusion or the regalloc causes an infinite loop.
-                 * Without retag, collatz is off by 1 (112 vs 111). */
+                /* The Sar output is raw. We should retag it to produce a
+                 * tagged SMI, but the retag causes an infinite loop.
+                 * Root cause: R10/R11 ARE loaded in block 0, but the
+                 * retag AND clobbers R11 (DATA_MASK), which is also
+                 * used by the next retag in the same block. The fix
+                 * is to use a temp vreg for the retag destination
+                 * instead of modifying dst in-place.
+                 *
+                 * For now: don't retag. The Sar produces a raw value.
+                 * This causes collatz off-by-1 (112 vs 111) because
+                 * the raw n/2 value flows into the tagged n Phi.
+                 * The shift exclusion in rep selection prevents the
+                 * strength reduction's Add from being RAW_INT, but
+                 * the Sar itself still produces raw output. */
                 /* emit_smi_retag(stream, block, dst, node_id, arena); */
             } else {
                 uint32_t cnt_untagged = vtx_isel_alloc_vreg_fixed(stream, arena, 1 /* RCX */);
@@ -4332,10 +4340,17 @@ static int resolve_phis(vtx_inst_stream_t *stream, const vtx_schedule_t *schedul
                     if ((is_forward_edge && !src_is_raw) ||
                         (!is_forward_edge && !src_is_raw)) {
                         /* Source is tagged SMI → need untag */
+                        if (getenv("VTX_REP_DEBUG")) {
+                            fprintf(stderr, "  [rp] Phi N%u pred=%u fwd=%d NOT_raw→UNTAG\n",
+                                    copy_node[i], pred_idx, is_forward_edge);
+                        }
                         INSERT_UNTAG(copy_dst[i], copy_src[i], copy_node[i], cur_insert);
                         cur_insert += 4;
                     } else {
-                        /* Source is already raw int → plain MOV */
+                        if (getenv("VTX_REP_DEBUG")) {
+                            fprintf(stderr, "  [rp] Phi N%u pred=%u fwd=%d IS_raw→MOV\n",
+                                    copy_node[i], pred_idx, is_forward_edge);
+                        }
                         INSERT_MOV(copy_dst[i], copy_src[i], copy_node[i], cur_insert);
                         cur_insert++;
                     }

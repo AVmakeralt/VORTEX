@@ -150,7 +150,17 @@ inline RepSelectionResult run_representation_selection(vtx_graph_t* graph) {
             if (node->type == VTX_TYPE_Float) continue;
             if (node->opcode == VTX_OP_Div || node->opcode == VTX_OP_Mod) continue;
 
-            /* Check ALL data inputs are RAW_INT or SMI producers */
+            /* Check ALL data inputs are RAW_INT or Constant (not Parameter).
+             *
+             * Parameters are problematic because their vreg comes from the
+             * calling convention and might not be available at the right time
+             * for resolve_phis INSERT_UNTAG. By only allowing Constants (which
+             * have known values) and RAW_INT nodes, we avoid the Parameter
+             * boundary issue.
+             *
+             * This means Phis that merge a Parameter (like N in fib/count)
+             * stay tagged. Only Phis that merge Constants (like sum=0, i=2)
+             * or other RAW_INT nodes get marked. */
             bool inputs_ok = true;
             for (uint32_t j = 0; j < node->input_count; j++) {
                 vtx_nodeid_t inp_id = node->inputs[j];
@@ -159,7 +169,10 @@ inline RepSelectionResult run_representation_selection(vtx_graph_t* graph) {
                 if (vtx_nf_has(inp->flags, VTX_NF_CONTROL)) continue;
                 if (vtx_nf_has(inp->flags, VTX_NF_MEMORY)) continue;
                 if (vtx_nf_has(inp->flags, VTX_NF_RAW_INT)) continue;
-                if (is_smi_producer(inp)) continue;
+                /* Only allow Constants — NOT Parameters */
+                if (inp->opcode == VTX_OP_Constant) continue;
+                /* For non-Phi nodes, also allow SMI producers */
+                if (node->opcode != VTX_OP_Phi && is_smi_producer(inp)) continue;
                 inputs_ok = false;
                 break;
             }

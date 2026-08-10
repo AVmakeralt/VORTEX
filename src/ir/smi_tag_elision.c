@@ -159,6 +159,9 @@ static bool is_chain_terminator(vtx_node_opcode_t op) {
     case VTX_OP_CheckCast:
     case VTX_OP_InstanceOf:
     case VTX_OP_FrameState:
+    case VTX_OP_Sar:    /* shifts always untag inputs — RAW_INT would be corrupted */
+    case VTX_OP_Shr:
+    case VTX_OP_Shl:
         return true;
     default:
         return false;

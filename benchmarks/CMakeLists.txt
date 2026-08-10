@@ -353,8 +353,19 @@ target_link_libraries(dump_sum_asm PRIVATE
     m
     pthread
 )
+
 add_executable(dump_fib_asm dump_fib_asm.c)
 target_link_libraries(dump_fib_asm PRIVATE
+    -Wl,--start-group
+    vortex_compile vortex_codecache vortex_lower vortex_interp vortex_runtime
+    vortex_ir vortex_deopt vortex_baseline vortex_inliner vortex_pea vortex_guard
+    vortex_sota vortex_region vortex_trace vortex_midtier vortex_profile
+    vortex_assembler vortex_common
+    $<$<BOOL:${VORTEX_ENABLE_CPP}>:vortex_cpp>
+    -Wl,--end-group m pthread)
+
+add_executable(dump_collatz dump_collatz.c)
+target_link_libraries(dump_collatz PRIVATE
     -Wl,--start-group
     vortex_compile vortex_codecache vortex_lower vortex_interp vortex_runtime
     vortex_ir vortex_deopt vortex_baseline vortex_inliner vortex_pea vortex_guard

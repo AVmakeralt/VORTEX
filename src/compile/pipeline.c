@@ -1141,9 +1141,9 @@ int vtx_pipeline_run(vtx_graph_t *graph,
          but the counter Phi stays tagged (only accumulator Phi is raw).
          With Cmp, sum gets 39% faster but fib/collatz break.
          TODO: debug the Cmp+If fusion with RAW_INT Phi inputs. */
-        /* extern uint32_t vtx_representation_selection_run(vtx_graph_t *graph); */
-        /* uint32_t rep_selected = vtx_representation_selection_run(graph); */
-        /* (void)rep_selected; */
+        extern uint32_t vtx_representation_selection_run(vtx_graph_t *graph);
+        uint32_t rep_selected = vtx_representation_selection_run(graph);
+        (void)rep_selected;
     }
 
     /* ================================================================== */
