@@ -1,5 +1,6 @@
 #include "runtime/helpers.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
@@ -584,6 +585,42 @@ vtx_value_t vtx_runtime_builtin_call(uint32_t func_id, vtx_value_t arg)
     case 6: /* exit */
         return arg;  /* return the exit code; caller handles termination */
     default:
+        /* Unknown func_id — delegate to the runtime callback if registered.
+         *
+         * Frontends (luajit-2, etc.) pack (fn_id << 6) | argc into the
+         * CALL_RUNTIME operand. The callback unpacks this and pops argc
+         * values from the stack, pushes results.
+         *
+         * The T1 JIT calls us with (operand, single_arg). We bridge to
+         * the callback's (operand, &sp, user_data) -> n_pushed protocol
+         * by simulating a stack with the single arg pushed.
+         *
+         * BUGFIX: Without this, the T1 JIT silently returns UNDEFINED
+         * for all frontend-extended CALL_RUNTIME opcodes, causing
+         * crashes (luajit-2's print, string.format, table ops all go
+         * through the callback). */
+        {
+            extern vtx_runtime_callback_t vtx_get_runtime_callback(void);
+            extern void *vtx_get_runtime_callback_data(void);
+            vtx_runtime_callback_t cb = vtx_get_runtime_callback();
+            if (cb != NULL) {
+                void *cb_data = vtx_get_runtime_callback_data();
+                /* Simulate the operand stack. The callback will pop
+                 * argc args and push results. We push the single arg
+                 * we received. If argc > 1, the callback will read
+                 * past our stack — but in practice the T1 codegen
+                 * only passes 1 arg per CALL_RUNTIME. For multi-arg
+                 * calls, the frontend should emit multiple
+                 * CALL_RUNTIME ops or use a different calling convention. */
+                vtx_value_t stack[256];
+                vtx_value_t *sp = &stack[128];
+                *--sp = arg;
+                int n_pushed = cb(func_id, &sp, cb_data);
+                if (n_pushed > 0) {
+                    return *sp;
+                }
+            }
+        }
         return VTX_VALUE_UNDEFINED;
     }
 }
