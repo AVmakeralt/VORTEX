@@ -1099,21 +1099,21 @@ int main(void)
     vtx_method_desc_t sum_method = {
         .name = "sum", .signature = "(I)I",
         .bytecode = sum_bc, .compiled_code = NULL,
-        .vtable_index = 0xFFFFFFFF, .arg_count = 1, .is_virtual = false
+        .vtable_index = 0xFFFFFFFE, .arg_count = 1, .is_virtual = false
     };
 
     vtx_bytecode_t *nested_bc = build_nested_bytecode(&arena);
     vtx_method_desc_t nested_method = {
         .name = "nested", .signature = "(I)I",
         .bytecode = nested_bc, .compiled_code = NULL,
-        .vtable_index = 0xFFFFFFFF, .arg_count = 1, .is_virtual = false
+        .vtable_index = 0xFFFFFFFE, .arg_count = 1, .is_virtual = false
     };
 
     vtx_bytecode_t *collatz_bc = build_collatz_bytecode(&arena);
     vtx_method_desc_t collatz_method = {
         .name = "collatz", .signature = "(I)I",
         .bytecode = collatz_bc, .compiled_code = NULL,
-        .vtable_index = 0xFFFFFFFF, .arg_count = 1, .is_virtual = false
+        .vtable_index = 0xFFFFFFFE, .arg_count = 1, .is_virtual = false
     };
 
     /* Compile with T1 baseline JIT */

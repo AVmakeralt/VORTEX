@@ -3395,13 +3395,28 @@ vtx_compiled_code_t *vtx_baseline_compile(const vtx_method_desc_t *method,
      * T1 cache and causing registry collisions. The fallback counter
      * (static, non-atomic) was also racy. Fix: refuse to compile if
      * vtable_index is uninitialized — the caller must initialize it. */
-    if (method->vtable_index == 0xFFFFFFFF) {
+    /* BUGFIX (audit High #32): vtable_index 0xFFFFFFFF means both
+     * "uninitialized" AND "non-virtual method". This collision causes
+     * T1 to refuse to compile non-virtual methods (which legitimately
+     * have vtable_index = 0xFFFFFFFF as a sentinel for "no vtable slot").
+     *
+     * Fix: Use 0xFFFFFFFE as the "uninitialized" sentinel. Non-virtual
+     * methods use 0xFFFFFFFF (meaning "no vtable slot, but method IS
+     * initialized"). This allows T1 to compile non-virtual methods. */
+    if (method->vtable_index == 0xFFFFFFFE) {
         fprintf(stderr, "[baseline] refusing to compile method '%s': "
-                "vtable_index is uninitialized\n",
+                "vtable_index is uninitialized (0xFFFFFFFE)\n",
                 method->name ? method->name : "(unnamed)");
         return NULL;
     }
-    ctx.method_id = method->vtable_index;
+    /* If vtable_index is 0xFFFFFFFF (non-virtual), assign a synthetic
+     * method_id based on the method pointer. This is stable within
+     * a single process. */
+    if (method->vtable_index == 0xFFFFFFFF) {
+        ctx.method_id = (uint32_t)((uintptr_t)method >> 4) & 0x00FFFFFF;
+    } else {
+        ctx.method_id = method->vtable_index;
+    }
 
     /* Initialize code buffer */
     if (vtx_code_buffer_init(&ctx.buf, VTX_CODE_BUFFER_INITIAL_CAPACITY) != 0) {

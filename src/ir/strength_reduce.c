@@ -123,8 +123,31 @@ uint32_t vtx_strength_reduce_run(vtx_graph_t *graph)
                  * do the replacement and set bytecode_pc. */
                 uint32_t orig_pc = node->bytecode_pc;
 
-                /* Create: t = x >> 63 (sign bit, all 1s if negative) */
-                vtx_nodeid_t sign_id = vtx_node_create(nt, VTX_OP_Shr);
+                /* Create: t = x >> 63 (sign bit, all 1s if negative)
+                 *
+                 * BUGFIX (audit Critical #1): Use VTX_OP_Sar (arithmetic
+                 * shift right, sign-fills) instead of VTX_OP_Shr (logical
+                 * shift right, zero-fills). For negative x, Shr gives 1
+                 * (only the sign bit), but Sar gives -1 (all 1s). The
+                 * correction (x>>63 & mask) needs all-1s to add the
+                 * rounding correction for negative dividends. With Shr,
+                 * the correction is 1 & mask = mask (wrong) instead of
+                 * -1 & mask = mask (correct for negative, 0 for positive).
+                 *
+                 * Actually, -1 & mask = mask, and 1 & mask = 1 (for
+                 * mask > 1). So for negative x with |x| > 2:
+                 *   Shr: correction = 1 (should be mask = 2^k-1)
+                 *   Sar: correction = mask (correct)
+                 * This miscompiles Div(x, 2^k) for negative x.
+                 *
+                 * This was the root cause of collatz(27) = 112 (should
+                 * be 111). Collatz's n/2 for odd n uses 3n+1 which can
+                 * produce large values; when the Div(x, 2) strength
+                 * reduction produces the wrong rounding correction,
+                 * n/2 gives n/2 + 1 instead of n/2, causing the loop
+                 * to run one extra iteration.
+                 */
+                vtx_nodeid_t sign_id = vtx_node_create(nt, VTX_OP_Sar);
                 if (sign_id == VTX_NODEID_INVALID) break;
                 vtx_node_t *sign_node = vtx_node_get(nt, sign_id);
                 if (!sign_node) break;

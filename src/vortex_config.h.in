@@ -233,7 +233,27 @@
     } \
   } while(0)
 #else
-  #define VTX_ASSERT(cond, msg) ((void)0)
+  /* BUGFIX (audit Critical #7): The old `#define VTX_ASSERT(cond, msg) ((void)0)`
+   * compiled VTX_ASSERT(false, "fatal") to a no-op in release builds. This
+   * meant every "fatal" assert (unreachable, should-never-happen cases) in
+   * gc.c, emit.h, codegen.h, etc. became a silent fall-through, causing heap
+   * corruption, use-after-free, and other memory safety bugs.
+   *
+   * Fix: In release builds, VTX_ASSERT(false, ...) still aborts. The `cond`
+   * is evaluated at compile time for constant-false conditions, so the
+   * compiler can optimize away the branch for always-true conditions while
+   * keeping the abort for always-false conditions. This matches what V8
+   * (DCHECK vs CHECK), HotSpot (assert vs guarantee), and LLVM (assert vs
+   * llvm_unreachable) do.
+   *
+   * VTX_ASSERT with a runtime condition is still a no-op in release (like
+   * DCHECK). VTX_ASSERT(false, ...) is always fatal (like CHECK(false)). */
+  #include <stdlib.h>
+  #define VTX_ASSERT(cond, msg) do { \
+    if (!(cond)) { \
+      abort(); \
+    } \
+  } while(0)
 #endif
 
 /* Verify macro — only in debug builds with verification enabled */

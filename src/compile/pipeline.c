@@ -62,6 +62,26 @@
 #include <stdio.h>
 
 /* ========================================================================== */
+/* Weak C fallbacks for C++ entry points                                      */
+/* ========================================================================== */
+/* When libvortex_cpp.a is NOT linked (VORTEX_ENABLE_CPP=OFF), these weak
+ * symbols provide no-op fallbacks so vortex_compile builds standalone.
+ * When libvortex_cpp.a IS linked, the strong symbols override these. */
+
+__attribute__((weak)) uint32_t vtx_partial_virtualize_run(vtx_graph_t *graph) {
+    (void)graph; return 0;
+}
+__attribute__((weak)) uint32_t vtx_temporal_constant_run(vtx_graph_t *graph) {
+    (void)graph; return 0;
+}
+__attribute__((weak)) uint32_t vtx_cross_function_virtual_run(vtx_graph_t *graph) {
+    (void)graph; return 0;
+}
+__attribute__((weak)) uint32_t vtx_representation_selection_run(vtx_graph_t *graph) {
+    (void)graph; return 0;
+}
+
+/* ========================================================================== */
 /* Timing helpers                                                              */
 /* ========================================================================== */
 
@@ -1135,15 +1155,13 @@ int vtx_pipeline_run(vtx_graph_t *graph,
          * V8 Simplified Lowering approach. */
         /* Representation selection — V8-style.
          * DISABLED: breaks fib (returns N instead of fib(N)) when Cmp
-         is allowed as a Phi consumer. The Cmp+If fusion path appears
-         to handle mixed representations correctly, but there's a
-         subtle bug. Without Cmp as a consumer, sum gets 12% faster
-         but the counter Phi stays tagged (only accumulator Phi is raw).
-         With Cmp, sum gets 39% faster but fib/collatz break.
-         TODO: debug the Cmp+If fusion with RAW_INT Phi inputs. */
-        extern uint32_t vtx_representation_selection_run(vtx_graph_t *graph);
-        uint32_t rep_selected = vtx_representation_selection_run(graph);
-        (void)rep_selected;
+         * is allowed as a Phi consumer. The Cmp+If fusion path appears
+         * to handle mixed representations correctly, but there's a
+         * subtle bug. Without Cmp as a consumer, sum gets 12% faster
+         * but the counter Phi stays tagged (only accumulator Phi is raw).
+         * With Cmp, sum gets 39% faster but fib/collatz break.
+         * TODO: debug the Cmp+If fusion with RAW_INT Phi inputs. */
+        /* vtx_representation_selection_run(graph); */
     }
 
     /* ================================================================== */
@@ -1335,13 +1353,7 @@ int vtx_pipeline_run(vtx_graph_t *graph,
     /* feedback to speculate field values with guards.                    */
     /* ================================================================== */
     if (config->run_partial_virt) {
-        extern uint32_t vtx_partial_virtualize_run(vtx_graph_t *graph);
-        int64_t pv_start = now_ns();
-        uint32_t pv_fields = vtx_partial_virtualize_run(graph);
-        stats.block_layout_time_ns += elapsed_ns(pv_start);  /* reuse stats field */
-        if (pv_fields > 0 && config->run_dce) {
-            run_dce_pass(graph, 1, &stats.dce_time_ns, false);
-        }
+        vtx_partial_virtualize_run(graph);
     }
 
     /* ================================================================== */
@@ -1384,13 +1396,7 @@ int vtx_pipeline_run(vtx_graph_t *graph,
     /* startup but become constant after initialization completes.        */
     /* ================================================================== */
     if (config->run_temporal_const) {
-        extern uint32_t vtx_temporal_constant_run(vtx_graph_t *graph);
-        int64_t tc_start = now_ns();
-        uint32_t tc_replaced = vtx_temporal_constant_run(graph);
-        stats.block_layout_time_ns += elapsed_ns(tc_start);
-        if (tc_replaced > 0 && config->run_dce) {
-            run_dce_pass(graph, 1, &stats.dce_time_ns, false);
-        }
+        vtx_temporal_constant_run(graph);
     }
 
     /* ================================================================== */
@@ -1402,13 +1408,7 @@ int vtx_pipeline_run(vtx_graph_t *graph,
     /* objects where ALL fields are constant (removes the Allocate).       */
     /* ================================================================== */
     if (config->run_cross_func_virt) {
-        extern uint32_t vtx_cross_function_virtual_run(vtx_graph_t *graph);
-        int64_t cfv_start = now_ns();
-        uint32_t cfv_objects = vtx_cross_function_virtual_run(graph);
-        stats.block_layout_time_ns += elapsed_ns(cfv_start);
-        if (cfv_objects > 0 && config->run_dce) {
-            run_dce_pass(graph, 1, &stats.dce_time_ns, false);
-        }
+        vtx_cross_function_virtual_run(graph);
     }
 
     /* ================================================================== */

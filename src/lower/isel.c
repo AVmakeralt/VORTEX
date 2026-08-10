@@ -2009,21 +2009,23 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
                 vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, val_untagged, node_id), arena);
                 vtx_isel_emit_inst(block, make_ri_inst(VTX_X86_SAR, dst,
                                    cnt_node->constval.as.int_val, node_id), arena);
-                /* The Sar output is raw. We need to retag it, but the retag
-                 * causes an infinite loop in collatz. The root cause is
-                 * unknown — possibly the retag changes the instruction count
-                 * which shifts branch offsets, or the regalloc assigns
-                 * the retag's temp vreg to a register that's still live.
+                /* The Sar output is raw. The retag (emit_smi_retag) and
+                 * RAW_INT marking both cause an infinite loop — root cause
+                 * unknown, likely a regalloc or branch offset issue.
                  *
-                 * For now: DISABLE the retag. The Sar produces a raw value.
-                 * This causes collatz off-by-1 (112 vs 111). The shift
-                 * exclusion in rep selection prevents most RAW_INT issues,
-                 * but the strength reduction's Sar still produces raw output.
+                 * The Shr→Sar fix in strength_reduce.c:127 corrects the
+                 * sign extension for negative dividends. The off-by-1
+                 * (112 vs 111) persists because the raw Sar output flows
+                 * into tagged Phis without retagging, but the loop DOES
+                 * terminate (unlike with the retag).
                  *
-                 * TODO: investigate why the retag causes an infinite loop.
-                 * The retag code itself is correct (AND+SHL+OR = SMI).
-                 * The issue is likely in the regalloc or emit phase. */
-                /* RETAG DISABLED */
+                 * TODO: debug why emit_smi_retag / RAW_INT marking causes
+                 * the collatz loop to never terminate. The retag code is
+                 * correct (AND+SHL+OR = SMI), and the resolve_phis
+                 * INSERT_RETAG is correct. The issue is likely in the
+                 * regalloc assigning the retag's vreg to a live register,
+                 * or in the emit phase's branch offset computation. */
+                /* RETAG DISABLED — collatz off by 1 */
             } else {
                 uint32_t cnt_untagged = vtx_isel_alloc_vreg_fixed(stream, arena, 1 /* RCX */);
                 emit_smi_untag(stream, block, cnt_untagged, cnt_vreg, node_id, arena);

@@ -2953,9 +2953,9 @@ dispatch_VT_OP_LOAD_CONST_INT__IADD:
 dispatch_VT_OP_LOAD_LOCAL__LOAD_LOCAL:
     read_operand_4(code, pc, &operand, &operand2);
     {
-        VTX_ASSERT(operand < locals_count,
+        VTX_ASSERT(operand < frame->locals_count,
                    "LOAD_LOCAL__LOAD_LOCAL: local a out of bounds");
-        VTX_ASSERT(operand2 < locals_count,
+        VTX_ASSERT(operand2 < frame->locals_count,
                    "LOAD_LOCAL__LOAD_LOCAL: local b out of bounds");
         /* Push in order: local_a first, then local_b (so local_b is TOS). */
         sp[0] = locals_arr[operand];
@@ -2983,7 +2983,7 @@ dispatch_VT_OP_LOAD_LOCAL__LOAD_LOCAL:
 dispatch_VT_OP_LOAD_LOCAL__STORE_FIELD:
     read_operand_4(code, pc, &operand, &operand2);
     {
-        VTX_ASSERT(operand < locals_count,
+        VTX_ASSERT(operand < frame->locals_count,
                    "LOAD_LOCAL__STORE_FIELD: local idx out of bounds");
         vtx_value_t val = locals_arr[operand];
         vtx_value_t obj_v = *--sp;  /* pop obj (already on stack) */

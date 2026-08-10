@@ -263,9 +263,12 @@ uint32_t vtx_algebraic_simplify_run(vtx_graph_t *graph)
                     }
                 }
             }
-            /* Cmp(x, x) → Constant(1) for EQ, Constant(0) for NE,
-             * Constant(1) for GE/LE, Constant(0) for GT/LT.
-             * Only valid when x is not a float (NaN != NaN). */
+            /* Cmp(x, x) → Constant(1) for EQ/GE/LE/UGE/ULE,
+             * Constant(0) for NE/GT/LT/UGT/ULT.
+             * Only valid when x is not a float (NaN != NaN).
+             *
+             * BUGFIX (audit High #16): The old code fell through `default`
+             * for unsigned ULE/UGE, folding them to 0 (should be 1). */
             if (node->type != VTX_TYPE_Float && lhs == rhs &&
                 lhs != VTX_NODEID_INVALID) {
                 bool result = false;
@@ -276,6 +279,10 @@ uint32_t vtx_algebraic_simplify_run(vtx_graph_t *graph)
                 case VTX_COND_GE:  result = true;  break;
                 case VTX_COND_LT:  result = false; break;
                 case VTX_COND_GT:  result = false; break;
+                case VTX_COND_ULE: result = true;  break;
+                case VTX_COND_UGE: result = true;  break;
+                case VTX_COND_ULT: result = false; break;
+                case VTX_COND_UGT: result = false; break;
                 default: break;
                 }
                 vtx_nodeid_t c_id = vtx_node_create(nt, VTX_OP_Constant);

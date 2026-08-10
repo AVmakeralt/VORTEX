@@ -535,10 +535,18 @@ void vtx_sota_fdi_register_version(vtx_sota_fdi_t *fdi,
 
     rec->alternative_versions[rec->alternative_version_count++] = version_id;
 
-    /* If this is the first version, set it as the best */
+    /* If this is the first version, set it as the best.
+     *
+     * BUGFIX (audit High #18): The old code initialized best_version_score
+     * to 1.0 (the maximum possible score). This meant no subsequent version
+     * could ever beat it (score > 1.0 is impossible), so the score-update
+     * branch at line 408 was dead code. FDI never switched to a better version.
+     *
+     * Fix: Initialize to -1.0 so the first version always wins, but
+     * subsequent versions with score >= 0 can replace it. */
     if (rec->best_version_id == 0) {
         rec->best_version_id = version_id;
-        rec->best_version_score = 1.0; /* assume best until proven otherwise */
+        rec->best_version_score = -1.0; /* will be beaten by any real score */
     }
 }
 
