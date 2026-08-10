@@ -1,6 +1,7 @@
 #include "runtime/bytecode.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ========================================================================== */
@@ -124,6 +125,11 @@ const vtx_opcode_info_t vtx_opcode_table[VT_OP_COUNT] = {
 
     /* Runtime calls */
     OP(VT_OP_CALL_RUNTIME, 0, 1, true, 2),  /* 2-byte operand: runtime function ID */
+
+    /* §2.6: Superinstructions — 4-byte operands (two 2-byte operands packed) */
+    OP(VT_OP_LOAD_CONST_INT__IADD,    1, 1, true, 4),  /* push const, add to TOS */
+    OP(VT_OP_LOAD_LOCAL__LOAD_LOCAL,  2, 0, true, 4),  /* push two locals */
+    OP(VT_OP_LOAD_LOCAL__STORE_FIELD, 0, 1, true, 4),  /* push local, store field */
 };
 
 #undef OP

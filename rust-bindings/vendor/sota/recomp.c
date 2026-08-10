@@ -322,8 +322,15 @@ double vtx_kl_divergence_callsite(const vtx_callsite_profile_t *current,
         freqs_b[i] = 1; /* uniform weight — fallback */
     }
 
-    return vtx_kl_divergence(types_a, freqs_a, current->count,
-                               types_b, freqs_b, compiled->count);
+    /* BUGFIX (audit Critical #13): Clamp count to VTX_POLY_LIMIT to prevent
+     * OOB stack read. The arrays are sized VTX_POLY_LIMIT+1, but
+     * current->count can be larger, causing vtx_kl_divergence to read
+     * uninitialized stack memory. */
+    uint32_t count_a = current->count > VTX_POLY_LIMIT ? VTX_POLY_LIMIT : current->count;
+    uint32_t count_b = compiled->count > VTX_POLY_LIMIT ? VTX_POLY_LIMIT : compiled->count;
+
+    return vtx_kl_divergence(types_a, freqs_a, count_a,
+                               types_b, freqs_b, count_b);
 }
 
 /* ========================================================================== */

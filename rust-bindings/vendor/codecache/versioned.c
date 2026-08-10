@@ -212,7 +212,7 @@ int vtx_versioned_cache_patch(vtx_versioned_cache_t *vc, uint32_t method_id,
     if (vc == NULL || new_bytes == NULL) return -1;
     vtx_versioned_code_version_t *active = vtx_versioned_cache_get_active(vc, method_id);
     if (active == NULL || active->code_ptr == NULL) return -1;
-    if (patch_offset + len > active->code_size) return -1;
+    if ((size_t)patch_offset + (size_t)len > active->code_size) return -1;
 
     uint8_t *patch_addr = (uint8_t *)active->code_ptr + patch_offset;
 

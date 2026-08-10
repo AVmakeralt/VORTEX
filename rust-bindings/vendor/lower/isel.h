@@ -161,6 +161,13 @@ typedef enum {
                                         * any register; memory access triggers
                                         * SIGSEGV if guard page is PROT_NONE) */
 
+    /* §3.6: Profile-guided prefetch.
+     * PREFETCHT0 loads a cache line into all cache levels.
+     * Emitted before likely-taken branches to hide I-cache miss
+     * latency. V8: code-generator.cc PrefetchInstructionData.
+     * HotSpot: as_x86.cpp prefetch_prefix. */
+    VTX_X86_PREFETCHT0,  /* prefetcht0 [rip + rel32] */
+
     /* SSE2 packed double operations (for vectorized loops) */
     VTX_X86_MOVAPD,     /* movaps/movapd xmm, xmm — 128-bit aligned move */
     VTX_X86_ADDPD,      /* addpd xmm, xmm — packed double add (2 doubles) */

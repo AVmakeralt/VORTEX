@@ -69,6 +69,9 @@ typedef struct {
     bool run_midtier;           /* run mid-tier type specialization (T1.5) */
     bool run_block_layout;      /* profile-guided block layout (T2/T3) */
     bool run_rep_infer;         /* representation inference (UnboxInt/BoxInt) */
+    bool run_partial_virt;     /* partial virtualization (field → constant) */
+    bool run_temporal_const;   /* temporal constant propagation (phase-stable) */
+    bool run_cross_func_virt; /* cross-function virtual object continuation */
     int  gvn_iterations;        /* Max GVN iterations */
     int  sccp_iterations;       /* Max SCCP iterations */
     int  dce_iterations;        /* Max DCE iterations */

@@ -193,6 +193,15 @@ uint32_t vtx_rep_infer_run(vtx_graph_t *graph, vtx_arena_t *arena)
             vtx_node_t *user = &nt->nodes[use->user_id];
             if (user->dead) continue;
 
+            /* RAW-INT REGION FORMATION: If the consumer is itself RAW_INT
+             * (e.g., a RAW_INT Phi), do NOT insert BoxInt. The boundary
+             * is handled by resolve_phis (INSERT_UNTAG) or the consumer
+             * isel (Return retag). Without this check, rep_infer creates
+             * a wasteful retag-then-untag cycle every loop iteration. */
+            if (vtx_nf_has(user->flags, VTX_NF_RAW_INT)) {
+                continue;  /* consumer is raw — no BoxInt needed */
+            }
+
             /* If the consumer needs tagged and doesn't accept raw */
             if (consumer_needs_tagged(user->opcode) &&
                 !consumer_accepts_raw(user->opcode)) {

@@ -62,6 +62,26 @@
 #include <stdio.h>
 
 /* ========================================================================== */
+/* Weak C fallbacks for C++ entry points                                      */
+/* ========================================================================== */
+/* When libvortex_cpp.a is NOT linked (VORTEX_ENABLE_CPP=OFF), these weak
+ * symbols provide no-op fallbacks so vortex_compile builds standalone.
+ * When libvortex_cpp.a IS linked, the strong symbols override these. */
+
+__attribute__((weak)) uint32_t vtx_partial_virtualize_run(vtx_graph_t *graph) {
+    (void)graph; return 0;
+}
+__attribute__((weak)) uint32_t vtx_temporal_constant_run(vtx_graph_t *graph) {
+    (void)graph; return 0;
+}
+__attribute__((weak)) uint32_t vtx_cross_function_virtual_run(vtx_graph_t *graph) {
+    (void)graph; return 0;
+}
+__attribute__((weak)) uint32_t vtx_representation_selection_run(vtx_graph_t *graph) {
+    (void)graph; return 0;
+}
+
+/* ========================================================================== */
 /* Timing helpers                                                              */
 /* ========================================================================== */
 
@@ -203,6 +223,9 @@ vtx_pipeline_config_t vtx_pipeline_config_t2(void)
     cfg.run_midtier       = false;
     cfg.run_block_layout  = true;   /* profile-guided block layout */
     cfg.run_rep_infer     = true;
+    cfg.run_partial_virt = true;  /* partial virtualization (field → constant) */
+    cfg.run_temporal_const = true;  /* temporal constant propagation */
+    cfg.run_cross_func_virt = true;  /* cross-function virtual continuation */
     cfg.markov            = NULL;
     return cfg;
 }
@@ -247,6 +270,9 @@ vtx_pipeline_config_t vtx_pipeline_config_t3(void)
     cfg.run_midtier       = false;
     cfg.run_block_layout  = true;   /* profile-guided block layout */
     cfg.run_rep_infer     = true;   /* representation inference (UnboxInt/BoxInt) */
+    cfg.run_partial_virt = true;   /* partial virtualization (field → constant) */
+    cfg.run_temporal_const = true;   /* temporal constant propagation */
+    cfg.run_cross_func_virt = true;   /* cross-function virtual continuation */
     cfg.markov            = NULL;
     return cfg;
 }
@@ -1108,17 +1134,34 @@ int vtx_pipeline_run(vtx_graph_t *graph,
     }
 
     /* ================================================================== */
-    /* Phase 2.6: SMI Tag Elision                                         */
+    /* Phase 2.6: SMI Tag Elision + Representation Selection              */
     /*                                                                    */
-    /* Marks straight-line arithmetic chains as RAW_INT so the isel skips */
-    /* per-op untag/retag. One untag at chain entry, one retag at exit.  */
-    /* This is the single highest-ROI optimization for SMI-heavy loops.  */
+    /* Marks arithmetic chains AND Phis as RAW_INT so the isel skips      */
+    /* per-op untag/retag. The representation_selection pass (C++) does   */
+    /* V8-style representation selection: it marks Phis as RAW_INT when   */
+    /* safe, and the boundary conversions are handled by resolve_phis   */
+    /* (INSERT_UNTAG on forward edge, INSERT_RETAG at tagged consumers). */
+    /* This collapses per-iteration tag/untag overhead in hot loops.     */
     /* ================================================================== */
     if (config->run_sccp) {
+        /* First run the old smi_tag_elision for backward compat */
         uint32_t elided = vtx_smi_tag_elision_run(graph);
         if (elided > 0) {
             verify_between_passes(graph, config, "SMITagElision");
         }
+
+        /* Then run the new representation selection pass which also
+         * marks Phis as RAW_INT (the old pass didn't). This is the
+         * V8 Simplified Lowering approach. */
+        /* Representation selection — V8-style.
+         * DISABLED: breaks fib (returns N instead of fib(N)) when Cmp
+         * is allowed as a Phi consumer. The Cmp+If fusion path appears
+         * to handle mixed representations correctly, but there's a
+         * subtle bug. Without Cmp as a consumer, sum gets 12% faster
+         * but the counter Phi stays tagged (only accumulator Phi is raw).
+         * With Cmp, sum gets 39% faster but fib/collatz break.
+         * TODO: debug the Cmp+If fusion with RAW_INT Phi inputs. */
+        /* vtx_representation_selection_run(graph); */
     }
 
     /* ================================================================== */
@@ -1292,6 +1335,28 @@ int vtx_pipeline_run(vtx_graph_t *graph,
     }
 
     /* ================================================================== */
+    /* Phase 5.5: Partial Virtualization (field → constant)                */
+    /*                                                                    */
+    /* Identifies object fields that always hold compile-time constant     */
+    /* values and replaces field loads with the constants directly.        */
+    /* This is the "cross-constant optimization + partial virtualization"  */
+    /* combination: known constants propagate through the computation      */
+    /* graph, killing branches and enabling further virtualization.        */
+    /*                                                                    */
+    /* Runs BEFORE PEA (Phase 6) so that PEA sees the simplified graph     */
+    /* (objects with constant fields are more likely to become fully       */
+    /* virtualizable). Also runs BEFORE SCCP's re-run so SCCP can         */
+    /* propagate the exposed constants.                                   */
+    /*                                                                    */
+    /* T2-safe: no speculation — only replaces fields proven to always     */
+    /* hold the same constant value. A T3 variant (future) can use type    */
+    /* feedback to speculate field values with guards.                    */
+    /* ================================================================== */
+    if (config->run_partial_virt) {
+        vtx_partial_virtualize_run(graph);
+    }
+
+    /* ================================================================== */
     /* Phase 6: PEA (Partial Escape Analysis)                             */
     /*                                                                    */
     /* Determines which allocations can be scalar-replaced (eliminated).  */
@@ -1322,6 +1387,28 @@ int vtx_pipeline_run(vtx_graph_t *graph,
                 return -1;
             }
         }
+    }
+
+    /* ================================================================== */
+    /* Phase 6.5: Temporal Constant Propagation                            */
+    /*                                                                    */
+    /* Identifies "phase-stable" fields: values that are mutable during   */
+    /* startup but become constant after initialization completes.        */
+    /* ================================================================== */
+    if (config->run_temporal_const) {
+        vtx_temporal_constant_run(graph);
+    }
+
+    /* ================================================================== */
+    /* Phase 6.6: Cross-Function Virtual Object Continuation               */
+    /*                                                                    */
+    /* Pushes PEA across call boundaries. After inlining, identifies        */
+    /* virtual objects that flow through the (now-inlined) call chain     */
+    /* and maintains their virtual representation. Fully virtualizes       */
+    /* objects where ALL fields are constant (removes the Allocate).       */
+    /* ================================================================== */
+    if (config->run_cross_func_virt) {
+        vtx_cross_function_virtual_run(graph);
     }
 
     /* ================================================================== */
@@ -1636,6 +1723,35 @@ int vtx_pipeline_run(vtx_graph_t *graph,
             return -1;
         }
         (void)blocks_reordered;  /* could log for debugging */
+    }
+
+    /* ================================================================== */
+    /* Phase 9.8: Post-optimization PEA re-run                            */
+    /*                                                                    */
+    /* §3.2/PEA audit: PEA should be re-run after inlining and loop       */
+    /* unrolling because these transforms expose new allocation patterns.  */
+    /* Inlining can merge allocation sites from callees into the caller,  */
+    /* and loop unrolling can duplicate allocations that are now eligible */
+    /* for scalar replacement.                                            */
+    /*                                                                    */
+    /* GraalVM runs PEA after inlining (EscapeAnalysisPhase runs after    */
+    /* InliningPhase). V8 runs escape analysis after inlining and         */
+    /* simplification (EscapeAnalysis runs after JSInlining).             */
+    /*                                                                    */
+    /* We only re-run if the first PEA pass found at least one            */
+    /* scalar-replaceable allocation (no point re-running if there are   */
+    /* no allocations to analyze).                                        */
+    /* ================================================================== */
+    if (config->run_pea && stats.pea_allocs_eliminated > 0) {
+        int64_t pea2_start = now_ns();
+        uint32_t pea2_eliminated = run_pea_pass(
+            graph, arena, &stats.pea_time_ns);
+        stats.pea_allocs_eliminated += pea2_eliminated;
+        stats.pea_time_ns += elapsed_ns(pea2_start);
+
+        if (config->run_dce) {
+            run_dce_pass(graph, 1, &stats.dce_time_ns, false);
+        }
     }
 
     /* ================================================================== */
