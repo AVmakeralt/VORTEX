@@ -33,6 +33,11 @@ static inline bool is_allocation(vtx_node_opcode_t opcode)
            opcode == VTX_OP_Allocate;
 }
 
+/* Maximum fields per object (used by insert_materialization_code and
+ * vtx_materialize_run). PEA-2-7 tracks this as a follow-up to make
+ * dynamic — currently 32 is enough for most objects. */
+#define MAX_FIELDS_PER_OBJ 32
+
 /* ========================================================================== */
 /* Internal: find all field values for a scalar-replaced allocation            */
 /* ========================================================================== */
@@ -271,13 +276,39 @@ static vtx_materialize_point_t *add_materialize_point(
  * caller uses this to connect the materialization chain to the escape
  * point's memory input — without this connection, the scheduler may
  * place the StoreFields AFTER the escape point, causing it to read
- * uninitialized heap memory. */
+ * uninitialized heap memory.
+ *
+ * PEA-2-4/PEA-2-5: recursive materialization with cycle handling.
+ * When a field value is itself a virtual allocation, we must
+ * materialize it first (recursively) and store the materialized
+ * object's ID. Cycles (A.field→B, B.field→A) are broken by
+ * pre-allocating the NewObject and registering it in the
+ * `mat_in_progress` map before recursing into fields. */
 static int insert_materialization_code(vtx_graph_t *graph,
                                         vtx_materialize_point_t *pt,
                                         vtx_arena_t *arena,
-                                        vtx_nodeid_t *out_final_mem_state)
+                                        vtx_nodeid_t *out_final_mem_state,
+                                        const vtx_pea_analysis_t *analysis,
+                                        const vtx_virtual_result_t *virtual_result,
+                                        vtx_materialize_result_t *result,
+                                        vtx_nodeid_t *mat_in_progress_ids,
+                                        vtx_nodeid_t *mat_in_progress_objs,
+                                        uint32_t *mat_in_progress_count,
+                                        uint32_t mat_in_progress_cap)
 {
     vtx_node_table_t *table = &graph->node_table;
+
+    /* PEA-2-5: cycle detection — check if this allocation is already
+     * being materialized (pre-allocated). If so, return the existing
+     * NewObject ID without recursing into its fields again. */
+    for (uint32_t i = 0; i < *mat_in_progress_count; i++) {
+        if (mat_in_progress_ids[i] == pt->alloc_id) {
+            if (out_final_mem_state) {
+                *out_final_mem_state = mat_in_progress_objs[i];
+            }
+            return 0;
+        }
+    }
 
     /* Create NewObject node */
     vtx_nodeid_t new_obj_id = vtx_node_create(table, VTX_OP_NewObject);
@@ -296,6 +327,16 @@ static int insert_materialization_code(vtx_graph_t *graph,
         vtx_node_add_input(table, new_obj_id, pt->predecessor_control);
     }
 
+    /* PEA-2-5: register this NewObject as "in progress" BEFORE
+     * recursing into fields. This breaks cycles: if A.field→B and
+     * B.field→A, when we recurse into B, we find A in the map and
+     * use the pre-allocated NewObject ID instead of recursing again. */
+    if (*mat_in_progress_count < mat_in_progress_cap) {
+        mat_in_progress_ids[*mat_in_progress_count] = pt->alloc_id;
+        mat_in_progress_objs[*mat_in_progress_count] = new_obj_id;
+        (*mat_in_progress_count)++;
+    }
+
     pt->materialized_obj_id = new_obj_id;
 
     /* Track the current memory state for chaining StoreField nodes.
@@ -304,6 +345,59 @@ static int insert_materialization_code(vtx_graph_t *graph,
 
     /* Create StoreField nodes for each field */
     for (uint32_t f = 0; f < pt->field_count; f++) {
+        vtx_nodeid_t field_value = pt->field_local_ids[f];
+
+        /* PEA-2-4: if the field value is a virtual allocation,
+         * recursively materialize it first. */
+        if (virtual_result != NULL && analysis != NULL &&
+            field_value < virtual_result->state_count &&
+            vtx_virtual_is_virtual(virtual_result, field_value) &&
+            vtx_pea_is_scalar_replaceable(analysis, field_value)) {
+
+            /* Check if already materialized */
+            bool already_done = false;
+            for (uint32_t m = 0; m < *mat_in_progress_count; m++) {
+                if (mat_in_progress_ids[m] == field_value) {
+                    field_value = mat_in_progress_objs[m];
+                    already_done = true;
+                    break;
+                }
+            }
+
+            if (!already_done) {
+                /* Recursively materialize the nested virtual object. */
+                vtx_materialize_point_t nested_pt;
+                memset(&nested_pt, 0, sizeof(nested_pt));
+                nested_pt.alloc_id = field_value;
+                vtx_node_t *nested_alloc = vtx_node_get(table, field_value);
+                nested_pt.type_id = nested_alloc ? nested_alloc->type_id : 0;
+                nested_pt.field_offsets = vtx_arena_alloc(arena,
+                    MAX_FIELDS_PER_OBJ * sizeof(uint32_t));
+                nested_pt.field_local_ids = vtx_arena_alloc(arena,
+                    MAX_FIELDS_PER_OBJ * sizeof(vtx_nodeid_t));
+
+                if (nested_pt.field_offsets && nested_pt.field_local_ids) {
+                    nested_pt.field_count = collect_field_values_from_virtual(
+                        virtual_result, field_value,
+                        nested_pt.field_offsets, nested_pt.field_local_ids,
+                        MAX_FIELDS_PER_OBJ);
+
+                    vtx_nodeid_t nested_mem = VTX_NODEID_INVALID;
+                    if (insert_materialization_code(graph, &nested_pt, arena,
+                                                     &nested_mem, analysis,
+                                                     virtual_result, result,
+                                                     mat_in_progress_ids,
+                                                     mat_in_progress_objs,
+                                                     mat_in_progress_count,
+                                                     mat_in_progress_cap) == 0) {
+                        field_value = nested_pt.materialized_obj_id;
+                        result->objects_materialized++;
+                        result->fields_stored += nested_pt.field_count;
+                    }
+                }
+            }
+        }
+
         vtx_nodeid_t store_id = vtx_node_create(table, VTX_OP_StoreField);
         if (store_id == VTX_NODEID_INVALID) return -1;
 
@@ -312,12 +406,12 @@ static int insert_materialization_code(vtx_graph_t *graph,
         store->type    = VTX_TYPE_Void;
         store->flags   = vtx_nf_union(VTX_NF_SIDE_EFFECT, VTX_NF_MEMORY);
 
-        /* Add inputs: memory chain, receiver (new object), value (scalar local).
-         * The memory chain is threaded: each StoreField takes the previous
-         * memory state as input, ensuring correct ordering. */
+        /* Add inputs: memory chain, receiver (new object), value.
+         * PEA-2-4: field_value may have been updated to the nested
+         * object's materialized ID. */
         vtx_node_add_input(table, store_id, mem_state);  /* memory chain */
         vtx_node_add_input(table, store_id, new_obj_id); /* receiver */
-        vtx_node_add_input(table, store_id, pt->field_local_ids[f]); /* value */
+        vtx_node_add_input(table, store_id, field_value); /* value */
 
         /* This StoreField becomes the new memory state */
         mem_state = store_id;
@@ -353,8 +447,16 @@ vtx_materialize_result_t *vtx_materialize_run(vtx_graph_t *graph,
     if (!result) return NULL;
     memset(result, 0, sizeof(*result));
 
-    /* Maximum fields per object (conservative bound) */
-    const uint32_t MAX_FIELDS_PER_OBJ = 32;
+    /* PEA-2-5: materialization-in-progress map for cycle detection.
+     * Sized to the number of allocations (from the analysis). */
+    uint32_t mat_cap = analysis->escape_map.alloc_count;
+    if (mat_cap == 0) mat_cap = 1;
+    vtx_nodeid_t *mat_in_progress_ids = vtx_arena_alloc(arena,
+        mat_cap * sizeof(vtx_nodeid_t));
+    vtx_nodeid_t *mat_in_progress_objs = vtx_arena_alloc(arena,
+        mat_cap * sizeof(vtx_nodeid_t));
+    uint32_t mat_in_progress_count = 0;
+    if (!mat_in_progress_ids || !mat_in_progress_objs) return NULL;
 
     /* Scan for escape/deopt points that reference scalar-replaced allocations */
     for (uint32_t i = 0; i < table->count; i++) {
@@ -446,7 +548,7 @@ vtx_materialize_result_t *vtx_materialize_run(vtx_graph_t *graph,
              * PEA-2-6: get the final memory state so we can connect the
              * materialization chain to the escape point's memory input. */
             vtx_nodeid_t final_mem = VTX_NODEID_INVALID;
-            if (insert_materialization_code(graph, pt, arena, &final_mem) != 0) {
+            if (insert_materialization_code(graph, pt, arena, &final_mem, analysis, virtual_result, result, mat_in_progress_ids, mat_in_progress_objs, &mat_in_progress_count, mat_cap) != 0) {
                 return NULL;
             }
 
@@ -546,7 +648,7 @@ vtx_materialize_result_t *vtx_materialize_run(vtx_graph_t *graph,
 
             /* PEA-2-6: pass out_final_mem_state to connect the chain. */
             vtx_nodeid_t final_mem = VTX_NODEID_INVALID;
-            if (insert_materialization_code(graph, pt, arena, &final_mem) != 0) {
+            if (insert_materialization_code(graph, pt, arena, &final_mem, analysis, virtual_result, result, mat_in_progress_ids, mat_in_progress_objs, &mat_in_progress_count, mat_cap) != 0) {
                 return NULL;
             }
 
@@ -679,7 +781,7 @@ vtx_materialize_result_t *vtx_materialize_run(vtx_graph_t *graph,
              * ensuring correct placement.
              * PEA-2-6: pass out_final_mem_state to connect the chain. */
             vtx_nodeid_t final_mem = VTX_NODEID_INVALID;
-            if (insert_materialization_code(graph, pt, arena, &final_mem) != 0) {
+            if (insert_materialization_code(graph, pt, arena, &final_mem, analysis, virtual_result, result, mat_in_progress_ids, mat_in_progress_objs, &mat_in_progress_count, mat_cap) != 0) {
                 return NULL;
             }
 

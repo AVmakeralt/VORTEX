@@ -1122,3 +1122,26 @@ target_link_libraries(test_pea1_2_non_alloc_global_escape PRIVATE
 add_test(NAME pea1_2_non_alloc_global_escape
     COMMAND test_pea1_2_non_alloc_global_escape)
 
+# PEA-1-1: Phi-chain escape propagation
+add_executable(test_pea1_1_phi_escape_propagation
+    regression/pea/test_pea1_1_phi_escape_propagation.c
+)
+target_link_libraries(test_pea1_1_phi_escape_propagation PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME pea1_1_phi_escape_propagation
+    COMMAND test_pea1_1_phi_escape_propagation)
+
+# PEA-1-4: StoreField no unconditional ARG bump
+add_executable(test_pea1_4_storefield_no_arg_bump
+    regression/pea/test_pea1_4_storefield_no_arg_bump.c
+)
+target_link_libraries(test_pea1_4_storefield_no_arg_bump PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME pea1_4_storefield_no_arg_bump
+    COMMAND test_pea1_4_storefield_no_arg_bump)

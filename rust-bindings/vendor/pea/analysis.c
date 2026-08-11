@@ -213,116 +213,170 @@ static inline void get_block_successors(vtx_graph_t *graph, uint32_t block_idx,
 /* Examines how the node uses values and updates escape states accordingly.   */
 /* ========================================================================== */
 
+/* PEA-1-1: recursively propagate escape state through Phi chains.
+ *
+ * When an escape point (Return/StoreField/Call*) encounters a Phi as
+ * input, the Phi itself is not an allocation, so the old code skipped
+ * it — the escape never flowed back to the Phi's allocation inputs.
+ * This function walks through a Phi's inputs (and recursively through
+ * nested Phis) to find all allocation inputs and propagate the escape
+ * state to them.
+ *
+ * `depth` limits recursion to prevent infinite loops on cyclic Phi
+ * graphs (shouldn't happen in SSA, but defensive). */
+static void propagate_escape_through_phi(vtx_node_table_t *table,
+                                          vtx_escape_state_t *state,
+                                          uint32_t state_count,
+                                          vtx_nodeid_t phi_id,
+                                          vtx_escape_state_t escape_state,
+                                          uint32_t depth)
+{
+    if (depth > 8) return;  /* recursion limit */
+    if (phi_id >= state_count) return;
+
+    vtx_node_t *phi = vtx_node_get(table, phi_id);
+    if (!phi || phi->dead || phi->opcode != VTX_OP_Phi) return;
+
+    for (uint32_t i = 0; i < phi->input_count; i++) {
+        vtx_nodeid_t input_id = phi->inputs[i];
+        if (input_id >= state_count) continue;
+
+        vtx_node_t *input = vtx_node_get(table, input_id);
+        if (!input || input->dead) continue;
+
+        if (is_allocation(input->opcode)) {
+            /* Found an allocation input — propagate the escape state. */
+            if (state[input_id] < escape_state) {
+                state[input_id] = escape_state;
+            }
+        } else if (input->opcode == VTX_OP_Phi) {
+            /* Nested Phi — recurse. */
+            propagate_escape_through_phi(table, state, state_count,
+                                          input_id, escape_state, depth + 1);
+        }
+    }
+}
+
+/* Helper: propagate escape to a value, handling Phi chains (PEA-1-1).
+ * If the value is an allocation, set its escape state directly.
+ * If the value is a Phi, walk through to find allocation inputs. */
+static void propagate_escape_to_value(vtx_node_table_t *table,
+                                       vtx_escape_state_t *state,
+                                       uint32_t state_count,
+                                       vtx_nodeid_t value_id,
+                                       vtx_escape_state_t escape_state)
+{
+    if (value_id >= state_count) return;
+    vtx_node_t *val = vtx_node_get(table, value_id);
+    if (!val || val->dead) return;
+
+    if (is_allocation(val->opcode)) {
+        if (state[value_id] < escape_state) {
+            state[value_id] = escape_state;
+        }
+    } else if (val->opcode == VTX_OP_Phi) {
+        /* PEA-1-1: walk through the Phi to find allocation inputs. */
+        propagate_escape_through_phi(table, state, state_count,
+                                      value_id, escape_state, 0);
+    }
+}
+
 static void transfer_node(vtx_node_t *node, vtx_node_table_t *table,
                            vtx_escape_state_t *state, uint32_t state_count)
 {
     if (node->dead) return;
 
     switch (node->opcode) {
-    /* ---- Return: any returned allocation escapes globally ---- */
+    /* ---- Return: any returned allocation escapes globally ----
+     *
+     * PEA-1-1: if the returned value is a Phi, walk through the Phi
+     * to find all allocation inputs and mark them GlobalEscape. */
     case VTX_OP_Return:
         for (uint32_t i = 0; i < node->input_count; i++) {
             vtx_nodeid_t input_id = node->inputs[i];
             if (input_id < state_count) {
-                /* The returned value itself is a data value. If it is an
-                 * allocation, it escapes globally. If it references an
-                 * allocation indirectly, we need to check the input node. */
-                vtx_node_t *input = vtx_node_get(table, input_id);
-                if (input && !input->dead && is_allocation(input->opcode)) {
-                    state[input_id] = vtx_escape_join(state[input_id],
-                                                       VTX_ESCAPE_GLOBAL);
-                }
+                propagate_escape_to_value(table, state, state_count,
+                                           input_id, VTX_ESCAPE_GLOBAL);
             }
         }
         break;
 
     /* ---- StoreField: if the stored value is an allocation, it escapes
-       based on the receiver's escape state ---- */
+     * based on the receiver's escape state ----
+     *
+     * PEA-1-4: previously the code unconditionally joined with
+     * VTX_ESCAPE_ARG, which bumped even NoEscape containers to
+     * ArgEscape — disabling scalar replacement for the common pattern
+     * of an object holding a private reference to another non-escaping
+     * object. Fix: only bump to the container's state (no unconditional
+     * ARG join). The container's state already captures whether the
+     * value can be observed externally.
+     *
+     * PEA-1-1: if the stored value is a Phi, walk through to find
+     * allocation inputs. */
     case VTX_OP_StoreField:
         if (node->input_count >= 2) {
-            /* Input layout: [control?, memory?, receiver, value] */
-            /* Find the receiver and value inputs — they are the last two
-             * data inputs. We search for them by position. */
             vtx_nodeid_t receiver_id = node->inputs[node->input_count - 2];
             vtx_nodeid_t value_id    = node->inputs[node->input_count - 1];
 
-            /* If the stored value is an allocation, it escapes at least
-             * as much as the container object */
-            if (value_id < state_count) {
-                vtx_node_t *val_node = vtx_node_get(table, value_id);
-                if (val_node && !val_node->dead && is_allocation(val_node->opcode)) {
-                    vtx_escape_state_t container_state = VTX_ESCAPE_GLOBAL;
-                    if (receiver_id < state_count) {
-                        vtx_node_t *recv_node = vtx_node_get(table, receiver_id);
-                        if (recv_node && !recv_node->dead && is_allocation(recv_node->opcode)) {
-                            container_state = state[receiver_id];
-                        }
-                    }
-                    /* Stored into a container that escapes → the stored value
-                     * escapes at least as much as the container */
-                    state[value_id] = vtx_escape_join(state[value_id],
-                                                       vtx_escape_join(container_state, VTX_ESCAPE_ARG));
+            /* Determine the container's escape state. */
+            vtx_escape_state_t container_state = VTX_ESCAPE_GLOBAL;
+            if (receiver_id < state_count) {
+                vtx_node_t *recv_node = vtx_node_get(table, receiver_id);
+                if (recv_node && !recv_node->dead && is_allocation(recv_node->opcode)) {
+                    container_state = state[receiver_id];
                 }
             }
+
+            /* PEA-1-4: propagate container_state to the stored value,
+             * WITHOUT the unconditional ARG bump. The value escapes at
+             * least as much as the container (if the container escapes,
+             * the stored value escapes with it). If the container is
+             * NoEscape, the value stays NoEscape too. */
+            propagate_escape_to_value(table, state, state_count,
+                                      value_id, container_state);
         }
         break;
 
-    /* ---- StoreIndexed: storing into an array — the value escapes
-       at least as much as the array ---- */
+    /* ---- StoreIndexed: storing into an array — same as StoreField ----
+     * PEA-1-4: same fix — no unconditional ARG bump. */
     case VTX_OP_StoreIndexed:
         if (node->input_count >= 3) {
             vtx_nodeid_t array_id = node->inputs[node->input_count - 3];
             vtx_nodeid_t value_id = node->inputs[node->input_count - 1];
 
-            if (value_id < state_count) {
-                vtx_node_t *val_node = vtx_node_get(table, value_id);
-                if (val_node && !val_node->dead && is_allocation(val_node->opcode)) {
-                    vtx_escape_state_t array_state = VTX_ESCAPE_GLOBAL;
-                    if (array_id < state_count) {
-                        vtx_node_t *arr_node = vtx_node_get(table, array_id);
-                        if (arr_node && !arr_node->dead && is_allocation(arr_node->opcode)) {
-                            array_state = state[array_id];
-                        }
-                    }
-                    state[value_id] = vtx_escape_join(state[value_id],
-                                                       vtx_escape_join(array_state, VTX_ESCAPE_ARG));
+            vtx_escape_state_t array_state = VTX_ESCAPE_GLOBAL;
+            if (array_id < state_count) {
+                vtx_node_t *arr_node = vtx_node_get(table, array_id);
+                if (arr_node && !arr_node->dead && is_allocation(arr_node->opcode)) {
+                    array_state = state[array_id];
                 }
             }
+            propagate_escape_to_value(table, state, state_count,
+                                      value_id, array_state);
         }
         break;
 
-    /* ---- Calls: any allocation passed as argument escapes ---- */
+    /* ---- Calls: any allocation passed as argument escapes ----
+     *
+     * PEA-1-1: if an argument is a Phi, walk through to find
+     * allocation inputs and propagate the escape state to them. */
     case VTX_OP_CallStatic:
     case VTX_OP_CallVirtual:
     case VTX_OP_CallInterface:
     case VTX_OP_CallRuntime:
-        /* All allocation arguments to unknown functions escape.
-         * For CallVirtual/CallInterface, the receiver also escapes. */
         for (uint32_t i = 0; i < node->input_count; i++) {
             vtx_nodeid_t input_id = node->inputs[i];
-            if (input_id < state_count) {
-                vtx_node_t *input = vtx_node_get(table, input_id);
-                if (input && !input->dead && is_allocation(input->opcode)) {
-                    /* Arguments to unknown functions escape at least through args.
-                     * For CallRuntime (which may store globally), be conservative. */
-                    if (node->opcode == VTX_OP_CallRuntime) {
-                        state[input_id] = vtx_escape_join(state[input_id],
-                                                           VTX_ESCAPE_GLOBAL);
-                    } else {
-                        state[input_id] = vtx_escape_join(state[input_id],
-                                                           VTX_ESCAPE_ARG);
-                    }
-                }
-            }
-        }
+            if (input_id >= state_count) continue;
 
-        /* For virtual/interface calls, the receiver may dispatch to an
-         * unknown method that stores the object globally. Conservative:
-         * ArgEscape (could be made more precise with callee analysis). */
-        if (node->opcode == VTX_OP_CallVirtual ||
-            node->opcode == VTX_OP_CallInterface) {
-            /* The receiver is typically the first data input after control/memory.
-             * We check all inputs for allocation nodes — already handled above. */
+            /* PEA-1-1: propagate through Phi chains. CallRuntime
+             * is conservative (GlobalEscape); others use ArgEscape. */
+            vtx_escape_state_t call_escape =
+                (node->opcode == VTX_OP_CallRuntime)
+                    ? VTX_ESCAPE_GLOBAL
+                    : VTX_ESCAPE_ARG;
+            propagate_escape_to_value(table, state, state_count,
+                                       input_id, call_escape);
         }
         break;
 
