@@ -149,6 +149,34 @@ static int virtual_obj_set_field(vtx_virtual_obj_t *obj,
 }
 
 /* ========================================================================== */
+/* Internal: PEA-2-11 helper — drop all input edges of a dying node             */
+/* ========================================================================== */
+
+/**
+ * PEA-2-11: Before marking a StoreField/LoadField node dead, we must
+ * decrement each producer's output_count so that subsequent DCE passes
+ * (which rely on output_count == 0 to collect dead inputs) actually
+ * collect them. Without this, a "dead" StoreField retains inflated
+ * output_count on its receiver/value/memory-chain inputs and they
+ * never become collectable.
+ *
+ * vtx_node_remove_input(table, consumer, 0) shifts subsequent inputs
+ * down by one and decrements input_count, so calling it repeatedly at
+ * index 0 is the safe way to drain every slot.
+ */
+static void node_clear_inputs(vtx_node_table_t *table, vtx_nodeid_t node_id)
+{
+    vtx_node_t *n = vtx_node_get(table, node_id);
+    if (!n) return;
+    while (n->input_count > 0) {
+        if (vtx_node_remove_input(table, node_id, 0) != 0) break;
+        /* vtx_node_remove_input does not realloc table->nodes (it only
+         * mutates the consumer's inputs[] and the producers' use lists),
+         * so `n` remains valid across iterations. */
+    }
+}
+
+/* ========================================================================== */
 /* Internal: classify allocations as virtual or not                            */
 /* ========================================================================== */
 
@@ -300,23 +328,45 @@ static uint32_t resolve_virtual_phis(vtx_graph_t *graph,
                     continue;
                 }
 
-                /* Collect fields from the first virtual input */
-                vtx_virtual_obj_t *first_vobj = NULL;
+                /* PEA-2-8: previously this block collected fields from
+                 * only the FIRST virtual input (first_vobj) and used that
+                 * single field set for the per-field Phi creation loop.
+                 * If two virtual inputs had different field sets (e.g.,
+                 * vobj1 = {fields 0,1}, vobj2 = {fields 0,2}), vobj2's
+                 * field 2 had no per-field Phi, and any LoadField(field 2)
+                 * on the merged Phi would resolve to VTX_NODEID_INVALID
+                 * (reading dead memory).
+                 *
+                 * Fix: build the UNION of all virtual inputs' field
+                 * offsets first, then create one per-field Phi per
+                 * offset in the union. Fields missing from an input
+                 * fall through to the null-constant fallback (the
+                 * existing field_value == INVALID path below). */
+                uint32_t union_offsets[VTX_MAX_FIELDS_PER_OBJ];
+                uint32_t union_count = 0;
                 for (uint32_t inp = 0; inp < node->input_count; inp++) {
                     vtx_nodeid_t input_id = node->inputs[inp];
-                    if (input_id < result->state_count &&
-                        result->virtual_states[input_id] == VTX_VIRTUAL_YES) {
-                        for (uint32_t v = 0; v < result->virtual_obj_count; v++) {
-                            if (result->virtual_objs[v].alloc_id == input_id) {
-                                first_vobj = &result->virtual_objs[v];
-                                break;
+                    if (input_id >= result->state_count) continue;
+                    if (result->virtual_states[input_id] != VTX_VIRTUAL_YES) continue;
+
+                    for (uint32_t v = 0; v < result->virtual_obj_count; v++) {
+                        if (result->virtual_objs[v].alloc_id != input_id) continue;
+                        const vtx_virtual_obj_t *iv = &result->virtual_objs[v];
+                        for (uint32_t f = 0; f < iv->field_count; f++) {
+                            uint32_t off = iv->field_offsets[f];
+                            bool seen = false;
+                            for (uint32_t k = 0; k < union_count; k++) {
+                                if (union_offsets[k] == off) { seen = true; break; }
+                            }
+                            if (!seen && union_count < VTX_MAX_FIELDS_PER_OBJ) {
+                                union_offsets[union_count++] = off;
                             }
                         }
-                        if (first_vobj) break;
+                        break;
                     }
                 }
 
-                if (!first_vobj) continue;
+                if (union_count == 0) continue;
 
                 /* PEA-2-2: the per-field Phi creation loop below calls
                  * vtx_node_create(table, VTX_OP_Phi) and vtx_node_create(
@@ -336,10 +386,11 @@ static uint32_t resolve_virtual_phis(vtx_graph_t *graph,
                 vtx_nodeid_t node_id = node->id;
                 uint32_t input_count = node->input_count;
 
-                /* For each field, create a Phi that merges the values
-                 * from all virtual inputs */
-                for (uint32_t f = 0; f < first_vobj->field_count; f++) {
-                    uint32_t field_offset = first_vobj->field_offsets[f];
+                /* For each field (PEA-2-8: union of all virtual inputs'
+                 * field offsets, not just the first input's), create a
+                 * Phi that merges the values from all virtual inputs */
+                for (uint32_t f = 0; f < union_count; f++) {
+                    uint32_t field_offset = union_offsets[f];
 
                     /* Create a new Phi node for this field */
                     vtx_nodeid_t field_phi_id = vtx_node_create(table, VTX_OP_Phi);
@@ -514,7 +565,12 @@ static uint32_t rewrite_virtual_field_accesses(vtx_graph_t *graph,
                         }
                     }
                 }
-                node->dead = true;
+                /* PEA-2-11: drop the LoadField's own input edges so the
+                 * receiver's output_count is decremented (otherwise DCE
+                 * cannot collect the virtual allocation later). */
+                node_clear_inputs(table, node->id);
+                node = vtx_node_get(table, i);
+                if (node) node->dead = true;
                 rewritten++;
             }
         } else {
@@ -542,8 +598,12 @@ static uint32_t rewrite_virtual_field_accesses(vtx_graph_t *graph,
                 vtx_nodeid_t *new_values = vtx_arena_alloc(arena,
                     new_cap * sizeof(vtx_nodeid_t));
                 if (!new_offsets || !new_values) {
-                    /* Can't add the field — skip to avoid buffer overflow */
-                    node->dead = true;
+                    /* Can't add the field — skip to avoid buffer overflow.
+                     * PEA-2-11: still drop input edges first so dead
+                     * producers can be collected. */
+                    node_clear_inputs(table, node->id);
+                    node = vtx_node_get(table, i);
+                    if (node) node->dead = true;
                     rewritten++;
                     continue;
                 }
@@ -561,12 +621,100 @@ static uint32_t rewrite_virtual_field_accesses(vtx_graph_t *graph,
                 vobj->field_count++;
             }
 
-            node->dead = true;
+            /* PEA-2-11: drop the StoreField's input edges (receiver,
+             * value, memory-chain) so their output_count is decremented
+             * and DCE can collect them. */
+            node_clear_inputs(table, node->id);
+            node = vtx_node_get(table, i);
+            if (node) node->dead = true;
             rewritten++;
         }
     }
 
     return rewritten;
+}
+
+/* ========================================================================== */
+/* Internal: PEA-2-12 — fold CmpP of two virtual objects to Constant             */
+/* ========================================================================== */
+
+/**
+ * PEA-2-12: A CmpP comparing two virtual allocations compares their
+ * IR NodeIDs, which has no semantic meaning (two distinct NewObject
+ * nodes always produce distinct objects at runtime, but their NodeIDs
+ * are arbitrary integers). Fold such compares:
+ *
+ *   CmpP(alloc_a, alloc_a)        → Constant(true)   (same allocation)
+ *   CmpP(alloc_a, alloc_b)        → Constant(false)  (different allocations)
+ *   CmpP(alloc_a, non_alloc)     → leave alone       (virtual will be
+ *                                                     materialized at the
+ *                                                     escape point and the
+ *                                                     CmpP will work on the
+ *                                                     real object)
+ *
+ * CmpP nodes typically only have 2 inputs (both producers); we still
+ * skip control/memory inputs defensively.
+ */
+static uint32_t rewrite_virtual_cmp_identity(vtx_graph_t *graph,
+                                              vtx_virtual_result_t *result)
+{
+    vtx_node_table_t *table = &graph->node_table;
+    uint32_t folded = 0;
+
+    for (uint32_t i = 0; i < table->count; i++) {
+        vtx_node_t *node = &table->nodes[i];
+        if (node->dead || node->opcode != VTX_OP_CmpP) continue;
+        if (node->input_count < 2) continue;
+
+        /* Locate the two data inputs. CmpP has fixed_inputs=2 and is
+         * pure VTX_NF_DATA (see node.c opcode table), so inputs[0] and
+         * inputs[1] are the two producers being compared.
+         *
+         * Do NOT skip MEMORY-flagged inputs — NewObject/NewArray/
+         * Allocate all carry VTX_NF_MEMORY (because they're side-
+         * effecting allocation ops). Skipping them would mean no
+         * CmpP of two virtual allocations is ever folded. */
+        vtx_nodeid_t a = node->inputs[0];
+        vtx_nodeid_t b = node->inputs[1];
+
+        /* Both inputs must be virtual allocations. */
+        if (a >= result->state_count || b >= result->state_count) continue;
+        if (result->virtual_states[a] != VTX_VIRTUAL_YES) continue;
+        if (result->virtual_states[b] != VTX_VIRTUAL_YES) continue;
+
+        /* Fold: same alloc_id → true; different alloc_id → false. */
+        bool same = (a == b);
+        vtx_nodeid_t const_id = vtx_node_create(table, VTX_OP_Constant);
+        if (const_id == VTX_NODEID_INVALID) continue;
+        vtx_node_t *c = vtx_node_get(table, const_id);
+        if (!c) continue;
+        c->type = VTX_TYPE_Int;
+        c->constval = vtx_constval_int(same ? 1 : 0);
+
+        /* Re-fetch `node` (vtx_node_create may have realloc'd). */
+        node = vtx_node_get(table, i);
+        if (!node) continue;
+
+        /* Redirect every use of the CmpP to the new Constant. */
+        for (uint32_t u = 0; u < table->count; u++) {
+            vtx_node_t *user = &table->nodes[u];
+            if (user->dead) continue;
+            for (uint32_t inp = 0; inp < user->input_count; inp++) {
+                if (user->inputs[inp] == node->id) {
+                    vtx_node_replace_input(table, user->id, inp, const_id);
+                }
+            }
+        }
+
+        /* Drop the CmpP's own input edges so DCE can collect the
+         * allocations later (same reasoning as PEA-2-11). */
+        node_clear_inputs(table, node->id);
+        node = vtx_node_get(table, i);
+        if (node) node->dead = true;
+        folded++;
+    }
+
+    return folded;
 }
 
 /* ========================================================================== */
@@ -671,6 +819,11 @@ vtx_virtual_result_t *vtx_virtual_run(vtx_graph_t *graph,
     /* Step 4: Rewrite field accesses */
     result->field_accesses_rewritten = rewrite_virtual_field_accesses(
         graph, result, arena);
+
+    /* PEA-2-12: Fold CmpP of two virtual allocations to Constant(true/false).
+     * Must run AFTER field-access rewriting so the virtual_states[] for
+     * any virtual Phis are populated before we read them here. */
+    rewrite_virtual_cmp_identity(graph, result);
 
     /* Step 5: Eliminate virtual allocation nodes */
     eliminate_virtual_allocations(graph, result);

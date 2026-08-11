@@ -553,6 +553,29 @@ static int rewrite_scalar_replacements(vtx_graph_t *graph,
             }
 
             if (local_id != VTX_NODEID_INVALID) {
+                /* PEA-3-4: if more than one StoreField reaches this
+                 * (alloc_id, field_offset), the reverse-linear-scan
+                 * above picks an arbitrary one — wrong across branches
+                 * and across loop iterations. The minimal surgical
+                 * fix (per audit) is to DISABLE the rewrite for this
+                 * field: leave the LoadField in place, which falls
+                 * back to the original heap load (correct but
+                 * unoptimized). A proper fix requires synthesizing
+                 * Phi nodes at merge points — deferred to a follow-up. */
+                uint32_t reaching = 0;
+                for (uint32_t m = 0; m < result->mapping_count; m++) {
+                    if (result->mappings[m].alloc_id == alloc_id &&
+                        result->mappings[m].field_offset == node->field_offset) {
+                        reaching++;
+                    }
+                }
+                if (reaching > 1) {
+                    /* Skip rewrite; leave LoadField in place. The
+                     * allocation itself may still be eligible for
+                     * elimination if all other uses are rewritten. */
+                    continue;
+                }
+
                 /* Replace all uses of this LoadField with the local */
                 /* We can't easily replace all uses in the SoN graph,
                  * so we mark the LoadField as having a replacement.
@@ -585,8 +608,34 @@ static int rewrite_scalar_replacements(vtx_graph_t *graph,
                 alloc_node = vtx_node_get(table, alloc_id);
                 if (null_id != VTX_NODEID_INVALID) {
                     vtx_node_t *null_node = vtx_node_get(table, null_id);
-                    null_node->type = VTX_TYPE_Ptr;
-                    null_node->constval = vtx_constval_ptr(NULL);
+                    /* PEA-3-3: pick the default value based on the
+                     * LoadField's declared type. Previously this code
+                     * unconditionally synthesized a null pointer
+                     * Constant, which is the wrong default for
+                     * primitive-typed fields: Int fields need 0, Float
+                     * fields need 0.0, and the isel will misinterpret
+                     * a typed pointer constant for an Int load. We
+                     * don't have a type-descriptor lookup here, so we
+                     * rely on the LoadField's `type` lattice slot —
+                     * which the front-end populates from the field's
+                     * declared type before PEA runs. */
+                    switch (node->type) {
+                    case VTX_TYPE_Int:
+                        null_node->type = VTX_TYPE_Int;
+                        null_node->constval = vtx_constval_int(0);
+                        break;
+                    case VTX_TYPE_Float:
+                        null_node->type = VTX_TYPE_Float;
+                        null_node->constval = vtx_constval_float(0.0);
+                        break;
+                    case VTX_TYPE_Ptr:
+                    default:
+                        /* Untracked / Top / Void / pointer-typed field:
+                         * the original null-pointer default is correct. */
+                        null_node->type = VTX_TYPE_Ptr;
+                        null_node->constval = vtx_constval_ptr(NULL);
+                        break;
+                    }
 
                     /* Record the mapping */
                     if (result->mapping_count >= result->mapping_capacity) {
@@ -631,11 +680,22 @@ static int rewrite_scalar_replacements(vtx_graph_t *graph,
 
                 for (uint32_t inp = 0; inp < node->input_count; inp++) {
                     if (node->inputs[inp] == alloc_id) {
-                        /* Check if this use is a StoreField receiver or
-                         * LoadField receiver (already handled) or something else */
-                        if (node->opcode == VTX_OP_StoreField ||
-                            node->opcode == VTX_OP_LoadField) {
-                            continue; /* already handled */
+                        /* Check if this use is a StoreField receiver
+                         * (handled in pass 1, marked dead) or something
+                         * else. StoreFields on THIS alloc are dead by
+                         * this point (filtered by the outer dead-skip).
+                         *
+                         * PEA-3-4: a LoadField that we SKIPPED rewriting
+                         * (multiple reaching stores) is still alive and
+                         * IS a remaining use — the LoadField will fall
+                         * back to the original heap load at runtime, so
+                         * the allocation MUST remain. Pre-fix, the
+                         * check below treated any LoadField as "already
+                         * handled", so skipped LoadFields silently
+                         * caused the allocation to be killed, producing
+                         * a LoadField on a non-existent object. */
+                        if (node->opcode == VTX_OP_StoreField) {
+                            continue; /* handled in pass 1 */
                         }
                         has_remaining_uses = true;
                         break;

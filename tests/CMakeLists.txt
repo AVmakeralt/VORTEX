@@ -1145,3 +1145,63 @@ target_link_libraries(test_pea1_4_storefield_no_arg_bump PRIVATE
 )
 add_test(NAME pea1_4_storefield_no_arg_bump
     COMMAND test_pea1_4_storefield_no_arg_bump)
+
+# PEA-2-8: union of all virtual inputs' field sets in resolve_virtual_phis
+add_executable(test_pea2_8
+    regression/pea/test_pea2_8_union_field_set.c
+)
+target_link_libraries(test_pea2_8 PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME pea2_8_union_field_set
+    COMMAND test_pea2_8)
+
+# PEA-2-11: dead StoreField nodes drop input edges (output_count)
+add_executable(test_pea2_11
+    regression/pea/test_pea2_11_dead_storefield_inputs.c
+)
+target_link_libraries(test_pea2_11 PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME pea2_11_dead_storefield_inputs
+    COMMAND test_pea2_11)
+
+# PEA-2-12: CmpP identity fold for virtual objects
+add_executable(test_pea2_12
+    regression/pea/test_pea2_12_cmp_identity_virtuals.c
+)
+target_link_libraries(test_pea2_12 PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME pea2_12_cmp_identity_virtuals
+    COMMAND test_pea2_12)
+
+# PEA-3-3: primitive-typed default value for never-stored fields
+add_executable(test_pea3_3
+    regression/pea/test_pea3_3_primitive_default.c
+)
+target_link_libraries(test_pea3_3 PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME pea3_3_primitive_default
+    COMMAND test_pea3_3)
+
+# PEA-3-4: multiple reaching stores disables LoadField rewrite
+add_executable(test_pea3_4
+    regression/pea/test_pea3_4_multiple_stores_disabled.c
+)
+target_link_libraries(test_pea3_4 PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME pea3_4_multiple_stores_disabled
+    COMMAND test_pea3_4)
