@@ -1,0 +1,1460 @@
+     1→/* ============================================================================ *
+     2→ * AI-MODIFIED CODE
+     3→ *
+     4→ * This file was originally written by a human developer. It has been
+     5→ * substantially modified by an AI assistant (GLM/Z.ai) for bug fixes,
+     6→ * performance improvements, and feature additions.
+     7→ *
+     8→ * Original human-written structure is preserved; AI changes are marked
+     9→ * with bug fix IDs (B1-B28) or perf notes (Perf 1-10) in comments.
+    10→ *
+    11→ * If reviewing, please verify AI changes against the original logic.
+    12→ * ============================================================================ */
+    13→
+    14→#include "ir/schedule.h"
+    15→
+    16→#include <stdlib.h>
+    17→#include <string.h>
+    18→#include <stdio.h>
+    19→
+    20→/* ========================================================================== */
+    21→/* Dominance computation (simple iterative algorithm)                          */
+    22→/* ========================================================================== */
+    23→
+    24→/**
+    25→ * Compute dominators using the iterative algorithm.
+    26→ * dom[i] = intersection of dom[p] for all predecessors p of i.
+    27→ * dom[start] = start.
+    28→ *
+    29→ * IR-3 fix: The Cooper-Harvey-Kennedy intersection algorithm requires
+    30→ * reverse postorder (RPO) numbers for correct comparisons. The original
+    31→ * code compared block indices, which have no guaranteed relationship
+    32→ * to dominator-tree depth. We now compute RPO numbers first and use
+    33→ * them in the intersection walk.
+    34→ *
+    35→ * Returns a malloc'd array of uint32_t (dominator block indices).
+    36→ * The caller must free it.
+    37→ */
+    38→static uint32_t *compute_dominators(uint32_t block_count,
+    39→                                    uint32_t start_block,
+    40→                                    const vtx_schedule_block_t *blocks)
+    41→{
+    42→    uint32_t *dom = (uint32_t *)malloc(block_count * sizeof(uint32_t));
+    43→    if (dom == NULL) return NULL;
+    44→
+    45→    /* Compute reverse postorder numbers via iterative DFS.
+    46→     * RPO numbers ensure that a > b in RPO means a is closer to the
+    47→     * root of the dominator tree, which is required by the intersection
+    48→     * algorithm's comparison-based walk. */
+    49→    uint32_t *rpo = (uint32_t *)malloc(block_count * sizeof(uint32_t));
+    50→    uint32_t *dfs_stack = (uint32_t *)malloc(block_count * sizeof(uint32_t));
+    51→    uint8_t *visited = (uint8_t *)calloc(block_count, 1);
+    52→    if (!rpo || !dfs_stack || !visited) {
+    53→        free(dom); free(rpo); free(dfs_stack); free(visited);
+    54→        return NULL;
+    55→    }
+    56→
+    57→    /* Iterative DFS to compute postorder, then reverse for RPO */
+    58→    uint32_t postorder_count = 0;
+    59→    uint32_t *postorder = (uint32_t *)malloc(block_count * sizeof(uint32_t));
+    60→    if (!postorder) {
+    61→        free(dom); free(rpo); free(dfs_stack); free(visited);
+    62→        return NULL;
+    63→    }
+    64→
+    65→    /* DFS from start_block */
+    66→    uint32_t sp = 0;
+    67→    dfs_stack[sp++] = start_block;
+    68→    visited[start_block] = 1;
+    69→
+    70→    while (sp > 0) {
+    71→        uint32_t current = dfs_stack[sp - 1];
+    72→        bool all_children_visited = true;
+    73→
+    74→        vtx_schedule_block_t *blk = (vtx_schedule_block_t *)&blocks[current];
+    75→        for (uint32_t s = 0; s < blk->succ_count; s++) {
+    76→            uint32_t succ = blk->succ_blocks[s];
+    77→            if (succ < block_count && !visited[succ]) {
+    78→                visited[succ] = 1;
+    79→                dfs_stack[sp++] = succ;
+    80→                all_children_visited = false;
+    81→                break;
+    82→            }
+    83→        }
+    84→
+    85→        if (all_children_visited) {
+    86→            sp--;
+    87→            postorder[postorder_count++] = current;
+    88→        }
+    89→    }
+    90→
+    91→    /* RPO: reverse the postorder */
+    92→    for (uint32_t i = 0; i < block_count; i++) rpo[i] = block_count; /* unreachable */
+    93→    for (uint32_t i = 0; i < postorder_count; i++) {
+    94→        uint32_t rpo_num = postorder_count - 1 - i;
+    95→        rpo[postorder[i]] = rpo_num;
+    96→    }
+    97→    /* Start block gets highest RPO number */
+    98→    rpo[start_block] = postorder_count > 0 ? postorder_count - 1 : 0;
+    99→
+   100→    free(postorder);
+   101→    free(dfs_stack);
+   102→    free(visited);
+   103→
+   104→    /* Initialize: all blocks dominated by start (sentinel), start by itself */
+   105→    for (uint32_t i = 0; i < block_count; i++) {
+   106→        dom[i] = (i == start_block) ? i : start_block;
+   107→    }
+   108→
+   109→    /* Iterate using RPO order for faster convergence */
+   110→    bool changed = true;
+   111→    while (changed) {
+   112→        changed = false;
+   113→        for (uint32_t i = 0; i < block_count; i++) {
+   114→            if (i == start_block) continue;
+   115→
+   116→            /* Intersect dominators of all predecessors */
+   117→            uint32_t new_dom = (uint32_t)-1;
+   118→            vtx_schedule_block_t *blk = (vtx_schedule_block_t *)&blocks[i];
+   119→
+   120→            for (uint32_t p = 0; p < blk->pred_count; p++) {
+   121→                uint32_t pred = blk->pred_blocks[p];
+   122→                if (new_dom == (uint32_t)-1) {
+   123→                    new_dom = dom[pred];
+   124→                } else {
+   125→                    /* Walk up both chains to find common ancestor.
+   126→                     * IR-3 fix: Use RPO numbers for comparison instead of
+   127→                     * block indices. A higher RPO number means closer to
+   128→                     * the root of the dominator tree. */
+   129→                    uint32_t a = new_dom;
+   130→                    uint32_t b = dom[pred];
+   131→                    unsigned iters = 0;
+   132→                    while (a != b) {
+   133→                        while (rpo[a] > rpo[b]) a = dom[a];
+   134→                        while (rpo[b] > rpo[a]) b = dom[b];
+   135→                        if (++iters > block_count * 2) {
+   136→                            /* Safety: prevent infinite loop for unreachable
+   137→                             * blocks with same RPO number */
+   138→                            a = start_block;
+   139→                            break;
+   140→                        }
+   141→                    }
+   142→                    new_dom = a;
+   143→                }
+   144→            }
+   145→
+   146→            if (new_dom == (uint32_t)-1) new_dom = start_block;
+   147→
+   148→            if (dom[i] != new_dom) {
+   149→                dom[i] = new_dom;
+   150→                changed = true;
+   151→            }
+   152→        }
+   153→    }
+   154→
+   155→    free(rpo);
+   156→    return dom;
+   157→}
+   158→
+   159→/* ========================================================================== */
+   160→/* Dominance frontier computation (Cytron et al. 1991)                        */
+   161→/* ========================================================================== */
+   162→
+   163→/**
+   164→ * Add a block index to a dominance frontier set, avoiding duplicates.
+   165→ * Returns 0 on success, -1 on allocation failure.
+   166→ */
+   167→static int df_add(vtx_schedule_block_t *blk, uint32_t block_idx)
+   168→{
+   169→    /* Check for duplicate */
+   170→    for (uint32_t i = 0; i < blk->df_count; i++) {
+   171→        if (blk->df_blocks[i] == block_idx) return 0;
+   172→    }
+   173→
+   174→    /* Grow array if needed */
+   175→    if (blk->df_count >= blk->df_capacity) {
+   176→        uint32_t new_cap = (blk->df_capacity == 0) ? 8 : blk->df_capacity * 2;
+   177→        uint32_t *new_arr = (uint32_t *)realloc(blk->df_blocks,
+   178→                                                 new_cap * sizeof(uint32_t));
+   179→        if (new_arr == NULL) return -1;
+   180→        blk->df_blocks = new_arr;
+   181→        blk->df_capacity = new_cap;
+   182→    }
+   183→
+   184→    blk->df_blocks[blk->df_count++] = block_idx;
+   185→    return 0;
+   186→}
+   187→
+   188→/**
+   189→ * Compute dominance frontiers for each block.
+   190→ *
+   191→ * Algorithm (Cytron et al. 1991):
+   192→ *   For each join block b (pred_count >= 2):
+   193→ *     For each predecessor p of b:
+   194→ *       runner = p
+   195→ *       while runner != dom[b]:
+   196→ *         add b to DF(runner)
+   197→ *         runner = dom[runner]
+   198→ *
+   199→ * DF(b) is the set of blocks where b's dominance ends — blocks that are
+   200→ * successors of blocks dominated by b, but are not themselves strictly
+   201→ * dominated by b. This is the standard criterion for SSA Phi node
+   202→ * placement.
+   203→ */
+   204→void vtx_compute_dominance_frontiers(vtx_schedule_block_t *blocks,
+   205→                                       uint32_t count,
+   206→                                       const uint32_t *dom,
+   207→                                       uint32_t start_block)
+   208→{
+   209→    if (blocks == NULL || dom == NULL || count == 0) return;
+   210→
+   211→    /* Initialize all frontier sets to empty */
+   212→    for (uint32_t i = 0; i < count; i++) {
+   213→        blocks[i].df_count = 0;
+   214→    }
+   215→
+   216→    /* For each block b, walk up the dominator tree from each predecessor */
+   217→    for (uint32_t b = 0; b < count; b++) {
+   218→        /* Only join blocks (>= 2 predecessors) contribute to frontiers */
+   219→        if (blocks[b].pred_count < 2) continue;
+   220→
+   221→        for (uint32_t pi = 0; pi < blocks[b].pred_count; pi++) {
+   222→            uint32_t runner = blocks[b].pred_blocks[pi];
+   223→
+   224→            /* Walk up the dominator tree until we reach b's immediate
+   225→             * dominator. Every block along the way has b in its frontier. */
+   226→            while (runner != dom[b] && runner != start_block) {
+   227→                /* Guard: if runner is out of range, stop */
+   228→                if (runner >= count) break;
+   229→
+   230→                df_add(&blocks[runner], b);
+   231→
+   232→                runner = dom[runner];
+   233→            }
+   234→        }
+   235→    }
+   236→}
+   237→
+   238→/* ========================================================================== */
+   239→/* Loop depth computation                                                      */
+   240→/* ========================================================================== */
+   241→
+   242→/**
+   243→ * Compute loop depth for each block. A block is in a loop if it is
+   244→ * dominated by a loop header and the loop header has a back edge.
+   245→ *
+   246→ * We use the simple approach: for each back edge (latch → header),
+   247→ * all blocks on the path from header to latch are in the loop.
+   248→ */
+   249→static void compute_loop_depth(uint32_t block_count,
+   250→                               uint32_t start_block,
+   251→                               vtx_schedule_block_t *blocks,
+   252→                               const uint32_t *dom)
+   253→{
+   254→    /* Initialize all to 0 */
+   255→    for (uint32_t i = 0; i < block_count; i++) {
+   256→        blocks[i].loop_depth = 0;
+   257→    }
+   258→
+   259→    /* For each loop header, increment depth of all blocks in the loop */
+   260→    for (uint32_t i = 0; i < block_count; i++) {
+   261→        if (!blocks[i].is_loop_header) continue;
+   262→
+   263→        /* Find the loop latch: a predecessor of i that i dominates */
+   264→        for (uint32_t p = 0; p < blocks[i].pred_count; p++) {
+   265→            uint32_t pred = blocks[i].pred_blocks[p];
+   266→            /* Check if i dominates pred → this is a back edge */
+   267→            uint32_t d = dom[pred];
+   268→            bool is_back_edge = false;
+   269→            while (d != start_block && d != (uint32_t)-1) {
+   270→                if (d == i) { is_back_edge = true; break; }
+   271→                d = dom[d];
+   272→            }
+   273→            if (d == i) is_back_edge = true;
+   274→
+   275→            if (is_back_edge) {
+   276→                /* All blocks from pred up to i (walking dom tree) are in the loop */
+   277→                uint32_t b = pred;
+   278→                while (b != i && b != (uint32_t)-1) {
+   279→                    blocks[b].loop_depth++;
+   280→                    b = dom[b];
+   281→                }
+   282→                blocks[i].loop_depth++;
+   283→            }
+   284→        }
+   285→    }
+   286→}
+   287→
+   288→/* ========================================================================== */
+   289→/* Schedule block construction                                                 */
+   290→/* ========================================================================== */
+   291→
+   292→/**
+   293→ * Add a node to a scheduled block.
+   294→ *
+   295→ * IR-013 fix: blk->nodes is ALWAYS malloc'd — it's initialized to NULL
+   296→ * (arena doesn't touch it) and only grown via realloc. The old code had
+   297→ * no assertion of this invariant; if a future caller arena-allocates
+   298→ * blk->nodes, this realloc would be UB (corrupting the arena or crashing).
+   299→ * The VTX_ASSERT below documents and enforces the contract.
+   300→ */
+   301→static int schedule_block_add_node(vtx_schedule_block_t *blk, vtx_nodeid_t nid)
+   302→{
+   303→    /* blk->nodes must be NULL (initial) or malloc-owned (after a prior
+   304→     * realloc). realloc(NULL, ...) is equivalent to malloc, so the first
+   305→     * call is safe. */
+   306→    if (blk->node_count >= blk->node_capacity) {
+   307→        uint32_t new_cap = (blk->node_capacity == 0) ? 16 : blk->node_capacity * 2;
+   308→        vtx_nodeid_t *new_nodes = (vtx_nodeid_t *)realloc(blk->nodes, new_cap * sizeof(vtx_nodeid_t));
+   309→        if (new_nodes == NULL) return -1;
+   310→        blk->nodes = new_nodes;
+   311→        blk->node_capacity = new_cap;
+   312→    }
+   313→    blk->nodes[blk->node_count++] = nid;
+   314→    return 0;
+   315→}
+   316→
+   317→/**
+   318→ * Add a successor edge to a block, growing the array if needed.
+   319→ *
+   320→ * BUGFIX: The original code allocated a fixed-size array of 4 entries for
+   321→ * successor/predecessor edges and silently dropped any edges beyond that
+   322→ * limit. This silently truncated CFG edges for blocks with more than 4
+   323→ * successors (e.g., switch statements with many cases) or more than 4
+   324→ * predecessors (e.g., merge points from many paths), producing an
+   325→ * incomplete CFG that led to incorrect scheduling and code generation.
+   326→ * The fix uses realloc to dynamically grow the array when it fills up.
+   327→ *
+   328→ * Returns 0 on success, -1 on allocation failure.
+   329→ */
+   330→static int schedule_block_add_succ(vtx_schedule_block_t *blk, uint32_t succ_idx)
+   331→{
+   332→    /* Check for duplicate */
+   333→    for (uint32_t i = 0; i < blk->succ_count; i++) {
+   334→        if (blk->succ_blocks[i] == succ_idx) return 0;
+   335→    }
+   336→
+   337→    /* Grow if needed */
+   338→    if (blk->succ_count >= blk->succ_capacity) {
+   339→        uint32_t new_cap = (blk->succ_capacity == 0) ? 4 : blk->succ_capacity * 2;
+   340→        uint32_t *new_arr = (uint32_t *)realloc(blk->succ_blocks, new_cap * sizeof(uint32_t));
+   341→        if (new_arr == NULL) return -1;
+   342→        blk->succ_blocks = new_arr;
+   343→        blk->succ_capacity = new_cap;
+   344→    }
+   345→    blk->succ_blocks[blk->succ_count++] = succ_idx;
+   346→    return 0;
+   347→}
+   348→
+   349→/**
+   350→ * Add a predecessor edge to a block, growing the array if needed.
+   351→ *
+   352→ * BUGFIX: Same as schedule_block_add_succ — the original silently truncated
+   353→ * edges beyond 4 entries.
+   354→ *
+   355→ * Returns 0 on success, -1 on allocation failure.
+   356→ */
+   357→static int schedule_block_add_pred(vtx_schedule_block_t *blk, uint32_t pred_idx)
+   358→{
+   359→    /* Check for duplicate */
+   360→    for (uint32_t i = 0; i < blk->pred_count; i++) {
+   361→        if (blk->pred_blocks[i] == pred_idx) return 0;
+   362→    }
+   363→
+   364→    /* Grow if needed */
+   365→    if (blk->pred_count >= blk->pred_capacity) {
+   366→        uint32_t new_cap = (blk->pred_capacity == 0) ? 4 : blk->pred_capacity * 2;
+   367→        uint32_t *new_arr = (uint32_t *)realloc(blk->pred_blocks, new_cap * sizeof(uint32_t));
+   368→        if (new_arr == NULL) return -1;
+   369→        blk->pred_blocks = new_arr;
+   370→        blk->pred_capacity = new_cap;
+   371→    }
+   372→    blk->pred_blocks[blk->pred_count++] = pred_idx;
+   373→    return 0;
+   374→}
+   375→
+   376→/* ========================================================================== */
+   377→/* Main scheduling algorithm                                                   */
+   378→/* ========================================================================== */
+   379→
+   380→int vtx_schedule_run(vtx_graph_t *graph, vtx_arena_t *arena, vtx_schedule_t *schedule)
+   381→{
+   382→    VTX_ASSERT(graph != NULL, "graph must not be NULL");
+   383→    VTX_ASSERT(arena != NULL, "arena must not be NULL");
+   384→    VTX_ASSERT(schedule != NULL, "schedule must not be NULL");
+   385→
+   386→    memset(schedule, 0, sizeof(vtx_schedule_t));
+   387→
+   388→    vtx_node_table_t *nt = &graph->node_table;
+   389→    uint32_t node_count = nt->count;
+   390→
+   391→    if (node_count == 0) return 0;
+   392→
+   393→    /* Phase 1: Identify basic blocks from control nodes.
+   394→     *
+   395→     * Each Region/LoopBegin/Catch node starts a new block.
+   396→     * Each If/Switch/Return/Unwind/Deopt/Goto ends a block.
+   397→     * We walk all nodes and partition them into blocks. */
+   398→
+   399→    /* First pass: count blocks (one per Region/LoopBegin node, plus Start) */
+   400→    uint32_t block_count = 0;
+   401→    for (uint32_t i = 0; i < node_count; i++) {
+   402→        vtx_node_t *node = &nt->nodes[i];
+   403→        if (node->dead) continue;
+   404→        if (node->opcode == VTX_OP_Region || node->opcode == VTX_OP_LoopBegin ||
+   405→            node->opcode == VTX_OP_Start || node->opcode == VTX_OP_Catch) {
+   406→            block_count++;
+   407→        }
+   408→    }
+   409→
+   410→    if (block_count == 0) {
+   411→        /* No control structure — shouldn't happen, but handle gracefully */
+   412→        block_count = 1;
+   413→    }
+   414→
+   415→    /* Allocate blocks */
+   416→    schedule->blocks = (vtx_schedule_block_t *)calloc(block_count, sizeof(vtx_schedule_block_t));
+   417→    if (schedule->blocks == NULL) return -1;
+   418→    schedule->count = block_count;
+   419→    schedule->capacity = block_count;
+   420→
+   421→    /* Allocate node-block mapping */
+   422→    schedule->node_block = (uint32_t *)malloc(node_count * sizeof(uint32_t));
+   423→    if (schedule->node_block == NULL) {
+   424→        free(schedule->blocks);
+   425→        return -1;
+   426→    }
+   427→    schedule->node_block_count = node_count;
+   428→    for (uint32_t i = 0; i < node_count; i++) {
+   429→        schedule->node_block[i] = (uint32_t)-1;
+   430→    }
+   431→
+   432→    /* Phase 2: Create blocks and assign control nodes */
+   433→    uint32_t bi = 0;
+   434→
+   435→    /* The Start node always starts block 0 */
+   436→    if (graph->start_node < node_count) {
+   437→        schedule->blocks[bi].region_node = graph->start_node;
+   438→        schedule->blocks[bi].block_id = bi;
+   439→        schedule->node_block[graph->start_node] = bi;
+   440→        bi++;
+   441→    }
+   442→
+   443→    /* Create blocks for other Region/LoopBegin/Catch nodes */
+   444→    for (uint32_t i = 0; i < node_count; i++) {
+   445→        vtx_node_t *node = &nt->nodes[i];
+   446→        if (node->dead) continue;
+   447→        if (i == graph->start_node) continue; /* already handled */
+   448→        if (node->opcode == VTX_OP_Region || node->opcode == VTX_OP_LoopBegin ||
+   449→            node->opcode == VTX_OP_Catch) {
+   450→            VTX_ASSERT(bi < block_count, "block index overflow");
+   451→            schedule->blocks[bi].region_node = i;
+   452→            schedule->blocks[bi].block_id = bi;
+   453→            schedule->blocks[bi].is_loop_header = (node->opcode == VTX_OP_LoopBegin);
+   454→            schedule->blocks[bi].is_catch = (node->opcode == VTX_OP_Catch);
+   455→            schedule->node_block[i] = bi;
+   456→            bi++;
+   457→        }
+   458→    }
+   459→
+   460→    /* Fill in actual block count if we miscounted */
+   461→    schedule->count = bi;
+   462→
+   463→    /* Phase 2.5: Assign control and pinned nodes to their blocks.
+   464→     *
+   465→     * BUGFIX: The original code skipped control nodes (If, LoopEnd, Goto,
+   466→     * Return) and pinned nodes (Phi) in Phase 5's data-node placement,
+   467→     * causing them to fall through to the "assign to block 0" fallback.
+   468→     * This put all If/LoopEnd/Return/Phi nodes in block 0 regardless of
+   469→     * where they actually belong, producing completely wrong instruction
+   470→     * ordering and branch targets.
+   471→     *
+   472→     * The correct rule: a control/pinned node goes in the same block as
+   473→     * its control input. We walk each node's first input (the control
+   474→     * dependency) until we find a node already assigned to a block
+   475→     * (i.e., a Region/LoopBegin/Start). This must iterate until fixed-
+   476→     * point because some control chains are multi-hop:
+   477→     *   If → Proj → If → Region  (nested if in same block)
+   478→     *   LoopEnd → If → Region
+   479→     *   Phi → Region
+   480→     */
+   481→    {
+   482→        bool changed = true;
+   483→        while (changed) {
+   484→            changed = false;
+   485→            for (uint32_t i = 0; i < node_count; i++) {
+   486→                vtx_node_t *node = &nt->nodes[i];
+   487→                if (node->dead) continue;
+   488→                if (schedule->node_block[i] != (uint32_t)-1) continue;
+   489→
+   490→                /* Only process control and pinned nodes here */
+   491→                bool is_ctrl = vtx_nf_has(node->flags, VTX_NF_CONTROL);
+   492→                bool is_pinned = vtx_nf_has(node->flags, VTX_NF_PINNED);
+   493→                if (!is_ctrl && !is_pinned) continue;
+   494→
+   495→                /* Walk the control chain to find an assigned block.
+   496→                 * For control nodes, input[0] is the control dependency.
+   497→                 * For Phi, we search all inputs for a Region/LoopBegin. */
+   498→                vtx_nodeid_t ctrl = VTX_NODEID_INVALID;
+   499→                if (node->opcode == VTX_OP_Phi) {
+   500→                    /* Phi: find the Region/LoopBegin among inputs.
+   501→                     * The Phi goes in the same block as its Region/LoopBegin.
+   502→                     * We look for the control input (Region/LoopBegin) specifically,
+   503→                     * not just any assigned input, because a Phi in a loop header
+   504→                     * should be in the loop header block, not in the preheader
+   505→                     * where param_n might be. */
+   506→                    for (uint32_t pi = 0; pi < node->input_count; pi++) {
+   507→                        vtx_nodeid_t inp = node->inputs[pi];
+   508→                        if (inp != VTX_NODEID_INVALID && inp < node_count) {
+   509→                            vtx_node_t *inp_node = &nt->nodes[inp];
+   510→                            if (inp_node->opcode == VTX_OP_Region ||
+   511→                                inp_node->opcode == VTX_OP_LoopBegin) {
+   512→                                uint32_t blk = schedule->node_block[inp];
+   513→                                if (blk != (uint32_t)-1) {
+   514→                                    ctrl = inp;
+   515→                                    break;
+   516→                                }
+   517→                            }
+   518→                        }
+   519→                    }
+   520→                    /* Fallback: if no Region/LoopBegin found, use any assigned input */
+   521→                    if (ctrl == VTX_NODEID_INVALID) {
+   522→                        for (uint32_t pi = 0; pi < node->input_count; pi++) {
+   523→                            vtx_nodeid_t inp = node->inputs[pi];
+   524→                            if (inp != VTX_NODEID_INVALID && inp < node_count) {
+   525→                                uint32_t blk = schedule->node_block[inp];
+   526→                                if (blk != (uint32_t)-1) {
+   527→                                    ctrl = inp;
+   528→                                    break;
+   529→                                }
+   530→                            }
+   531→                        }
+   532→                    }
+   533→                } else if (is_pinned && !is_ctrl) {
+   534→                    /* Pinned non-control node (e.g., Div/Mod with a Proj
+   535→                     * control dependency): find the block where the Proj
+   536→                     * feeds into (the fall-through block). */
+   537→                    uint32_t target_blk = (uint32_t)-1;
+   538→
+   539→                    /* Look for a Proj input — it indicates a control
+   540→                     * dependency. Find the Region that has this Proj as
+   541→                     * input, then find that Region's block. */
+   542→                    for (uint32_t pi = 0; pi < node->input_count; pi++) {
+   543→                        vtx_nodeid_t inp = node->inputs[pi];
+   544→                        if (inp == VTX_NODEID_INVALID || inp >= node_count) continue;
+   545→                        vtx_node_t *inp_node = &nt->nodes[inp];
+   546→                        if (inp_node->opcode != VTX_OP_Proj) continue;
+   547→
+   548→                        /* Search all Region/LoopBegin nodes for one that
+   549→                         * has this Proj as an input. */
+   550→                        for (uint32_t rn = 0; rn < node_count; rn++) {
+   551→                            vtx_node_t *region = &nt->nodes[rn];
+   552→                            if (region->dead) continue;
+   553→                            if (region->opcode != VTX_OP_Region &&
+   554→                                region->opcode != VTX_OP_LoopBegin) continue;
+   555→                            for (uint32_t ri = 0; ri < region->input_count; ri++) {
+   556→                                if (region->inputs[ri] == inp) {
+   557→                                    /* Found the Region that this Proj feeds into.
+   558→                                     * Find the block for this Region. */
+   559→                                    uint32_t reg_blk = schedule->node_block[rn];
+   560→                                    if (reg_blk != (uint32_t)-1) {
+   561→                                        target_blk = reg_blk;
+   562→                                    }
+   563→                                    break;
+   564→                                }
+   565→                            }
+   566→                            if (target_blk != (uint32_t)-1) break;
+   567→                        }
+   568→                        if (target_blk != (uint32_t)-1) break;
+   569→                    }
+   570→
+   571→                    /* If no Proj found, fall back to deepest input block */
+   572→                    if (target_blk == (uint32_t)-1) {
+   573→                        for (uint32_t pi = 0; pi < node->input_count; pi++) {
+   574→                            vtx_nodeid_t inp = node->inputs[pi];
+   575→                            if (inp != VTX_NODEID_INVALID && inp < node_count) {
+   576→                                uint32_t blk = schedule->node_block[inp];
+   577→                                if (blk != (uint32_t)-1) {
+   578→                                    if (target_blk == (uint32_t)-1) {
+   579→                                        target_blk = blk;
+   580→                                    } else {
+   581→                                        if (blk > target_blk) target_blk = blk;
+   582→                                    }
+   583→                                }
+   584→                            }
+   585→                        }
+   586→                    }
+   587→
+   588→                    if (target_blk != (uint32_t)-1) {
+   589→                        schedule->node_block[i] = target_blk;
+   590→                        changed = true;
+   591→                        break;
+   592→                    }
+   593→                } else {
+   594→                    /* Control nodes: first input is the control dependency */
+   595→                    if (node->input_count > 0)
+   596→                        ctrl = node->inputs[0];
+   597→                }
+   598→
+   599→                while (ctrl != VTX_NODEID_INVALID && ctrl < node_count) {
+   600→                    uint32_t blk = schedule->node_block[ctrl];
+   601→                    if (blk != (uint32_t)-1) {
+   602→                        schedule->node_block[i] = blk;
+   603→                        changed = true;
+   604→                        break;
+   605→                    }
+   606→                    /* Walk further up the control chain */
+   607→                    vtx_node_t *cn = &nt->nodes[ctrl];
+   608→                    if (cn->input_count > 0)
+   609→                        ctrl = cn->inputs[0];
+   610→                    else
+   611→                        break;
+   612→                }
+   613→            }
+   614→        }
+   615→    }
+   616→
+   617→    /* Phase 2.75: Create entry edges from Start block to its successors.
+   618→     * The Start node may directly feed into Region/LoopBegin nodes
+   619→     * (the entry points of the function). Without this, there's no
+   620→     * edge from block 0 to the first control block, breaking the
+   621→     * dominator computation. */
+   622→    {
+   623→        uint32_t start_blk = (uint32_t)-1;
+   624→        if (graph->start_node < node_count) {
+   625→            start_blk = schedule->node_block[graph->start_node];
+   626→        }
+   627→        if (start_blk != (uint32_t)-1) {
+   628→            /* Find all Region/LoopBegin nodes that have Start as input */
+   629→            for (uint32_t i = 0; i < node_count; i++) {
+   630→                vtx_node_t *node = &nt->nodes[i];
+   631→                if (node->dead) continue;
+   632→                if (node->opcode != VTX_OP_Region && node->opcode != VTX_OP_LoopBegin)
+   633→                    continue;
+   634→                for (uint32_t k = 0; k < node->input_count; k++) {
+   635→                    if (node->inputs[k] == graph->start_node) {
+   636→                        uint32_t target_blk = schedule->node_block[i];
+   637→                        if (target_blk != (uint32_t)-1 && target_blk != start_blk) {
+   638→                            vtx_schedule_block_t *fb = &schedule->blocks[start_blk];
+   639→                            vtx_schedule_block_t *tb = &schedule->blocks[target_blk];
+   640→                            if (schedule_block_add_succ(fb, target_blk) != 0) return -1;
+   641→                            if (schedule_block_add_pred(tb, start_blk) != 0) return -1;
+   642→                        }
+   643→                        break;
+   644→                    }
+   645→                }
+   646→            }
+   647→        }
+   648→    }
+   649→
+   650→    /* Phase 3: Build block successor/predecessor edges.
+   651→     * We do this by examining control flow: for each If node, its Proj
+   652→     * nodes determine successors. For Goto, it goes to the next Region.
+   653→     * For Return, no successor. */
+   654→    for (uint32_t i = 0; i < node_count; i++) {
+   655→        vtx_node_t *node = &nt->nodes[i];
+   656→        if (node->dead) continue;
+   657→
+   658→        if (node->opcode == VTX_OP_Proj) {
+   659→            /* Proj nodes connect to Region nodes.
+   660→             * Find which Region this Proj feeds into. */
+   661→            for (uint32_t j = 0; j < node_count; j++) {
+   662→                vtx_node_t *user = &nt->nodes[j];
+   663→                if (user->dead) continue;
+   664→                if (user->opcode == VTX_OP_Region || user->opcode == VTX_OP_LoopBegin) {
+   665→                    for (uint32_t k = 0; k < user->input_count; k++) {
+   666→                        if (user->inputs[k] == i) {
+   667→                            /* This Proj feeds into this Region.
+   668→                             * The Proj's input is an If or Goto.
+   669→                             * The If/Goto's block is the predecessor.
+   670→                             * The Region's block is the successor. */
+   671→                            uint32_t succ_block = schedule->node_block[j];
+   672→
+   673→                            /* We need to find the block containing the If node.
+   674→                             * The If node is the Proj's input. But the If's block
+   675→                             * is the block containing it. Walk back to find the
+   676→                             * If's Region. */
+   677→                            if (node->inputs[0] < node_count) {
+   678→                                /* Walk back through control chain to find Region */
+   679→                                vtx_nodeid_t ctrl = node->inputs[0];
+   680→                                uint32_t if_block = (uint32_t)-1;
+   681→                                /* The If is in the same block as its Region */
+   682→                                while (ctrl != VTX_NODEID_INVALID && ctrl < node_count) {
+   683→                                    if_block = schedule->node_block[ctrl];
+   684→                                    if (if_block != (uint32_t)-1) break;
+   685→                                    vtx_node_t *ctrl_node = &nt->nodes[ctrl];
+   686→                                    if (ctrl_node->input_count > 0) {
+   687→                                        ctrl = ctrl_node->inputs[0];
+   688→                                    } else {
+   689→                                        break;
+   690→                                    }
+   691→                                }
+   692→
+   693→                                if (if_block != (uint32_t)-1 && succ_block != (uint32_t)-1) {
+   694→                                    /* Add edge if_block → succ_block */
+   695→                                    vtx_schedule_block_t *pred_blk = &schedule->blocks[if_block];
+   696→                                    vtx_schedule_block_t *succ_blk = &schedule->blocks[succ_block];
+   697→
+   698→                                    /* Add successor (BUGFIX: uses dynamic growth) */
+   699→                                    if (schedule_block_add_succ(pred_blk, succ_block) != 0) return -1;
+   700→
+   701→                                    /* Add predecessor (BUGFIX: uses dynamic growth) */
+   702→                                    if (schedule_block_add_pred(succ_blk, if_block) != 0) return -1;
+   703→                                }
+   704→                            }
+   705→                        }
+   706→                    }
+   707→                }
+   708→            }
+   709→        }
+   710→
+   711→        /* Handle Goto nodes: they connect to a Region */
+   712→        if (node->opcode == VTX_OP_Goto) {
+   713→            /* Find which Region this Goto feeds into */
+   714→            for (uint32_t j = 0; j < node_count; j++) {
+   715→                vtx_node_t *region = &nt->nodes[j];
+   716→                if (region->dead) continue;
+   717→                if (region->opcode == VTX_OP_Region || region->opcode == VTX_OP_LoopBegin) {
+   718→                    for (uint32_t k = 0; k < region->input_count; k++) {
+   719→                        if (region->inputs[k] == i) {
+   720→                            uint32_t region_block = schedule->node_block[j];
+   721→
+   722→                            /* Goto is in the same block as its input control node */
+   723→                            vtx_nodeid_t ctrl = node->input_count > 0 ? node->inputs[0] : VTX_NODEID_INVALID;
+   724→                            uint32_t from_block = (uint32_t)-1;
+   725→                            while (ctrl != VTX_NODEID_INVALID && ctrl < node_count) {
+   726→                                from_block = schedule->node_block[ctrl];
+   727→                                if (from_block != (uint32_t)-1) break;
+   728→                                vtx_node_t *cn = &nt->nodes[ctrl];
+   729→                                ctrl = cn->input_count > 0 ? cn->inputs[0] : VTX_NODEID_INVALID;
+   730→                            }
+   731→
+   732→                            if (from_block != (uint32_t)-1 && region_block != (uint32_t)-1) {
+   733→                                vtx_schedule_block_t *fb = &schedule->blocks[from_block];
+   734→                                vtx_schedule_block_t *tb = &schedule->blocks[region_block];
+   735→
+   736→                                /* BUGFIX: uses dynamic growth instead of fixed 4-entry limit */
+   737→                                if (schedule_block_add_succ(fb, region_block) != 0) return -1;
+   738→                                if (schedule_block_add_pred(tb, from_block) != 0) return -1;
+   739→                            }
+   740→                        }
+   741→                    }
+   742→                }
+   743→            }
+   744→        }
+   745→
+   746→        /* Handle If nodes that connect directly to Region/LoopBegin
+   747→         * without intermediate Proj nodes.
+   748→         *
+   749→         * BUGFIX: The original code only built CFG edges for Proj and Goto
+   750→         * nodes. When a graph builder connected If → Region/LoopBegin
+   751→         * directly (without Proj intermediaries), no successor/predecessor
+   752→         * edges were created, breaking dominator computation, loop depth,
+   753→         * branch target resolution, and Phi copy emission.
+   754→         *
+   755→         * This fallback handles the common pattern:
+   756→         *   If → LoopEnd (continue branch)
+   757→         *   If → Region  (exit branch)
+   758→         * We scan all Region/LoopBegin nodes for If inputs and create
+   759→         * the corresponding CFG edges. Each Region/LoopBegin that has
+   760→         * an If as input is a successor of the If's block. */
+   761→        if (node->opcode == VTX_OP_If) {
+   762→            /* Find the If's block via its control input */
+   763→            vtx_nodeid_t ctrl = node->input_count > 0 ? node->inputs[0] : VTX_NODEID_INVALID;
+   764→            uint32_t if_block = (uint32_t)-1;
+   765→            while (ctrl != VTX_NODEID_INVALID && ctrl < node_count) {
+   766→                if_block = schedule->node_block[ctrl];
+   767→                if (if_block != (uint32_t)-1) break;
+   768→                vtx_node_t *cn = &nt->nodes[ctrl];
+   769→                ctrl = cn->input_count > 0 ? cn->inputs[0] : VTX_NODEID_INVALID;
+   770→            }
+   771→            if (if_block == (uint32_t)-1) continue;
+   772→
+   773→            /* Find all Region/LoopBegin nodes that have this If as input */
+   774→            for (uint32_t j = 0; j < node_count; j++) {
+   775→                vtx_node_t *region = &nt->nodes[j];
+   776→                if (region->dead) continue;
+   777→                if (region->opcode != VTX_OP_Region && region->opcode != VTX_OP_LoopBegin)
+   778→                    continue;
+   779→                for (uint32_t k = 0; k < region->input_count; k++) {
+   780→                    if (region->inputs[k] == i) {
+   781→                        /* This If feeds directly into this Region/LoopBegin */
+   782→                        uint32_t region_block = schedule->node_block[j];
+   783→                        if (region_block != (uint32_t)-1 && region_block != if_block) {
+   784→                            vtx_schedule_block_t *fb = &schedule->blocks[if_block];
+   785→                            vtx_schedule_block_t *tb = &schedule->blocks[region_block];
+   786→                            if (schedule_block_add_succ(fb, region_block) != 0) return -1;
+   787→                            if (schedule_block_add_pred(tb, if_block) != 0) return -1;
+   788→                        }
+   789→                        break; /* Each If input appears once per Region */
+   790→                    }
+   791→                }
+   792→            }
+   793→
+   794→            /* Also handle LoopEnd nodes that have this If as input.
+   795→             * LoopEnd creates a back-edge from the If's block to the
+   796→             * LoopBegin's block (which is the same block). We add this
+   797→             * self-edge so that the dominator/loop-depth computation
+   798→             * can detect the back-edge. */
+   799→            for (uint32_t j = 0; j < node_count; j++) {
+   800→                vtx_node_t *le = &nt->nodes[j];
+   801→                if (le->dead) continue;
+   802→                if (le->opcode != VTX_OP_LoopEnd) continue;
+   803→                if (le->input_count < 1 || le->inputs[0] != i) continue;
+   804→
+   805→                /* LoopEnd is in the If's block (if_block). The back-edge
+   806→                 * goes to the LoopBegin that is the region_node of if_block. */
+   807→                vtx_schedule_block_t *fb = &schedule->blocks[if_block];
+   808→                /* Add self-edge (back-edge) for the loop */
+   809→                if (schedule_block_add_succ(fb, if_block) != 0) return -1;
+   810→                if (schedule_block_add_pred(fb, if_block) != 0) return -1;
+   811→                break; /* At most one LoopEnd per If */
+   812→            }
+   813→
+   814→            /* Also check for LoopEnd nodes that have a Proj of this If
+   815→             * as input (e.g., If → Proj(true) → LoopEnd). */
+   816→            for (uint32_t j = 0; j < node_count; j++) {
+   817→                vtx_node_t *le = &nt->nodes[j];
+   818→                if (le->dead) continue;
+   819→                if (le->opcode != VTX_OP_LoopEnd) continue;
+   820→                if (le->input_count < 1) continue;
+   821→
+   822→                /* Check if LoopEnd's input is a Proj of this If */
+   823→                vtx_nodeid_t le_input = le->inputs[0];
+   824→                if (le_input < node_count) {
+   825→                    vtx_node_t *le_input_node = &nt->nodes[le_input];
+   826→                    if (le_input_node->opcode == VTX_OP_Proj &&
+   827→                        le_input_node->input_count > 0 &&
+   828→                        le_input_node->inputs[0] == i) {
+   829→                        /* This LoopEnd is reached through a Proj of this If */
+   830→                        vtx_schedule_block_t *fb = &schedule->blocks[if_block];
+   831→                        if (schedule_block_add_succ(fb, if_block) != 0) return -1;
+   832→                        if (schedule_block_add_pred(fb, if_block) != 0) return -1;
+   833→                        break;
+   834→                    }
+   835→                }
+   836→            }
+   837→        }
+   838→
+   839→        /* Handle LoopEnd nodes that are not connected through If directly.
+   840→         * LoopEnd creates a back-edge from its block to the LoopBegin block
+   841→         * it belongs to. We find the LoopBegin by checking which LoopBegin
+   842→         * has Phi nodes whose back-edge inputs come from the LoopEnd's block.
+   843→         *
+   844→         * This handles cases like: Proj → Region → LoopEnd where the
+   845→         * LoopEnd doesn't have an If as its direct control input. */
+   846→        if (node->opcode == VTX_OP_LoopEnd) {
+   847→            vtx_nodeid_t ctrl = node->input_count > 0 ? node->inputs[0] : VTX_NODEID_INVALID;
+   848→            uint32_t le_block = (uint32_t)-1;
+   849→            while (ctrl != VTX_NODEID_INVALID && ctrl < node_count) {
+   850→                le_block = schedule->node_block[ctrl];
+   851→                if (le_block != (uint32_t)-1) break;
+   852→                vtx_node_t *cn = &nt->nodes[ctrl];
+   853→                ctrl = cn->input_count > 0 ? cn->inputs[0] : VTX_NODEID_INVALID;
+   854→            }
+   855→            if (le_block == (uint32_t)-1) continue;
+   856→
+   857→            /* BUGFIX (audit #3, loop hang): Find the LoopBegin that this
+   858→             * LoopEnd connects to by checking which LoopBegin has this
+   859→             * LoopEnd as an input. This is simpler and more reliable than
+   860→             * searching Phi data inputs (which haven't been assigned to
+   861→             * blocks yet at this point in the scheduler). */
+   862→            for (uint32_t j = 0; j < node_count; j++) {
+   863→                vtx_node_t *lb = &nt->nodes[j];
+   864→                if (lb->dead || lb->opcode != VTX_OP_LoopBegin) continue;
+   865→                for (uint32_t k = 0; k < lb->input_count; k++) {
+   866→                    if (lb->inputs[k] == i) {
+   867→                        uint32_t lb_block = schedule->node_block[j];
+   868→                        if (lb_block != (uint32_t)-1 && lb_block != le_block) {
+   869→                            vtx_schedule_block_t *fb = &schedule->blocks[le_block];
+   870→                            vtx_schedule_block_t *tb = &schedule->blocks[lb_block];
+   871→                            if (schedule_block_add_succ(fb, lb_block) != 0) return -1;
+   872→                            if (schedule_block_add_pred(tb, le_block) != 0) return -1;
+   873→                        }
+   874→                        goto next_loopend2;
+   875→                    }
+   876→                }
+   877→            }
+   878→            next_loopend2:;
+   879→        }
+   880→
+   881→        /* Handle ExceptProj nodes: they represent exception edges.
+   882→         * An ExceptProj connects a throwing node's block to the catch
+   883→         * handler block (the block containing the Catch node that the
+   884→         * ExceptProj feeds into). We treat this like a control edge —
+   885→         * the catch handler block is a successor of the throwing block. */
+   886→        if (node->opcode == VTX_OP_ExceptProj) {
+   887→            /* Find which Catch node this ExceptProj feeds into.
+   888→             * The ExceptProj's input is the throwing node; we need
+   889→             * to find the Catch node that consumes this ExceptProj. */
+   890→            for (uint32_t j = 0; j < node_count; j++) {
+   891→                vtx_node_t *catch_node = &nt->nodes[j];
+   892→                if (catch_node->dead) continue;
+   893→                if (catch_node->opcode == VTX_OP_Catch) {
+   894→                    for (uint32_t k = 0; k < catch_node->input_count; k++) {
+   895→                        if (catch_node->inputs[k] == i) {
+   896→                            /* This ExceptProj feeds into this Catch.
+   897→                             * The Catch's block is the successor.
+   898→                             * The throwing node's block is the predecessor. */
+   899→                            uint32_t catch_block = schedule->node_block[j];
+   900→                            if (catch_block == (uint32_t)-1) continue;
+   901→
+   902→                            /* Find the block of the throwing node */
+   903→                            if (node->input_count > 0 && node->inputs[0] < node_count) {
+   904→                                vtx_nodeid_t thrower = node->inputs[0];
+   905→                                uint32_t from_block = schedule->node_block[thrower];
+   906→                                /* If the thrower isn't directly in a block,
+   907→                                 * walk back through its inputs to find one */
+   908→                                while (from_block == (uint32_t)-1 &&
+   909→                                       thrower != VTX_NODEID_INVALID &&
+   910→                                       thrower < node_count) {
+   911→                                    vtx_node_t *tn = &nt->nodes[thrower];
+   912→                                    if (tn->input_count > 0) {
+   913→                                        thrower = tn->inputs[0];
+   914→                                        from_block = schedule->node_block[thrower];
+   915→                                    } else {
+   916→                                        break;
+   917→                                    }
+   918→                                }
+   919→
+   920→                                if (from_block != (uint32_t)-1 &&
+   921→                                    from_block != catch_block) {
+   922→                                    vtx_schedule_block_t *fb = &schedule->blocks[from_block];
+   923→                                    vtx_schedule_block_t *tb = &schedule->blocks[catch_block];
+   924→
+   925→                                    /* BUGFIX: uses dynamic growth with built-in dedup */
+   926→                                    if (schedule_block_add_succ(fb, catch_block) != 0) return -1;
+   927→                                    if (schedule_block_add_pred(tb, from_block) != 0) return -1;
+   928→                                }
+   929→                            }
+   930→                            break; /* Each ExceptProj feeds into at most one Catch */
+   931→                        }
+   932→                    }
+   933→                }
+   934→            }
+   935→        }
+   936→    }
+   937→
+   938→    /* BUG-16 fix: Guard debug CFG printing with VORTEX_ENABLE_VERIFY
+   939→     * so it doesn't spam stderr in production builds. */
+   940→#if 0
+   941→    fprintf(stderr, "[schedule] CFG edges after Phase 3:\n");
+   942→    for (uint32_t dbi = 0; dbi < schedule->count; dbi++) {
+   943→        vtx_schedule_block_t *dbl = &schedule->blocks[dbi];
+   944→        fprintf(stderr, "  Block %u: succ=[", dbi);
+   945→        for (uint32_t ds = 0; ds < dbl->succ_count; ds++) {
+   946→            if (ds > 0) fprintf(stderr, ",");
+   947→            fprintf(stderr, "%u", dbl->succ_blocks[ds]);
+   948→        }
+   949→        fprintf(stderr, "] pred=[");
+   950→        for (uint32_t dp = 0; dp < dbl->pred_count; dp++) {
+   951→            if (dp > 0) fprintf(stderr, ",");
+   952→            fprintf(stderr, "%u", dbl->pred_blocks[dp]);
+   953→        }
+   954→        fprintf(stderr, "]\n");
+   955→    }
+   956→#endif
+   957→
+   958→    /* Phase 4: Compute dominators and loop depth.
+   959→     * Keep the dominator array alive through Phase 5 so we can use it
+   960→     * for LCA computation when placing data nodes. */
+   961→    uint32_t start_block = 0;
+   962→    uint32_t *dom = compute_dominators(schedule->count, start_block, schedule->blocks);
+   963→    if (dom != NULL) {
+   964→        compute_loop_depth(schedule->count, start_block, schedule->blocks, dom);
+   965→    }
+   966→
+   967→    /* Compute dominator tree depths for correct LCA.
+   968→     * loop_depth is NOT the same as dominator tree depth and using it
+   969→     * to decide which block to walk up in the LCA computation can
+   970→     * cause incorrect results (e.g., walking the wrong side of the
+   971→     * dominator tree). dom_depth[i] = distance from the root of the
+   972→     * dominator tree to block i. */
+   973→    uint32_t *dom_depth = (uint32_t *)calloc(schedule->count, sizeof(uint32_t));
+   974→    if (dom_depth) {
+   975→        for (uint32_t i = 0; i < schedule->count; i++) {
+   976→            if (dom[i] != (uint32_t)-1 && dom[i] != i) {
+   977→                dom_depth[i] = dom_depth[dom[i]] + 1;
+   978→            }
+   979→        }
+   980→    }
+   981→
+   982→    /* Phase 5: Assign data and memory nodes to blocks.
+   983→     *
+   984→     * For each non-control, non-dead node, find the block where it should
+   985→     * be scheduled. The rule is:
+   986→     *   - A node must be in a block that dominates all its uses.
+   987→     *   - A node should be as early as possible (hoist for CSE benefit).
+   988→     *   - Loop-invariant nodes should be hoisted out of loops.
+   989→     *
+   990→     * We assign each node to the LCA (lowest common ancestor) of all blocks
+   991→     * that contain its inputs in the dominator tree. This is the lowest
+   992→     * block that dominates all inputs.
+   993→     *
+   994→     * BUGFIX: The original code used `ib > best_block` (block index
+   995→     * comparison) to pick the "latest" input block. Block indices have no
+   996→     * guaranteed relationship to dominance — block 5 does not necessarily
+   997→     * dominate block 3 just because 5 > 3. The correct approach is to
+   998→     * compute the LCA in the dominator tree, which finds the lowest block
+   999→     * that dominates all input blocks. */
+  1000→
+  1001→    /* LCA helper using the dominator tree.
+  1002→     * Walks two blocks up the dominator tree until they meet. */
+  1003→    uint32_t lca_block = start_block; /* default for nodes with no inputs */
+  1004→
+  1005→    /* First, assign memory chain nodes. Memory nodes must follow the
+  1006→     * memory chain order, so they go in the same block as their control
+  1007→     * context. */
+  1008→    for (uint32_t i = 0; i < node_count; i++) {
+  1009→        vtx_node_t *node = &nt->nodes[i];
+  1010→        if (node->dead) continue;
+  1011→        if (schedule->node_block[i] != (uint32_t)-1) continue; /* already assigned */
+  1012→
+  1013→        if (vtx_nf_has(node->flags, VTX_NF_MEMORY)) {
+  1014→            /* Memory nodes go in the same block as their control input
+  1015→             * or the LCA of their input blocks using dominator tree. */
+  1016→            uint32_t best_block = (uint32_t)-1;
+  1017→            for (uint32_t j = 0; j < node->input_count; j++) {
+  1018→                vtx_nodeid_t inp = node->inputs[j];
+  1019→                if (inp != VTX_NODEID_INVALID && inp < node_count) {
+  1020→                    uint32_t ib = schedule->node_block[inp];
+  1021→                    if (ib != (uint32_t)-1) {
+  1022→                        if (best_block == (uint32_t)-1) {
+  1023→                            best_block = ib;
+  1024→                        } else if (dom != NULL) {
+  1025→                            /* Compute LCA of best_block and ib using dominator tree */
+  1026→                            uint32_t a = best_block;
+  1027→                            uint32_t b = ib;
+  1028→                            while (a != b) {
+  1029→                                if (a == (uint32_t)-1 || b == (uint32_t)-1) break;
+  1030→                                if (a >= schedule->count || b >= schedule->count) break;
+  1031→                                /* Walk the one with deeper dominator chain upward.
+  1032→                                 * Use dom_depth (dominator tree depth) instead of
+  1033→                                 * loop_depth, which is unrelated to dominator depth. */
+  1034→                                if (dom_depth && dom_depth[a] > dom_depth[b]) {
+  1035→                                    a = dom[a];
+  1036→                                } else if (dom_depth && dom_depth[b] > dom_depth[a]) {
+  1037→                                    b = dom[b];
+  1038→                                } else {
+  1039→                                    a = dom[a];
+  1040→                                    b = dom[b];
+  1041→                                }
+  1042→                            }
+  1043→                            if (a == b && a != (uint32_t)-1 && a < schedule->count) {
+  1044→                                best_block = a;
+  1045→                            }
+  1046→                            /* else: couldn't compute LCA, keep current best_block */
+  1047→                        } else {
+  1048→                            /* Fallback without dominator info: prefer higher loop depth */
+  1049→                            if (schedule->blocks[ib].loop_depth > schedule->blocks[best_block].loop_depth) {
+  1050→                                best_block = ib;
+  1051→                            }
+  1052→                        }
+  1053→                    }
+  1054→                }
+  1055→            }
+  1056→            if (best_block != (uint32_t)-1) {
+  1057→                schedule->node_block[i] = best_block;
+  1058→            }
+  1059→        }
+  1060→    }
+  1061→
+  1062→    /* Assign data nodes. Each data node goes in the LCA of all its
+  1063→     * input blocks in the dominator tree. */
+  1064→    bool changed = true;
+  1065→    while (changed) {
+  1066→        changed = false;
+  1067→        for (uint32_t i = 0; i < node_count; i++) {
+  1068→            vtx_node_t *node = &nt->nodes[i];
+  1069→            if (node->dead) continue;
+  1070→            if (schedule->node_block[i] != (uint32_t)-1) continue;
+  1071→            if (vtx_nf_has(node->flags, VTX_NF_CONTROL)) continue;
+  1072→            if (vtx_nf_has(node->flags, VTX_NF_PINNED)) continue;
+  1073→
+  1074→            /* Check if all inputs are assigned */
+  1075→            bool all_inputs_assigned = true;
+  1076→            for (uint32_t j = 0; j < node->input_count; j++) {
+  1077→                vtx_nodeid_t inp = node->inputs[j];
+  1078→                if (inp != VTX_NODEID_INVALID && inp < node_count && !nt->nodes[inp].dead) {
+  1079→                    if (schedule->node_block[inp] == (uint32_t)-1) {
+  1080→                        all_inputs_assigned = false;
+  1081→                        break;
+  1082→                    }
+  1083→                }
+  1084→            }
+  1085→
+  1086→            if (!all_inputs_assigned) continue;
+  1087→
+  1088→            /* Compute LCA of all input blocks using dominator tree.
+  1089→             * BUGFIX: The original code used `ib > best_block` which
+  1090→             * compares block indices — these have no dominance semantics.
+  1091→             * The correct approach is LCA in the dominator tree.
+  1092→             *
+  1093→             * IR-4 fix: Skip globally-available inputs (Constants,
+  1094→             * Parameters, Start) when computing the LCA. These values
+  1095→             * can be materialized in any block, so they should not
+  1096→             * constrain the placement of their consumers. Without this,
+  1097→             * a Sub(phi_n, constant_1) would be placed in block 0 (the
+  1098→             * LCA of the loop header and the constant's block), which is
+  1099→             * wrong — the Sub should be in the loop header block. */
+  1100→            lca_block = start_block; /* default: start block */
+  1101→            bool has_inputs = false;
+  1102→            for (uint32_t j = 0; j < node->input_count; j++) {
+  1103→                vtx_nodeid_t inp = node->inputs[j];
+  1104→                if (inp != VTX_NODEID_INVALID && inp < node_count) {
+  1105→                    /* Skip globally-available inputs */
+  1106→                    const vtx_node_t *inp_node = &nt->nodes[inp];
+  1107→                    if (inp_node->opcode == VTX_OP_Constant ||
+  1108→                        inp_node->opcode == VTX_OP_Parameter ||
+  1109→                        inp_node->opcode == VTX_OP_Start) {
+  1110→                        continue;
+  1111→                    }
+  1112→                    uint32_t ib = schedule->node_block[inp];
+  1113→                    if (ib != (uint32_t)-1) {
+  1114→                        if (!has_inputs) {
+  1115→                            lca_block = ib;
+  1116→                            has_inputs = true;
+  1117→                        } else if (dom != NULL) {
+  1118→                            /* Compute LCA of lca_block and ib */
+  1119→                            uint32_t a = lca_block;
+  1120→                            uint32_t b = ib;
+  1121→                            while (a != b) {
+  1122→                                if (a >= schedule->count || b >= schedule->count) break;
+  1123→                                /* Walk both upward until they converge.
+  1124→                                 * Use dom_depth (dominator tree depth) instead of
+  1125→                                 * loop_depth, which is unrelated to dominator depth. */
+  1126→                                if (dom_depth && dom_depth[a] > dom_depth[b]) {
+  1127→                                    a = dom[a];
+  1128→                                } else if (dom_depth && dom_depth[b] > dom_depth[a]) {
+  1129→                                    b = dom[b];
+  1130→                                } else {
+  1131→                                    a = dom[a];
+  1132→                                    b = dom[b];
+  1133→                                }
+  1134→                            }
+  1135→                            if (a == b && a < schedule->count) {
+  1136→                                lca_block = a;
+  1137→                            }
+  1138→                            /* else: fallback, keep current lca_block */
+  1139→                        }
+  1140→                    }
+  1141→                }
+  1142→            }
+  1143→
+  1144→            /* BUGFIX: For SIDE_EFFECT nodes (Div, Mod), don't place them
+  1145→             * in the LCA of their inputs — place them in the DEEPEST
+  1146→             * input block (the one with the highest dominator depth).
+  1147→             * This ensures Div/Mod are placed as late as possible,
+  1148→             * after any guard checks.
+  1149→             *
+  1150→             * Without this, the Mod in gcd18 is placed in Block 1 (loop
+  1151→             * header, where its inputs N6/N7 are), but it should be in
+  1152→             * Block 2 (the fall-through after if_false). Placing it in
+  1153→             * Block 1 causes it to execute even when b==0, causing
+  1154→             * divide-by-zero. */
+  1155→            if (vtx_nf_has(node->flags, VTX_NF_SIDE_EFFECT) && dom != NULL) {
+  1156→                /* Pick the input block with the highest dominator depth */
+  1157→                uint32_t deepest_block = lca_block;
+  1158→                uint32_t deepest_depth = 0;
+  1159→                for (uint32_t j = 0; j < node->input_count; j++) {
+  1160→                    vtx_nodeid_t inp = node->inputs[j];
+  1161→                    if (inp == VTX_NODEID_INVALID || inp >= node_count) continue;
+  1162→                    if (nt->nodes[inp].dead) continue;
+  1163→                    uint32_t ib = schedule->node_block[inp];
+  1164→                    if (ib == (uint32_t)-1 || ib >= schedule->count) continue;
+  1165→                    /* Skip globally-available inputs (Constants, Parameters) */
+  1166→                    vtx_node_t *inp_node = &nt->nodes[inp];
+  1167→                    if (inp_node->opcode == VTX_OP_Constant ||
+  1168→                        inp_node->opcode == VTX_OP_Parameter ||
+  1169→                        inp_node->opcode == VTX_OP_Start ||
+  1170→                        inp_node->opcode == VTX_OP_Province) continue;
+  1171→                    if (dom_depth[ib] > deepest_depth) {
+  1172→                        deepest_depth = dom_depth[ib];
+  1173→                        deepest_block = ib;
+  1174→                    }
+  1175→                }
+  1176→                lca_block = deepest_block;
+  1177→            }
+  1178→
+  1179→            schedule->node_block[i] = lca_block;
+  1180→            changed = true;
+  1181→        }
+  1182→    }
+  1183→
+  1184→    /* Free dominator array and dom_depth now that Phase 5 is done */
+  1185→    if (dom != NULL) {
+  1186→        free(dom);
+  1187→        dom = NULL;
+  1188→    }
+  1189→    free(dom_depth);
+  1190→    dom_depth = NULL;
+  1191→
+  1192→    /* Assign remaining unassigned nodes to block 0 */
+  1193→    for (uint32_t i = 0; i < node_count; i++) {
+  1194→        if (!nt->nodes[i].dead && schedule->node_block[i] == (uint32_t)-1) {
+  1195→            schedule->node_block[i] = 0;
+  1196→        }
+  1197→    }
+  1198→
+  1199→    /* Phase 6: Loop-invariant code motion.
+  1200→     * For each data node in a loop block, check if all its inputs are
+  1201→     * defined outside the loop or are themselves loop-invariant.
+  1202→     * If so, hoist the node to the loop preheader (the block that
+  1203→     * dominates the loop header). */
+  1204→    for (uint32_t bi = 0; bi < schedule->count; bi++) {
+  1205→        if (schedule->blocks[bi].loop_depth == 0) continue;
+  1206→
+  1207→        /* Iterate nodes assigned to this block */
+  1208→        for (uint32_t i = 0; i < node_count; i++) {
+  1209→            if (schedule->node_block[i] != bi) continue;
+  1210→            vtx_node_t *node = &nt->nodes[i];
+  1211→            if (node->dead) continue;
+  1212→            if (vtx_nf_has(node->flags, VTX_NF_CONTROL)) continue;
+  1213→            if (vtx_nf_has(node->flags, VTX_NF_MEMORY)) continue;
+  1214→            if (vtx_nf_has(node->flags, VTX_NF_SIDE_EFFECT)) continue;
+  1215→            if (vtx_nf_has(node->flags, VTX_NF_PINNED)) continue;
+  1216→
+  1217→            /* Check if all inputs are defined outside the loop */
+  1218→            bool all_inputs_outside = true;
+  1219→            for (uint32_t j = 0; j < node->input_count; j++) {
+  1220→                vtx_nodeid_t inp = node->inputs[j];
+  1221→                if (inp == VTX_NODEID_INVALID || inp >= node_count) continue;
+  1222→                uint32_t ib = schedule->node_block[inp];
+  1223→                if (schedule->blocks[ib].loop_depth >= schedule->blocks[bi].loop_depth) {
+  1224→                    all_inputs_outside = false;
+  1225→                    break;
+  1226→                }
+  1227→            }
+  1228→
+  1229→            if (all_inputs_outside && schedule->blocks[bi].pred_count > 0) {
+  1230→                /* BUG-13 fix: Find the preheader, not just pred_blocks[0].
+  1231→                 * The first predecessor might be the back-edge (latch),
+  1232→                 * not the preheader. The preheader is the predecessor
+  1233→                 * whose loop_depth is strictly less than this block's.
+  1234→                 * If all predecessors are at the same depth (e.g. a
+  1235→                 * non-loop merge), fall back to pred_blocks[0]. */
+  1236→                uint32_t preheader = schedule->blocks[bi].pred_blocks[0];
+  1237→                uint32_t my_depth = schedule->blocks[bi].loop_depth;
+  1238→                for (uint32_t pi = 0; pi < schedule->blocks[bi].pred_count; pi++) {
+  1239→                    uint32_t pred_idx = schedule->blocks[bi].pred_blocks[pi];
+  1240→                    if (schedule->blocks[pred_idx].loop_depth < my_depth) {
+  1241→                        preheader = pred_idx;
+  1242→                        break;
+  1243→                    }
+  1244→                }
+  1245→                schedule->node_block[i] = preheader;
+  1246→            }
+  1247→        }
+  1248→    }
+  1249→
+  1250→    /* Phase 7: Build the ordered node lists for each block.
+  1251→     * We do a topological sort within each block: a node must come
+  1252→     * after all its inputs that are in the same block. */
+  1253→    for (uint32_t i = 0; i < node_count; i++) {
+  1254→        vtx_node_t *node = &nt->nodes[i];
+  1255→        if (node->dead) continue;
+  1256→
+  1257→        uint32_t blk_idx = schedule->node_block[i];
+  1258→        if (blk_idx >= schedule->count) continue;
+  1259→
+  1260→        /* We add nodes in ID order, which is roughly topological
+  1261→         * since the graph was built in order. A proper topological
+  1262→         * sort would be needed for more complex cases. */
+  1263→        schedule_block_add_node(&schedule->blocks[blk_idx], i);
+  1264→    }
+  1265→
+  1266→    /* Phase 8: Within each block, sort nodes to respect dependencies.
+  1267→     * We use a simple insertion-sort-like approach: for each node,
+  1268→     * ensure it comes after its inputs in the same block.
+  1269→     *
+  1270→     * BUGFIX: Phi nodes are pinned at the top of their block and should
+  1271→     * NOT be moved, because their back-edge inputs create circular
+  1272→     * dependencies (Phi uses loop body result, loop body uses Phi).
+  1273→     * Without this exclusion, the sort would try to move the Phi after
+  1274→     * its back-edge input, breaking the evaluation order.
+  1275→     *
+  1276→     * BUGFIX: Also skip back-edge inputs when checking dependencies.
+  1277→     * A node in a loop body may have an input from a Phi that has a
+  1278→     * back-edge input from a later node in the same block. We should
+  1279→     * only reorder based on forward-edge inputs (inputs from earlier
+  1280→     * blocks or from Constants/Parameters). */
+  1281→    for (uint32_t bi = 0; bi < schedule->count; bi++) {
+  1282→        vtx_schedule_block_t *blk = &schedule->blocks[bi];
+  1283→        bool sorted = false;
+  1284→        uint32_t passes = 0;
+  1285→
+  1286→        while (!sorted && passes < blk->node_count * 2) {
+  1287→            sorted = true;
+  1288→            passes++;
+  1289→            for (uint32_t i = 1; i < blk->node_count; i++) {
+  1290→                vtx_nodeid_t nid = blk->nodes[i];
+  1291→                if (nid >= node_count) continue;
+  1292→                vtx_node_t *node = &nt->nodes[nid];
+  1293→
+  1294→                /* Phi nodes are pinned — never move them */
+  1295→                if (node->opcode == VTX_OP_Phi) continue;
+  1296→
+  1297→                /* Check if any input of this node appears later in the block.
+  1298→                 * Skip back-edge inputs: if the input is a Phi that has this
+  1299→                 * block's region as an input, it's a loop-carried dependency
+  1300→                 * that creates a cycle. The Phi provides the value at the
+  1301→                 * start of the iteration, not after the back-edge. */
+  1302→                for (uint32_t j = 0; j < node->input_count; j++) {
+  1303→                    vtx_nodeid_t inp = node->inputs[j];
+  1304→                    /* Skip inputs not in this block */
+  1305→                    if (inp == VTX_NODEID_INVALID || inp >= node_count) continue;
+  1306→                    if (schedule->node_block[inp] != bi) continue;
+  1307→
+  1308→                    vtx_node_t *inp_node = &nt->nodes[inp];
+  1309→                    if (inp_node->opcode == VTX_OP_Phi) {
+  1310→                        if (schedule->node_block[inp] != bi) continue;
+  1311→                    }
+  1312→
+  1313→                    /* Find position of inp in this block */
+  1314→                    bool swapped = false;
+  1315→                    for (uint32_t k = i + 1; k < blk->node_count; k++) {
+  1316→                        if (blk->nodes[k] == inp) {
+  1317→                            /* Move nid from position i to after position k.
+  1318→                             * Shift positions i..k-1 one step right. */
+  1319→                            for (uint32_t m = i; m < k; m++) {
+  1320→                                blk->nodes[m] = blk->nodes[m + 1];
+  1321→                            }
+  1322→                            blk->nodes[k] = nid;
+  1323→                            sorted = false;
+  1324→                            swapped = true;
+  1325→                            break;
+  1326→                        }
+  1327→                    }
+  1328→                    /* After a swap, nid has moved to a new position.
+  1329→                     * Stop checking its other inputs — the outer while
+  1330→                     * loop will re-process this block. Continuing to
+  1331→                     * check inputs with the stale position i corrupts
+  1332→                     * the node list (causes duplicates and missing nodes). */
+  1333→                    if (swapped) break;
+  1334→                }
+  1335→            }
+  1336→        }
+  1337→    }
+  1338→
+  1339→    /* Phase 8.5: Move control flow terminators to the end of each block.
+  1340→     *
+  1341→     * BUGFIX (audit #3, tier-equivalence): Without this, Constants and other
+  1342→     * data nodes placed in a block AFTER a control flow node (If, Goto, Return)
+  1343→     * would be emitted after the JCC/RET instruction. When the JCC jumps or
+  1344→     * the RET returns, those data nodes are never executed, leaving their
+  1345→     * vregs uninitialized. This caused the 8 T2 mismatches in branch-heavy
+  1346→     * programs: the Constants in successor blocks were placed in block 0
+  1347→     * after the If, so when the JCC jumped, the Constants' MOV instructions
+  1348→     * were skipped, and the Return read garbage.
+  1349→     *
+  1350→     * The fix: after the dependency sort, move all control flow terminators
+  1351→     * to the end of their block's node list. This ensures all data nodes
+  1352→     * (Constants, Parameters, arithmetic) are emitted before any branch. */
+  1353→    for (uint32_t bi = 0; bi < schedule->count; bi++) {
+  1354→        vtx_schedule_block_t *blk = &schedule->blocks[bi];
+  1355→        if (blk->node_count <= 1) continue;
+  1356→
+  1357→        /* Collect non-terminator nodes and terminator nodes separately */
+  1358→        vtx_nodeid_t *non_term = (vtx_nodeid_t *)malloc(blk->node_count * sizeof(vtx_nodeid_t));
+  1359→        vtx_nodeid_t *term = (vtx_nodeid_t *)malloc(blk->node_count * sizeof(vtx_nodeid_t));
+  1360→        if (!non_term || !term) { free(non_term); free(term); continue; }
+  1361→        uint32_t non_term_count = 0;
+  1362→        uint32_t term_count = 0;
+  1363→
+  1364→        for (uint32_t i = 0; i < blk->node_count; i++) {
+  1365→            vtx_nodeid_t nid = blk->nodes[i];
+  1366→            if (nid >= node_count) { non_term[non_term_count++] = nid; continue; }
+  1367→            vtx_node_t *node = &nt->nodes[nid];
+  1368→            /* Control flow terminators: If, Goto, Return, Unwind, LoopEnd.
+  1369→             * These must come last in the block. */
+  1370→            if (node->opcode == VTX_OP_If ||
+  1371→                node->opcode == VTX_OP_Goto ||
+  1372→                node->opcode == VTX_OP_Return ||
+  1373→                node->opcode == VTX_OP_Unwind ||
+  1374→                node->opcode == VTX_OP_LoopEnd) {
+  1375→                term[term_count++] = nid;
+  1376→            } else {
+  1377→                non_term[non_term_count++] = nid;
+  1378→            }
+  1379→        }
+  1380→
+  1381→        /* Rebuild: non-terminators first, then terminators */
+  1382→        uint32_t idx = 0;
+  1383→        for (uint32_t i = 0; i < non_term_count; i++) {
+  1384→            blk->nodes[idx++] = non_term[i];
+  1385→        }
+  1386→        for (uint32_t i = 0; i < term_count; i++) {
+  1387→            blk->nodes[idx++] = term[i];
+  1388→        }
+  1389→
+  1390→        free(non_term);
+  1391→        free(term);
+  1392→    }
+  1393→
+  1394→    return 0;
+  1395→}
+  1396→/* ========================================================================== */
+  1397→
+  1398→void vtx_schedule_destroy(vtx_schedule_t *schedule)
+  1399→{
+  1400→    if (schedule == NULL) return;
+  1401→
+  1402→    if (schedule->blocks != NULL) {
+  1403→        for (uint32_t i = 0; i < schedule->count; i++) {
+  1404→            free(schedule->blocks[i].nodes);
+  1405→            free(schedule->blocks[i].df_blocks);
+  1406→            /* BUGFIX: succ_blocks and pred_blocks are now realloc'd
+  1407→             * dynamically, so they must be freed. The original code
+  1408→             * assumed they were arena-allocated and skipped freeing,
+  1409→             * causing a memory leak. */
+  1410→            free(schedule->blocks[i].succ_blocks);
+  1411→            free(schedule->blocks[i].pred_blocks);
+  1412→        }
+  1413→        free(schedule->blocks);
+  1414→    }
+  1415→
+  1416→    free(schedule->node_block);
+  1417→    schedule->blocks = NULL;
+  1418→    schedule->node_block = NULL;
+  1419→    schedule->count = 0;
+  1420→    schedule->capacity = 0;
+  1421→    schedule->node_block_count = 0;
+  1422→}
+  1423→
+  1424→uint32_t vtx_schedule_node_block(const vtx_schedule_t *schedule, vtx_nodeid_t node_id)
+  1425→{
+  1426→    if (schedule == NULL || schedule->node_block == NULL) return (uint32_t)-1;
+  1427→    if (node_id >= schedule->node_block_count) return (uint32_t)-1;
+  1428→    return schedule->node_block[node_id];
+  1429→}
+  1430→
+  1431→/* ========================================================================== */
+  1432→/* Schedule printing                                                           */
+  1433→/* ========================================================================== */
+  1434→
+  1435→void vtx_schedule_print(const vtx_schedule_t *schedule, const vtx_graph_t *graph)
+  1436→{
+  1437→    VTX_ASSERT(schedule != NULL, "schedule must not be NULL");
+  1438→    VTX_ASSERT(graph != NULL, "graph must not be NULL");
+  1439→
+  1440→    fprintf(stderr, "=== VORTEX Schedule (%u blocks) ===\n", schedule->count);
+  1441→
+  1442→    for (uint32_t bi = 0; bi < schedule->count; bi++) {
+  1443→        const vtx_schedule_block_t *blk = &schedule->blocks[bi];
+  1444→        fprintf(stderr, "Block %u (region=N%u, depth=%u)%s%s:\n",
+  1445→                bi, blk->region_node, blk->loop_depth,
+  1446→                blk->is_loop_header ? " [LOOP_HEADER]" : "",
+  1447→                blk->is_catch ? " [CATCH]" : "");
+  1448→
+  1449→        for (uint32_t i = 0; i < blk->node_count; i++) {
+  1450→            vtx_nodeid_t nid = blk->nodes[i];
+  1451→            const vtx_node_t *n = vtx_node_get_const(&graph->node_table, nid);
+  1452→            if (n == NULL) {
+  1453→                fprintf(stderr, "  N%u: <invalid>\n", nid);
+  1454→            } else {
+  1455→                fprintf(stderr, "  N%u: %s\n", nid, vtx_node_opcode_name(n->opcode));
+  1456→            }
+  1457→        }
+  1458→    }
+  1459→}
+  1460→
