@@ -25,6 +25,17 @@ int vtx_profiler_init(vtx_profiler_t *profiler)
     /* Initialize LRU cache to empty */
     memset(profiler->lru, 0, sizeof(profiler->lru));
 
+    /* OSR-18 fix: initialize the LRU/data-array mutex. The mutex is
+     * recursive-safe via per-call lock/unlock (no nested locking). */
+    if (pthread_mutex_init(&profiler->mutex, NULL) != 0) {
+        free(profiler->data);
+        profiler->data = NULL;
+        profiler->capacity = 0;
+        profiler->mutex_initialized = false;
+        return -1;
+    }
+    profiler->mutex_initialized = true;
+
     return 0;
 }
 
@@ -48,6 +59,11 @@ void vtx_profiler_destroy(vtx_profiler_t *profiler)
     profiler->data = NULL;
     profiler->count = 0;
     profiler->capacity = 0;
+
+    if (profiler->mutex_initialized) {
+        pthread_mutex_destroy(&profiler->mutex);
+        profiler->mutex_initialized = false;
+    }
 }
 
 /* ========================================================================== */
@@ -164,9 +180,21 @@ vtx_profile_data_t *vtx_profiler_get_method_data(vtx_profiler_t *profiler,
     VTX_ASSERT(profiler != NULL, "profiler must not be NULL");
     VTX_ASSERT(method != NULL, "method must not be NULL");
 
+    /* OSR-18 fix: serialize access to the data array + LRU cache.
+     * The threadpool worker thread calls this concurrently with the
+     * interpreter (during tier-up reset / set_compiled_tier). Without
+     * this lock, the LRU lookup could read stale pointers from the
+     * LRU cache after the data array was realloc'd by the interp. */
+    if (profiler->mutex_initialized) {
+        pthread_mutex_lock(&profiler->mutex);
+    }
+
     /* Fast path: check LRU cache first (O(1) for repeated calls) */
     vtx_profile_data_t *cached = lru_lookup(profiler, method);
     if (cached != NULL) {
+        if (profiler->mutex_initialized) {
+            pthread_mutex_unlock(&profiler->mutex);
+        }
         return cached;
     }
 
@@ -175,6 +203,9 @@ vtx_profile_data_t *vtx_profiler_get_method_data(vtx_profiler_t *profiler,
         if (profiler->data[i].method == method) {
             vtx_profile_data_t *pd = &profiler->data[i];
             lru_insert(profiler, method, pd);
+            if (profiler->mutex_initialized) {
+                pthread_mutex_unlock(&profiler->mutex);
+            }
             return pd;
         }
     }
@@ -188,8 +219,10 @@ vtx_profile_data_t *vtx_profiler_get_method_data(vtx_profiler_t *profiler,
         uint32_t lru_idx = 0;
         uint64_t min_heat = UINT64_MAX;
         for (uint32_t i = 0; i < profiler->count; i++) {
-            uint64_t heat = profiler->data[i].invocation_count
-                          + profiler->data[i].backward_branch_count * 2;
+            uint64_t heat = __atomic_load_n(&profiler->data[i].invocation_count,
+                                              __ATOMIC_RELAXED)
+                          + __atomic_load_n(&profiler->data[i].backward_branch_count,
+                                              __ATOMIC_RELAXED) * 2;
             if (heat < min_heat) {
                 min_heat = heat;
                 lru_idx = i;
@@ -212,18 +245,26 @@ vtx_profile_data_t *vtx_profiler_get_method_data(vtx_profiler_t *profiler,
             pd->method = method;
             pd->compiled_tier = VT_TIER_T0;
             pd->deopt_count = 0;
-            pd->invocation_count = 0;
-            pd->backward_branch_count = 0;
+            __atomic_store_n(&pd->invocation_count, 0, __ATOMIC_RELAXED);
+            __atomic_store_n(&pd->backward_branch_count, 0, __ATOMIC_RELAXED);
             pd->call_site_types = NULL;
             pd->call_site_count = 0;
-            pd->tier_up.tier_up_counter = VTX_TIER_UP_INITIAL_COUNT;
-            pd->tier_up.compilation_requested = false;
+            __atomic_store_n(&pd->tier_up.tier_up_counter,
+                              VTX_TIER_UP_INITIAL_COUNT, __ATOMIC_RELAXED);
+            __atomic_store_n(&pd->tier_up.compilation_requested, false,
+                              __ATOMIC_RELAXED);
             ensure_profile_arrays(pd);
 
             /* Invalidate LRU cache — pointers may be stale */
             memset(profiler->lru, 0, sizeof(profiler->lru));
             lru_insert(profiler, method, pd);
+            if (profiler->mutex_initialized) {
+                pthread_mutex_unlock(&profiler->mutex);
+            }
             return pd;
+        }
+        if (profiler->mutex_initialized) {
+            pthread_mutex_unlock(&profiler->mutex);
         }
         return NULL;
     }
@@ -233,14 +274,16 @@ vtx_profile_data_t *vtx_profiler_get_method_data(vtx_profiler_t *profiler,
     pd->method = method;
     pd->compiled_tier = VT_TIER_T0;
     pd->deopt_count = 0;
-    pd->invocation_count = 0;
-    pd->backward_branch_count = 0;
+    __atomic_store_n(&pd->invocation_count, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&pd->backward_branch_count, 0, __ATOMIC_RELAXED);
     pd->call_site_types = NULL;
     pd->call_site_count = 0;
 
     /* D7: Initialize tier-up counter */
-    pd->tier_up.tier_up_counter = VTX_TIER_UP_INITIAL_COUNT;
-    pd->tier_up.compilation_requested = false;
+    __atomic_store_n(&pd->tier_up.tier_up_counter, VTX_TIER_UP_INITIAL_COUNT,
+                      __ATOMIC_RELAXED);
+    __atomic_store_n(&pd->tier_up.compilation_requested, false,
+                      __ATOMIC_RELAXED);
 
     /* Allocate per-PC arrays based on bytecode length */
     ensure_profile_arrays(pd);
@@ -250,6 +293,9 @@ vtx_profile_data_t *vtx_profiler_get_method_data(vtx_profiler_t *profiler,
     /* Insert into LRU cache */
     lru_insert(profiler, method, pd);
 
+    if (profiler->mutex_initialized) {
+        pthread_mutex_unlock(&profiler->mutex);
+    }
     return pd;
 }
 
@@ -268,9 +314,17 @@ void vtx_profiler_record_invocation(vtx_profiler_t *profiler,
         return;
     }
 
-    /* Saturating increment */
-    if (pd->invocation_count < UINT64_MAX) {
-        pd->invocation_count++;
+    /* OSR-18 fix: atomic saturating increment. The interp thread is the
+     * only writer, but the threadpool worker may read this field via
+     * vtx_profiler_method_heat — RELAXED is sufficient since the value
+     * is a best-effort heat estimate, not a synchronization primitive. */
+    uint64_t cur = __atomic_load_n(&pd->invocation_count, __ATOMIC_RELAXED);
+    while (cur < UINT64_MAX) {
+        if (__atomic_compare_exchange_n(&pd->invocation_count, &cur, cur + 1,
+                                          false, __ATOMIC_RELAXED,
+                                          __ATOMIC_RELAXED)) {
+            break;
+        }
     }
 }
 
@@ -285,9 +339,14 @@ void vtx_profiler_record_backward_branch(vtx_profiler_t *profiler,
         return;
     }
 
-    /* Saturating increment */
-    if (pd->backward_branch_count < UINT64_MAX) {
-        pd->backward_branch_count++;
+    /* OSR-18 fix: atomic saturating increment (see record_invocation). */
+    uint64_t cur = __atomic_load_n(&pd->backward_branch_count, __ATOMIC_RELAXED);
+    while (cur < UINT64_MAX) {
+        if (__atomic_compare_exchange_n(&pd->backward_branch_count, &cur, cur + 1,
+                                          false, __ATOMIC_RELAXED,
+                                          __ATOMIC_RELAXED)) {
+            break;
+        }
     }
 }
 
@@ -415,8 +474,12 @@ uint64_t vtx_profiler_method_heat(vtx_profiler_t *profiler,
         return 0;
     }
 
-    uint64_t invocations = pd->invocation_count;
-    uint64_t backward_branches = pd->backward_branch_count;
+    /* OSR-18 fix: atomic loads (the worker thread may read this while
+     * the interp thread is incrementing). */
+    uint64_t invocations = __atomic_load_n(&pd->invocation_count,
+                                             __ATOMIC_RELAXED);
+    uint64_t backward_branches = __atomic_load_n(&pd->backward_branch_count,
+                                                    __ATOMIC_RELAXED);
 
     /* heat = invocations + backward_branches * 2
      * This doubles the weight of backward branches, penalizing hot loops.
@@ -587,7 +650,8 @@ bool vtx_profiler_tier_up_check(vtx_profiler_t *profiler,
     /* If compilation was already requested, this is a no-op.
      * This prevents re-queueing a method that's already waiting
      * to be compiled. */
-    if (pd->tier_up.compilation_requested) {
+    if (__atomic_load_n(&pd->tier_up.compilation_requested,
+                          __ATOMIC_RELAXED)) {
         return false;
     }
 
@@ -596,15 +660,27 @@ bool vtx_profiler_tier_up_check(vtx_profiler_t *profiler,
      * `dec [mem]` instruction (2-3 bytes). The subsequent check is
      * a `jle` (2 bytes). Total: 4-5 bytes of overhead per backward
      * branch, which is essentially zero compared to the cost of the
-     * branch itself and the safepoint check. */
-    pd->tier_up.tier_up_counter--;
+     * branch itself and the safepoint check.
+     *
+     * OSR-18 fix: use atomic fetch_sub so the decrement is visible to
+     * the threadpool worker's tier_up_reset. The CAS on the dedup flag
+     * in vtx_request_compilation handles the multi-threaded race — but
+     * the decrement itself still needs to be atomic to avoid lost
+     * updates if the worker reads the counter concurrently. */
+    int32_t prev = __atomic_fetch_sub(&pd->tier_up.tier_up_counter, 1,
+                                        __ATOMIC_RELAXED);
 
-    if (pd->tier_up.tier_up_counter <= 0) {
-        /* Threshold reached — mark as compilation requested.
-         * The actual compilation is triggered by the dispatch loop
-         * after this function returns true. */
-        pd->tier_up.compilation_requested = true;
-        return true;
+    if (prev <= 1) {
+        /* Threshold reached (counter was <= 1 before the decrement,
+         * i.e. now <= 0). Use an atomic CAS to claim the compilation
+         * request — if another thread beat us to it, no-op. */
+        bool expected = false;
+        if (__atomic_compare_exchange_n(&pd->tier_up.compilation_requested,
+                                          &expected, true,
+                                          false, __ATOMIC_RELAXED,
+                                          __ATOMIC_RELAXED)) {
+            return true;
+        }
     }
 
     return false;
@@ -626,6 +702,10 @@ void vtx_profiler_tier_up_reset(vtx_profiler_t *profiler,
         new_initial_count = VTX_TIER_UP_INITIAL_COUNT;
     }
 
-    pd->tier_up.tier_up_counter = new_initial_count;
-    pd->tier_up.compilation_requested = false;
+    /* OSR-18 fix: atomic stores so the interp thread sees the reset
+     * immediately (the interp may be decrementing concurrently). */
+    __atomic_store_n(&pd->tier_up.tier_up_counter, new_initial_count,
+                      __ATOMIC_RELAXED);
+    __atomic_store_n(&pd->tier_up.compilation_requested, false,
+                      __ATOMIC_RELAXED);
 }

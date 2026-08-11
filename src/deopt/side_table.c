@@ -72,7 +72,8 @@ void vtx_side_table_destroy(vtx_side_table_t *table)
 uint32_t vtx_side_table_add_entry(vtx_side_table_t *table,
                                    uint32_t native_pc_offset,
                                    uint32_t frame_state_index,
-                                   uint32_t flags)
+                                   uint32_t flags,
+                                   uint32_t bytecode_pc)
 {
     if (!table) return UINT32_MAX;
 
@@ -110,6 +111,9 @@ uint32_t vtx_side_table_add_entry(vtx_side_table_t *table,
     entry->register_map = NULL;
     entry->register_map_count = 0;
     entry->flags = flags;
+    /* OSR-5: store the bytecode_pc so OSR entry lookup can match by
+     * loop_header_pc instead of picking the first OSR-flagged entry. */
+    entry->bytecode_pc = bytecode_pc;
 
     return idx;
 }
@@ -226,6 +230,42 @@ const vtx_side_table_entry_t *vtx_side_table_lookup_entry(
     return &table->entries[lo - 1];
 }
 
+/* OSR-23 + OSR-5 fix: dedicated OSR entry lookup.
+ *
+ * The generic vtx_side_table_lookup returns the entry with the largest
+ * native_pc_offset <= target, which is correct for deopt (state at or
+ * before the PC) but WRONG for OSR entry lookup — it could return a
+ * non-OSR entry (e.g., a safepoint) near the requested PC.
+ *
+ * This function only returns entries that:
+ *   1. Have the VTX_STF_OSR_ENTRY flag set (OSR-23 fix), AND
+ *   2. Match the requested bytecode_pc (OSR-5 fix — picks the right
+ *      loop header when a method has multiple OSR entry points).
+ *
+ * Returns NULL if no matching entry is found.
+ *
+ * We use a linear scan because the number of OSR entry points per
+ * method is typically small (one per loop header — usually <10).
+ * Binary search by native_pc_offset doesn't help here because we're
+ * filtering by bytecode_pc, not by native PC.
+ */
+const vtx_side_table_entry_t *vtx_side_table_lookup_osr_entry(
+    const vtx_side_table_t *table,
+    uint32_t bytecode_pc)
+{
+    if (!table || table->entry_count == 0) return NULL;
+
+    for (uint32_t i = 0; i < table->entry_count; i++) {
+        const vtx_side_table_entry_t *entry = &table->entries[i];
+        if ((entry->flags & VTX_STF_OSR_ENTRY) &&
+            entry->bytecode_pc == bytecode_pc) {
+            return entry;
+        }
+    }
+
+    return NULL;
+}
+
 const vtx_side_table_entry_t *vtx_side_table_get_entry(
     const vtx_side_table_t *table, uint32_t index)
 {
@@ -289,11 +329,14 @@ int vtx_side_table_record_safepoint(vtx_side_table_t *table,
     /* Add a side table entry at the safepoint PC offset with the
      * VTX_STF_SAFEPPOINT flag. Use frame_state_index = UINT32_MAX
      * as a sentinel since safepoints don't necessarily have an
-     * associated FrameState — the GC root map is the primary data. */
+     * associated FrameState — the GC root map is the primary data.
+     * OSR-5: bytecode_pc = UINT32_MAX since safepoints are not OSR
+     * entry points. */
     uint32_t entry_idx = vtx_side_table_add_entry(table,
                                                     native_pc_offset,
                                                     UINT32_MAX,
-                                                    VTX_STF_SAFEPPOINT);
+                                                    VTX_STF_SAFEPPOINT,
+                                                    UINT32_MAX);
     if (entry_idx == UINT32_MAX) return -1;
 
     /* Record each GC root as a register map entry. We store the

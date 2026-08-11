@@ -1,9 +1,34 @@
 #include "runtime/gc.h"
 #include "runtime/safepoint_manager.h"
 
+/* OSR-20/21: drain the code-cache quarantine at GC safepoint.
+ *
+ * Originally this file included <codecache/quarantine.h> and called
+ * vtx_codecache_get_quarantine() / vtx_codecache_quarantine_drain()
+ * directly. That introduced a hard library dependency from
+ * vortex_runtime → vortex_codecache, which is the wrong direction
+ * (codecache depends on runtime, not vice versa) and broke linking
+ * for tests that link only vortex_runtime (e.g., test_stress_runtime).
+ *
+ * Fix: invert the dependency. The application (main_new.c, or a test
+ * harness) registers a "drain_quarantine" callback via
+ * vtx_gc_set_quarantine_drain_callback. The GC calls it at safepoint
+ * if non-NULL. If no callback is registered (e.g., in a minimal test
+ * that doesn't wire the code cache), the GC simply skips the drain —
+ * there's nothing to drain. */
 #include <sys/mman.h>
 #include <string.h>
 #include <stdlib.h>
+
+/* OSR-20/21: registered callback for draining the code-cache quarantine
+ * at safepoint. NULL until the application wires it (typically to
+ * vtx_codecache_quarantine_drain via vtx_codecache_get_quarantine). */
+static void (*g_quarantine_drain_fn)(void) = NULL;
+
+void vtx_gc_set_quarantine_drain_callback(void (*fn)(void))
+{
+    g_quarantine_drain_fn = fn;
+}
 
 /* ========================================================================== */
 /* Global GC instance                                                          */
@@ -558,6 +583,22 @@ void vtx_gc_safepoint(vtx_gc_t *gc)
             vtx_safepoint_request_all(mgr);
         }
 
+        /* OSR-20/21 fix: now that all mutator threads are safepointed
+         * (no thread is in JIT code), drain the code-cache quarantine.
+         * This frees retired compiled-method metadata (side_table,
+         * deopt_info, bc_pc_map, poly_ics) that was deferred from
+         * vtx_install_method and vtx_invalidate_dependencies. Doing
+         * the drain here guarantees no thread holds a cached pointer
+         * to the freed objects (because safepoint = no thread in JIT
+         * code = no thread in vtx_osr_up / vtx_deopt_runtime_transition).
+         *
+         * The drain is invoked via a registered callback (set by
+         * vtx_gc_set_quarantine_drain_callback) to avoid a hard
+         * dependency from vortex_runtime → vortex_codecache. */
+        if (g_quarantine_drain_fn != NULL) {
+            g_quarantine_drain_fn();
+        }
+
         vtx_gc_collect_young(gc);
 
         if (gc->safepoint_mgr != NULL) {
@@ -864,6 +905,24 @@ static vtx_value_t trace_value(vtx_gc_t *gc, vtx_value_t value)
 
     vtx_heap_object_t *new_obj = forward_object(gc, obj);
     return vtx_make_heap_ptr(new_obj);
+}
+
+/**
+ * OSR-26 fix: public version of trace_value for use by the JIT root
+ * scanner (jit_root_scan_conservative in main_new.c). The scanner
+ * walks the native stack and traces each potential root IN PLACE —
+ * it writes the returned value back to the original stack slot so
+ * that forwarded pointers are visible to the mutator after GC.
+ *
+ * Without this writeback, the old conservative scanner only pushed
+ * values onto the root stack (keeping the live object alive but
+ * leaving the original slot pointing at the now-forwarded old
+ * location). On the next access, the JIT would dereference a stale
+ * pointer → use-after-free once the from-space is reclaimed.
+ */
+vtx_value_t vtx_gc_trace_value(vtx_gc_t *gc, vtx_value_t value)
+{
+    return trace_value(gc, value);
 }
 
 /**

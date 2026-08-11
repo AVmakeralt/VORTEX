@@ -20,6 +20,7 @@
  */
 
 #include "codecache/invalidate.h"
+#include "codecache/quarantine.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -307,8 +308,97 @@ int vtx_invalidate_dependencies(uint64_t typeid_,
 
         /* Don't free metadata either — same reasoning. Just NULL the
          * pointers in the registry entry so they're not double-freed
-         * when the registry entry itself is cleaned up. */
-        cm->side_table = NULL;
+         * when the registry entry itself is cleaned up.
+         *
+         * OSR-21 fix: NULLing cm->side_table / cm->deopt_info /
+         * cm->bc_pc_map here is still a UAF risk if another thread
+         * (in vtx_osr_up or vtx_deopt_runtime_transition) already
+         * cached a pointer to one of these objects. The fix:
+         * instead of NULLing, retire each object to the quarantine.
+         * The object stays alive (so cached pointers are still valid)
+         * until the quarantine drains at the next safepoint — at
+         * which point no thread can be in JIT code, so no thread
+         * can be holding a cached pointer.
+         *
+         * For callers that read cm->side_table AFTER this invalidation
+         * (e.g., a fresh vtx_osr_up that starts after invalidation),
+         * they see NULL and gracefully skip the metadata (degrade
+         * to "no side table" behavior). */
+        vtx_codecache_quarantine_t *q = vtx_codecache_get_quarantine();
+        if (q != NULL) {
+            /* Move metadata ownership to the quarantine. The cm's
+             * pointers are NULLed so subsequent reads see NULL. */
+            vtx_side_table_t *old_st = cm->side_table;
+            vtx_deopt_info_t *old_di = cm->deopt_info;
+            vtx_bc_pc_map_entry_t *old_map = cm->bc_pc_map;
+            vtx_poly_ic_t **old_poly_ics = cm->poly_ics;
+            uint32_t old_poly_ic_count = cm->poly_ic_count;
+            /* poly_ics: the cm struct itself isn't freed here (the
+             * comment below explains why), so we just NULL the
+             * pointer. poly_ics are owned by the cm struct and freed
+             * when the cm struct is freed (in
+             * vtx_codecache_destroy_compiled_method, when the cm
+             * eventually gets retired). To preserve the old poly_ics
+             * for any thread holding a pointer, retire them too. */
+            struct vtx_poly_ic_pair {
+                void   **poly_ics;
+                uint32_t poly_ic_count;
+            };
+            cm->side_table = NULL;
+            cm->deopt_info = NULL;
+            cm->bc_pc_map = NULL;
+            cm->poly_ics = NULL;
+            cm->poly_ic_count = 0;
+
+            if (old_st != NULL) {
+                vtx_codecache_quarantine_retire(q, old_st,
+                                                  vtx_codecache_destroy_side_table,
+                                                  "invalidate.c: side_table");
+            }
+            if (old_di != NULL) {
+                vtx_codecache_quarantine_retire(q, old_di,
+                                                  vtx_codecache_destroy_deopt_info,
+                                                  "invalidate.c: deopt_info");
+            }
+            if (old_map != NULL) {
+                vtx_codecache_quarantine_retire(q, old_map,
+                                                  vtx_codecache_destroy_bc_pc_map,
+                                                  "invalidate.c: bc_pc_map");
+            }
+            if (old_poly_ics != NULL) {
+                /* Wrap (poly_ics, count) in a heap pair so the
+                 * destructor can free each IC. */
+                struct vtx_poly_ic_pair *pair =
+                    (struct vtx_poly_ic_pair *)malloc(sizeof(*pair));
+                if (pair != NULL) {
+                    pair->poly_ics = (void **)old_poly_ics;
+                    pair->poly_ic_count = old_poly_ic_count;
+                    vtx_codecache_quarantine_retire(q, pair,
+                                                      vtx_codecache_destroy_poly_ics,
+                                                      "invalidate.c: poly_ics");
+                } else {
+                    /* OOM — fall back to immediate free (still risky). */
+                    for (uint32_t i = 0; i < old_poly_ic_count; i++) {
+                        free(old_poly_ics[i]);
+                    }
+                    free(old_poly_ics);
+                }
+            }
+        } else {
+            /* No quarantine — fall back to NULLing (the pre-fix
+             * behavior). Safe in single-threaded mode. */
+            cm->side_table = NULL;
+            cm->deopt_info = NULL;
+            cm->bc_pc_map = NULL;
+            cm->poly_ics = NULL;
+            cm->poly_ic_count = 0;
+        }
+        /* dep_type_ids / dep_shape_ids: these are dependency-set
+         * metadata used by the inverted index, NOT by OSR-up /
+         * deopt-runtime-transition. NULLing them here is safe because
+         * no thread in JIT code reads them (they're only used by
+         * the compile-cache layer for invalidation, which is what
+         * we're doing right now). */
         cm->dep_type_ids = NULL;
         cm->dep_type_count = 0;
         cm->dep_shape_ids = NULL;
@@ -317,10 +407,7 @@ int vtx_invalidate_dependencies(uint64_t typeid_,
          * pointer, and free remaining metadata to prevent leaks. */
         cm->code_start = NULL;
         cm->code_size = 0;
-        cm->poly_ics = NULL;
         cm->reloc_table = NULL;
-        cm->deopt_info = NULL;
-        cm->bc_pc_map = NULL;
 
         /* Remove from registry (but don't free cm — the code cache
          * owns the code memory, and freeing cm here would lose the

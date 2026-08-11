@@ -41,9 +41,12 @@ _Static_assert(
 
 VTX_TEST(osr3_null_inputs_return_void)
 {
-    /* NULL interp/code — vtx_osr_up must return without crashing. */
-    vtx_gc_t gc;
-    vtx_gc_init(&gc, NULL, VTX_GC_GENERATIONAL);
+    /* NULL interp/code — vtx_osr_up must return without crashing.
+     * vtx_gc_init requires a non-NULL type_system (it asserts), so
+     * we create a real one for the GC, but pass NULL for interp/code
+     * to vtx_osr_up — that's the contract under test. */
+    vtx_type_system_t ts; vtx_type_system_init(&ts);
+    vtx_gc_t gc; vtx_gc_init(&gc, &ts, VTX_GC_GENERATIONAL);
 
     /* Calling with all-NULL inputs must return cleanly. */
     vtx_osr_up(NULL, 42, NULL, 100, NULL, &gc);
@@ -54,6 +57,7 @@ VTX_TEST(osr3_null_inputs_return_void)
     VTX_ASSERT_TRUE(1);
 
     vtx_gc_destroy(&gc);
+    vtx_type_system_destroy(&ts);
 }
 
 VTX_TEST(osr3_failure_returns_to_caller)

@@ -227,7 +227,14 @@ int vtx_stack_walk_read_caller_fp(void *fp, void **out_caller_fp);
 
 /**
  * Read the return address from a compiled frame.
- * On x86-64, this is the value at [fp + 8].
+ *
+ * On x86-64, the VORTEX JIT frame header pushes 5 words above RBP
+ * (caller RBP, profile_data, deopt_info, method_ptr, return address),
+ * so the return address lives at [fp + VTX_FRAME_RETURN_ADDR_OFFSET]
+ * = [fp + 32]. Reading from [fp + 8] (the System V ABI standard
+ * location) returns profile_data, not the return address — this was
+ * OSR-4.
+ *
  * Returns 0 on success, -1 on failure.
  */
 int vtx_stack_walk_read_return_addr(void *fp, void **out_return_addr);

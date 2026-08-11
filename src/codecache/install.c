@@ -12,6 +12,7 @@
  */
 
 #include "codecache/install.h"
+#include "codecache/quarantine.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -286,21 +287,77 @@ bool vtx_install_method(vtx_code_cache_t *cache,
      * dep arrays, poly_ics, and code in the cache were leaked on every
      * promotion. We mark the old entry as invalid; the versioned cache
      * (if configured) will eventually free the code once no threads are
-     * executing it. The old vtx_compiled_method_t struct itself is freed
-     * here since it's just metadata (the code stays in the cache segment
-     * until the versioned cache reclaims it). */
+     * executing it.
+     *
+     * OSR-20 fix: the old code freed old_cm immediately here. But another
+     * thread may be in the middle of vtx_osr_up, having just loaded
+     * cm->code_start / cm->side_table from this old_cm. Freeing them now
+     * = UAF. Retire the cm (and its metadata) to the quarantine instead.
+     * The quarantine drains at the next safepoint (when no thread is in
+     * JIT code), so the free is safe. */
     vtx_compiled_method_t *old_cm = vtx_method_registry_get(registry, method_id);
     if (old_cm != NULL) {
         old_cm->is_installed = false;
         old_cm->is_valid = false;
-        /* Free the old metadata struct (side_table, deopt_info, etc.).
-         * The code itself stays in the cache segment — versioned cache
-         * reclaims it via vtx_versioned_cache_retire when configured. */
-        if (old_cm->side_table) {
-            vtx_side_table_destroy(old_cm->side_table);
+        /* Free the old code in the cache now — it's already replaced
+         * atomically above (well, it will be once we publish the new
+         * compiled_code pointer below). The cache segment's free-list
+         * doesn't actually unmap the memory, it just marks the region
+         * available for reuse, so this is safe from a memory-safety
+         * standpoint (the bytes are still readable). The quarantine
+         * delays reuse until the safepoint confirms no thread is in
+         * the old code. For now, we don't free the code here — that
+         * would let the cache reuse the region immediately. The cm's
+         * metadata (side_table, deopt_info, bc_pc_map) is what we
+         * quarantine, since those are the objects that get freed and
+         * would cause UAF in vtx_osr_up / vtx_deopt_runtime_transition
+         * if freed while a thread holds a pointer to them. */
+        vtx_codecache_quarantine_t *q = vtx_codecache_get_quarantine();
+        if (q != NULL) {
+            /* Take ownership of the metadata pointers from old_cm so
+             * the quarantine can free them later. We NULL them in
+             * old_cm so subsequent lookups (which should never happen
+             * because is_valid=false) don't double-free. */
+            vtx_side_table_t *old_st = old_cm->side_table;
+            vtx_deopt_info_t *old_di = old_cm->deopt_info;
+            vtx_bc_pc_map_entry_t *old_map = old_cm->bc_pc_map;
+            old_cm->side_table = NULL;
+            old_cm->deopt_info = NULL;
+            old_cm->bc_pc_map = NULL;
+
+            /* Retire the cm struct itself (will free poly_ics, dep
+             * arrays, reloc_table, and the cm struct). */
+            vtx_codecache_quarantine_retire(q, old_cm,
+                                              vtx_codecache_destroy_compiled_method,
+                                              "install.c: old_cm");
+            /* Retire each metadata object separately so they stay
+             * alive until the safepoint. */
+            if (old_st != NULL) {
+                vtx_codecache_quarantine_retire(q, old_st,
+                                                  vtx_codecache_destroy_side_table,
+                                                  "install.c: old side_table");
+            }
+            if (old_di != NULL) {
+                vtx_codecache_quarantine_retire(q, old_di,
+                                                  vtx_codecache_destroy_deopt_info,
+                                                  "install.c: old deopt_info");
+            }
+            if (old_map != NULL) {
+                vtx_codecache_quarantine_retire(q, old_map,
+                                                  vtx_codecache_destroy_bc_pc_map,
+                                                  "install.c: old bc_pc_map");
+            }
+        } else {
+            /* No quarantine configured — fall back to immediate free.
+             * This is the pre-fix behavior (still UAF-prone, but only
+             * when the quarantine isn't initialized, e.g., in unit
+             * tests that don't wire the GC safepoint). */
+            if (old_cm->side_table) {
+                vtx_side_table_destroy(old_cm->side_table);
+            }
+            free(old_cm->bc_pc_map);
+            free(old_cm);
         }
-        free(old_cm->bc_pc_map);
-        free(old_cm);
     }
 
     /* Register the method */

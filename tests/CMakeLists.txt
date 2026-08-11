@@ -498,7 +498,9 @@ target_link_libraries(test_stress_profile_trace PRIVATE
     vortex_ir
     vortex_interp
     vortex_runtime
+    vortex_codecache
     m
+    pthread
 )
 add_test(NAME test_stress_profile_trace COMMAND test_stress_profile_trace)
 
@@ -541,6 +543,7 @@ target_link_libraries(test_stress_integration PRIVATE
     vortex_deopt
     vortex_trace
     vortex_region
+    vortex_codecache
     m
     pthread
 )
@@ -708,3 +711,314 @@ add_test(NAME test_deopt_dynamic COMMAND test_deopt_dynamic)
 
 # Note: tests/opcode/test_opcodes.c is intentionally NOT built — it uses
 # popen() to invoke /tmp/vortex (TEST-003), which is not portable.
+
+# ==========================================================================
+# OSR Cluster D regression tests (Concurrency & GC):
+#   OSR-4  — stack walker reads return addr from [RBP+32]
+#   OSR-18 — atomic dedup + atomic profiler counters
+#   OSR-20/21 — code-cache quarantine defers metadata free
+#   OSR-22 — versioned cache on_enter/on_exit wired into dispatch loop
+#   OSR-26 — GC conservative scanner window widened + writeback
+# ==========================================================================
+
+# Shared link group for OSR regression tests. These exercise the full
+# pipeline (interp → JIT → GC → deopt) so they need every library.
+set(VORTEX_OSR_TEST_LIBS
+    vortex_test_framework
+    vortex_interp
+    vortex_ir
+    vortex_runtime
+    vortex_baseline
+    vortex_trace
+    vortex_region
+    vortex_pea
+    vortex_deopt
+    vortex_inliner
+    vortex_profile
+    vortex_lower
+    vortex_codecache
+    vortex_compile
+    vortex_guard
+    vortex_midtier
+    $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota>
+    vortex_common
+    m
+    pthread
+)
+
+# OSR-4: stack-walker return-address offset
+add_executable(test_osr4_stack_walk_return_addr
+    regression/osr/test_osr4_stack_walk_return_addr.c
+)
+target_link_libraries(test_osr4_stack_walk_return_addr PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME test_osr4_stack_walk_return_addr
+    COMMAND test_osr4_stack_walk_return_addr)
+
+# OSR-18: atomic dedup in vtx_request_compilation + atomic profiler counters
+add_executable(test_osr18_atomic_dedup
+    regression/osr/test_osr18_atomic_dedup.c
+)
+target_link_libraries(test_osr18_atomic_dedup PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME test_osr18_atomic_dedup
+    COMMAND test_osr18_atomic_dedup)
+
+# OSR-20 / OSR-21: code-cache quarantine defers metadata free
+add_executable(test_osr20_21_quarantine
+    regression/osr/test_osr20_21_quarantine.c
+)
+target_link_libraries(test_osr20_21_quarantine PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME test_osr20_21_quarantine
+    COMMAND test_osr20_21_quarantine)
+
+# OSR-22: versioned cache on_enter/on_exit wired into dispatch loop's JIT path
+add_executable(test_osr22_versioned_cache_on_enter_exit
+    regression/osr/test_osr22_versioned_cache_on_enter_exit.c
+)
+target_link_libraries(test_osr22_versioned_cache_on_enter_exit PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME test_osr22_versioned_cache_on_enter_exit
+    COMMAND test_osr22_versioned_cache_on_enter_exit)
+
+# OSR-26: GC conservative scanner window widened + forwarded-pointer writeback
+add_executable(test_osr26_gc_conservative_scanner
+    regression/osr/test_osr26_gc_conservative_scanner.c
+)
+target_link_libraries(test_osr26_gc_conservative_scanner PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME test_osr26_gc_conservative_scanner
+    COMMAND test_osr26_gc_conservative_scanner)
+
+# ==========================================================================
+# OSR Cluster A/B/C regression tests (OSR-up trampoline, OSR-down/deopt,
+# OSR entry registration & dispatch).
+# These tests were previously on disk but NOT registered as build targets
+# (Meta-review Blocker B2). Wiring them below so they are compiled and run.
+# Tests that fail to compile or fail at runtime due to known limitations
+# (B3-B6: tests that don't trigger the actual bug path) are still wired
+# here so the build/test status is visible; the test bodies themselves
+# were updated by the FIXUP task to either trigger the bug path or to
+# verify the fix via source-grep.
+# ==========================================================================
+
+# OSR-2: codegen records VTX_STF_OSR_ENTRY side-table entries for loop headers
+add_executable(test_osr_2
+    regression/osr/test_osr_2.c
+)
+target_link_libraries(test_osr_2 PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME test_osr_2 COMMAND test_osr_2)
+
+# OSR-3: vtx_osr_up is void (not bool) — asm-jump success is detected by
+# the function not returning
+add_executable(test_osr_3
+    regression/osr/test_osr_3.c
+)
+target_link_libraries(test_osr_3 PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME test_osr_3 COMMAND test_osr_3)
+
+# OSR-5: side-table OSR entry lookup filters by bytecode_pc
+add_executable(test_osr_5
+    regression/osr/test_osr_5.c
+)
+target_link_libraries(test_osr_5 PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME test_osr_5 COMMAND test_osr_5)
+
+# OSR-6: OSR-up asm saves caller's RBX/R12 to JIT frame's saved-register slots
+add_executable(test_osr_6
+    regression/osr/test_osr_6.c
+)
+target_link_libraries(test_osr_6 PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME test_osr_6 COMMAND test_osr_6)
+
+# OSR-11: vtx_osr_up re-checks registry's current cm version before asm jump
+add_executable(test_osr_11
+    regression/osr/test_osr_11.c
+)
+target_link_libraries(test_osr_11 PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME test_osr_11 COMMAND test_osr_11)
+
+# OSR-12: vtx_osr_up polls GC safepoint immediately before the asm jump
+add_executable(test_osr_12
+    regression/osr/test_osr_12.c
+)
+target_link_libraries(test_osr_12 PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME test_osr_12 COMMAND test_osr_12)
+
+# OSR-16: vtx_osr_up refuses OSR into inlined code (frame shape mismatch)
+add_executable(test_osr_16
+    regression/osr/test_osr_16.c
+)
+target_link_libraries(test_osr_16 PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME test_osr_16 COMMAND test_osr_16)
+
+# OSR-24: vtx_osr_up verifies stack_depth matches interp->stack_top
+add_executable(test_osr_24
+    regression/osr/test_osr_24.c
+)
+target_link_libraries(test_osr_24 PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME test_osr_24 COMMAND test_osr_24)
+
+# OSR-27: NULL check on compiled_code->code in bc_pc_map loop
+add_executable(test_osr_27
+    regression/osr/test_osr_27.c
+)
+target_link_libraries(test_osr_27 PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME test_osr_27 COMMAND test_osr_27)
+
+# OSR-28: asm clobber list includes "rbp" and "rsp" (defensive)
+add_executable(test_osr_28
+    regression/osr/test_osr_28.c
+)
+target_link_libraries(test_osr_28 PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME test_osr_28 COMMAND test_osr_28)
+
+# OSR-30: asm writes profile_data to [RBP+8] (was hardcoded NULL)
+add_executable(test_osr_30
+    regression/osr/test_osr_30.c
+)
+target_link_libraries(test_osr_30 PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME test_osr_30 COMMAND test_osr_30)
+
+# OSR-31: int3 safety trap is preceded by __builtin_unreachable
+add_executable(test_osr_31
+    regression/osr/test_osr_31.c
+)
+target_link_libraries(test_osr_31 PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME test_osr_31 COMMAND test_osr_31)
+
+# OSR-33: vtx_osr_up verifies entry_register_convention == VTX_OSR_CONV_DEFAULT
+add_executable(test_osr_33
+    regression/osr/test_osr_33.c
+)
+target_link_libraries(test_osr_33 PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME test_osr_33 COMMAND test_osr_33)
+
+# ==========================================================================
+# OSR Cluster C-retry-2: 5 missing regression tests (17, 23, 25, 29, 32)
+# Added by Subagent C-retry-2 to address Meta findings (M3 + M4).
+# ==========================================================================
+
+# OSR-17: OSR trigger fires at IF_TRUE/IF_FALSE backedges (not just GOTO)
+add_executable(test_osr_17_backedge_triggers
+    regression/osr/test_osr_17_backedge_triggers.c
+)
+target_link_libraries(test_osr_17_backedge_triggers PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME osr_17_backedge_triggers COMMAND test_osr_17_backedge_triggers)
+
+# OSR-23: vtx_side_table_lookup_osr_entry filters by flag + bytecode_pc
+add_executable(test_osr_23_lookup_filter
+    regression/osr/test_osr_23_lookup_filter.c
+)
+target_link_libraries(test_osr_23_lookup_filter PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME osr_23_lookup_filter COMMAND test_osr_23_lookup_filter)
+
+# OSR-25: cm->frame_layout.codegen override (locals_base=-24, not -8)
+add_executable(test_osr_25_layout
+    regression/osr/test_osr_25_layout.c
+)
+target_link_libraries(test_osr_25_layout PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME osr_25_layout COMMAND test_osr_25_layout)
+
+# OSR-29: per-method OSR re-attempt rate limiter (helpers + cooldown)
+add_executable(test_osr_29_rate_limit
+    regression/osr/test_osr_29_rate_limit.c
+)
+target_link_libraries(test_osr_29_rate_limit PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME osr_29_rate_limit COMMAND test_osr_29_rate_limit)
+
+# OSR-32: dead `osr_active` field removed (compile-time _Static_assert)
+add_executable(test_osr_32_dead_flag_removed
+    regression/osr/test_osr_32_dead_flag_removed.c
+)
+target_link_libraries(test_osr_32_dead_flag_removed PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME osr_32_dead_flag_removed COMMAND test_osr_32_dead_flag_removed)
+

@@ -13,6 +13,7 @@
 
 #include "deopt/stack_walk.h"
 #include "interp/frame.h"
+#include "baseline/frame_layout.h"   /* VTX_FRAME_RETURN_ADDR_OFFSET */
 #include <stdlib.h>
 #include <string.h>
 
@@ -215,7 +216,19 @@ int vtx_stack_walk_read_caller_fp(void *fp, void **out_caller_fp)
 int vtx_stack_walk_read_return_addr(void *fp, void **out_return_addr)
 {
     if (!out_return_addr) return -1;
-    if (!read_ptr(fp, sizeof(void *), out_return_addr)) return -1;
+    /* OSR-4 fix: the JIT frame header pushes 5 words above RBP:
+     *   [RBP+0]  caller RBP
+     *   [RBP+8]  profile_data
+     *   [RBP+16] deopt_info
+     *   [RBP+24] method_ptr
+     *   [RBP+32] return address
+     * Reading from [fp+8] (sizeof(void *)) returned profile_data
+     * instead of the actual return address, which broke every caller
+     * of this function — stack-walk classification (JIT frames were
+     * misclassified as native), GC root scanning, deopt frame-chain
+     * reconstruction, and profiling. Use the symbolic constant from
+     * baseline/frame_layout.h instead of hardcoding the 32 offset. */
+    if (!read_ptr(fp, VTX_FRAME_RETURN_ADDR_OFFSET, out_return_addr)) return -1;
     return 0;
 }
 

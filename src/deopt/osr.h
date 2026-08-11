@@ -24,6 +24,20 @@
 #include "deopt/types.h"
 #include "codecache/types.h"
 
+/* Forward declaration: vtx_method_registry_t is defined in codecache/install.h.
+ * Forward-declared here so vtx_osr_up can take it as a parameter without
+ * pulling install.h into every translation unit that includes osr.h. */
+struct vtx_method_registry;
+typedef struct vtx_method_registry vtx_method_registry_t;
+
+/* Forward declaration: vtx_gc_t is defined in runtime/gc.h. Forward-declared
+ * here so vtx_osr_up can take it as a parameter for the OSR-12 pre-asm
+ * safepoint poll without pulling gc.h into every translation unit that
+ * includes osr.h. The struct tag and typedef share the name vtx_gc_t,
+ * which is legal in C (separate namespaces). */
+struct vtx_gc_t;
+typedef struct vtx_gc_t vtx_gc_t;
+
 #ifndef VTX_CATCH_NONE
 #define VTX_CATCH_NONE UINT32_MAX
 #endif
@@ -89,7 +103,8 @@ typedef struct {
      * type-punning through incompatible pointer types is UB under
      * C17 strict aliasing (6.5p7) and is flagged by -fsanitize=undefined. */
     void             *caller;       /* caller's frame (vtx_frame_state_t * or vtx_interp_frame_t *) */
-    bool             osr_active;     /* true after OSR up: frame is superseded by JIT code */
+    /* OSR-32 fix: removed `osr_active` flag — was set by vtx_osr_up but
+     * never read by any code (GC, stack walker, etc.). Dead-flag removal. */
 
     /* --- Enhanced fields (matching src/interp/frame.h) --- */
 
@@ -127,6 +142,14 @@ typedef struct {
  * This is distinct from vtx_deopt_info_t (which is the static per-method
  * deopt metadata) — this struct contains the dynamic runtime state
  * at the point of deoptimization.
+ *
+ * OSR-13 fix: `register_map` is now `const vtx_reg_map_entry_t *` (the
+ * side table's native format — an array of {register_number, node_id}
+ * entries). Previously this was typed `vtx_value_t *` and assumed a
+ * flat [count, (node_id, value) pairs...] layout that did not exist
+ * anywhere in the codebase. The format mismatch meant the resolver
+ * always read garbage and returned VTX_VALUE_UNDEFINED, defeating
+ * the register-map path of OSR-down reconstruction.
  */
 typedef struct {
     uint32_t             method_id;       /* method where guard failed */
@@ -134,7 +157,7 @@ typedef struct {
     vtx_frame_state_t   *frame_state;     /* FrameState at the deopt point */
     vtx_side_table_t    *side_table;      /* side table for the compiled code */
     void                *frame_pointer;   /* frame pointer of the compiled frame */
-    vtx_value_t         *register_map;    /* values of live registers at deopt */
+    const vtx_reg_map_entry_t *register_map; /* OSR-13: side-table native format */
     uint32_t             register_count;  /* number of entries in register_map */
 } vtx_osr_deopt_context_t;
 
@@ -153,16 +176,48 @@ typedef struct {
  *   4. Patch the return address to point into the compiled code.
  *   5. Transfer execution to the compiled code's entry point.
  *
+ * OSR-11 fix: `registry` is required so that vtx_osr_up can re-check
+ * the registry's current `cm` for the method immediately before the asm
+ * jump. If the version has changed (e.g., due to concurrent invalidation
+ * or retrace), the function returns instead of jumping to freed memory.
+ *
+ * OSR-3 fix: this function returns `void`, NOT `bool`. On a successful
+ * OSR transition the inline-asm trampoline jumps directly to the JIT
+ * entry point and never returns to C — the JIT method's NaN-boxed
+ * return value propagates back to the caller of vtx_interp_run through
+ * RAX exactly as if the JIT had been called normally. Returning `bool`
+ * was fundamentally broken because, after a successful transition,
+ * the value left in RAX is the JIT method's return value (which can
+ * be SMI 0 / undefined / null and thus be misread as `false`), causing
+ * the dispatch loop to set jit_reenter_pending and re-execute the
+ * entire method (side effects run twice).
+ *
+ * On any failure (NULL inputs, method/PC mismatch, side-table miss,
+ * inlined-code entry, stack-depth mismatch, version mismatch), the
+ * function returns normally so the caller can fall back to whole-method
+ * re-enter. The caller detects failure simply by the function
+ * returning — if vtx_osr_up returns at all, OSR failed.
+ *
+ * OSR-12 fix: `gc` is required so that vtx_osr_up can poll for a
+ * pending safepoint immediately before the asm jump. The dispatch
+ * loop's last safepoint check happened at the backward branch — a
+ * GC may have been requested between then and the asm jump, and the
+ * JIT code's own safepoint poll may be far away if the OSR entry is
+ * at a loop header with a long body.
+ *
  * @param interp         Current interpreter frame
- * @param method_id      Method being executed
+ * @param method_id       Method being executed
  * @param compiled_code  Compiled code descriptor for the method
  * @param loop_header_pc Bytecode PC of the loop header (OSR entry point)
- * @return true if OSR up was successful, false if not
+ * @param registry        Method registry (for OSR-11 version re-check)
+ * @param gc              GC handle (for OSR-12 pre-asm safepoint poll)
  */
-bool vtx_osr_up(vtx_interp_frame_t *interp,
+void vtx_osr_up(vtx_interp_frame_t *interp,
                  uint32_t method_id,
                  const vtx_compiled_code_t *compiled_code,
-                 uint32_t loop_header_pc);
+                 uint32_t loop_header_pc,
+                 struct vtx_method_registry *registry,
+                 vtx_gc_t *gc);
 
 /* ========================================================================== */
 /* OSR Down: Compiled Code → Interpreter                                      */
@@ -209,15 +264,41 @@ vtx_interp_frame_t *vtx_osr_build_interp_frame(
 
 /**
  * Resolve a NodeID to its value at deopt time.
- * Uses the register map and frame state to look up the value.
  *
- * @param node_id      The NodeID to resolve
- * @param register_map Array of values indexed by NodeID (from side table)
- * @param map_size     Size of the register map array
- * @return The resolved value, or VTX_VALUE_UNDEFINED if not found
+ * OSR-13 fix: the register_map parameter is now `const vtx_reg_map_entry_t *`
+ * (the side table's native format — an array of {register_number, node_id}
+ * entries), and `register_count` is the number of entries (NOT a "total
+ * vtx_value_t elements" count as the old docs claimed). The prior signature
+ * assumed a fabricated [count, (node_id, value) pairs...] layout that did
+ * not exist anywhere; the resolver always read garbage from real side-table
+ * memory and returned VTX_VALUE_UNDEFINED.
+ *
+ * OSR-9 fix: when a NodeID is NOT in the register map (the common case
+ * for VTX_OP_Constant, VTX_OP_Parameter, and spilled nodes), this now
+ * falls back to alternative resolution paths:
+ *   - VTX_OP_Constant: read the constant value from the IR node table
+ *     (passed via `node_table`). Returns the boxed constant value.
+ *   - VTX_OP_Parameter: read the parameter's value from the caller's
+ *     interpreter locals (passed via `locals` / `local_count`). The
+ *     parameter's index is the node's `local_index` field.
+ *   - Spilled nodes (any other opcode not in the register map): return
+ *     VTX_VALUE_UNDEFINED — the caller is responsible for reading the
+ *     spill slot directly from the JIT frame. (Without a T2 register
+ *     save area, we cannot resolve spilled values from here.)
+ *
+ * @param node_id        The NodeID to resolve
+ * @param register_map   Side-table register map (OSR-13: native format)
+ * @param register_count Number of entries in register_map
+ * @param node_table     IR node table (OSR-9: for VTX_OP_Constant fallback)
+ * @param locals         Interpreter locals (OSR-9: for VTX_OP_Parameter fallback)
+ * @param local_count    Number of locals in the `locals` array
+ * @return The resolved value, or VTX_VALUE_UNDEFINED if not resolvable
  */
 vtx_value_t vtx_osr_resolve_node(vtx_nodeid_t node_id,
-                                   const vtx_value_t *register_map,
-                                   uint32_t map_size);
+                                   const vtx_reg_map_entry_t *register_map,
+                                   uint32_t register_count,
+                                   const vtx_node_table_t *node_table,
+                                   const vtx_value_t *locals,
+                                   uint32_t local_count);
 
 #endif /* VORTEX_DEOPT_OSR_H */

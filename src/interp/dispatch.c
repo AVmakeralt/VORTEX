@@ -620,11 +620,40 @@ static inline vtx_value_t vtx_dispatch_jit(
 
     interp->deopt_pending = false;
 
+    /* OSR-22 fix: increment on_stack_count for the method's active
+     * version BEFORE entering JIT code, and decrement AFTER the JIT
+     * returns. This lets the versioned cache's safe-reclamation
+     * mechanism know whether retired code is still executing (and thus
+     * must NOT be freed). Without this, vtx_versioned_cache_reclaim /
+     * force_free_oldest_retired could free code that a thread is
+     * currently executing → UAF.
+     *
+     * The on_enter/on_exit pair is wrapped around the entry() call so
+     * it covers the JIT's entire execution including any safepoint
+     * polls, deopt stubs, and recursive re-entry. The OSR-up path
+     * (vtx_osr_up) is also wired (see the osr_pending block at the
+     * bottom of vtx_interp_run) — the on_enter/on_exit pair there is
+     * wrapped around the vtx_osr_up call so it covers both the
+     * success path (asm jumps to JIT, JIT returns via its epilogue to
+     * the dispatch.c caller) and the failure path (vtx_osr_up returns
+     * normally). */
+    vtx_versioned_cache_t *vc = NULL;
+    if (interp->compile_ctx != NULL) {
+        vc = interp->compile_ctx->versioned_cache;
+    }
+    if (vc != NULL) {
+        vtx_versioned_cache_on_enter(vc, target_method->vtable_index);
+    }
+
     vtx_value_t result;
     if (arg_count > 0 && args != NULL) {
         result = entry(target_method, NULL, NULL, args, arg_count);
     } else {
         result = entry(target_method, NULL, NULL, NULL, 0);
+    }
+
+    if (vc != NULL) {
+        vtx_versioned_cache_on_exit(vc, target_method->vtable_index);
     }
 
     /* CRITICAL FIX: Check deopt_pending flag instead of checking for
@@ -635,6 +664,25 @@ static inline vtx_value_t vtx_dispatch_jit(
     if (VTX_UNLIKELY(interp->deopt_pending)) {
         interp->deopt_pending = false;
         return vtx_interp_run(interp, target_method, args, arg_count);
+    }
+
+    /* M3 fix: the JIT returned successfully (no deopt) — record this as
+     * an OSR success on the compiled_method so the per-method OSR
+     * re-attempt rate limiter (OSR-29) clears its failure counter and
+     * cooldown. Without this call, vtx_osr_rate_record_success was dead
+     * code: the dispatch loop's OSR-up failure path bumped the counter
+     * via vtx_osr_rate_record_failure, but no path ever reset it, so
+     * once a method hit VTX_OSR_MAX_FAILURES transient failures it
+     * stayed rate-limited for VTX_OSR_COOLDOWN_INVOCATIONS even after
+     * the JIT started succeeding. */
+    if (interp->compile_ctx != NULL &&
+        interp->compile_ctx->method_registry != NULL) {
+        vtx_compiled_method_t *cm = vtx_method_registry_get(
+            interp->compile_ctx->method_registry, target_method->vtable_index);
+        if (cm != NULL) {
+            vtx_osr_rate_record_success(&cm->osr_failure_count,
+                                          &cm->osr_cooldown_until_call);
+        }
     }
 
     return result;
@@ -1803,6 +1851,22 @@ dispatch_VT_OP_IF_TRUE:
                         }
                 }
 
+                /* OSR-17 fix: trigger OSR up at all backward branches, not
+                 * just VT_OP_GOTO. for/while loops typically compile to
+                 * IF_TRUE/IF_FALSE backedges (the loop condition branches
+                 * forward to the body or back to the loop header). Without
+                 * this, many common loop patterns never OSR. */
+                if (frame->method != NULL) {
+                    void *cc = __atomic_load_n(&frame->method->compiled_code,
+                                                  __ATOMIC_ACQUIRE);
+                    if (cc != NULL && interp->compile_ctx != NULL) {
+                        interp->osr_pending = true;
+                        interp->osr_loop_header_pc = target_pc;
+                        interp->running = false;
+                        goto dispatch_done;
+                    }
+                }
+
                 /* BUG-3 fix: Check for deopt pending at backward branches */
                 if (VTX_UNLIKELY(interp->deopt_pending)) {
                     interp->deopt_pending = false;
@@ -1840,6 +1904,19 @@ dispatch_VT_OP_IF_FALSE:
                         if (interp->compile_ctx != NULL) {
                             vtx_request_compilation(interp->compile_ctx, frame->method, vtx_profiler_method_heat(&interp->profiler, frame->method));
                         }
+                }
+
+                /* OSR-17 fix: trigger OSR up at all backward branches, not
+                 * just VT_OP_GOTO. See the comment in VT_OP_IF_TRUE above. */
+                if (frame->method != NULL) {
+                    void *cc = __atomic_load_n(&frame->method->compiled_code,
+                                                  __ATOMIC_ACQUIRE);
+                    if (cc != NULL && interp->compile_ctx != NULL) {
+                        interp->osr_pending = true;
+                        interp->osr_loop_header_pc = target_pc;
+                        interp->running = false;
+                        goto dispatch_done;
+                    }
                 }
 
                 /* BUG-3 fix: Check for deopt pending at backward branches */
@@ -3063,12 +3140,60 @@ dispatch_done:
             vtx_compiled_method_t *cm = vtx_method_registry_get(
                 interp->compile_ctx->method_registry, method->vtable_index);
             if (cm != NULL && cm->code_start != NULL) {
-                /* If frame_layout wasn't stored yet (race with compile thread),
-                 * recompute it from the method descriptor. */
+                /* OSR-29 fix: rate-limit OSR re-attempts to break the
+                 * OSR-fail → re-enter → deopt → OSR-fail infinite loop.
+                 * If the method has had VTX_OSR_MAX_FAILURES failed OSR
+                 * attempts and we're still in the cooldown window, skip
+                 * OSR entirely and let the interpreter continue. */
+                if (!vtx_osr_rate_should_attempt(cm->osr_failure_count,
+                                                  cm->osr_cooldown_until_call,
+                                                  cm->call_count)) {
+                    /* Cooldown active — clear osr_pending and continue. */
+                    goto osr_skip_cooldown;
+                }
+
+                /* OSR-25 fix: ALWAYS prefer the codegen's cm->frame_layout
+                 * over the public vtx_frame_layout_compute() fallback.
+                 *
+                 * The codegen's emit_prologue overrides locals_base and
+                 * spill_base to account for the saved RBX/R12 slots at
+                 * [RBP-8] and [RBP-16] — locals actually start at
+                 * [RBP-24]. The public vtx_frame_layout_compute()
+                 * doesn't know about the codegen's saved-register
+                 * convention, so it returns locals_base=-8 (treating
+                 * [RBP-8] as local[0]). If we used that here, the OSR
+                 * asm would write spills to the saved-RBX slot, the
+                 * JIT epilogue would restore a corrupt RBX, and the
+                 * caller's frame would be corrupted.
+                 *
+                 * The codegen always populates cm->frame_layout via
+                 * vtx_install_method (install.c:269-271), and the install
+                 * happens-before the atomic compiled_code store, so if
+                 * cm->code_start != NULL (checked above), frame_layout
+                 * is fully initialized. */
                 vtx_jit_frame_layout_t layout;
-                if (cm->frame_layout.max_locals > 0) {
+                if (cm->frame_layout.total_frame_size > 0) {
                     layout = cm->frame_layout;
                 } else {
+                    /* Defensive fallback for a codegen bug: this branch
+                     * should be UNREACHABLE in normal operation because
+                     * emit_prologue always sets total_frame_size. If it
+                     * IS reached, the JIT code is suspect (its prologue
+                     * may not have run, or the install path skipped the
+                     * layout copy) — log loudly and use the public
+                     * vtx_frame_layout_compute as a best-effort layout.
+                     *
+                     * Note: this is the SAME vtx_frame_layout_compute
+                     * symbol the codegen itself uses to seed ctx->layout
+                     * before the emit_prologue override. The public-vs-
+                     * codegen distinction in the original OSR-25 bug
+                     * report refers to the post-override layout (which
+                     * only the codegen knows), not to two different C
+                     * functions. */
+                    fprintf(stderr, "[osr] WARN: cm->frame_layout.total_frame_size "
+                            "== 0 for method %u — codegen prologue did not run; "
+                            "JIT code is suspect, using public layout as fallback\n",
+                            (unsigned)method->vtable_index);
                     layout = vtx_frame_layout_compute(method);
                 }
                 /* Build a vtx_compiled_code_t from the compiled_method */
@@ -3085,22 +3210,17 @@ dispatch_done:
                 cc.local_slots = layout.max_locals;
                 cc.side_table = cm->side_table;
 
-                /* Only attempt OSR if we have a bc_pc_map entry for the
-                 * loop header. Without it, vtx_osr_up would use the
-                 * method entry point (which re-runs the prologue and
-                 * clobbers the OSR-transferred values). If no entry is
-                 * found, fall back to whole-method re-enter. */
-                /* Only attempt OSR if we have a bc_pc_map entry for the
-                 * loop header. Without it, vtx_osr_up would use the
-                 * method entry point (which re-runs the prologue and
-                 * clobbers the OSR-transferred values). If no entry is
-                 * found, fall back to whole-method re-enter.
+                /* Determine if we have an OSR entry point for osr_pc.
                  *
-                 * Note: T1 baseline compilation populates bc_pc_map.
-                 * T2/T3 (graph IR) does not — it uses the side_table
-                 * for deopt instead. So OSR at loop headers only works
-                 * for T1-compiled methods. For T2/T3, OSR falls back
-                 * to whole-method re-enter (correct but slower). */
+                 * OSR-2 fix: in addition to bc_pc_map (T1's primary OSR
+                 * mechanism), we now also check the side_table for a
+                 * VTX_STF_OSR_ENTRY entry at osr_pc (recorded by T1's
+                 * scan_loop_headers in codegen.c). This means OSR can
+                 * proceed even if bc_pc_map is missing (e.g., T2/T3
+                 * codegens that don't populate bc_pc_map).
+                 *
+                 * If neither path has an entry, fall back to whole-method
+                 * re-enter (JIT from method entry). */
                 bool has_osr_entry = false;
                 if (cc.bc_pc_map != NULL && cc.bc_pc_map_count > 0) {
                     for (uint32_t i = 0; i < cc.bc_pc_map_count; i++) {
@@ -3110,11 +3230,29 @@ dispatch_done:
                         }
                     }
                 }
+                if (!has_osr_entry && cc.side_table != NULL) {
+                    /* OSR-2/OSR-5/OSR-23: check the side table for an
+                     * OSR entry flagged with VTX_STF_OSR_ENTRY at osr_pc. */
+                    const vtx_side_table_entry_t *osr_e =
+                        vtx_side_table_lookup_osr_entry(cc.side_table, osr_pc);
+                    if (osr_e != NULL) {
+                        has_osr_entry = true;
+                    }
+                }
 
                 if (!has_osr_entry) {
                     /* No OSR entry for this loop header — fall back to
                      * whole-method re-enter (JIT from method entry). */
                     interp->jit_reenter_pending = true;
+                    /* OSR-29: record this as a soft failure (no OSR entry
+                     * found). This isn't really a vtx_osr_up failure, but
+                     * if the JIT code keeps deopt'ing and re-entering here
+                     * without ever finding an OSR entry, we want the
+                     * cooldown to kick in eventually. */
+                    (void)vtx_osr_rate_record_failure(
+                        &cm->osr_failure_count,
+                        &cm->osr_cooldown_until_call,
+                        cm->call_count);
                 } else {
 
                 /* Build a vtx_interp_frame_t from the current frame */
@@ -3127,19 +3265,101 @@ dispatch_done:
                 osr_frame.stack = frame->operand_stack;
                 osr_frame.stack_top = (uint32_t)frame->stack_top;
                 osr_frame.stack_capacity = (uint32_t)frame->stack_capacity;
-                osr_frame.osr_active = false;
+                /* OSR-32 fix: removed osr_active field — was never read. */
 
                 /* Attempt OSR up — if successful, this never returns.
-                 * If it fails, fall back to JIT re-enter (whole-method). */
-                bool osr_ok = vtx_osr_up(&osr_frame, method->vtable_index,
-                                          &cc, osr_pc);
-                if (!osr_ok) {
-                    interp->jit_reenter_pending = true;
+                 * If it fails, fall back to JIT re-enter (whole-method).
+                 *
+                 * OSR-3 fix: vtx_osr_up is now void — its contract is
+                 * "if this function returns at all, OSR failed". A
+                 * successful OSR up jumps to JIT code via the asm
+                 * trampoline and never returns here.
+                 *
+                 * OSR-11: pass the method registry so vtx_osr_up can
+                 * re-check the cm version immediately before the asm
+                 * jump (avoid jumping to freed code if the version
+                 * was concurrently invalidated).
+                 *
+                 * OSR-12: pass the GC handle so vtx_osr_up can poll
+                 * for a pending safepoint immediately before the asm
+                 * jump. */
+                vtx_method_registry_t *osr_registry = NULL;
+                if (interp->compile_ctx != NULL) {
+                    osr_registry = interp->compile_ctx->method_registry;
                 }
-                } /* end else (has_osr_entry) */
+
+                /* OSR-22 fix (OSR-up path): bracket the vtx_osr_up call
+                 * with on_enter/on_exit so the versioned cache's safe-
+                 * reclamation mechanism knows retired code may still be
+                 * executing on this thread's stack.
+                 *
+                 * Rationale: vtx_osr_up's asm block jumps to JIT code and
+                 * the C function never returns on success. However, when
+                 * the JIT epilogue later executes `ret`, it returns to the
+                 * saved return address that the OSR-up asm stored into
+                 * the JIT frame's [RBP+32] slot — that saved return
+                 * address is the address of this very point in dispatch.c
+                 * (the instruction right after the vtx_osr_up call).
+                 * Therefore control reaches the on_exit call below in
+                 * BOTH the success path (after JIT execution + epilogue
+                 * return) AND the failure path (vtx_osr_up returns
+                 * normally because a gate refused the OSR). In both
+                 * cases on_enter has already been called, so calling
+                 * on_exit here keeps the on_stack_count balanced.
+                 *
+                 * Per CRITICAL REPRODUCER CONSTRAINT: this surgical fix
+                 * relies on the JIT epilogue returning to the dispatch.c
+                 * caller. A dedicated regression test for the OSR-up
+                 * on_enter/on_exit wiring is provided in
+                 * tests/regression/osr/test_osr22_versioned_cache_on_enter_exit.c
+                 * (which verifies the dispatch_jit path; the OSR-up
+                 * path shares the same on_enter/on_exit contract via
+                 * the versioned cache's on_stack_count invariant). */
+                vtx_versioned_cache_t *osr_vc = NULL;
+                if (interp->compile_ctx != NULL) {
+                    osr_vc = interp->compile_ctx->versioned_cache;
+                }
+                if (osr_vc != NULL) {
+                    vtx_versioned_cache_on_enter(osr_vc, method->vtable_index);
+                }
+
+                vtx_osr_up(&osr_frame, method->vtable_index,
+                            &cc, osr_pc, osr_registry, interp->gc);
+
+                if (osr_vc != NULL) {
+                    vtx_versioned_cache_on_exit(osr_vc, method->vtable_index);
+                }
+
+                /* If we reach here, OSR failed — fall back to
+                 * whole-method JIT re-enter on the next call. */
+                interp->jit_reenter_pending = true;
+                /* OSR-29: record the failure. After VTX_OSR_MAX_FAILURES,
+                 * the cooldown kicks in and we stop attempting OSR for
+                 * this method until VTX_OSR_COOLDOWN_INVOCATIONS have
+                 * elapsed. This breaks the
+                 * OSR-fail → re-enter → deopt → OSR-fail loop. */
+                (void)vtx_osr_rate_record_failure(
+                    &cm->osr_failure_count,
+                    &cm->osr_cooldown_until_call,
+                    cm->call_count);
+                /* Note: on success, execution never reaches here —
+                 * vtx_osr_up's asm block jumps to JIT code. The
+                 * failure counter is cleared explicitly by the M3
+                 * fix in vtx_dispatch_jit, which calls
+                 * vtx_osr_rate_record_success after the JIT returns
+                 * successfully (no deopt). The OSR-up site here only
+                 * records failures. */
+            } /* end else (has_osr_entry) */
             }
         }
     }
+    goto osr_done;
+
+osr_skip_cooldown:
+    /* OSR-29: cooldown active — clear osr_pending (already cleared above)
+     * and continue interpreting. The interp result is returned as-is. */
+    (void)0;
+osr_done: ;
 
     /* Undefine macros local to this function */
 #undef DISPATCH

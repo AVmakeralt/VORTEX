@@ -72,6 +72,19 @@
 #define VTX_DEOPT_GLOBAL_FAIL_THRESHOLD 10000u
 
 /* ========================================================================== */
+/* OSR re-attempt rate limiting (OSR-29)                                        */
+/* ========================================================================== */
+
+/* After this many failed vtx_osr_up calls for a single method, disable
+ * OSR for that method for a cooldown period to break the
+ * OSR-fail → re-enter → deopt → OSR-fail infinite loop. */
+#define VTX_OSR_MAX_FAILURES            5u
+
+/* Number of method invocations to wait before re-enabling OSR after
+ * the failure threshold is hit. Counted via cm->call_count. */
+#define VTX_OSR_COOLDOWN_INVOCATIONS    1000ull
+
+/* ========================================================================== */
 /* Per-site rate limiter                                                       */
 /* ========================================================================== */
 
@@ -180,5 +193,36 @@ bool vtx_deopt_budget_is_suppressed(const vtx_deopt_budget_t *gb, uint64_t now_n
 
 /* Get the current global deopt rate (deopts per second). */
 double vtx_deopt_budget_rate_per_sec(const vtx_deopt_budget_t *gb, uint64_t now_ns);
+
+/* ========================================================================== */
+/* OSR-29: per-method OSR re-attempt rate limiting                              */
+/* ========================================================================== */
+
+/* These helpers encapsulate the OSR re-attempt policy. The dispatch loop
+ * owns the per-method state (osr_failure_count, osr_cooldown_until_call)
+ * on vtx_compiled_method_t and calls these to decide whether to attempt
+ * OSR and to record the outcome.
+ *
+ * See src/deopt/rate_limit.c for the implementation. */
+
+/* Returns true if OSR should be attempted for a method whose failure
+ * counter and cooldown threshold are as given. */
+bool vtx_osr_rate_should_attempt(uint32_t osr_failure_count,
+                                  uint64_t osr_cooldown_until_call,
+                                  uint64_t current_call_count);
+
+/* Record a failed OSR attempt. Bumps the failure counter and, if the
+ * threshold (VTX_OSR_MAX_FAILURES) is reached, arms the cooldown by
+ * setting *osr_cooldown_until_call = current_call_count + COOLDOWN.
+ * Returns true iff the threshold was just hit (so the caller can log
+ * the cooldown activation). */
+bool vtx_osr_rate_record_failure(uint32_t *osr_failure_count,
+                                  uint64_t *osr_cooldown_until_call,
+                                  uint64_t current_call_count);
+
+/* Record a successful OSR attempt. Resets the failure counter and
+ * clears any cooldown. */
+void vtx_osr_rate_record_success(uint32_t *osr_failure_count,
+                                  uint64_t *osr_cooldown_until_call);
 
 #endif /* VORTEX_DEOPT_RATE_LIMIT_H */

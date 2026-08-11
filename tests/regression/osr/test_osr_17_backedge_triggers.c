@@ -77,10 +77,18 @@ static int                g_callback_fired = 0;
 static int                g_compiled_in_callback = 0;
 
 /* Runtime callback: invoked from the interpreter's CALL_RUNTIME
- * handler. On the first invocation, JIT-compiles the method
- * (which atomically sets method->compiled_code via vtx_install_method).
- * This makes the subsequent IF_TRUE backedge see compiled_code != NULL
- * and fire the OSR-17 trigger. */
+ * handler. Two modes:
+ *
+ *  - Real-compile mode (g_arena != NULL): JIT-compiles the method
+ *    via vtx_baseline_compile (installs compiled_code atomically
+ *    via vtx_install_method).
+ *
+ *  - Sentinel-only mode (g_arena == NULL): only sets
+ *    method->compiled_code = (void*)1 (a non-NULL sentinel). This
+ *    triggers the dispatch loop's osr_pending logic without
+ *    depending on JIT codegen correctness — vtx_interp_run's
+ *    OSR-up path will see cm == NULL (no cm in the registry) and
+ *    skip vtx_osr_up. */
 static int osr17_runtime_callback(uint32_t func_id,
                                     vtx_value_t **sp_ptr,
                                     void *user_data)
@@ -91,20 +99,20 @@ static int osr17_runtime_callback(uint32_t func_id,
     }
     g_callback_fired++;
 
-    /* Compile the method the first time the callback fires. This
-     * installs compiled_code atomically (vtx_install_method). The
-     * next IF_TRUE backedge in the interpreter will see this and
-     * set osr_pending — which is the OSR-17 fix. */
-    if (g_compiled_in_callback == 0 && g_arena != NULL &&
-        g_cache != NULL && g_registry != NULL) {
+    if (g_arena == NULL) {
+        /* Sentinel-only mode: set compiled_code to a non-NULL
+         * sentinel so the IF_TRUE backedge fires osr_pending.
+         * Do NOT actually compile — we want vtx_interp_run to
+         * skip vtx_osr_up (cm == NULL in the registry). */
+        __atomic_store_n(&g_method->compiled_code, (void *)1,
+                          __ATOMIC_RELEASE);
+        g_compiled_in_callback = 1;
+    } else if (g_compiled_in_callback == 0 && g_cache != NULL &&
+               g_registry != NULL) {
         vtx_compiled_code_t *cc = vtx_baseline_compile(
             g_method, NULL, g_arena, g_cache, g_registry);
         if (cc != NULL) {
             g_compiled_in_callback = 1;
-            /* The cc struct wrapper is leaked here — its underlying
-             * code is installed in the cache and the cm is in the
-             * registry. The cc wrapper itself is arena-allocated and
-             * will be freed at arena teardown. */
         }
     }
 
@@ -233,6 +241,16 @@ VTX_TEST(osr17_codegen_records_osr_entry_for_if_true_backedge)
  * method, so compiled_code is set when the backedge is reached.
  * The OSR-17 fix at the IF_TRUE handler must set osr_pending.
  */
+/* Build the test method. const_pool layout:
+ *   const_pool[0] = 0 (initial counter value)
+ *   const_pool[1] = 1 (IADD increment)
+ *   const_pool[2] = 10 (ICMP_LT comparison value — counter < 10 is
+ *                       true for many iterations, so the backedge fires)
+ *
+ * The two LOAD_CONST_INT 1 instructions load DIFFERENT pool entries:
+ *   - PC 9 LOAD_CONST_INT 1: loads const_pool[1] = 1 (for IADD)
+ *   - PC 22 LOAD_CONST_INT 2: loads const_pool[2] = 10 (for ICMP_LT)
+ */
 static void build_if_true_loop_with_callback(vtx_bytecode_t *bc,
                                                 uint8_t *code_buf,
                                                 vtx_value_t *const_pool)
@@ -242,32 +260,48 @@ static void build_if_true_loop_with_callback(vtx_bytecode_t *bc,
     code_buf[pc] = VT_OP_STORE_LOCAL;    code_buf[pc+1] = 0; code_buf[pc+2] = 0; pc += 3;
     /* loop header at PC=6 */
     code_buf[pc] = VT_OP_LOAD_LOCAL;     code_buf[pc+1] = 0; code_buf[pc+2] = 0; pc += 3;
-    code_buf[pc] = VT_OP_LOAD_CONST_INT; code_buf[pc+1] = 0; code_buf[pc+2] = 1; pc += 3;
+    code_buf[pc] = VT_OP_LOAD_CONST_INT; code_buf[pc+1] = 0; code_buf[pc+2] = 1; pc += 3;  /* const_pool[1] = 1 */
     code_buf[pc] = VT_OP_IADD; pc += 1;
     code_buf[pc] = VT_OP_STORE_LOCAL;    code_buf[pc+1] = 0; code_buf[pc+2] = 0; pc += 3;
     code_buf[pc] = VT_OP_CALL_RUNTIME;   code_buf[pc+1] = 0; code_buf[pc+2] = OSR17_CALLBACK_FUNC_ID; pc += 3;
     code_buf[pc] = VT_OP_LOAD_LOCAL;     code_buf[pc+1] = 0; code_buf[pc+2] = 0; pc += 3;
-    code_buf[pc] = VT_OP_LOAD_CONST_INT; code_buf[pc+1] = 0; code_buf[pc+2] = 1; pc += 3;
+    code_buf[pc] = VT_OP_LOAD_CONST_INT; code_buf[pc+1] = 0; code_buf[pc+2] = 2; pc += 3;  /* const_pool[2] = 10 */
     code_buf[pc] = VT_OP_ICMP_LT; pc += 1;
     code_buf[pc] = VT_OP_IF_TRUE;        code_buf[pc+1] = 0; code_buf[pc+2] = OSR17_LOOP_HEADER_PC; pc += 3;
     code_buf[pc] = VT_OP_LOAD_LOCAL;     code_buf[pc+1] = 0; code_buf[pc+2] = 0; pc += 3;
     code_buf[pc] = VT_OP_RETURN_VALUE; pc += 1;
 
     bc->code = code_buf; bc->length = pc;
-    bc->constant_pool = const_pool; bc->constant_count = 2;
+    bc->constant_pool = const_pool; bc->constant_count = 3;
     bc->max_locals = 1; bc->max_stack = 4;
 }
 
 VTX_TEST(osr17_if_true_backedge_sets_osr_loop_header_pc)
 {
+    /* This test verifies the DISPATCH-SIDE OSR-17 fix: the IF_TRUE
+     * backedge handler in src/interp/dispatch.c sets osr_pending
+     * and osr_loop_header_pc when compiled_code != NULL.
+     *
+     * We deliberately AVOID running real JIT code: the callback
+     * sets method->compiled_code to a non-NULL sentinel (so the
+     * dispatch loop's "cc != NULL" gate fires), but does NOT
+     * install a real cm in the method registry. vtx_interp_run's
+     * OSR-up path then sees cm == NULL and falls through to
+     * jit_reenter_pending WITHOUT calling vtx_osr_up — so we
+     * don't depend on JIT codegen correctness (which is tested
+     * elsewhere). The deterministic signal is that
+     * osr_loop_header_pc == 6 after vtx_interp_run returns. */
     vtx_arena_t arena; vtx_arena_init(&arena);
     vtx_type_system_t ts; vtx_type_system_init(&ts);
     vtx_gc_t gc; vtx_gc_init(&gc, &ts, VTX_GC_GENERATIONAL);
 
     uint8_t *code_buf = vtx_arena_alloc(&arena, 48);
-    /* const_pool[1] = 2 → condition `counter < 2` is true on iter 1
-     * (counter=1 after the IADD), so the IF_TRUE backedge fires. */
-    vtx_value_t const_pool[2] = { vtx_make_smi(0), vtx_make_smi(2) };
+    /* const_pool[0]=0 (initial counter), [1]=1 (IADD increment),
+     * [2]=10 (ICMP_LT comparison value). On iter 1: counter goes
+     * 0→1, condition (1 < 10) == true → IF_TRUE backedge fires
+     * (the OSR-17 trigger). The dispatch loop exits immediately
+     * after setting osr_pending, so the loop only runs 1 iteration. */
+    vtx_value_t const_pool[3] = { vtx_make_smi(0), vtx_make_smi(1), vtx_make_smi(10) };
     vtx_bytecode_t bc;
     build_if_true_loop_with_callback(&bc, code_buf, const_pool);
 
@@ -287,12 +321,17 @@ VTX_TEST(osr17_if_true_backedge_sets_osr_loop_header_pc)
     compile_ctx.method_registry = &registry;
     vtx_interp_set_compile_ctx(&interp, &compile_ctx);
 
-    /* Register the runtime callback and prime the globals it reads. */
+    /* Register a runtime callback that ONLY sets method->compiled_code
+     * to a non-NULL sentinel. This makes the dispatch loop's IF_TRUE
+     * backedge handler fire osr_pending (the OSR-17 fix), but
+     * vtx_interp_run's OSR-up path will see cm == NULL (no cm in the
+     * registry) and skip the vtx_osr_up call — avoiding any dependency
+     * on JIT codegen correctness. */
     vtx_set_runtime_callback(osr17_runtime_callback, NULL);
     g_method = &method;
-    g_arena = &arena;
-    g_cache = &cache;
-    g_registry = &registry;
+    g_arena = NULL;  /* signal callback: do NOT compile, just set sentinel */
+    g_cache = NULL;
+    g_registry = NULL;
     g_callback_fired = 0;
     g_compiled_in_callback = 0;
 
@@ -300,31 +339,24 @@ VTX_TEST(osr17_if_true_backedge_sets_osr_loop_header_pc)
     VTX_ASSERT_FALSE(interp.osr_pending);
     VTX_ASSERT_EQUAL(interp.osr_loop_header_pc, 0u);
 
-    /* Run the method. The interpreter enters the dispatch loop with
-     * compiled_code == NULL (no JIT yet). On iteration 1:
+    /* Run the method. On iteration 1:
      *   1. Body runs: counter goes 0 → 1.
-     *   2. CALL_RUNTIME fires our callback, which JIT-compiles the
-     *      method (compiled_code is now non-NULL atomically).
+     *   2. CALL_RUNTIME fires our callback, which sets
+     *      method->compiled_code = (void*)1 (sentinel).
      *   3. The IF_TRUE at PC 26 evaluates (1 < 2) == true → backedge.
      *   4. The OSR-17 fix at the IF_TRUE handler sees compiled_code
      *      != NULL && compile_ctx != NULL → sets osr_pending = true,
      *      osr_loop_header_pc = 6, exits the dispatch loop.
-     *   5. The OSR-up site runs vtx_osr_up. Whether it succeeds (asm
-     *      jumps to JIT) or fails (gate refuses), osr_loop_header_pc
-     *      retains the value 6.
-     *
-     * Per the CRITICAL REPRODUCER CONSTRAINT note above: we don't
-     * depend on the OSR-up asm running successfully. The deterministic
-     * signal is osr_loop_header_pc == 6 after vtx_interp_run returns. */
+     *   5. vtx_interp_run's OSR-up path looks up cm in the registry
+     *      (which we left empty) → cm == NULL → fall through to
+     *      jit_reenter_pending. vtx_osr_up is NEVER called.
+     *   6. vtx_interp_run returns. osr_loop_header_pc is 6. */
     vtx_value_t result = vtx_interp_run(&interp, &method, NULL, 0);
     (void)result;
 
     /* Detach callback and clear globals. */
     vtx_set_runtime_callback(NULL, NULL);
     g_method = NULL;
-    g_arena = NULL;
-    g_cache = NULL;
-    g_registry = NULL;
 
     /* === OSR-17 assertions === */
 
@@ -333,25 +365,13 @@ VTX_TEST(osr17_if_true_backedge_sets_osr_loop_header_pc)
      *    short-circuit). */
     VTX_ASSERT_TRUE(g_callback_fired >= 1);
 
-    /* 2. The callback compiled the method (compiled_code is set). */
-    VTX_ASSERT_TRUE(g_compiled_in_callback == 1);
+    /* 2. The callback set the sentinel (compiled_code is non-NULL). */
     VTX_ASSERT_TRUE(__atomic_load_n(&method.compiled_code, __ATOMIC_ACQUIRE) != NULL);
 
     /* 3. The OSR-17 fix: the IF_TRUE backedge set osr_loop_header_pc
      *    to the loop header PC (6). Pre-fix, only GOTO backedges
      *    would set this — and there's no GOTO in this method, so
-     *    pre-fix osr_loop_header_pc would remain 0.
-     *
-     *    Note: osr_pending itself is cleared by the OSR-up site (which
-     *    runs after the dispatch loop exits). osr_loop_header_pc is
-     *    NOT cleared — it retains the value set at the IF_TRUE backedge.
-     *    This is the deterministic signal that OSR-17 fired.
-     *
-     *    If the OSR-up succeeded (asm jumped to JIT and JIT returned),
-     *    osr_loop_header_pc still holds 6. If the OSR-up failed (gate
-     *    refused), osr_loop_header_pc still holds 6. Either way, the
-     *    assertion verifies the IF_TRUE backedge triggered the OSR
-     *    path. */
+     *    pre-fix osr_loop_header_pc would remain 0. */
     VTX_ASSERT_EQUAL(interp.osr_loop_header_pc, (uint32_t)OSR17_LOOP_HEADER_PC);
 
     /* Cleanup. */

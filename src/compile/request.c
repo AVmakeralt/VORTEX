@@ -163,7 +163,11 @@ void vtx_clear_compilation_requested(vtx_compile_context_t *ctx,
 {
     if (ctx == NULL || ctx->compilation_requested == NULL) return;
     if (method_id >= ctx->compilation_requested_capacity) return;
-    __atomic_store_n(&ctx->compilation_requested[method_id], false, __ATOMIC_RELAXED);
+    /* OSR-18: RELEASE so the next ACQUIRE CAS by vtx_request_compilation
+     * observes a fully completed compilation (all writes to the code cache,
+     * method->compiled_code, and the profiler's compiled_tier field are
+     * visible to the next thread that claims the slot). */
+    __atomic_store_n(&ctx->compilation_requested[method_id], false, __ATOMIC_RELEASE);
 }
 
 /* ========================================================================== */
@@ -178,18 +182,34 @@ void vtx_request_compilation(vtx_compile_context_t *ctx,
 
     uint32_t method_id = method->vtable_index;
 
-    /* Check if already requested */
-    if (vtx_is_compilation_requested(ctx, method_id)) {
-        return;
-    }
-
-    /* Ensure flag array has space */
+    /* OSR-18 fix: the old code did a non-atomic check-then-set:
+     *   if (vtx_is_compilation_requested(...)) return;
+     *   ...
+     *   __atomic_store_n(&ctx->compilation_requested[method_id], true, RELAXED);
+     * Two interpreter threads on the same hot loop could both pass the
+     * check and both submit duplicate compile tasks, then both write
+     * true. The threadpool would compile the method twice and the
+     * deduplication invariant would be violated.
+     *
+     * Fix: use an atomic compare-exchange to claim the slot. Only one
+     * thread transitions the flag from false → true; the loser sees
+     * the CAS fail and returns immediately. ACQUIRE on success pairs
+     * with the RELEASE store done by vtx_clear_compilation_requested
+     * so the claiming thread also observes a fully initialized slot
+     * (in case a previous compilation just finished). */
     if (!ensure_compilation_flag_capacity(ctx, method_id)) {
         return; /* allocation failure — skip compilation */
     }
-
-    /* Mark as requested */
-    __atomic_store_n(&ctx->compilation_requested[method_id], true, __ATOMIC_RELAXED);
+    bool expected = false;
+    if (!__atomic_compare_exchange_n(&ctx->compilation_requested[method_id],
+                                       &expected, true,
+                                       false /* not weak */,
+                                       __ATOMIC_ACQUIRE,
+                                       __ATOMIC_RELAXED)) {
+        /* Already claimed by another thread (or by a still-pending
+         * compilation request). No-op. */
+        return;
+    }
 
     /* Submit to thread pool */
     if (ctx->threadpool != NULL) {
@@ -208,8 +228,11 @@ void vtx_request_compilation(vtx_compile_context_t *ctx,
         task.priority = VTX_COMPILE_PRIORITY_NORMAL;
 
         if (vtx_threadpool_submit_task(ctx->threadpool, &task) != 0) {
-            /* Submission failed — clear the flag so we can retry later */
-            __atomic_store_n(&ctx->compilation_requested[method_id], false, __ATOMIC_RELAXED);
+            /* Submission failed — clear the flag so we can retry later.
+             * Use RELAXED here because the failure path doesn't need
+             * to synchronize with the claiming CAS. */
+            __atomic_store_n(&ctx->compilation_requested[method_id],
+                              false, __ATOMIC_RELEASE);
         }
     }
 }

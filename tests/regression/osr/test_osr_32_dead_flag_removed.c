@@ -107,13 +107,15 @@ VTX_TEST(osr32_dead_field_removed_runtime_check)
     VTX_ASSERT_TRUE(frame.frame_kind == VTX_FRAME_INTERPRETED);
 
     /* vtx_osr_up with NULL interp returns at the null-check gate.
-     * It does NOT touch any osr_active field (which doesn't exist). */
-    vtx_gc_t gc;
-    vtx_gc_init(&gc, NULL, VTX_GC_GENERATIONAL);
+     * It does NOT touch any osr_active field (which doesn't exist).
+     * vtx_gc_init requires a non-NULL type_system (it asserts). */
+    vtx_type_system_t ts; vtx_type_system_init(&ts);
+    vtx_gc_t gc; vtx_gc_init(&gc, &ts, VTX_GC_GENERATIONAL);
     vtx_osr_up(NULL, 42, NULL, 100, NULL, &gc);
     VTX_ASSERT_TRUE(1);
 
     vtx_gc_destroy(&gc);
+    vtx_type_system_destroy(&ts);
 }
 
 int main(void)

@@ -4,6 +4,7 @@
 #include "vortex_config.h"
 #include <stdint.h>
 #include <stdbool.h>
+#include <pthread.h>
 #include "runtime/object.h"
 #include "runtime/bytecode.h"
 #include "runtime/type_system.h"
@@ -137,6 +138,20 @@ typedef struct {
         const vtx_method_desc_t *method;
         vtx_profile_data_t      *pd;
     } lru[VTX_PROFILER_LRU_SIZE];
+
+    /* OSR-18 fix: the LRU cache and the data[] array are accessed from
+     * both the interpreter thread (which mutates them via record_* /
+     * get_method_data) and the threadpool worker (which reads
+     * pd->compiled_tier via get_method_data). Without synchronization,
+     * the worker can be in the middle of an LRU walk when the interp
+     * reallocs the data[] array (in profiler_ensure_capacity),
+     * dereferencing a freed pointer.
+     *
+     * The mutex is held only around vtx_profiler_get_method_data — the
+     * hot-path counter increments use atomics, not the mutex, so the
+     * dispatch loop pays no lock cost per bytecode op. */
+    pthread_mutex_t     mutex;
+    bool                 mutex_initialized;
 } vtx_profiler_t;
 
 /**

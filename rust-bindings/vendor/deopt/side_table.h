@@ -62,6 +62,14 @@ typedef struct {
 /**
  * A single entry in the side table: maps a native PC offset to a FrameState
  * and provides the register map for reconstructing values.
+ *
+ * OSR-5 fix: added `bytecode_pc` field so OSR entry lookup can match
+ * against the requested loop_header_pc (previously the lookup picked
+ * the first OSR-flagged entry regardless of which loop header it
+ * belonged to).
+ *
+ * For non-OSR entries (guards, safepoints, call sites), bytecode_pc
+ * is set to UINT32_MAX as a sentinel meaning "not applicable".
  */
 typedef struct {
     uint32_t              native_pc_offset;   /* offset from code start */
@@ -69,6 +77,7 @@ typedef struct {
     vtx_reg_map_entry_t  *register_map;       /* register map entries (arena-allocated) */
     uint32_t              register_map_count;  /* number of entries in register map */
     uint32_t              flags;              /* bit flags for this entry */
+    uint32_t              bytecode_pc;         /* OSR-5: bytecode PC for OSR entries (UINT32_MAX if N/A) */
 } vtx_side_table_entry_t;
 
 /* Entry flags */
@@ -127,16 +136,22 @@ void vtx_side_table_destroy(vtx_side_table_t *table);
  * native_pc_offset order (this is natural since code is emitted sequentially).
  * Returns the index of the new entry, or UINT32_MAX on failure.
  *
+ * OSR-5 fix: added `bytecode_pc` parameter so OSR entry lookups can match
+ * against the requested loop_header_pc. Non-OSR entries should pass
+ * UINT32_MAX (sentinel for "not applicable").
+ *
  * @param table             The side table
  * @param native_pc_offset  Native PC offset of the deopt point
  * @param frame_state_index Index into the FrameState array
  * @param flags             Bit flags for this entry
+ * @param bytecode_pc       Bytecode PC for OSR entries (UINT32_MAX if N/A)
  * @return Entry index, or UINT32_MAX on failure
  */
 uint32_t vtx_side_table_add_entry(vtx_side_table_t *table,
                                    uint32_t native_pc_offset,
                                    uint32_t frame_state_index,
-                                   uint32_t flags);
+                                   uint32_t flags,
+                                   uint32_t bytecode_pc);
 
 /**
  * Add a register map entry to the most recently added side table entry.
@@ -190,6 +205,26 @@ uint32_t vtx_side_table_lookup(const vtx_side_table_t *table,
 const vtx_side_table_entry_t *vtx_side_table_lookup_entry(
     const vtx_side_table_t *table,
     uint32_t native_pc_offset);
+
+/**
+ * OSR-23 fix: dedicated lookup for OSR entry points.
+ *
+ * The generic vtx_side_table_lookup uses "largest native_pc_offset <= target"
+ * semantics, which is correct for deopt (state at or before the PC) but
+ * WRONG for OSR entry lookup — it could return a non-OSR entry (e.g., a
+ * safepoint) near the requested PC.
+ *
+ * This function only returns entries flagged with VTX_STF_OSR_ENTRY, and
+ * additionally filters by `bytecode_pc` to match the requested loop header
+ * (OSR-5 fix). Returns NULL if no matching OSR entry exists.
+ *
+ * @param table          The side table
+ * @param bytecode_pc    The loop-header bytecode PC to match (the OSR-5 fix)
+ * @return Pointer to the matching OSR entry, or NULL if none found
+ */
+const vtx_side_table_entry_t *vtx_side_table_lookup_osr_entry(
+    const vtx_side_table_t *table,
+    uint32_t bytecode_pc);
 
 /**
  * Get a side table entry by its index.

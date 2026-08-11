@@ -309,6 +309,20 @@ void vtx_gc_collect_old(vtx_gc_t *gc);
 void vtx_gc_pin(vtx_gc_t *gc, vtx_heap_object_t *obj);
 
 /**
+ * OSR-26 fix: trace a single GC root value, forwarding the underlying
+ * young-gen object if needed. Returns the new value (which the caller
+ * MUST write back to the original slot — otherwise the slot keeps
+ * pointing at the now-forwarded old location, causing a UAF when
+ * from-space is reclaimed).
+ *
+ * Exposed so the JIT root scanner (jit_root_scan_conservative in
+ * main_new.c) can trace potential roots in place rather than just
+ * pushing them onto the root stack (the old behavior, which never
+ * wrote back, leaving stale pointers in JIT frame slots).
+ */
+vtx_value_t vtx_gc_trace_value(vtx_gc_t *gc, vtx_value_t value);
+
+/**
  * Unpin an object.
  */
 void vtx_gc_unpin(vtx_gc_t *gc, vtx_heap_object_t *obj);
@@ -363,6 +377,25 @@ vtx_gc_t *vtx_get_current_gc(void);
  * Set the current GC instance. Called during VM initialization.
  */
 void vtx_set_current_gc(vtx_gc_t *gc);
+
+/**
+ * OSR-20/21: Register a callback invoked from vtx_gc_safepoint to
+ * drain the code-cache quarantine. The callback (typically
+ * `vtx_codecache_quarantine_drain` bound to the global quarantine)
+ * frees retired compiled-method metadata after all mutator threads
+ * have reached a safepoint — guaranteeing no thread is in JIT code
+ * and therefore no thread holds a cached pointer to the freed
+ * side_table / deopt_info / bc_pc_map / poly_ics objects.
+ *
+ * Indirection via a callback (rather than a direct call from gc.c
+ * into the code cache) avoids a hard library dependency from
+ * vortex_runtime → vortex_codecache (which would break linking
+ * for tests that link only vortex_runtime).
+ *
+ * Pass NULL to disable the drain (e.g., in a minimal test that
+ * doesn't wire the code cache).
+ */
+void vtx_gc_set_quarantine_drain_callback(void (*fn)(void));
 
 /**
  * Check if a mode requires write barriers.

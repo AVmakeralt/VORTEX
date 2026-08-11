@@ -2682,7 +2682,7 @@ VTX_TEST(test_deopt_st_02)
 {
     vtx_side_table_t *table = vtx_side_table_build(NULL);
     VTX_ASSERT_NOT_NULL(table);
-    uint32_t idx = vtx_side_table_add_entry(table, 100, 0, VTX_STF_GUARD);
+    uint32_t idx = vtx_side_table_add_entry(table, 100, 0, VTX_STF_GUARD, UINT32_MAX);
     VTX_ASSERT_NOT_EQUAL(idx, UINT32_MAX);
     VTX_ASSERT_EQUAL(vtx_side_table_entry_count(table), 1u);
     vtx_side_table_destroy(table);
@@ -2692,8 +2692,8 @@ VTX_TEST(test_deopt_st_03)
 {
     vtx_side_table_t *table = vtx_side_table_build(NULL);
     VTX_ASSERT_NOT_NULL(table);
-    vtx_side_table_add_entry(table, 100, 0, VTX_STF_GUARD);
-    vtx_side_table_add_entry(table, 200, 1, VTX_STF_CALL_SITE);
+    vtx_side_table_add_entry(table, 100, 0, VTX_STF_GUARD, UINT32_MAX);
+    vtx_side_table_add_entry(table, 200, 1, VTX_STF_CALL_SITE, UINT32_MAX);
     uint32_t fs_idx = vtx_side_table_lookup(table, 150);
     /* Should find the entry at 100 (largest <= 150) */
     VTX_ASSERT_EQUAL(fs_idx, 0u);
@@ -2704,9 +2704,9 @@ VTX_TEST(test_deopt_st_04)
 {
     vtx_side_table_t *table = vtx_side_table_build(NULL);
     VTX_ASSERT_NOT_NULL(table);
-    vtx_side_table_add_entry(table, 100, 0, VTX_STF_GUARD);
-    vtx_side_table_add_entry(table, 200, 1, VTX_STF_CALL_SITE);
-    vtx_side_table_add_entry(table, 300, 2, VTX_STF_SAFEPPOINT);
+    vtx_side_table_add_entry(table, 100, 0, VTX_STF_GUARD, UINT32_MAX);
+    vtx_side_table_add_entry(table, 200, 1, VTX_STF_CALL_SITE, UINT32_MAX);
+    vtx_side_table_add_entry(table, 300, 2, VTX_STF_SAFEPPOINT, UINT32_MAX);
     /* Exact match */
     VTX_ASSERT_EQUAL(vtx_side_table_lookup(table, 200), 1u);
     vtx_side_table_destroy(table);
@@ -2717,7 +2717,7 @@ VTX_TEST(test_deopt_st_05)
     vtx_side_table_t *table = vtx_side_table_build(NULL);
     VTX_ASSERT_NOT_NULL(table);
     for (uint32_t i = 0; i < 5; i++) {
-        vtx_side_table_add_entry(table, (i + 1) * 100, i, VTX_STF_GUARD);
+        vtx_side_table_add_entry(table, (i + 1) * 100, i, VTX_STF_GUARD, UINT32_MAX);
     }
     VTX_ASSERT_EQUAL(vtx_side_table_entry_count(table), 5u);
     vtx_side_table_destroy(table);
@@ -2727,7 +2727,7 @@ VTX_TEST(test_deopt_st_06)
 {
     vtx_side_table_t *table = vtx_side_table_build(NULL);
     VTX_ASSERT_NOT_NULL(table);
-    uint32_t idx = vtx_side_table_add_entry(table, 100, 0, VTX_STF_GUARD);
+    uint32_t idx = vtx_side_table_add_entry(table, 100, 0, VTX_STF_GUARD, UINT32_MAX);
     int rc = vtx_side_table_add_register(table, 0, 42);
     VTX_ASSERT_EQUAL(rc, 0);
     vtx_nodeid_t nid = vtx_side_table_find_register(table, 100, 0);
@@ -2739,9 +2739,9 @@ VTX_TEST(test_deopt_st_07)
 {
     vtx_side_table_t *table = vtx_side_table_build(NULL);
     VTX_ASSERT_NOT_NULL(table);
-    vtx_side_table_add_entry(table, 100, 0, VTX_STF_GUARD);
-    vtx_side_table_add_entry(table, 200, 1, VTX_STF_GUARD);
-    vtx_side_table_add_entry(table, 300, 2, VTX_STF_GUARD);
+    vtx_side_table_add_entry(table, 100, 0, VTX_STF_GUARD, UINT32_MAX);
+    vtx_side_table_add_entry(table, 200, 1, VTX_STF_GUARD, UINT32_MAX);
+    vtx_side_table_add_entry(table, 300, 2, VTX_STF_GUARD, UINT32_MAX);
     /* Entries should be in sorted order */
     const vtx_side_table_entry_t *e0 = vtx_side_table_get_entry(table, 0);
     const vtx_side_table_entry_t *e1 = vtx_side_table_get_entry(table, 1);
@@ -2768,8 +2768,8 @@ VTX_TEST(test_deopt_st_09)
 {
     vtx_side_table_t *table = vtx_side_table_build(NULL);
     VTX_ASSERT_NOT_NULL(table);
-    vtx_side_table_add_entry(table, 100, 0, VTX_STF_GUARD);
-    vtx_side_table_add_entry(table, 200, 1, VTX_STF_GUARD);
+    vtx_side_table_add_entry(table, 100, 0, VTX_STF_GUARD, UINT32_MAX);
+    vtx_side_table_add_entry(table, 200, 1, VTX_STF_GUARD, UINT32_MAX);
     /* Before first entry */
     uint32_t idx = vtx_side_table_lookup(table, 50);
     VTX_ASSERT_EQUAL(idx, UINT32_MAX);
@@ -2786,7 +2786,7 @@ VTX_TEST(test_deopt_st_10)
     vtx_side_table_t *table = vtx_side_table_build(NULL);
     VTX_ASSERT_NOT_NULL(table);
     for (uint32_t i = 0; i < 100; i++) {
-        vtx_side_table_add_entry(table, i * 10, i, VTX_STF_GUARD);
+        vtx_side_table_add_entry(table, i * 10, i, VTX_STF_GUARD, UINT32_MAX);
     }
     VTX_ASSERT_EQUAL(vtx_side_table_entry_count(table), 100u);
     /* Lookup should find correct entry via binary search */
@@ -2834,7 +2834,7 @@ VTX_TEST(test_deopt_osr_03)
     frame.local_count = 4;
     frame.stack_top = 0;
     frame.stack_capacity = 8;
-    frame.osr_active = false;
+    /* OSR-32 fix: removed osr_active field — was never read. */
     frame.frame_kind = VTX_FRAME_INTERPRETED;
     VTX_ASSERT_EQUAL(frame.method_id, 1u);
     VTX_ASSERT_EQUAL(frame.frame_kind, VTX_FRAME_INTERPRETED);
@@ -2994,8 +2994,9 @@ VTX_TEST(test_deopt_osr_14)
     interp.local_count = 4;
     interp.stack_capacity = 8;
     interp.frame_kind = VTX_FRAME_INTERPRETED;
-    /* Can't call vtx_osr_up without real compiled code, but test context */
-    VTX_ASSERT_FALSE(interp.osr_active);
+    /* Can't call vtx_osr_up without real compiled code, but test context.
+     * OSR-32 fix: removed osr_active field — was never read. */
+    VTX_ASSERT_EQUAL(interp.method_id, 1u);
 }
 
 VTX_TEST(test_deopt_osr_15)

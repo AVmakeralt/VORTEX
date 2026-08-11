@@ -562,6 +562,20 @@ typedef struct {
     vtx_poly_ic_t **poly_ics;
     uint32_t        poly_ic_count;
     uint32_t        poly_ic_capacity;
+
+    /* OSR-2 fix: set of bytecode PCs that are loop headers (targets of
+     * backward branches). Populated by a pre-scan in vtx_baseline_compile.
+     * During the main compilation loop, when we record_bc_pc_map for a
+     * PC that is in this set, we ALSO emit a side-table entry flagged
+     * with VTX_STF_OSR_ENTRY — so vtx_osr_up can find the OSR entry
+     * point in the side table without relying solely on bc_pc_map
+     * (which T2/T3 codegens don't populate).
+     *
+     * We use a simple uint16_t array because bytecode PCs in VORTEX
+     * are 16-bit (uint16_t operands in branch instructions). */
+    uint16_t *loop_header_pcs;
+    uint32_t  loop_header_count;
+    uint32_t  loop_header_capacity;
 } vtx_compile_ctx_t;
 
 /* ========================================================================== */
@@ -583,6 +597,89 @@ static void record_bc_pc_map(vtx_compile_ctx_t *ctx, uint32_t bc_pc, uint32_t na
     ctx->pc_map[ctx->pc_map_count].native_offset = native_offset;
     ctx->pc_map[ctx->pc_map_count].stack_depth = ctx->stack_depth;
     ctx->pc_map_count++;
+
+    /* OSR-2 fix: if this PC is a known loop header (target of a backward
+     * branch, pre-scanned by scan_loop_headers), record a side-table
+     * entry with VTX_STF_OSR_ENTRY flag so vtx_osr_up can find it via
+     * vtx_side_table_lookup_osr_entry.
+     *
+     * Native offsets grow monotonically as we emit bytecodes in PC
+     * order, so the side-table entries are added in increasing
+     * native_pc_offset order — satisfying vtx_side_table_add_entry's
+     * ordering invariant.
+     *
+     * We use frame_state_index=UINT32_MAX (sentinel: no FrameState
+     * for OSR entries — the side table lookup uses the bytecode_pc
+     * field, not the FrameState). */
+    if (ctx->side_table && ctx->loop_header_pcs != NULL) {
+        for (uint32_t i = 0; i < ctx->loop_header_count; i++) {
+            if (ctx->loop_header_pcs[i] == (uint16_t)bc_pc) {
+                vtx_side_table_add_entry(ctx->side_table,
+                    native_offset, UINT32_MAX,
+                    VTX_STF_OSR_ENTRY, bc_pc);
+                break;
+            }
+        }
+    }
+}
+
+/* OSR-2 fix: pre-scan the bytecode to identify loop headers (targets of
+ * backward branches). The result populates ctx->loop_header_pcs so the
+ * main compilation loop can emit VTX_STF_OSR_ENTRY side-table entries
+ * at each loop header's native offset.
+ *
+ * This handles VT_OP_GOTO, VT_OP_IF_TRUE, and VT_OP_IF_FALSE — all the
+ * opcodes that can be backward branches. (See OSR-17 for the dispatch-
+ * side fix that triggers OSR at all backward branch types, not just GOTO.) */
+static void scan_loop_headers(vtx_compile_ctx_t *ctx)
+{
+    const vtx_bytecode_t *bc = ctx->bc;
+    if (!bc || !bc->code || bc->length == 0) return;
+
+    ctx->loop_header_capacity = 16;
+    ctx->loop_header_pcs = (uint16_t *)calloc(
+        ctx->loop_header_capacity, sizeof(uint16_t));
+    if (!ctx->loop_header_pcs) {
+        ctx->loop_header_capacity = 0;
+        return;
+    }
+    ctx->loop_header_count = 0;
+
+    uint32_t pc = 0;
+    while (pc < bc->length) {
+        vtx_opcode_t op = vtx_bytecode_opcode_at(bc, pc);
+        const vtx_opcode_info_t *info = &vtx_opcode_table[op];
+        if (info->has_operand) {
+            uint16_t target = vtx_bytecode_read_operand(bc, pc);
+            if (op == VT_OP_GOTO ||
+                op == VT_OP_IF_TRUE ||
+                op == VT_OP_IF_FALSE) {
+                /* Backward branch? target <= pc means we're jumping back. */
+                if (target <= (uint16_t)pc) {
+                    /* Dedup: only add if not already in the list. */
+                    bool found = false;
+                    for (uint32_t i = 0; i < ctx->loop_header_count; i++) {
+                        if (ctx->loop_header_pcs[i] == target) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        if (ctx->loop_header_count >= ctx->loop_header_capacity) {
+                            uint32_t new_cap = ctx->loop_header_capacity * 2;
+                            uint16_t *new_arr = (uint16_t *)realloc(
+                                ctx->loop_header_pcs, new_cap * sizeof(uint16_t));
+                            if (!new_arr) break;
+                            ctx->loop_header_pcs = new_arr;
+                            ctx->loop_header_capacity = new_cap;
+                        }
+                        ctx->loop_header_pcs[ctx->loop_header_count++] = target;
+                    }
+                }
+            }
+        }
+        pc += vtx_bytecode_insn_length(bc, pc);
+    }
 }
 
 static void record_native_to_bc(vtx_compile_ctx_t *ctx, uint32_t native_offset, uint32_t bc_pc)
@@ -3185,10 +3282,11 @@ static void compile_catch(vtx_compile_ctx_t *ctx, uint16_t handler_pc)
 
     vtx_code_buffer_t *buf = &ctx->buf;
 
-    /* Record the handler in the side table */
+    /* Record the handler in the side table.
+     * OSR-5: bytecode_pc = UINT32_MAX since this is not an OSR entry. */
     if (ctx->side_table) {
         vtx_side_table_add_entry(ctx->side_table,
-            vtx_code_buffer_position(buf), 0, 0);
+            vtx_code_buffer_position(buf), 0, 0, UINT32_MAX);
     }
     (void)handler_pc;
 }
@@ -3438,6 +3536,13 @@ vtx_compiled_code_t *vtx_baseline_compile(const vtx_method_desc_t *method,
         vtx_code_buffer_destroy(&ctx.buf);
         return NULL;
     }
+
+    /* OSR-2 fix: pre-scan the bytecode for backward-branch targets
+     * (loop headers) so record_bc_pc_map can emit VTX_STF_OSR_ENTRY
+     * side-table entries at each loop header's native offset. Without
+     * this, vtx_osr_up's side-table lookup never finds an OSR entry
+     * (the flag was never written by any codegen). */
+    scan_loop_headers(&ctx);
 
     /* Emit prologue */
     emit_prologue(&ctx);
@@ -3754,6 +3859,11 @@ vtx_compiled_code_t *vtx_baseline_compile(const vtx_method_desc_t *method,
     /* Clean up */
     vtx_code_buffer_destroy(&ctx.buf);
     free(ctx.fixups);
+    /* OSR-2 fix: free the loop-header pre-scan buffer. */
+    free(ctx.loop_header_pcs);
+    ctx.loop_header_pcs = NULL;
+    ctx.loop_header_count = 0;
+    ctx.loop_header_capacity = 0;
 
     /* Transfer poly IC ownership to the result so they can be freed
      * when the compiled method is evicted or the code is destroyed.

@@ -105,6 +105,25 @@ struct vtx_compiled_method {
     vtx_bc_pc_map_entry_t   *bc_pc_map;
     uint32_t                 bc_pc_map_count;
 
+    /* OSR-29 fix: per-method OSR re-attempt rate limiting.
+     *
+     * If vtx_osr_up fails repeatedly (e.g., due to a transient
+     * condition or a bug like OSR-3's return-value bug), the
+     * dispatch loop would otherwise set jit_reenter_pending=true
+     * on every failure, re-enter the JIT from method entry, deopt,
+     * and try OSR again — an infinite loop.
+     *
+     * After VTX_OSR_MAX_FAILURES failed attempts, we disable OSR
+     * for this method for a cooldown of VTX_OSR_COOLDOWN_INVOCATIONS
+     * method invocations (counted via call_count). During cooldown,
+     * osr_pending is cleared without calling vtx_osr_up.
+     *
+     * The counter is reset on successful OSR up (from inside the
+     * JIT trampoline — not yet implemented) or when the cooldown
+     * expires. */
+    uint32_t                 osr_failure_count;
+    uint64_t                 osr_cooldown_until_call; /* call_count threshold */
+
     /* Linked list for method registry */
     vtx_compiled_method_t   *next;
 };

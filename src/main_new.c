@@ -51,6 +51,7 @@
 #include "deopt/stack_walk.h"
 #include "deopt/coordinator.h"
 #include "codecache/versioned.h"
+#include "codecache/quarantine.h"
 #include "runtime/safepoint_manager.h"
 #include "runtime/gc.h"
 #include "baseline/codegen.h"
@@ -2868,9 +2869,46 @@ static void mkdir_recursive(const char *path) {
  * push non-roots (keeping some dead objects alive), but it's safe (never
  * frees a live object).
  *
- * This is the integration point for the stack walker. A precise scanner
- * using vtx_stack_walk + side tables would be more efficient but requires
- * the full stack walk config (side table registry, node table, etc). */
+ * OSR-26 fix: the old scanner scanned only 11 slots per frame
+ * (indices [-8, +2] around RBP = [fp-64, fp+16]). This misses:
+ *   - Deep locals (local[2], local[3], ...) which live at RBP-24 and
+ *     below for typical JIT frames.
+ *   - Spill slots (spill[0], spill[1], ...) which live below locals.
+ *   - The saved-RBX / saved-R12 slots at [RBP-8] / [RBP-16].
+ *
+ * The fix widens the scan window to cover a typical JIT frame (which
+ * can have hundreds of bytes of locals + spills). The new window scans
+ * VTX_GC_JIT_SCAN_SLOTS slots below RBP (covering locals + spills +
+ * saved regs) plus 5 slots above RBP (covering the JIT frame header:
+ * caller RBP, profile_data, deopt_info, method_ptr, return address).
+ *
+ * The fix also writes back forwarded pointers IN PLACE via
+ * vtx_gc_trace_value. The old scanner only pushed roots onto the GC
+ * root stack — which kept the live objects alive but left the original
+ * stack slots pointing at the now-forwarded old location. On the next
+ * access from JIT code, those slots would dereference stale pointers
+ * → use-after-free once from-space is reclaimed.
+ *
+ * A precise scanner using vtx_stack_walk + side tables would be more
+ * efficient but requires the full stack walk config (side table
+ * registry, node table, etc). The conservative+writeback approach is
+ * a strict improvement over the old behavior.
+ */
+
+/* Number of 8-byte slots below RBP to scan for heap pointers.
+ * Covers locals + spills + saved callee-saved registers.
+ * 64 slots = 512 bytes, enough for methods with up to ~60 locals/spills.
+ * Going larger has diminishing returns and risks scanning unrelated
+ * stack data (safe but keeps more dead objects alive). */
+#define VTX_GC_JIT_SCAN_SLOTS_BELOW 64
+
+/* Number of 8-byte slots above RBP to scan. The JIT frame header
+ * pushes 5 words above RBP (caller RBP, profile_data, deopt_info,
+ * method_ptr, return address). None of these hold user heap pointers
+ * (they're runtime metadata), but we scan them anyway to catch any
+ * spurious heap pointers that might end up there (conservative). */
+#define VTX_GC_JIT_SCAN_SLOTS_ABOVE 5
+
 static void jit_root_scan_conservative(vtx_gc_t *gc)
 {
     if (gc == NULL) return;
@@ -2887,11 +2925,14 @@ static void jit_root_scan_conservative(vtx_gc_t *gc)
     /* Walk up the frame chain (max 64 frames to prevent infinite loops) */
     for (int depth = 0; depth < 64 && fp != NULL; depth++) {
         void **frame = (void **)fp;
-        /* The saved RBP is at [frame], the return address is at [frame+1].
-         * Local variables are at negative offsets from RBP.
-         * Scan the local area (8 slots below RBP) for heap pointers. */
-        for (int i = -8; i <= 2; i++) {
-            uint64_t val = (uint64_t)frame[i];
+
+        /* OSR-26 fix: scan a wider window — VTX_GC_JIT_SCAN_SLOTS_BELOW
+         * slots below RBP and VTX_GC_JIT_SCAN_SLOTS_ABOVE slots above.
+         * The old code scanned only [-8, +2] = 11 slots. */
+        for (int i = -VTX_GC_JIT_SCAN_SLOTS_BELOW;
+             i <= VTX_GC_JIT_SCAN_SLOTS_ABOVE; i++) {
+            uint64_t *slot = (uint64_t *)&frame[i];
+            uint64_t val = *slot;
             /* Check if this looks like a NaN-boxed heap pointer:
              * VTX_NAN_BOX_HEADER = 0x7FF8000000000000
              * VTX_TAG_HEAP_PTR = 1 (low 3 bits)
@@ -2899,8 +2940,20 @@ static void jit_root_scan_conservative(vtx_gc_t *gc)
              * We check: top 16 bits == 0x7FF8, low 3 bits == 1 */
             if ((val & 0xFFFF000000000000ULL) == 0x7FF8000000000000ULL &&
                 (val & 0x7ULL) == VTX_TAG_HEAP_PTR) {
-                /* This looks like a heap pointer — push it as a root */
-                vtx_gc_root_push(gc, (vtx_value_t)val);
+                /* OSR-26 fix: trace the value IN PLACE so that
+                 * forwarded pointers are visible to the mutator
+                 * after GC. The old code only pushed onto the root
+                 * stack, leaving the original slot stale. */
+                vtx_value_t new_val = vtx_gc_trace_value(gc,
+                                                          (vtx_value_t)val);
+                if (new_val != (vtx_value_t)val) {
+                    /* Object was forwarded — write back the new
+                     * pointer to the original stack slot. */
+                    *slot = (uint64_t)new_val;
+                }
+                /* The value has now been traced (object copied to
+                 * to-space if needed). No need to also push it onto
+                 * the root stack — tracing already handled it. */
             }
         }
         /* Move to caller frame */
@@ -3040,6 +3093,26 @@ int main(int argc, char *argv[])
             compile_ctx.safepoint_mgr = NULL;
             gc.safepoint_mgr = NULL;
         }
+
+        /* OSR-20/21 fix: instantiate the code-cache quarantine. Retired
+         * compiled-method metadata (from vtx_install_method tier
+         * promotions and vtx_invalidate_dependencies) is held here
+         * until the next GC safepoint confirms no thread is in JIT
+         * code. vtx_gc_safepoint drains the quarantine after
+         * vtx_safepoint_request_all. */
+        vtx_codecache_quarantine_t codecache_quarantine;
+        if (vtx_codecache_quarantine_init(&codecache_quarantine) == 0) {
+            vtx_codecache_set_quarantine(&codecache_quarantine);
+        }
+
+        /* OSR-20/21: register the quarantine-drain adapter with the GC.
+         * vtx_gc_safepoint invokes this adapter after safepointing all
+         * mutator threads (so no thread is in JIT code). The adapter
+         * calls vtx_codecache_quarantine_drain on the global quarantine.
+         * Using a registered callback avoids a hard library dependency
+         * from vortex_runtime → vortex_codecache. */
+        vtx_gc_set_quarantine_drain_callback(
+            vtx_codecache_quarantine_drain_global);
 
         /* Wire JIT root scanning into the GC.
          *
@@ -3524,6 +3597,10 @@ int main(int argc, char *argv[])
         vtx_set_current_gc(NULL);
         vtx_set_current_interp(NULL);
         vtx_set_current_side_table(NULL);
+        /* OSR-20/21: drain + destroy the code-cache quarantine. After
+         * this, no retired cm metadata remains. */
+        vtx_codecache_set_quarantine(NULL);
+        vtx_codecache_quarantine_destroy(&codecache_quarantine);
 
         vtx_gc_destroy(&gc);
         vtx_type_system_destroy(&ts);

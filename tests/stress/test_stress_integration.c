@@ -3425,7 +3425,7 @@ VTX_TEST(test_deoptgraph_02)
     /* Side table with single entry */
     vtx_side_table_t *table = vtx_side_table_build(NULL);
     VTX_ASSERT_NOT_NULL(table);
-    uint32_t idx = vtx_side_table_add_entry(table, 100, 0, VTX_STF_GUARD);
+    uint32_t idx = vtx_side_table_add_entry(table, 100, 0, VTX_STF_GUARD, UINT32_MAX);
     VTX_ASSERT_NOT_EQUAL(idx, UINT32_MAX);
     VTX_ASSERT_EQUAL(vtx_side_table_entry_count(table), 1u);
     const vtx_side_table_entry_t *e = vtx_side_table_get_entry(table, 0);
@@ -3439,9 +3439,9 @@ VTX_TEST(test_deoptgraph_03)
     /* Side table with multiple entries */
     vtx_side_table_t *table = vtx_side_table_build(NULL);
     VTX_ASSERT_NOT_NULL(table);
-    vtx_side_table_add_entry(table, 50, 0, VTX_STF_GUARD);
-    vtx_side_table_add_entry(table, 100, 1, VTX_STF_CALL_SITE);
-    vtx_side_table_add_entry(table, 200, 2, VTX_STF_SAFEPPOINT);
+    vtx_side_table_add_entry(table, 50, 0, VTX_STF_GUARD, UINT32_MAX);
+    vtx_side_table_add_entry(table, 100, 1, VTX_STF_CALL_SITE, UINT32_MAX);
+    vtx_side_table_add_entry(table, 200, 2, VTX_STF_SAFEPPOINT, UINT32_MAX);
     VTX_ASSERT_EQUAL(vtx_side_table_entry_count(table), 3u);
     vtx_side_table_destroy(table);
 }
@@ -3452,7 +3452,7 @@ VTX_TEST(test_deoptgraph_04)
     vtx_side_table_t *table = vtx_side_table_build(NULL);
     VTX_ASSERT_NOT_NULL(table);
     for (uint32_t i = 0; i < 10; i++) {
-        vtx_side_table_add_entry(table, (i + 1) * 100, i, VTX_STF_GUARD);
+        vtx_side_table_add_entry(table, (i + 1) * 100, i, VTX_STF_GUARD, UINT32_MAX);
     }
     /* Exact match: offset 500 → index 4 */
     VTX_ASSERT_EQUAL(vtx_side_table_lookup(table, 500), 4u);
@@ -3525,9 +3525,9 @@ VTX_TEST(test_deoptgraph_09)
     /* Side table: lookup by offset */
     vtx_side_table_t *table = vtx_side_table_build(NULL);
     VTX_ASSERT_NOT_NULL(table);
-    vtx_side_table_add_entry(table, 10, 0, VTX_STF_GUARD);
-    vtx_side_table_add_entry(table, 50, 1, VTX_STF_CALL_SITE);
-    vtx_side_table_add_entry(table, 100, 2, VTX_STF_SAFEPPOINT);
+    vtx_side_table_add_entry(table, 10, 0, VTX_STF_GUARD, UINT32_MAX);
+    vtx_side_table_add_entry(table, 50, 1, VTX_STF_CALL_SITE, UINT32_MAX);
+    vtx_side_table_add_entry(table, 100, 2, VTX_STF_SAFEPPOINT, UINT32_MAX);
     /* Exact match at 50 */
     uint32_t idx = vtx_side_table_lookup(table, 50);
     VTX_ASSERT_EQUAL(idx, 1u);
@@ -3780,8 +3780,8 @@ VTX_TEST(test_deoptgraph_28)
     vtx_node_create(&graph.node_table, VTX_OP_Parameter);
     vtx_side_table_t *table = vtx_side_table_build(NULL);
     VTX_ASSERT_NOT_NULL(table);
-    vtx_side_table_add_entry(table, 10, 0, VTX_STF_GUARD);
-    vtx_side_table_add_entry(table, 50, 1, VTX_STF_SAFEPPOINT);
+    vtx_side_table_add_entry(table, 10, 0, VTX_STF_GUARD, UINT32_MAX);
+    vtx_side_table_add_entry(table, 50, 1, VTX_STF_SAFEPPOINT, UINT32_MAX);
     VTX_ASSERT_EQUAL(vtx_side_table_entry_count(table), 2u);
     vtx_side_table_destroy(table);
     vtx_graph_destroy(&graph);

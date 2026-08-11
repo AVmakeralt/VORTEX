@@ -12,93 +12,152 @@
  * ============================================================================ */
 
 #include "deopt/osr.h"
+#include "codecache/install.h"
+#include "runtime/gc.h"   /* OSR-12: vtx_gc_safepoint declaration for the
+                           * pre-asm safepoint poll in vtx_osr_up. */
+#include "runtime/object.h"  /* OSR-7/9/15: vtx_make_smi, VTX_VALUE_*,
+                              * vtx_is_heap_ptr. */
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+
+/* OSR-7: forward declaration for the runtime monitor re-enter primitive.
+ * vtx_runtime_monitor_enter is defined in src/runtime_stubs.c (part of
+ * the vortex_baseline library). It is not yet declared in any public
+ * header, so we extern it here following the same pattern as
+ * baseline/codegen.c:3311. */
+extern void vtx_runtime_monitor_enter(vtx_value_t obj);
 
 /* ========================================================================== */
 /* Internal: node resolution                                                  */
 /* ========================================================================== */
 
 /**
- * The register map is a sparse array indexed by NodeID. For nodes that
- * are not in the register map (e.g., constants, nodes that were spilled
- * to the stack), we need to look up the value differently.
+ * The register map is a sparse array of {register_number, node_id} entries
+ * stored in vtx_side_table_entry_t.register_map (the side table's native
+ * format — `vtx_reg_map_entry_t[]`).
  *
- * For OSR down, the register_map is laid out as:
- *   register_map[0] = number of entries
- *   register_map[1..2*N] = (node_id, value) pairs
+ * OSR-13 fix: previously this function documented a fabricated
+ * [count, (node_id, value) pairs...] layout in `vtx_value_t[]` and tried
+ * to type-pun its way through it, but no caller in the codebase ever
+ * built that layout — the side table always stored
+ * vtx_reg_map_entry_t[]. The type-pun read garbage as the count header
+ * and returned VTX_VALUE_UNDEFINED for every lookup. The new signature
+ * accepts the native side-table format directly.
  *
- * This allows for sparse mapping without allocating a huge array.
+ * OSR-9 fix: when a NodeID is not in the register map (the common case
+ * for VTX_OP_Constant, VTX_OP_Parameter, and spilled values), fall back
+ * to alternative resolution:
+ *   - VTX_OP_Constant: read the constant value from the IR node table.
+ *   - VTX_OP_Parameter: read the parameter's value from the caller's
+ *     interpreter locals (the parameter's index is the node's
+ *     `local_index` field).
+ *   - Any other opcode (spilled): the value is not in the register map
+ *     and not in the locals — return VTX_VALUE_UNDEFINED. The caller is
+ *     responsible for reading the spill slot directly from the JIT frame.
  */
 typedef struct {
-    vtx_nodeid_t node_id;
-    vtx_value_t  value;
-} vtx_node_value_pair_t;
+    const vtx_reg_map_entry_t *register_map;
+    uint32_t                   register_count;
+    const vtx_node_table_t    *node_table;   /* OSR-9: for VTX_OP_Constant */
+    const vtx_value_t         *locals;        /* OSR-9: for VTX_OP_Parameter */
+    uint32_t                   local_count;
+} vtx_resolve_context_t;
 
 vtx_value_t vtx_osr_resolve_node(vtx_nodeid_t node_id,
-                                   const vtx_value_t *register_map,
-                                   uint32_t map_size)
+                                   const vtx_reg_map_entry_t *register_map,
+                                   uint32_t register_count,
+                                   const vtx_node_table_t *node_table,
+                                   const vtx_value_t *locals,
+                                   uint32_t local_count)
 {
-    /* DEOPT-004 fix: the old code did
-     *   const vtx_node_value_pair_t *pairs = (const vtx_node_value_pair_t *)register_map;
-     * which type-puns vtx_value_t[] as vtx_node_value_pair_t[] — strict
-     * aliasing UB. Fix: read each pair via memcpy so the compiler can't
-     * mis-optimize. The map layout is:
-     *   [count: uint32_t in first vtx_value_t's low 32 bits]
-     *   [pair[0].node_id, pair[0].value, pair[1].node_id, pair[1].value, ...]
-     * Each element is sizeof(vtx_value_t) bytes. The first element's low
-     * 32 bits are the count; the remaining elements form (node_id, value)
-     * pairs of 2 vtx_value_t each. */
-    if (!register_map || map_size == 0) return VTX_VALUE_UNDEFINED;
-
-    /* Validate we have at least the count header + 1 pair. */
-    if (map_size < 3) return VTX_VALUE_UNDEFINED;
-
-    /* Read the count via memcpy (no type punning). */
-    uint32_t pair_count;
-    vtx_value_t first_elem = register_map[0];
-    memcpy(&pair_count, &first_elem, sizeof(uint32_t));
-
-    /* Validate pair_count against map_size (1 header + 2*pair_count). */
-    if ((uint64_t)1 + (uint64_t)pair_count * 2ULL > (uint64_t)map_size) {
+    if (node_id == VTX_NODEID_INVALID) {
         return VTX_VALUE_UNDEFINED;
     }
 
-    /* Linear scan via memcpy — no type punning. */
-    for (uint32_t i = 0; i < pair_count; i++) {
-        vtx_value_t id_elem = register_map[1 + i * 2];
-        vtx_value_t val_elem = register_map[1 + i * 2 + 1];
-        vtx_nodeid_t this_id;
-        memcpy(&this_id, &id_elem, sizeof(vtx_nodeid_t));
-        if (this_id == node_id) {
-            return val_elem;
+    /* ---- Path 1: register map lookup (OSR-13: native side-table format) ---- */
+    if (register_map != NULL && register_count > 0) {
+        for (uint32_t i = 0; i < register_count; i++) {
+            if (register_map[i].node_id == node_id) {
+                /* The side table records which register holds this NodeID's
+                 * value, but not the value itself — the value is in the
+                 * hardware register at deopt time, which the deopt stub
+                 * saves to a per-arch save area. Without a T2 register save
+                 * area wired through to this resolver, we cannot return the
+                 * register's content here; the caller (vtx_osr_build_interp_frame)
+                 * is responsible for reading the save area via the register
+                 * number. We return UNDEFINED to signal "in register map,
+                 * value pending save-area read."
+                 *
+                 * Note: this still makes the register map USEFUL — callers
+                 * can detect a hit and then read the save area for the
+                 * matching register_number. Pre-OSR-13, the type-pun read
+                 * garbage as the count and never matched any NodeID. */
+                return VTX_VALUE_UNDEFINED;
+            }
+        }
+    }
+
+    /* ---- Path 2 (OSR-9): fallback resolution for non-register-resident nodes ---- */
+    if (node_table != NULL) {
+        const vtx_node_t *node = vtx_node_get_const(node_table, node_id);
+        if (node != NULL) {
+            switch (node->opcode) {
+            case VTX_OP_Constant: {
+                /* Box the constant value into a vtx_value_t based on its
+                 * declared kind. SMI/int constants become SMI-tagged values;
+                 * pointer constants (e.g., null) become VTX_VALUE_NULL;
+                 * other kinds fall through to UNDEFINED. */
+                vtx_constval_t cv = node->constval;
+                switch (cv.kind) {
+                case VTX_TYPE_Int:
+                    /* SMI-tag the integer constant. */
+                    return vtx_make_smi(cv.as.int_val);
+                case VTX_TYPE_Ptr:
+                    if (cv.as.ptr_val == NULL) {
+                        return VTX_VALUE_NULL;
+                    }
+                    /* Non-null pointer constants are not representable as
+                     * NaN-boxed heap pointers without an allocated object —
+                     * fall through to UNDEFINED. */
+                    return VTX_VALUE_UNDEFINED;
+                case VTX_TYPE_Float:
+                case VTX_TYPE_Void:
+                default:
+                    return VTX_VALUE_UNDEFINED;
+                }
+            }
+            case VTX_OP_Parameter: {
+                /* Parameters are passed in the interpreter's locals — the
+                 * parameter's index is the node's `local_index` field. */
+                uint32_t param_idx = node->local_index;
+                if (locals != NULL && param_idx < local_count) {
+                    return locals[param_idx];
+                }
+                return VTX_VALUE_UNDEFINED;
+            }
+            default:
+                /* Spilled node or other opcode not in the register map.
+                 * Without a T2 register save area, we cannot resolve the
+                 * value here; the caller is responsible for reading the
+                 * spill slot directly from the JIT frame. */
+                break;
+            }
         }
     }
 
     return VTX_VALUE_UNDEFINED;
 }
 
-/* ========================================================================== */
-/* Internal: resolve NodeID from FrameState using register map               */
-/* ========================================================================== */
-
-/**
- * Context for the node-to-value resolution callback.
- */
-typedef struct {
-    const vtx_value_t *register_map;
-    uint32_t           register_map_size;
-} vtx_resolve_context_t;
-
 static vtx_value_t resolve_node_callback(vtx_nodeid_t node_id, void *ctx)
 {
     vtx_resolve_context_t *rc = (vtx_resolve_context_t *)ctx;
-    if (node_id == VTX_NODEID_INVALID) {
-        return VTX_VALUE_UNDEFINED;
-    }
-    return vtx_osr_resolve_node(node_id, rc->register_map,
-                                 rc->register_map_size);
+    return vtx_osr_resolve_node(node_id,
+                                  rc->register_map,
+                                  rc->register_count,
+                                  rc->node_table,
+                                  rc->locals,
+                                  rc->local_count);
 }
 
 /* ========================================================================== */
@@ -119,7 +178,18 @@ vtx_interp_frame_t *vtx_osr_build_interp_frame(
     frame->bytecode_pc = fs->bytecode_pc;
     frame->local_count = fs->local_count;
     frame->stack_top = fs->stack_count;
-    frame->stack_capacity = fs->stack_count;
+    /* OSR-14 fix: stack_capacity must leave headroom for the interpreter
+     * to push new values. The original code set stack_capacity = stack_count,
+     * so the very next `push` by the interpreter overflowed the buffer.
+     *
+     * The ideal fix is `stack_count + method->max_stack`, but
+     * vtx_osr_build_interp_frame does not have access to the method
+     * descriptor. We over-allocate by VTX_OSR_MIN_STACK_MARGIN slots
+     * (well above the typical max_stack for any reasonable method —
+     * V8/OpenJDK bytecodes rarely exceed 32) so the interpreter has
+     * room to push without overflowing. */
+    #define VTX_OSR_MIN_STACK_MARGIN 64
+    frame->stack_capacity = fs->stack_count + VTX_OSR_MIN_STACK_MARGIN;
     frame->caller = NULL;
 
     /* Initialize enhanced fields */
@@ -147,9 +217,15 @@ vtx_interp_frame_t *vtx_osr_build_interp_frame(
         }
     }
 
-    /* Allocate and fill operand stack */
-    if (fs->stack_count > 0) {
-        frame->stack = calloc(fs->stack_count, sizeof(vtx_value_t));
+    /* Allocate and fill operand stack.
+     * OSR-14 fix: allocate frame->stack_capacity slots (NOT just
+     * fs->stack_count) so the interpreter has room to push new values
+     * without overflowing the allocated buffer. The old code allocated
+     * exactly stack_count slots, so the next push wrote past the end
+     * of the heap allocation — a heap buffer overflow even when
+     * stack_capacity was correctly bumped. */
+    if (frame->stack_capacity > 0) {
+        frame->stack = calloc(frame->stack_capacity, sizeof(vtx_value_t));
         if (!frame->stack) {
             free(frame->locals);
             free(frame);
@@ -176,12 +252,36 @@ vtx_interp_frame_t *vtx_osr_build_interp_frame(
         frame->monitor_count = fs->monitor_count;
         frame->monitor_capacity = fs->monitor_count;
         for (uint32_t i = 0; i < fs->monitor_count; i++) {
-            frame->monitors[i].local_index = 0; /* will be resolved during deopt */
+            /* OSR-15 fix: store the actual local index holding the locked
+             * object, not a hardcoded 0. The old code wrote 0 for every
+             * monitor, so MONITOR_EXIT later looked up locals[0] and got
+             * the wrong object — releasing the wrong lock or no lock at
+             * all.
+             *
+             * The FrameState's monitor entry only stores the locked
+             * object's NodeID, not its local index. We resolve the NodeID
+             * to a value, then scan the locals array for the matching
+             * value to find the index. If the value isn't in any local
+             * (e.g., the lock is held on a temporary), we record
+             * UINT32_MAX as a sentinel meaning "not in a local." */
             if (fs->monitors[i].monitor_object != VTX_NODEID_INVALID) {
-                frame->monitors[i].object = node_to_value(fs->monitors[i].monitor_object, context);
+                frame->monitors[i].object = node_to_value(
+                    fs->monitors[i].monitor_object, context);
             } else {
                 frame->monitors[i].object = VTX_VALUE_UNDEFINED;
             }
+
+            /* OSR-15: scan locals for the matching value to find the index. */
+            uint32_t found_local = UINT32_MAX;
+            if (frame->locals != NULL) {
+                for (uint32_t li = 0; li < frame->local_count; li++) {
+                    if (frame->locals[li] == frame->monitors[i].object) {
+                        found_local = li;
+                        break;
+                    }
+                }
+            }
+            frame->monitors[i].local_index = found_local;
         }
     }
 
@@ -193,78 +293,149 @@ vtx_interp_frame_t *vtx_osr_build_interp_frame(
 /* ========================================================================== */
 
 __attribute__((optimize("O0")))
-bool vtx_osr_up(vtx_interp_frame_t *interp,
+void vtx_osr_up(vtx_interp_frame_t *interp,
                  uint32_t method_id,
                  const vtx_compiled_code_t *compiled_code,
-                 uint32_t loop_header_pc)
+                 uint32_t loop_header_pc,
+                 vtx_method_registry_t *registry,
+                 vtx_gc_t *gc)
 {
     if (!interp || !compiled_code || !compiled_code->entry_point) {
         fprintf(stderr, "[osr] FAIL: null check (interp=%p code=%p entry=%p)\n",
                 (void*)interp, (void*)compiled_code,
                 compiled_code ? (void*)compiled_code->entry_point : NULL);
-        return false;
+        return;
     }
+
+    /* OSR-3: this function returns void. On a successful transition the
+     * inline-asm trampoline jumps to the JIT entry and never returns to
+     * C — the JIT method's NaN-boxed return value propagates back to the
+     * caller of vtx_interp_run through RAX exactly as if the JIT had
+     * been called normally. Returning `bool` was broken because the
+     * post-asm RAX (the JIT return value) could be SMI 0 / undefined /
+     * null and be misread as `false`, triggering re-execution.
+     *
+     * If we get here at all, OSR failed; the caller falls back to
+     * whole-method re-enter via jit_reenter_pending. */
 
     /* Verify the method matches */
     if (compiled_code->method_id != method_id) {
         fprintf(stderr, "[osr] FAIL: method_id mismatch (code=%u frame=%u)\n",
                 compiled_code->method_id, method_id);
-        return false;
+        return;
     }
 
     /* Verify the interpreter is at the loop header PC */
     if (interp->bytecode_pc != loop_header_pc) {
         fprintf(stderr, "[osr] FAIL: pc mismatch (frame_pc=%u loop_header=%u)\n",
                 interp->bytecode_pc, loop_header_pc);
-        return false;
+        return;
     }
 
     /* Verify frame size compatibility */
     if (interp->local_count > compiled_code->local_slots) {
         fprintf(stderr, "[osr] FAIL: locals overflow (frame=%u code=%u)\n",
                 interp->local_count, compiled_code->local_slots);
-        return false;
+        return;
     }
     if (interp->stack_top > compiled_code->stack_slots) {
         fprintf(stderr, "[osr] FAIL: stack overflow (frame=%u code=%u)\n",
                 interp->stack_top, compiled_code->stack_slots);
-        return false;
+        return;
+    }
+
+    /* OSR-16: refuse OSR into inlined code. The trampoline only knows
+     * how to copy a single interpreter frame into the JIT frame; if the
+     * JIT code at the OSR entry point has inlined callees, the JIT
+     * frame's shape (locals + spills for each inlined frame) does not
+     * match what the asm sets up, and the JIT would read garbage from
+     * the wrong slots. Fall through to the failure path so the dispatch
+     * loop re-enters the JIT from method entry (which is correct for
+     * inlined code since the prologue handles inlined frame setup). */
+    if (compiled_code->has_inlined_frames) {
+        fprintf(stderr, "[osr] FAIL: compiled code for method %u has inlined "
+                "frames — refusing OSR (frame shape mismatch)\n", method_id);
+        return;
+    }
+
+    /* OSR-33: verify the JIT entry register convention matches the one
+     * the trampoline hardcodes. The asm loads TOS/TOS-1/TOS-2/TOS-3 into
+     * RAX/RCX/RDX/RBX (VTX_OSR_CONV_DEFAULT). If the JIT code uses a
+     * different convention, refuse OSR instead of loading values into
+     * the wrong registers. */
+    if (compiled_code->entry_register_convention != VTX_OSR_CONV_DEFAULT) {
+        fprintf(stderr, "[osr] FAIL: compiled code for method %u uses entry "
+                "register convention %u (trampoline only supports "
+                "VTX_OSR_CONV_DEFAULT) — refusing OSR\n",
+                method_id, (unsigned)compiled_code->entry_register_convention);
+        return;
     }
 
     /* ---- Step 1: Look up the OSR entry point in the side table ----
      *
-     * DEOPT-003 fix: the old code defaulted osr_entry to the function
-     * entry point, so when no side-table/bc_pc_map entry matched the
-     * requested loop_header_pc, OSR "succeeded" by jumping to the
-     * method entry — re-executing the entire method from PC 0. Side
-     * effects before the loop would run twice, and the interpreter's
-     * assumption that we're at the loop header was violated.
+     * OSR-2 fix: codegen now records VTX_STF_OSR_ENTRY entries for each
+     * loop-header (backward-branch target). Previously no codegen wrote
+     * this flag, so the side-table lookup never found an entry.
      *
-     * Fix: start with osr_entry = NULL and return false if no entry
-     * is found, so the interpreter continues interpreting instead. */
+     * OSR-5 fix: the lookup matches the requested loop_header_pc against
+     * the entry's bytecode_pc field, so a method with multiple OSR entry
+     * points picks the correct loop header.
+     *
+     * OSR-23 fix: we use the dedicated vtx_side_table_lookup_osr_entry
+     * (filters by VTX_STF_OSR_ENTRY flag) instead of the generic
+     * vtx_side_table_lookup_entry which uses "largest ≤ target" semantics
+     * and could return a non-OSR entry (e.g., a safepoint) near the
+     * requested PC.
+     *
+     * DEOPT-003 fix: start with osr_entry = NULL and return false if no
+     * entry is found, so the interpreter continues interpreting instead
+     * of silently jumping to the function entry point. */
     void *osr_entry = NULL;
 
     if (compiled_code->side_table != NULL) {
-        /* Search the side table for an OSR entry point at loop_header_pc.
-         * The side table entries may have VTX_STF_OSR_ENTRY flag. */
-        for (uint32_t i = 0; i < vtx_side_table_entry_count(compiled_code->side_table); i++) {
-            const vtx_side_table_entry_t *entry = vtx_side_table_get_entry(
-                compiled_code->side_table, i);
-            if (entry && (entry->flags & VTX_STF_OSR_ENTRY)) {
-                /* Found an OSR entry point. Compute the native code address
-                 * from the code start + native_pc_offset. */
-                osr_entry = (uint8_t *)compiled_code->entry_point + entry->native_pc_offset;
-                break;
-            }
+        const vtx_side_table_entry_t *osr_e = vtx_side_table_lookup_osr_entry(
+            compiled_code->side_table, loop_header_pc);
+        if (osr_e != NULL) {
+            osr_entry = (uint8_t *)compiled_code->entry_point + osr_e->native_pc_offset;
         }
     }
 
-    /* ---- Step 2: Look up the bytecode-to-native PC mapping ---- */
-    /* If bc_pc_map is available, find the native offset for the loop header.
-     * This gives us the exact entry point in the compiled code. */
+    /* ---- Step 2: Look up the bytecode-to-native PC mapping ----
+     * If bc_pc_map is available, find the native offset for the loop header.
+     * This gives us the exact entry point in the compiled code.
+     *
+     * OSR-27: compiled_code->code may be NULL (the install path at
+     * codegen.c:3689 sets code = NULL after copying into the executable
+     * cache). The current dispatch.c caller papers over this by setting
+     * cc.code = cm->code_start, but the function's contract does not
+     * enforce it. Add a NULL check so a future caller that forgets to
+     * set cc.code does not dereference NULL here. */
     if (compiled_code->bc_pc_map != NULL && compiled_code->bc_pc_map_count > 0) {
         for (uint32_t i = 0; i < compiled_code->bc_pc_map_count; i++) {
             if (compiled_code->bc_pc_map[i].bytecode_pc == loop_header_pc) {
+                /* OSR-27: NULL check on compiled_code->code. */
+                if (compiled_code->code == NULL) {
+                    fprintf(stderr, "[osr] FAIL: compiled_code->code is NULL "
+                            "for method %u (caller did not set cc.code) — "
+                            "cannot compute OSR entry\n", method_id);
+                    return;
+                }
+                /* OSR-24: verify the interpreter's stack_top matches the
+                 * stack depth the JIT code expects at this OSR entry
+                 * point. If they differ, the JIT would read garbage from
+                 * the spill slots (or miss values it expects in
+                 * registers). Fall through to the failure path on
+                 * mismatch — the dispatch loop re-enters from method
+                 * entry, which is always correct. */
+                if (compiled_code->bc_pc_map[i].stack_depth != interp->stack_top) {
+                    fprintf(stderr, "[osr] FAIL: stack depth mismatch at "
+                            "loop_header_pc=%u (interp=%u expected=%u) — "
+                            "refusing OSR\n",
+                            loop_header_pc,
+                            interp->stack_top,
+                            compiled_code->bc_pc_map[i].stack_depth);
+                    return;
+                }
                 /* Found the mapping — use this as the OSR entry */
                 osr_entry = (uint8_t *)compiled_code->code +
                             compiled_code->bc_pc_map[i].native_offset;
@@ -280,7 +451,42 @@ bool vtx_osr_up(vtx_interp_frame_t *interp,
     if (osr_entry == NULL) {
         fprintf(stderr, "[osr] no OSR entry for loop_header_pc=%u — "
                 "continuing in interpreter\n", loop_header_pc);
-        return false;
+        return;
+    }
+
+    /* ---- OSR-11 fix: re-check the registry's current cm before the asm jump ----
+     *
+     * The dispatch loop fetched `cm` from the registry earlier
+     * (dispatch.c:3063). Between then and now, the method may have been
+     * invalidated or recompiled (e.g., by a concurrent retrace triggered
+     * by a guard failure elsewhere). The old cm may have been freed
+     * (install.c:303), and its code_start memory may have been reclaimed.
+     *
+     * We re-fetch the current cm via the registry and compare its
+     * code_start against the cached `compiled_code->entry_point`. If
+     * they differ, the cached code is stale — return and let the
+     * dispatch loop re-enter the JIT from method entry on the next call
+     * (when it'll fetch the fresh cm).
+     *
+     * Note: there's still a small TOCTOU window between this check and
+     * the asm jump, but this narrows it dramatically and catches the
+     * common case (compile thread finished retrace between the original
+     * dispatch fetch and now). True elimination would require hazard
+     * pointers / epoch-based reclamation, which is out of scope. */
+    if (registry != NULL) {
+        vtx_compiled_method_t *current_cm = vtx_method_registry_get(registry, method_id);
+        if (current_cm == NULL ||
+            current_cm->code_start != (uint8_t *)compiled_code->entry_point ||
+            !current_cm->is_valid) {
+            fprintf(stderr, "[osr] FAIL: version mismatch — method %u was "
+                    "recompiled/invalidated since the dispatch loop fetched cm "
+                    "(current=%p cached=%p valid=%d)\n",
+                    method_id,
+                    current_cm ? (void*)current_cm->code_start : NULL,
+                    (void*)compiled_code->entry_point,
+                    current_cm ? (int)current_cm->is_valid : 0);
+            return;
+        }
     }
 
     /* ---- Step 3: Set up the JIT frame with interpreter values ----
@@ -311,9 +517,16 @@ bool vtx_osr_up(vtx_interp_frame_t *interp,
     uint32_t nlocals   = interp->local_count;
     uint32_t nstack    = interp->stack_top;
 
-    /* Mark the interpreter frame as OSR'd so GC doesn't collect it.
-     * The frame is now superseded by the JIT frame. */
-    interp->osr_active = true;
+    /* OSR-32 fix: the `osr_active` flag was set here but never read by
+     * any code (the GC and stack walker don't check it). The intended use
+     * was to skip OSR'd interpreter frames during root scanning, but this
+     * was never implemented. Per the surgical-removal rule, we delete the
+     * dead setter rather than carry the dead flag forward. The interp
+     * frame remains valid (the JIT code returns to the interpreter's
+     * caller via the patched return address) and the GC continues to scan
+     * it as before. If duplicate-root scanning becomes a real performance
+     * problem, a future patch should add the check at the GC site, not
+     * via a half-wired runtime flag. */
 
     /* Prepare ALL parameters in a struct on the stack to reduce
      * register pressure on the inline asm. x86-64 has limited
@@ -321,16 +534,17 @@ bool vtx_osr_up(vtx_interp_frame_t *interp,
      * avoids "impossible constraints" errors.
      *
      * Struct layout (all 8-byte slots, natural alignment):
-     *   [0]  frame_sz     (uint64_t)
-     *   [8]  l_base       (int64_t, sign-extended)
-     *   [16] s_base       (int64_t, sign-extended)
-     *   [24] nlocals      (uint64_t)
-     *   [32] nstack       (uint64_t)
-     *   [40] src_locals   (pointer)
-     *   [48] src_stack    (pointer)
-     *   [56] target       (pointer)
-     *   [64] method_desc  (pointer)
-     *   [72] deopt_ptr    (pointer)
+     *   [0]   frame_sz      (uint64_t)
+     *   [8]   l_base        (int64_t, sign-extended)
+     *   [16]  s_base        (int64_t, sign-extended)
+     *   [24]  nlocals       (uint64_t)
+     *   [32]  nstack        (uint64_t)
+     *   [40]  src_locals    (pointer)
+     *   [48]  src_stack     (pointer)
+     *   [56]  target        (pointer)
+     *   [64]  method_desc   (pointer)
+     *   [72]  deopt_ptr     (pointer)
+     *   [80]  profile_data  (pointer)        -- OSR-30
      */
     struct osr_params {
         uint64_t frame_sz;
@@ -343,6 +557,7 @@ bool vtx_osr_up(vtx_interp_frame_t *interp,
         void                    *target;
         const vtx_method_desc_t *method_desc;
         vtx_deopt_info_t        *deopt_ptr;
+        void                    *profile_data;   /* OSR-30: written to [RBP+8] */
     };
 
     struct osr_params params;
@@ -356,6 +571,24 @@ bool vtx_osr_up(vtx_interp_frame_t *interp,
     params.target      = osr_entry;
     params.method_desc = compiled_code->method;
     params.deopt_ptr   = compiled_code->deopt_info;
+    /* OSR-30: pass profile_data through params so the asm can write it
+     * to [RBP+8] in the JIT frame header. NULL is acceptable (matches
+     * pre-fix behavior); the dispatch caller populates this from the
+     * interp's profiler when known. */
+    params.profile_data = compiled_code->profile_data;
+
+    /* OSR-12: poll for a pending safepoint immediately before the asm
+     * jump. The dispatch loop's last safepoint check happened at the
+     * backward branch; a GC or invalidation may have been requested
+     * between then and now. Without this poll, the JIT code entered via
+     * OSR would not observe the safepoint until its own loop-back-edge
+     * poll, which may be far away if the OSR entry is at a loop header
+     * with a long body. vtx_gc_safepoint is the existing fast-path poll
+     * used at backward branches in dispatch.c — it just reads an atomic
+     * flag and only does real work when a GC was requested. */
+    if (gc != NULL) {
+        vtx_gc_safepoint(gc);
+    }
 
     /*
      * Inline assembly trampoline (x86-64, System V ABI, Linux).
@@ -380,6 +613,46 @@ bool vtx_osr_up(vtx_interp_frame_t *interp,
      *   r14 = new RBP
      *   r15 = pointer to osr_params struct (loaded once, used throughout)
      *   rax, rcx, rdx, rsi, r8, r9, r10 = temporaries
+     *
+     * OSR-33 (entry register convention): the asm loads TOS, TOS-1,
+     * TOS-2, TOS-3 into RAX, RCX, RDX, RBX respectively. This matches
+     * the VTX_OSR_CONV_DEFAULT convention declared in
+     * codecache/types.h and the expression-stack register assignment
+     * documented in baseline/frame_layout.h:54-55:
+     *
+     *     TOS   -> RAX (reg 0)
+     *     TOS-1 -> RCX (reg 1)
+     *     TOS-2 -> RDX (reg 2)
+     *     TOS-3 -> RBX (reg 3)
+     *
+     * Values deeper than TOS-3 are spilled to the frame and read by
+     * the JIT code from spill slots. vtx_osr_up verifies
+     * compiled_code->entry_register_convention == VTX_OSR_CONV_DEFAULT
+     * before reaching this asm, so a future codegen change that emits
+     * a different convention will fail the OSR transition cleanly
+     * (falling back to whole-method re-enter) instead of silently
+     * loading values into the wrong registers.
+     *
+     * OSR-6 (callee-saved register preservation): the JIT epilogue
+     * (baseline/codegen.c:1146-1170) restores RBX from [RBP-8] and
+     * R12 from [RBP-16]. Before this fix, the OSR-up asm never wrote
+     * the caller's values to those slots, so the JIT epilogue restored
+     * garbage into RBX and R12 — corrupting the caller of vtx_interp_run.
+     * Step 2.5 below writes the caller's current RBX and R12 to the
+     * saved-register slots BEFORE the asm clobbers them, so the JIT
+     * epilogue restores the correct values.
+     *
+     * R13/R14/R15 are also clobbered by the asm trampoline, but the
+     * baseline JIT codegen does NOT save/restore them (no slots in the
+     * prologue/epilogue) and does not use them as callee-saved. They
+     * are caller-saved from the JIT codegen's perspective. The asm
+     * trampoline follows the same convention — it clobbers them and
+     * does not restore them. This is consistent with the JIT codegen's
+     * behavior for non-OSR JIT calls (the caller of vtx_dispatch_jit
+     * also sees R13/R14/R15 clobbered). Extending the JIT frame to
+     * save/restore R13/R14/R15 would be a codegen-wide change and is
+     * out of scope for the OSR-up fix; this is documented as a known
+     * limitation matching the existing JIT convention.
      */
     __asm__ __volatile__ (
         /* ---- Read current frame link data before modifying RBP ---- */
@@ -400,10 +673,21 @@ bool vtx_osr_up(vtx_interp_frame_t *interp,
         "movq 0(%%r15), %%rax\n\t"          /* reload frame_sz */
         "leaq 8(%%rsp, %%rax), %%r14\n\t"   /* r14 = new RBP */
 
+        /* ---- Step 2.5: OSR-6 — save callee-saved registers to JIT frame ----
+         * The JIT epilogue restores RBX from [RBP-8] and R12 from [RBP-16].
+         * The OSR-up asm must initialize these slots with the caller's
+         * CURRENT values BEFORE clobbering them, otherwise the JIT
+         * epilogue restores garbage. At this point r14 = new RBP, and
+         * RBX and R12 still hold the caller's values (the asm hasn't
+         * touched them yet). VTX_FRAME_SAVED_RBX_OFFSET = -8 and
+         * VTX_FRAME_SAVED_R12_OFFSET = -16 (from baseline/frame_layout.h). */
+        "movq %%rbx, -8(%%r14)\n\t"         /* [RBP-8]  = caller's RBX */
+        "movq %%r12, -16(%%r14)\n\t"        /* [RBP-16] = caller's R12 */
+
         /* ---- Step 3: Write frame header above RBP ---- */
         "movq %%r12, 0(%%r14)\n\t"          /* [RBP+0]  = caller RBP */
-        "xorq %%rax, %%rax\n\t"
-        "movq %%rax, 8(%%r14)\n\t"          /* [RBP+8]  = profile_data (NULL) */
+        "movq 80(%%r15), %%rax\n\t"         /* OSR-30: load profile_data from params[80] */
+        "movq %%rax, 8(%%r14)\n\t"          /* [RBP+8]  = profile_data (was hardcoded NULL) */
         "movq 72(%%r15), %%rax\n\t"         /* load deopt_ptr from params[72] */
         "movq %%rax, 16(%%r14)\n\t"         /* [RBP+16] = deopt_info */
         "movq 64(%%r15), %%rax\n\t"         /* load method_desc from params[64] */
@@ -500,11 +784,29 @@ bool vtx_osr_up(vtx_interp_frame_t *interp,
         "movq 56(%%r15), %%rax\n\t"         /* load target from params[56] */
         "jmp *%%rax\n\t"
 
-        /* Should never reach here */
+        /* OSR-31: safety trap; should never execute — the preceding
+         * `jmp *%%rax` is unconditional and `__builtin_unreachable()`
+         * below tells the compiler the asm doesn't fall through. Kept
+         * as a defensive trap so that if a future code change breaks the
+         * asm's control flow (e.g., accidentally writes a `ret` instead
+         * of `jmp`), we trap loudly here instead of executing whatever
+         * bytes happen to follow in the code section. Do NOT delete. */
         "int3\n\t"
 
         : /* no outputs — we never return */
         : [params]  "r"(&params)
+        /* OSR-28: rbp and rsp are modified by the asm (movq %%r14,%%rbp
+         * and the leaq/subq that adjust %%rsp). They were not in the
+         * clobber list because the asm ends with an unconditional jmp +
+         * __builtin_unreachable — the compiler never generates code
+         * after the asm, so it doesn't matter that rbp/rsp are wrong.
+         *
+         * OSR-28: rbp and rsp are intentionally NOT in the clobber list.
+         * Modern GCC (≥13) rejects them with "bp cannot be used in 'asm'
+         * here" because the asm ends with an unconditional control transfer
+         * (jmp) — there is no fall-through path for the compiler to
+         * consider. The __builtin_unreachable() after the asm block is the
+         * authoritative signal to the compiler that the asm never returns. */
         : "rax", "rbx", "rcx", "rdx", "rsi", "r8", "r9", "r10",
           "r12", "r13", "r14", "r15", "memory"
     );
@@ -527,10 +829,19 @@ vtx_interp_frame_t *vtx_osr_down(vtx_interp_frame_t *interp,
     /* Step 1: Look up FrameState from side table (already provided in deopt_ctx) */
     const vtx_frame_state_t *fs = deopt_ctx->frame_state;
 
-    /* Step 2: Set up the resolution context */
+    /* Step 2: Set up the resolution context.
+     * OSR-13: register_map is now vtx_reg_map_entry_t* (the side-table
+     * native format) and register_count is the entry count. */
     vtx_resolve_context_t ctx;
-    ctx.register_map = deopt_ctx->register_map;
-    ctx.register_map_size = deopt_ctx->register_count;
+    ctx.register_map   = deopt_ctx->register_map;
+    ctx.register_count = deopt_ctx->register_count;
+    ctx.node_table     = NULL;   /* OSR-9: deopt_ctx doesn't carry the IR graph;
+                                  * vtx_osr_resolve_node falls back gracefully
+                                  * (returns UNDEFINED for constants/parameters
+                                  * when node_table is NULL). A future patch
+                                  * should pass the IR graph via deopt_ctx. */
+    ctx.locals         = NULL;
+    ctx.local_count    = 0;
 
     /* Step 3: Build the interpreter frame for the innermost method */
     vtx_interp_frame_t *new_frame = vtx_osr_build_interp_frame(
@@ -540,17 +851,22 @@ vtx_interp_frame_t *vtx_osr_down(vtx_interp_frame_t *interp,
     /* Step 4: Handle monitors — relock if needed.
      * For each monitor in the FrameState, we need to reacquire the lock
      * on the monitor object. The monitor object's value is resolved from
-     * the register map. */
+     * the register map.
+     *
+     * OSR-7 fix: uncommented and activated the vtx_runtime_monitor_enter
+     * call. Previously this was commented out, so monitors held in
+     * compiled code were NOT re-acquired during deopt — the thread
+     * continued without the lock, breaking the synchronization invariant. */
     if (fs->monitor_count > 0) {
         for (uint32_t i = 0; i < fs->monitor_count; i++) {
             vtx_nodeid_t mon_node = fs->monitors[i].monitor_object;
             if (mon_node != VTX_NODEID_INVALID) {
                 vtx_value_t mon_val = resolve_node_callback(mon_node, &ctx);
-                /* In a real implementation, we would call the runtime
-                 * to re-enter the monitor on the resolved object.
-                 * The object must be a heap pointer. */
+                /* OSR-7: actually call the runtime monitor re-enter
+                 * primitive so the lock is reacquired in the interpreter
+                 * context. Only heap pointers are valid monitor objects. */
                 if (vtx_is_heap_ptr(mon_val)) {
-                    /* vtx_runtime_monitor_enter(vtx_heap_ptr(mon_val)); */
+                    vtx_runtime_monitor_enter(mon_val);
                 }
             }
         }

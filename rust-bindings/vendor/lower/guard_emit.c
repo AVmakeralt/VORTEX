@@ -271,10 +271,11 @@ int vtx_guard_emit_lower(vtx_guard_desc_array_t *guards,
                              ? guard->jcc_native_offset
                              : vtx_x86_emit_position(emit);
 
-        /* Add a side table entry */
+        /* Add a side table entry.
+         * OSR-5: bytecode_pc = UINT32_MAX — guards are not OSR entries. */
         uint32_t st_idx = vtx_side_table_add_entry(side_table, native_pc,
                             guard->frame_state_index,
-                            VTX_STF_GUARD);
+                            VTX_STF_GUARD, UINT32_MAX);
 
         /* Collect live registers at this point using the register
          * allocator result for accurate register-to-NodeID mapping. */
@@ -366,11 +367,12 @@ int vtx_guard_emit_deopt_stubs(vtx_guard_desc_array_t *guards,
         emit_byte(emit, 0xFF);
         emit_byte(emit, 0xE0); /* ModR/M: mod=11, reg=4 (/4 = JMP), rm=0 (RAX) */
 
-        /* Record in side table */
+        /* Record in side table.
+         * OSR-5: bytecode_pc = UINT32_MAX — stubs are not OSR entries. */
         if (side_table) {
             uint32_t st_idx = vtx_side_table_add_entry(side_table, stub_offset,
                                 guard->frame_state_index,
-                                VTX_STF_GUARD);
+                                VTX_STF_GUARD, UINT32_MAX);
             (void)st_idx;
         }
 

@@ -29,6 +29,7 @@
 #include "runtime/gc.h"
 #include "runtime/arena.h"
 #include "interp/dispatch.h"
+#include <assert.h>
 
 /* ---- Bytecode builder helpers ---- */
 

@@ -328,3 +328,72 @@ double vtx_deopt_budget_rate_per_sec(const vtx_deopt_budget_t *gb, uint64_t now_
     (void)now_ns;
     return (double)gb->count * 1e9 / (double)VTX_DEOPT_GLOBAL_WINDOW_NS;
 }
+
+/* ========================================================================== */
+/* OSR-29: per-method OSR re-attempt rate limiting                              */
+/* ========================================================================== */
+//
+// The dispatch loop tracks per-method OSR failures via two fields on
+// vtx_compiled_method_t:
+//   - osr_failure_count       (uint32_t)
+//   - osr_cooldown_until_call (uint64_t) — call_count threshold past
+//                                         which OSR is re-enabled.
+//
+// These helper functions encapsulate the policy so the dispatch loop
+// stays small and the logic is unit-testable.
+//
+// Policy:
+//   - vtx_osr_rate_should_attempt: returns true if OSR is allowed now
+//     (i.e. either the method has never been rate-limited, or the
+//     cooldown has expired). The caller passes the current call_count.
+//   - vtx_osr_rate_record_failure: bumps the failure counter and, if
+//     the threshold is reached, sets the cooldown. Returns true if the
+//     threshold was just hit (so the caller can log).
+//   - vtx_osr_rate_record_success: resets the failure counter (a
+//     successful OSR clears the cooldown).
+//
+// Note: these functions do NOT take a lock. VORTEX is currently single-
+// threaded for the dispatch path; if multi-threading is added, callers
+// must serialize access to the cm fields.
+
+bool vtx_osr_rate_should_attempt(uint32_t osr_failure_count,
+                                  uint64_t osr_cooldown_until_call,
+                                  uint64_t current_call_count)
+{
+    if (osr_failure_count < VTX_OSR_MAX_FAILURES) {
+        return true;
+    }
+    /* Cooldown active — re-enable only after the call_count threshold. */
+    return current_call_count >= osr_cooldown_until_call;
+}
+
+bool vtx_osr_rate_record_failure(uint32_t *osr_failure_count,
+                                  uint64_t *osr_cooldown_until_call,
+                                  uint64_t current_call_count)
+{
+    if (osr_failure_count == NULL || osr_cooldown_until_call == NULL) {
+        return false;
+    }
+    (*osr_failure_count)++;
+    /* Re-arm the cooldown every time we hit or exceed the threshold.
+     * This prevents the OSR-fail → wait → OSR-fail → wait → ... loop
+     * from continuing indefinitely after the first cooldown expires
+     * if failures persist. Each fresh failure during/after cooldown
+     * extends the cooldown by another VTX_OSR_COOLDOWN_INVOCATIONS. */
+    if (*osr_failure_count >= VTX_OSR_MAX_FAILURES) {
+        *osr_cooldown_until_call =
+            current_call_count + VTX_OSR_COOLDOWN_INVOCATIONS;
+        return (*osr_failure_count == VTX_OSR_MAX_FAILURES);
+    }
+    return false;
+}
+
+void vtx_osr_rate_record_success(uint32_t *osr_failure_count,
+                                  uint64_t *osr_cooldown_until_call)
+{
+    if (osr_failure_count == NULL || osr_cooldown_until_call == NULL) {
+        return;
+    }
+    *osr_failure_count = 0;
+    *osr_cooldown_until_call = 0;
+}

@@ -394,8 +394,10 @@ const vtx_deopt_stub_t *vtx_deopt_stub_emit(vtx_deopt_context_t *ctx,
     uint32_t fs_index = vtx_side_table_add_frame_state(ctx->side_table, NULL);
     stub.frame_state_index = fs_index;
 
+    /* Add a side table entry for this deopt point.
+     * OSR-5: bytecode_pc = UINT32_MAX — guards are not OSR entries. */
     vtx_side_table_add_entry(ctx->side_table, guard->native_pc_offset,
-                              fs_index, VTX_STF_GUARD);
+                              fs_index, VTX_STF_GUARD, UINT32_MAX);
 
     /* Add the stub to the array */
     uint32_t idx = vtx_deopt_stub_array_add(
@@ -595,31 +597,63 @@ void *vtx_deopt_runtime_transition(void *jit_rbp, uint32_t native_pc)
         stack_depth = 0;
     }
 
-    /* Step 3: Get the side table and FrameState */
+    /* Step 3: Get the side table and FrameState.
+     *
+     * OSR-1 fix (partial): the previous version of this function fetched
+     * `fs`, `reg_map`, and `reg_map_count` from the side table but never
+     * used them — pure dead code. The dead locals have been removed.
+     *
+     * What we DO use is the FrameState's `bytecode_pc` and `stack_count`
+     * when the pc_map fallback (Step 2) failed to find a mapping. This
+     * fixes the most common T2/T3 deopt bug: when deopt_info lacks a
+     * pc_map (common for T2/T3 methods), the fallback used to set
+     * bytecode_pc=0 and stack_depth=0, re-executing the method from
+     * the beginning. Now the FrameState's authoritative PC/depth are
+     * used instead.
+     *
+     * KNOWN LIMITATION: the register map (`st_entry->register_map`)
+     * is still NOT consumed — register-resident values for T2/T3
+     * register-allocated NodeIDs are not yet recovered here. This is
+     * tracked as a follow-up: wire vtx_osr_resolve_node into Step 6
+     * below to override spill-slot reads with the saved-register
+     * values when a NodeID is in the register map. For T1 (where
+     * reg_map_count == 0), this code path is correct as-is. */
     vtx_side_table_t *side_table = (deopt_info != NULL) ? deopt_info->side_table : NULL;
     vtx_frame_state_t *fs = NULL;
-    const vtx_side_table_entry_t *st_entry = NULL;
-    const vtx_reg_map_entry_t *reg_map = NULL;
-    uint32_t reg_map_count = 0;
 
     if (side_table) {
-        st_entry = vtx_side_table_lookup_entry(side_table, native_pc);
+        const vtx_side_table_entry_t *st_entry =
+            vtx_side_table_lookup_entry(side_table, native_pc);
         if (st_entry) {
             fs = vtx_side_table_get_frame_state(side_table,
                                                  st_entry->frame_state_index);
-            reg_map = st_entry->register_map;
-            reg_map_count = st_entry->register_map_count;
+            /* NOTE: st_entry->register_map / register_map_count are not
+             * yet consumed here — see the KNOWN LIMITATION above. */
         }
+    }
+
+    /* Use the FrameState's bytecode_pc/stack_count when the pc_map
+     * fallback failed. This is the OSR-1 fix's behavioral change. */
+    if (fs != NULL && !found) {
+        bytecode_pc = fs->bytecode_pc;
+        stack_depth = fs->stack_count;
+        found = true;
     }
 
     /* Step 4: Compute the JIT frame layout */
     vtx_jit_frame_layout_t layout = vtx_frame_layout_compute(method);
 
-    /* Step 5: Create an interpreter frame */
-    /* We need a frame stack allocator. In production, each thread has one.
-     * For now, create a single-use one. This is pre-allocated memory —
-     * no malloc during deopt (the frame stack pre-allocates 256KB blocks). */
-    static vtx_frame_stack_t *deopt_fs = NULL;
+    /* Step 5: Create an interpreter frame.
+     *
+     * OSR-19 fix: the frame stack must be thread-local. The old code used
+     * a plain `static` (process-global) pointer, so two threads deopting
+     * simultaneously would share (and corrupt) the same vtx_frame_stack_t.
+     * Making it `static __thread` gives each thread its own pointer —
+     * each thread lazily allocates and owns its own frame stack, and the
+     * deopt path becomes reentrant across threads. The frame stack itself
+     * is intentionally leaked (one per thread, lifetime = thread lifetime);
+     * this is acceptable because it's a small fixed-size allocator. */
+    static __thread vtx_frame_stack_t *deopt_fs = NULL;
     if (deopt_fs == NULL) {
         deopt_fs = malloc(sizeof(vtx_frame_stack_t));
         if (!deopt_fs) return NULL;

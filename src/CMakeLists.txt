@@ -160,6 +160,7 @@ add_library(vortex_codecache STATIC
     codecache/invalidate.c
     codecache/versioned.c
     codecache/t1_persist.c
+    codecache/quarantine.c
 )
 target_include_directories(vortex_codecache PUBLIC ${VORTEX_INCLUDE_DIRS})
 target_link_libraries(vortex_codecache PUBLIC vortex_runtime vortex_lower)

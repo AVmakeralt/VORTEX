@@ -127,17 +127,24 @@ VTX_TEST(osr25_cm_frame_layout_populated_even_for_max_locals_zero)
      * public fallback's locals_base = -8 was being used because the
      * max_locals == 0 check was the trigger). Verify the codegen
      * STILL overrides locals_base to -24 even for max_locals == 0,
-     * so the OSR asm never writes spills into the saved-RBX slot. */
+     * so the OSR asm never writes spills into the saved-RBX slot.
+     *
+     * Bytecode: LOAD_CONST_INT 0 (push 0) then RETURN_VALUE.
+     * The push is required because RETURN_VALUE pops one value —
+     * vtx_bytecode_compute_max_stack asserts on stack underflow
+     * during its abstract-interpretation scan. */
     vtx_arena_t arena; vtx_arena_init(&arena);
     vtx_type_system_t ts; vtx_type_system_init(&ts);
     vtx_gc_t gc; vtx_gc_init(&gc, &ts, VTX_GC_GENERATIONAL);
 
     uint8_t *code_buf = vtx_arena_alloc(&arena, 4);
-    code_buf[0] = VT_OP_RETURN_VALUE;
+    code_buf[0] = VT_OP_LOAD_CONST_INT; code_buf[1] = 0; code_buf[2] = 0;
+    code_buf[3] = VT_OP_RETURN_VALUE;
 
+    vtx_value_t consts[1] = { vtx_make_smi(0) };
     vtx_bytecode_t bc = {
-        .code = code_buf, .length = 1,
-        .constant_pool = NULL, .constant_count = 0,
+        .code = code_buf, .length = 4,
+        .constant_pool = consts, .constant_count = 1,
         .max_locals = 0, .max_stack = 1,
     };
     vtx_method_desc_t method = {

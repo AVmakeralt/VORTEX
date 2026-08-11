@@ -33,6 +33,31 @@ typedef struct {
 } vtx_bc_pc_map_entry_t;
 
 /* ========================================================================== */
+/* OSR entry register convention (OSR-33)                                      */
+/* ========================================================================== */
+
+/**
+ * Identifies which physical registers the JIT entry point expects the
+ * top of the operand stack in. The OSR-up trampoline must populate the
+ * same registers before jumping — otherwise the JIT reads garbage.
+ *
+ * VTX_OSR_CONV_DEFAULT is the only convention currently emitted by the
+ * baseline codegen (T1). It matches the expression-stack register
+ * assignment documented in baseline/frame_layout.h:
+ *   TOS   → RAX
+ *   TOS-1 → RCX
+ *   TOS-2 → RDX
+ *   TOS-3 → RBX
+ *
+ * The field exists so a future codegen change can declare a different
+ * convention and vtx_osr_up will refuse to OSR into mismatched code
+ * instead of silently loading values into the wrong registers.
+ */
+typedef enum {
+    VTX_OSR_CONV_DEFAULT = 0,  /* RAX/RCX/RDX/RBX — T1 baseline convention */
+} vtx_osr_entry_conv_t;
+
+/* ========================================================================== */
 /* Compiled code result                                                        */
 /* ========================================================================== */
 
@@ -79,6 +104,29 @@ typedef struct {
     uint32_t          method_id;      /* method this code was compiled for */
     uint32_t          stack_slots;    /* number of stack slots in the JIT frame */
     uint32_t          local_slots;    /* number of local slots in the JIT frame */
+
+    /* OSR-16: if true, the compiled code contains inlined callees and
+     * the JIT frame shape does NOT match a single interpreter frame.
+     * vtx_osr_up refuses OSR into such code (falls through to the failure
+     * path) because the trampoline only knows how to copy one interp
+     * frame into the JIT frame. Set by the codegen when inlining occurs;
+     * memset-zero leaves it false for non-inlined T1 code. */
+    bool              has_inlined_frames;
+
+    /* OSR-33: declares which register convention the JIT entry point
+     * expects for the top of the operand stack. vtx_osr_up verifies
+     * the convention matches before jumping. Defaults to
+     * VTX_OSR_CONV_DEFAULT (RAX/RCX/RDX/RBX) which is the only
+     * convention currently emitted. */
+    vtx_osr_entry_conv_t entry_register_convention;
+
+    /* OSR-30: profile-data pointer written into the JIT frame header
+     * at [RBP+8] by the OSR-up trampoline. The JIT epilogue does not
+     * restore it, but the GC and stack walker read it from [RBP+8] to
+     * locate GC roots and profile state. NULL is acceptable (matches
+     * the pre-fix behavior) but the interpreter should populate this
+     * from interp->profiler when known. */
+    void             *profile_data;
 } vtx_compiled_code_t;
 
 #endif /* VORTEX_CODECACHE_TYPES_H */
