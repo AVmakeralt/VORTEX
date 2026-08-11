@@ -1022,3 +1022,103 @@ target_link_libraries(test_osr_32_dead_flag_removed PRIVATE
 )
 add_test(NAME osr_32_dead_flag_removed COMMAND test_osr_32_dead_flag_removed)
 
+# ==========================================================================
+# PEA use-after-realloc regression tests (Task PEA-FIX-1):
+#   PEA-3-1 — cross_object_sr.c stale `node` after vtx_node_create
+#   PEA-3-2 — cross_object_sr.c stale `alloc_node` after vtx_node_create
+#   PEA-2-1 — materialize.c stale `node` after insert_materialization_code
+#   PEA-2-2 — virtual.c resolve_virtual_phis stale `node` after per-field
+#             vtx_node_create
+#
+# Each test constructs a synthetic SoN graph whose node count is exactly
+# VTX_NODE_TABLE_INITIAL_CAPACITY (256) immediately before invoking the
+# PEA pass, so the first vtx_node_create() inside the pass triggers
+# node_table_grow() → realloc(table->nodes). The tests then verify the
+# post-pass graph state (dead flags, replaced inputs, virtual_states) to
+# confirm the surgical re-fetch fixes landed.
+# ==========================================================================
+
+# PEA-3-1: stale `node` pointer in cross_object_sr after realloc
+add_executable(test_pea3_1_cross_object_sr_realloc
+    regression/pea/test_pea3_1_cross_object_sr_realloc.c
+)
+target_link_libraries(test_pea3_1_cross_object_sr_realloc PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME pea3_1_cross_object_sr_realloc
+    COMMAND test_pea3_1_cross_object_sr_realloc)
+
+# PEA-3-2: stale `alloc_node` pointer in cross_object_sr after realloc
+add_executable(test_pea3_2_alloc_node_realloc
+    regression/pea/test_pea3_2_alloc_node_realloc.c
+)
+target_link_libraries(test_pea3_2_alloc_node_realloc PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME pea3_2_alloc_node_realloc
+    COMMAND test_pea3_2_alloc_node_realloc)
+
+# PEA-2-1: stale `node` pointer in materialize.c after insert_materialization_code
+add_executable(test_pea2_1_materialize_realloc
+    regression/pea/test_pea2_1_materialize_realloc.c
+)
+target_link_libraries(test_pea2_1_materialize_realloc PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME pea2_1_materialize_realloc
+    COMMAND test_pea2_1_materialize_realloc)
+
+# PEA-2-2: stale `node` pointer in virtual.c resolve_virtual_phis
+add_executable(test_pea2_2_virtual_phi_realloc
+    regression/pea/test_pea2_2_virtual_phi_realloc.c
+)
+target_link_libraries(test_pea2_2_virtual_phi_realloc PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME pea2_2_virtual_phi_realloc
+    COMMAND test_pea2_2_virtual_phi_realloc)
+
+# PEA-2-3: per-field Phi missing Region input
+add_executable(test_pea2_3_phi_region_input
+    regression/pea/test_pea2_3_phi_region_input.c
+)
+target_link_libraries(test_pea2_3_phi_region_input PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME pea2_3_phi_region_input
+    COMMAND test_pea2_3_phi_region_input)
+
+# PEA-2-6: materialization memory chain connected to escape point
+add_executable(test_pea2_6_materialize_memory_chain
+    regression/pea/test_pea2_6_materialize_memory_chain.c
+)
+target_link_libraries(test_pea2_6_materialize_memory_chain PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME pea2_6_materialize_memory_chain
+    COMMAND test_pea2_6_materialize_memory_chain)
+
+# PEA-1-2: non-allocation nodes return GlobalEscape
+add_executable(test_pea1_2_non_alloc_global_escape
+    regression/pea/test_pea1_2_non_alloc_global_escape.c
+)
+target_link_libraries(test_pea1_2_non_alloc_global_escape PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME pea1_2_non_alloc_global_escape
+    COMMAND test_pea1_2_non_alloc_global_escape)
+

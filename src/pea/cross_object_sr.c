@@ -573,6 +573,16 @@ static int rewrite_scalar_replacements(vtx_graph_t *graph,
                 /* Field was never stored — this means the field has the
                  * default value (null/zero). Create a null constant. */
                 vtx_nodeid_t null_id = vtx_node_create(table, VTX_OP_Constant);
+                /* PEA-3-1, PEA-3-2: vtx_node_create above may realloc
+                 * table->nodes (when count == capacity). Re-fetch both
+                 * `node` (captured at the top of the LoadField loop, used
+                 * below for field_offset/id reads and the dead-mark write)
+                 * and `alloc_node` (captured at the top of the per-alloc
+                 * loop, used at line 638 to dead-mark the allocation).
+                 * Without these re-fetches the stale pointers dereference
+                 * freed memory and the dead flags silently fail to set. */
+                node = &table->nodes[n];
+                alloc_node = vtx_node_get(table, alloc_id);
                 if (null_id != VTX_NODEID_INVALID) {
                     vtx_node_t *null_node = vtx_node_get(table, null_id);
                     null_node->type = VTX_TYPE_Ptr;

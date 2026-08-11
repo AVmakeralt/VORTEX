@@ -14,6 +14,34 @@
 #ifndef VORTEX_PEA_SPECULATIVE_PEA_H
 #define VORTEX_PEA_SPECULATIVE_PEA_H
 
+/* ============================================================================
+ * PEA-4 AUDIT WARNING — NOT WIRED INTO THE COMPILER PIPELINE
+ *
+ * This module is a SCAFFOLD / PROTOTYPE. It compiles and passes unit
+ * tests, but it is NEVER CALLED from the compiler pipeline (pipeline.c's
+ * run_pea_pass does not invoke vtx_spec_pea_run). The module's output
+ * (speculative_escape_map) is not consumed by any downstream pass.
+ *
+ * Known issues (see PEA audit report):
+ *   PEA-4-1: vtx_spec_pea_run is never called from the pipeline.
+ *   PEA-4-3: vtx_spec_pea_install_guard does not emit IR guard nodes
+ *            or deopt side-table entries — it only mutates an in-memory
+ *            struct. If the module were wired in, speculation would be
+ *            silently incorrect (objects could escape without deopt).
+ *   PEA-4-5: No runtime instrumentation feeds escape observations into
+ *            the value profiles, so speculation never fires in practice.
+ *
+ * Until these issues are resolved, this module has NO effect on compiled
+ * code. It is retained as a scaffold for future implementation.
+ *
+ * To complete this module:
+ *   1. Wire vtx_spec_pea_run into run_pea_pass after vtx_pea_run.
+ *   2. Make vtx_spec_pea_install_guard emit VTX_OP_DeoptGuard nodes.
+ *   3. Add side-table entries for virtual-object materialization at deopt.
+ *   4. Add runtime profiling hooks to feed escape observations.
+ *   5. Have materialize.c query the speculative escape map.
+ * ============================================================================ */
+
 /**
  * VORTEX Speculative PEA + Lock Elision
  *

@@ -318,6 +318,24 @@ static uint32_t resolve_virtual_phis(vtx_graph_t *graph,
 
                 if (!first_vobj) continue;
 
+                /* PEA-2-2: the per-field Phi creation loop below calls
+                 * vtx_node_create(table, VTX_OP_Phi) and vtx_node_create(
+                 * table, VTX_OP_Constant), both of which may realloc
+                 * table->nodes. The `node` pointer captured at the top of
+                 * the outer loop (line 226) would become dangling; reads
+                 * of node->inputs[inp] inside the inner loop and the read
+                 * of node->id after the field loop would dereference
+                 * freed memory.
+                 *
+                 * Save the invariant data we need to read across the
+                 * creates (NodeID and input_count) so we can re-fetch
+                 * `node` after each vtx_node_create call. The input_count
+                 * does not change as a side effect of vtx_node_create
+                 * (creates add a NEW node with input_count=0), so caching
+                 * it is safe. */
+                vtx_nodeid_t node_id = node->id;
+                uint32_t input_count = node->input_count;
+
                 /* For each field, create a Phi that merges the values
                  * from all virtual inputs */
                 for (uint32_t f = 0; f < first_vobj->field_count; f++) {
@@ -330,8 +348,14 @@ static uint32_t resolve_virtual_phis(vtx_graph_t *graph,
                     vtx_node_t *field_phi = vtx_node_get(table, field_phi_id);
                     field_phi->flags = VTX_NF_PINNED;
 
+                    /* PEA-2-2: vtx_node_create above may have realloc'd
+                     * table->nodes. Re-fetch `node` so the inner loop
+                     * reads node->inputs[inp] from the live array. */
+                    node = vtx_node_get(table, node_id);
+                    if (!node) break;
+
                     /* Add inputs from each virtual object's field value */
-                    for (uint32_t inp = 0; inp < node->input_count; inp++) {
+                    for (uint32_t inp = 0; inp < input_count; inp++) {
                         vtx_nodeid_t input_id = node->inputs[inp];
                         vtx_nodeid_t field_value = VTX_NODEID_INVALID;
 
@@ -351,7 +375,32 @@ static uint32_t resolve_virtual_phis(vtx_graph_t *graph,
                             }
                         }
 
-                        /* If we couldn't find the field value, use a null constant */
+                        /* If we couldn't find the field value, check if
+                         * this input is a control node (Region/LoopBegin).
+                         * Control inputs must pass through to the field Phi
+                         * directly — the field Phi needs the same control
+                         * inputs as the original Phi to be structurally
+                         * valid and schedulable.
+                         *
+                         * PEA-2-3: previously ALL non-virtual inputs
+                         * (including Region/LoopBegin) got a NULL constant,
+                         * producing a structurally invalid Phi with
+                         * [null_const, val_0, val_1, ...] instead of
+                         * [val_0, val_1, ..., Region]. The scheduler
+                         * couldn't pin the Phi to the merge point and
+                         * the verifier would reject the graph. */
+                        if (field_value == VTX_NODEID_INVALID) {
+                            vtx_node_t *input_node = vtx_node_get(table, input_id);
+                            if (input_node &&
+                                (input_node->opcode == VTX_OP_Region ||
+                                 input_node->opcode == VTX_OP_LoopBegin)) {
+                                /* Pass the control input through directly. */
+                                field_value = input_id;
+                            }
+                        }
+
+                        /* If still no field value (non-virtual data value
+                         * that's not a control node), use a null constant. */
                         if (field_value == VTX_NODEID_INVALID) {
                             vtx_nodeid_t null_id = vtx_node_create(table, VTX_OP_Constant);
                             if (null_id != VTX_NODEID_INVALID) {
@@ -362,6 +411,12 @@ static uint32_t resolve_virtual_phis(vtx_graph_t *graph,
                             }
                         }
 
+                        /* PEA-2-2: vtx_node_create above (for the null
+                         * constant) may realloc table->nodes again.
+                         * Re-fetch `node` so the next iteration reads
+                         * node->inputs[inp] from the live array. */
+                        node = vtx_node_get(table, node_id);
+
                         vtx_node_add_input(table, field_phi_id, field_value);
                     }
 
@@ -369,8 +424,12 @@ static uint32_t resolve_virtual_phis(vtx_graph_t *graph,
                     virtual_obj_set_field(obj, field_offset, field_phi_id, arena);
                 }
 
+                /* PEA-2-2: re-fetch `node` after the per-field create
+                 * loop — vtx_node_create calls inside the loop may have
+                 * realloc'd table->nodes, leaving `node` dangling. */
+                node = vtx_node_get(table, node_id);
                 obj->state = VTX_VIRTUAL_YES;
-                result->virtual_states[node->id] = VTX_VIRTUAL_YES;
+                result->virtual_states[node_id] = VTX_VIRTUAL_YES;
                 result->virtual_count++;
                 resolved++;
                 changed = true;

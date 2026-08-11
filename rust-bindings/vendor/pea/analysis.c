@@ -62,8 +62,17 @@ static int build_allocation_map(vtx_graph_t *graph, vtx_escape_map_t *map,
     map->states = vtx_arena_alloc(arena, count * sizeof(vtx_escape_state_t));
     if (!map->states) return -1;
 
-    /* Initialize all states to NoEscape */
-    memset(map->states, 0, count * sizeof(vtx_escape_state_t));
+    /* PEA-1-2: Initialize ALL states to VTX_ESCAPE_GLOBAL (conservative
+     * default for non-allocations). Only allocations get their actual
+     * state set in the finalization step (line ~768). Previously this
+     * was memset to 0 (NoEscape), which meant vtx_pea_get_escape()
+     * returned NoEscape for non-allocations — breaking the public API
+     * contract ("returns GlobalEscape for non-allocations") and causing
+     * vtx_pea_is_scalar_replaceable() to incorrectly return true for
+     * Constants, Parameters, Phis, etc. */
+    for (uint32_t s = 0; s < count; s++) {
+        map->states[s] = VTX_ESCAPE_GLOBAL;
+    }
 
     /* Count allocations first for capacity */
     uint32_t alloc_count = 0;
@@ -804,6 +813,17 @@ vtx_escape_state_t vtx_pea_block_entry_state(const vtx_pea_analysis_t *analysis,
                                               vtx_nodeid_t alloc_id)
 {
     VTX_ASSERT(analysis != NULL, "analysis must not be NULL");
+    /* PEA-1-2/PEA-1-12: non-allocations always return GlobalEscape
+     * (conservative). The per-block entry_state[] is zero-initialized
+     * and only allocations get their state updated during dataflow —
+     * so reading entry_state[non_alloc_id] would return NoEscape
+     * (wrong). Check the global escape map first: if the global state
+     * is GlobalEscape, the node is either a non-allocation or an
+     * escaping allocation — in both cases, the per-block state is
+     * irrelevant (the object escapes regardless). */
+    if (vtx_pea_get_escape(analysis, alloc_id) == VTX_ESCAPE_GLOBAL) {
+        return VTX_ESCAPE_GLOBAL;
+    }
     if (block_idx < analysis->block_state_count &&
         alloc_id < analysis->block_states[block_idx].state_count) {
         return analysis->block_states[block_idx].entry_state[alloc_id];
@@ -816,6 +836,11 @@ vtx_escape_state_t vtx_pea_block_exit_state(const vtx_pea_analysis_t *analysis,
                                              vtx_nodeid_t alloc_id)
 {
     VTX_ASSERT(analysis != NULL, "analysis must not be NULL");
+    /* PEA-1-2/PEA-1-12: same as block_entry_state — non-allocations
+     * return GlobalEscape. */
+    if (vtx_pea_get_escape(analysis, alloc_id) == VTX_ESCAPE_GLOBAL) {
+        return VTX_ESCAPE_GLOBAL;
+    }
     if (block_idx < analysis->block_state_count &&
         alloc_id < analysis->block_states[block_idx].state_count) {
         return analysis->block_states[block_idx].exit_state[alloc_id];

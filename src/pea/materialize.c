@@ -266,9 +266,16 @@ static vtx_materialize_point_t *add_materialize_point(
  * The last StoreField node becomes the new memory state for subsequent
  * nodes in the predecessor block.
  */
+/* PEA-2-6: insert_materialization_code now returns the final memory
+ * state (the last StoreField's NodeID) via out_final_mem_state. The
+ * caller uses this to connect the materialization chain to the escape
+ * point's memory input — without this connection, the scheduler may
+ * place the StoreFields AFTER the escape point, causing it to read
+ * uninitialized heap memory. */
 static int insert_materialization_code(vtx_graph_t *graph,
                                         vtx_materialize_point_t *pt,
-                                        vtx_arena_t *arena)
+                                        vtx_arena_t *arena,
+                                        vtx_nodeid_t *out_final_mem_state)
 {
     vtx_node_table_t *table = &graph->node_table;
 
@@ -314,6 +321,12 @@ static int insert_materialization_code(vtx_graph_t *graph,
 
         /* This StoreField becomes the new memory state */
         mem_state = store_id;
+    }
+
+    /* PEA-2-6: return the final memory state so the caller can
+     * connect it to the escape point's memory input. */
+    if (out_final_mem_state) {
+        *out_final_mem_state = mem_state;
     }
 
     return 0;
@@ -429,15 +442,39 @@ vtx_materialize_result_t *vtx_materialize_run(vtx_graph_t *graph,
                     MAX_FIELDS_PER_OBJ);
             }
 
-            /* Insert materialization code */
-            if (insert_materialization_code(graph, pt, arena) != 0) {
+            /* Insert materialization code.
+             * PEA-2-6: get the final memory state so we can connect the
+             * materialization chain to the escape point's memory input. */
+            vtx_nodeid_t final_mem = VTX_NODEID_INVALID;
+            if (insert_materialization_code(graph, pt, arena, &final_mem) != 0) {
                 return NULL;
             }
+
+            /* PEA-2-1: insert_materialization_code() calls vtx_node_create()
+             * (NewObject + StoreField per field), which may realloc
+             * table->nodes when count == capacity. The `node` pointer
+             * captured at the top of this scan loop is now dangling.
+             * Re-fetch via the loop index (= node->id by the table invariant)
+             * before reading node->id below and before the inner for-loop
+             * continues (next iteration reads node->input_count and
+             * node->inputs[inp] from the stale pointer). */
+            node = &table->nodes[i];
 
             /* Replace the reference to the scalar-replaced allocation
              * with the materialized object */
             vtx_node_replace_input(table, node->id, inp,
                                     pt->materialized_obj_id);
+
+            /* PEA-2-6: connect the materialization chain to the escape
+             * point's memory input. Add the last StoreField as an
+             * additional memory input to the escape point so the
+             * scheduler orders the stores BEFORE the escape. Without
+             * this, the escape point (Call/Return/Deopt) may execute
+             * before the field stores complete, reading uninitialized
+             * heap memory. */
+            if (final_mem != VTX_NODEID_INVALID) {
+                vtx_node_add_input(table, node->id, final_mem);
+            }
 
             result->objects_materialized++;
             result->fields_stored += pt->field_count;
@@ -507,12 +544,25 @@ vtx_materialize_result_t *vtx_materialize_run(vtx_graph_t *graph,
                     MAX_FIELDS_PER_OBJ);
             }
 
-            if (insert_materialization_code(graph, pt, arena) != 0) {
+            /* PEA-2-6: pass out_final_mem_state to connect the chain. */
+            vtx_nodeid_t final_mem = VTX_NODEID_INVALID;
+            if (insert_materialization_code(graph, pt, arena, &final_mem) != 0) {
                 return NULL;
             }
 
+            /* PEA-2-1: re-fetch `node` — insert_materialization_code()
+             * calls vtx_node_create() (NewObject + StoreField per field),
+             * which may realloc table->nodes. The FrameState scan loop's
+             * `node` pointer is now dangling; re-fetch via the loop index. */
+            node = &table->nodes[i];
+
             vtx_node_replace_input(table, node->id, inp,
                                     pt->materialized_obj_id);
+
+            /* PEA-2-6: connect materialization chain to escape point. */
+            if (final_mem != VTX_NODEID_INVALID) {
+                vtx_node_add_input(table, node->id, final_mem);
+            }
 
             result->objects_materialized++;
             result->fields_stored += pt->field_count;
@@ -626,14 +676,29 @@ vtx_materialize_result_t *vtx_materialize_run(vtx_graph_t *graph,
             /* Insert materialization code (NewObject + StoreField).
              * The predecessor_control field is set, so the NewObject
              * will be anchored to the predecessor block's control node,
-             * ensuring correct placement. */
-            if (insert_materialization_code(graph, pt, arena) != 0) {
+             * ensuring correct placement.
+             * PEA-2-6: pass out_final_mem_state to connect the chain. */
+            vtx_nodeid_t final_mem = VTX_NODEID_INVALID;
+            if (insert_materialization_code(graph, pt, arena, &final_mem) != 0) {
                 return NULL;
             }
+
+            /* PEA-2-1: re-fetch `node` — insert_materialization_code()
+             * calls vtx_node_create() (NewObject + StoreField per field),
+             * which may realloc table->nodes. The Phi scan loop's
+             * `node` pointer is now dangling; re-fetch via the loop index. */
+            node = &table->nodes[i];
 
             /* Replace the Phi's input with the materialized object */
             vtx_node_replace_input(table, node->id, inp,
                                     pt->materialized_obj_id);
+
+            /* PEA-2-6: connect materialization chain to the Phi's
+             * memory input so the scheduler orders stores before
+             * any memory-dependent use of the Phi's result. */
+            if (final_mem != VTX_NODEID_INVALID) {
+                vtx_node_add_input(table, node->id, final_mem);
+            }
 
             result->objects_materialized++;
             result->fields_stored += pt->field_count;
