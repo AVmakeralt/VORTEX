@@ -1,0 +1,1025 @@
+     1→# VORTEX Tests CMake
+     2→
+     3→# Test framework library
+     4→add_library(vortex_test_framework STATIC
+     5→    test_framework.c
+     6→)
+     7→target_include_directories(vortex_test_framework PUBLIC
+     8→    ${CMAKE_CURRENT_SOURCE_DIR}
+     9→    ${VORTEX_INCLUDE_DIRS}
+    10→)
+    11→
+    12→# ---- Unit tests ----
+    13→
+    14→# test_arena
+    15→add_executable(test_arena
+    16→    unit/test_arena.c
+    17→)
+    18→target_link_libraries(test_arena PRIVATE vortex_test_framework vortex_common)
+    19→add_test(NAME test_arena COMMAND test_arena)
+    20→
+    21→# test_object
+    22→add_executable(test_object
+    23→    unit/test_object.c
+    24→)
+    25→target_link_libraries(test_object PRIVATE vortex_test_framework vortex_runtime)
+    26→add_test(NAME test_object COMMAND test_object)
+    27→
+    28→# test_bytecode
+    29→add_executable(test_bytecode
+    30→    unit/test_bytecode.c
+    31→)
+    32→target_link_libraries(test_bytecode PRIVATE vortex_test_framework vortex_runtime)
+    33→add_test(NAME test_bytecode COMMAND test_bytecode)
+    34→
+    35→# test_type_system
+    36→add_executable(test_type_system
+    37→    unit/test_type_system.c
+    38→)
+    39→target_link_libraries(test_type_system PRIVATE vortex_test_framework vortex_runtime)
+    40→add_test(NAME test_type_system COMMAND test_type_system)
+    41→
+    42→# test_node
+    43→add_executable(test_node
+    44→    unit/test_node.c
+    45→)
+    46→target_link_libraries(test_node PRIVATE vortex_test_framework vortex_ir)
+    47→add_test(NAME test_node COMMAND test_node)
+    48→
+    49→# test_graph
+    50→add_executable(test_graph
+    51→    unit/test_graph.c
+    52→)
+    53→target_link_libraries(test_graph PRIVATE vortex_test_framework vortex_ir vortex_runtime)
+    54→add_test(NAME test_graph COMMAND test_graph)
+    55→
+    56→# test_bugfixes — comprehensive bug fix verification
+    57→add_executable(test_bugfixes
+    58→    unit/test_bugfixes.c
+    59→)
+    60→target_link_libraries(test_bugfixes PRIVATE
+    61→    -Wl,--start-group
+    62→    vortex_test_framework
+    63→    vortex_ir
+    64→    vortex_interp
+    65→    vortex_runtime
+    66→    vortex_baseline
+    67→    vortex_compile
+    68→    vortex_lower
+    69→    vortex_codecache
+    70→    vortex_deopt
+    71→    vortex_guard
+    72→    vortex_profile
+    73→    vortex_inliner
+    74→    vortex_pea
+    75→    vortex_midtier
+    76→    -Wl,--end-group
+    77→    m
+    78→    pthread
+    79→)
+    80→add_test(NAME test_bugfixes COMMAND test_bugfixes)
+    81→
+    82→# test_ir_bugfixes — IR-specific edge case tests for bug audit
+    83→add_executable(test_ir_bugfixes
+    84→    unit/test_ir_bugfixes.c
+    85→)
+    86→target_link_libraries(test_ir_bugfixes PRIVATE
+    87→    vortex_test_framework
+    88→    vortex_ir
+    89→    vortex_runtime
+    90→    m
+    91→)
+    92→add_test(NAME test_ir_bugfixes COMMAND test_ir_bugfixes)
+    93→
+    94→# test_zero_cost_deopt — zero-cost deopt feature verification
+    95→add_executable(test_zero_cost_deopt
+    96→    unit/test_zero_cost_deopt.c
+    97→)
+    98→target_link_libraries(test_zero_cost_deopt PRIVATE
+    99→-Wl,--start-group
+   100→    vortex_test_framework
+   101→    -Wl,--start-group
+   102→    vortex_guard
+   103→    vortex_compile
+   104→    vortex_lower
+   105→    vortex_codecache
+   106→    vortex_deopt
+   107→    vortex_ir
+   108→    vortex_interp
+   109→    vortex_runtime
+   110→    vortex_profile
+   111→    vortex_baseline
+   112→    vortex_inliner
+   113→    vortex_pea
+   114→    -Wl,--end-group
+   115→    m
+   116→    pthread
+   117→-Wl,--end-group
+   118→)
+   119→add_test(NAME test_zero_cost_deopt COMMAND test_zero_cost_deopt)
+   120→
+   121→# test_p2_features — P2 feature verification
+   122→add_executable(test_p2_features
+   123→    unit/test_p2_features.c
+   124→)
+   125→target_link_libraries(test_p2_features PRIVATE
+   126→-Wl,--start-group
+   127→    vortex_test_framework
+   128→    -Wl,--start-group
+   129→    vortex_guard
+   130→    vortex_compile
+   131→    vortex_lower
+   132→    vortex_codecache
+   133→    vortex_deopt
+   134→    vortex_ir
+   135→    vortex_interp
+   136→    vortex_runtime
+   137→    vortex_profile
+   138→    vortex_baseline
+   139→    vortex_inliner
+   140→    vortex_pea
+   141→    -Wl,--end-group
+   142→    m
+   143→    pthread
+   144→-Wl,--end-group
+   145→)
+   146→add_test(NAME test_p2_features COMMAND test_p2_features)
+   147→
+   148→# test_smi_arith — SMI arithmetic correctness (encoding, interpreter, T2 JIT)
+   149→add_executable(test_smi_arith
+   150→    unit/test_smi_arith.c
+   151→)
+   152→target_link_libraries(test_smi_arith PRIVATE
+   153→-Wl,--start-group
+   154→    vortex_test_framework
+   155→    -Wl,--start-group
+   156→    vortex_baseline
+   157→    vortex_codecache
+   158→    vortex_compile
+   159→    vortex_interp
+   160→    vortex_runtime
+   161→    vortex_ir
+   162→    vortex_guard
+   163→    vortex_deopt
+   164→    vortex_profile
+   165→    vortex_lower
+   166→    vortex_inliner
+   167→    vortex_pea
+   168→    $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota>
+   169→    vortex_midtier
+   170→    vortex_trace
+   171→    vortex_region
+   172→    -Wl,--end-group
+   173→    m
+   174→    pthread
+   175→-Wl,--end-group
+   176→)
+   177→add_test(NAME test_smi_arith COMMAND test_smi_arith)
+   178→
+   179→# ---- Integration tests ----
+   180→
+   181→# test_interp_basics
+   182→add_executable(test_interp_basics
+   183→    integration/test_interp_basics.c
+   184→)
+   185→target_link_libraries(test_interp_basics PRIVATE
+   186→-Wl,--start-group
+   187→    vortex_test_framework
+   188→    -Wl,--start-group
+   189→    vortex_compile
+   190→    vortex_baseline
+   191→    vortex_lower
+   192→    vortex_codecache
+   193→    vortex_interp
+   194→    vortex_runtime
+   195→    vortex_ir
+   196→    vortex_guard
+   197→    vortex_deopt
+   198→    vortex_profile
+   199→    vortex_inliner
+   200→    vortex_pea
+   201→    -Wl,--end-group
+   202→    m
+   203→    pthread
+   204→-Wl,--end-group
+   205→)
+   206→add_test(NAME test_interp_basics COMMAND test_interp_basics)
+   207→
+   208→# test_jit_e2e — End-to-end JIT compilation and execution tests
+   209→add_executable(test_jit_e2e
+   210→    integration/test_jit_e2e.c
+   211→)
+   212→target_link_libraries(test_jit_e2e PRIVATE
+   213→-Wl,--start-group
+   214→    vortex_test_framework
+   215→    -Wl,--start-group
+   216→    vortex_baseline
+   217→    vortex_codecache
+   218→    vortex_compile
+   219→    vortex_interp
+   220→    vortex_runtime
+   221→    vortex_ir
+   222→    vortex_guard
+   223→    vortex_deopt
+   224→    vortex_profile
+   225→    vortex_lower
+   226→    vortex_inliner
+   227→    vortex_pea
+   228→    $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota>
+   229→    vortex_midtier
+   230→    vortex_trace
+   231→    vortex_region
+   232→    -Wl,--end-group
+   233→    m
+   234→    pthread
+   235→-Wl,--end-group
+   236→)
+   237→add_test(NAME test_jit_e2e COMMAND test_jit_e2e)
+   238→
+   239→# ---- Fuzz tests ----
+   240→
+   241→# fuzz_graph_build: 500+ random valid bytecode programs through vtx_graph_build()
+   242→add_executable(fuzz_graph_build
+   243→    fuzz/fuzz_graph_build.c
+   244→)
+   245→target_link_libraries(fuzz_graph_build PRIVATE
+   246→    vortex_test_framework
+   247→    vortex_ir
+   248→    vortex_runtime
+   249→    m
+   250→)
+   251→add_test(NAME fuzz_graph_build COMMAND fuzz_graph_build)
+   252→set_tests_properties(fuzz_graph_build PROPERTIES TIMEOUT 60)
+   253→
+   254→# test_assembler_prog: program-mode assembler (labels + pseudo-instructions)
+   255→add_executable(test_assembler_prog
+   256→    unit/test_assembler_prog.c
+   257→)
+   258→target_link_libraries(test_assembler_prog PRIVATE
+   259→    vortex_test_framework
+   260→    vortex_ir
+   261→    vortex_runtime
+   262→    vortex_assembler
+   263→    m
+   264→)
+   265→add_test(NAME test_assembler_prog COMMAND test_assembler_prog)
+   266→
+   267→# test_tier_equivalence: 30+ programs, T0 interpreter == T2 JIT result
+   268→add_executable(test_tier_equivalence
+   269→    integration/test_tier_equivalence.c
+   270→)
+   271→target_link_libraries(test_tier_equivalence PRIVATE
+   272→-Wl,--start-group
+   273→    vortex_test_framework
+   274→    -Wl,--start-group
+   275→    vortex_baseline
+   276→    vortex_codecache
+   277→    vortex_compile
+   278→    vortex_interp
+   279→    vortex_runtime
+   280→    vortex_ir
+   281→    vortex_guard
+   282→    vortex_deopt
+   283→    vortex_profile
+   284→    vortex_lower
+   285→    vortex_inliner
+   286→    vortex_pea
+   287→    $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota>
+   288→    vortex_midtier
+   289→    vortex_trace
+   290→    vortex_region
+   291→    vortex_assembler
+   292→    -Wl,--end-group
+   293→    m
+   294→    pthread
+   295→-Wl,--end-group
+   296→)
+   297→add_test(NAME test_tier_equivalence COMMAND test_tier_equivalence)
+   298→set_tests_properties(test_tier_equivalence PROPERTIES TIMEOUT 120)
+   299→
+   300→# test_deopt_rate_limit: per-site, batcher, and global budget primitives
+   301→add_executable(test_deopt_rate_limit
+   302→    unit/test_deopt_rate_limit.c
+   303→)
+   304→target_link_libraries(test_deopt_rate_limit PRIVATE
+   305→    vortex_test_framework
+   306→    vortex_deopt
+   307→    m
+   308→)
+   309→add_test(NAME test_deopt_rate_limit COMMAND test_deopt_rate_limit)
+   310→
+   311→# test_deopt_coordinator: integration of rate_limit into deopt decision path
+   312→add_executable(test_deopt_coordinator
+   313→    unit/test_deopt_coordinator.c
+   314→)
+   315→target_link_libraries(test_deopt_coordinator PRIVATE
+   316→    vortex_test_framework
+   317→    vortex_deopt
+   318→    m
+   319→)
+   320→add_test(NAME test_deopt_coordinator COMMAND test_deopt_coordinator)
+   321→
+   322→# test_versioned_cache: N+1 versioning, patching, reclamation
+   323→add_executable(test_versioned_cache
+   324→    unit/test_versioned_cache.c
+   325→)
+   326→target_link_libraries(test_versioned_cache PRIVATE
+   327→    vortex_test_framework
+   328→    vortex_codecache
+   329→    m
+   330→    pthread
+   331→)
+   332→add_test(NAME test_versioned_cache COMMAND test_versioned_cache)
+   333→
+   334→# test_regalloc_upgrade: loop-boundary splitting, rematerialization
+   335→add_executable(test_regalloc_upgrade
+   336→    unit/test_regalloc_upgrade.c
+   337→)
+   338→target_link_libraries(test_regalloc_upgrade PRIVATE
+   339→    -Wl,--start-group
+   340→    vortex_test_framework
+   341→    vortex_lower
+   342→    vortex_compile
+   343→    vortex_ir
+   344→    vortex_runtime
+   345→    vortex_interp
+   346→    vortex_baseline
+   347→    vortex_deopt
+   348→    vortex_codecache
+   349→    vortex_guard
+   350→    vortex_profile
+   351→    vortex_inliner
+   352→    vortex_pea
+   353→    vortex_midtier
+   354→    -Wl,--end-group
+   355→    m
+   356→    pthread
+   357→)
+   358→add_test(NAME test_regalloc_upgrade COMMAND test_regalloc_upgrade)
+   359→
+   360→# test_safepoint_manager: thread-safe GC safepoint coordination
+   361→add_executable(test_safepoint_manager
+   362→    unit/test_safepoint_manager.c
+   363→)
+   364→target_link_libraries(test_safepoint_manager PRIVATE
+   365→    vortex_test_framework
+   366→    vortex_runtime
+   367→    m
+   368→    pthread
+   369→)
+   370→add_test(NAME test_safepoint_manager COMMAND test_safepoint_manager)
+   371→set_tests_properties(test_safepoint_manager PROPERTIES TIMEOUT 30)
+   372→
+   373→# test_pgo_sprint1: PGO stability features (confidence, hysteresis, backpressure, deterministic)
+   374→add_executable(test_pgo_sprint1
+   375→    unit/test_pgo_sprint1.c
+   376→)
+   377→target_link_libraries(test_pgo_sprint1 PRIVATE
+   378→    vortex_test_framework
+   379→    vortex_profile
+   380→    $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota>
+   381→    vortex_runtime
+   382→    m
+   383→    pthread
+   384→)
+   385→add_test(NAME test_pgo_sprint1 COMMAND test_pgo_sprint1)
+   386→set_tests_properties(test_pgo_sprint1 PROPERTIES TIMEOUT 30)
+   387→
+   388→# test_pgo_sprint2: PGO phase partitioning (per-phase storage, transition, persistence)
+   389→add_executable(test_pgo_sprint2
+   390→    unit/test_pgo_sprint2.c
+   391→)
+   392→target_link_libraries(test_pgo_sprint2 PRIVATE
+   393→    vortex_test_framework
+   394→    vortex_profile
+   395→    vortex_runtime
+   396→    m
+   397→    pthread
+   398→)
+   399→add_test(NAME test_pgo_sprint2 COMMAND test_pgo_sprint2)
+   400→set_tests_properties(test_pgo_sprint2 PROPERTIES TIMEOUT 30)
+   401→
+   402→# test_pgo_sprint3: PGO ensemble profiles (robust aggregate, demotion, rollback)
+   403→add_executable(test_pgo_sprint3
+   404→    unit/test_pgo_sprint3.c
+   405→)
+   406→target_link_libraries(test_pgo_sprint3 PRIVATE
+   407→    vortex_test_framework
+   408→    vortex_profile
+   409→    vortex_runtime
+   410→    m
+   411→    pthread
+   412→)
+   413→add_test(NAME test_pgo_sprint3 COMMAND test_pgo_sprint3)
+   414→set_tests_properties(test_pgo_sprint3 PROPERTIES TIMEOUT 30)
+   415→
+   416→# test_pgo_sprint4: PGO input-shape-keyed profiles (novel differentiator)
+   417→add_executable(test_pgo_sprint4
+   418→    unit/test_pgo_sprint4.c
+   419→)
+   420→target_link_libraries(test_pgo_sprint4 PRIVATE
+   421→    vortex_test_framework
+   422→    vortex_profile
+   423→    vortex_runtime
+   424→    m
+   425→    pthread
+   426→)
+   427→add_test(NAME test_pgo_sprint4 COMMAND test_pgo_sprint4)
+   428→set_tests_properties(test_pgo_sprint4 PROPERTIES TIMEOUT 30)
+   429→
+   430→# test_pgo_sprint5: PGO T1 code persistence (cold-start killer)
+   431→add_executable(test_pgo_sprint5
+   432→    unit/test_pgo_sprint5.c
+   433→)
+   434→target_link_libraries(test_pgo_sprint5 PRIVATE
+   435→    vortex_test_framework
+   436→    vortex_codecache
+   437→    vortex_profile
+   438→    vortex_runtime
+   439→    vortex_lower
+   440→    vortex_ir
+   441→    vortex_deopt
+   442→    m
+   443→    pthread
+   444→)
+   445→add_test(NAME test_pgo_sprint5 COMMAND test_pgo_sprint5)
+   446→set_tests_properties(test_pgo_sprint5 PROPERTIES TIMEOUT 30)
+   447→
+   448→# test_pgo_sprint6: PGO profile patching (append-only updates, crash recovery)
+   449→add_executable(test_pgo_sprint6
+   450→    unit/test_pgo_sprint6.c
+   451→)
+   452→target_link_libraries(test_pgo_sprint6 PRIVATE
+   453→    vortex_test_framework
+   454→    vortex_profile
+   455→    vortex_runtime
+   456→    m
+   457→    pthread
+   458→)
+   459→add_test(NAME test_pgo_sprint6 COMMAND test_pgo_sprint6)
+   460→set_tests_properties(test_pgo_sprint6 PROPERTIES TIMEOUT 30)
+   461→
+   462→# ---- Stress tests (1000 tests) ----
+   463→
+   464→# test_stress_runtime: Arena, Object, Type System, Bytecode, GC (200 tests)
+   465→add_executable(test_stress_runtime
+   466→    stress/test_stress_runtime.c
+   467→)
+   468→target_link_libraries(test_stress_runtime PRIVATE
+   469→    vortex_test_framework
+   470→    vortex_runtime
+   471→    m
+   472→)
+   473→add_test(NAME test_stress_runtime COMMAND test_stress_runtime)
+   474→
+   475→# test_stress_ir: Node, Graph, GVN, SCCP, DCE, Schedule, TBAA, LICM, Bounds, Induction (200 tests)
+   476→add_executable(test_stress_ir
+   477→    stress/test_stress_ir.c
+   478→)
+   479→target_link_libraries(test_stress_ir PRIVATE
+   480→    vortex_test_framework
+   481→    vortex_ir
+   482→    vortex_runtime
+   483→    m
+   484→)
+   485→add_test(NAME test_stress_ir COMMAND test_stress_ir)
+   486→
+   487→# test_stress_profile_trace: Profile, Trace, Region, Guard, Deopt (200 tests)
+   488→add_executable(test_stress_profile_trace
+   489→    stress/test_stress_profile_trace.c
+   490→)
+   491→target_link_libraries(test_stress_profile_trace PRIVATE
+   492→    vortex_test_framework
+   493→    vortex_profile
+   494→    vortex_trace
+   495→    vortex_region
+   496→    vortex_guard
+   497→    vortex_deopt
+   498→    vortex_ir
+   499→    vortex_interp
+   500→    vortex_runtime
+   501→    vortex_codecache
+   502→    m
+   503→    pthread
+   504→)
+   505→add_test(NAME test_stress_profile_trace COMMAND test_stress_profile_trace)
+   506→
+   507→# test_stress_compile_lower: Compile, Inliner, Lower, CodeCache, SOTA, PEA (200 tests)
+   508→add_executable(test_stress_compile_lower
+   509→    stress/test_stress_compile_lower.c
+   510→)
+   511→target_link_libraries(test_stress_compile_lower PRIVATE
+   512→-Wl,--start-group
+   513→    vortex_test_framework
+   514→    vortex_compile
+   515→    vortex_inliner
+   516→    vortex_lower
+   517→    vortex_codecache
+   518→    $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota>
+   519→    vortex_pea
+   520→    vortex_ir
+   521→    vortex_runtime
+   522→    vortex_profile
+   523→    vortex_deopt
+   524→    vortex_guard
+   525→    vortex_interp
+   526→    vortex_baseline
+   527→    m
+   528→-Wl,--end-group
+   529→)
+   530→add_test(NAME test_stress_compile_lower COMMAND test_stress_compile_lower)
+   531→
+   532→# test_stress_integration: Full pipeline, Interpreter, Profile+Graph, Deopt+Graph, Multi-subsystem (200 tests)
+   533→add_executable(test_stress_integration
+   534→    stress/test_stress_integration.c
+   535→)
+   536→target_link_libraries(test_stress_integration PRIVATE
+   537→    vortex_test_framework
+   538→    vortex_interp
+   539→    vortex_ir
+   540→    vortex_runtime
+   541→    vortex_profile
+   542→    vortex_guard
+   543→    vortex_deopt
+   544→    vortex_trace
+   545→    vortex_region
+   546→    vortex_codecache
+   547→    m
+   548→    pthread
+   549→)
+   550→add_test(NAME test_stress_integration COMMAND test_stress_integration)
+   551→
+   552→# ---- Opcode tests (B4-B8 patches + extras) ----
+   553→# test_opcodes_b4_b8: Validates B4 (InstanceOf), B5 (IsNull), B6 (NewArray),
+   554→#   B7 (CallStatic), B8 (CallVirtual) bugfixes, plus NEW, LOAD_FIELD/STORE_FIELD,
+   555→#   ARRAY_LOAD/STORE/LENGTH, THROW/CATCH.
+   556→# Built with the manual build script at /home/z/my-project/scripts/build_opcode_test.sh
+   557→# when cmake is unavailable.
+   558→add_executable(test_opcodes_b4_b8
+   559→    opcode/test_opcodes_b4_b8.c
+   560→)
+   561→target_link_libraries(test_opcodes_b4_b8 PRIVATE
+   562→-Wl,--start-group
+   563→    vortex_test_framework
+   564→    vortex_interp
+   565→    vortex_ir
+   566→    vortex_runtime
+   567→    vortex_baseline
+   568→    vortex_trace
+   569→    vortex_region
+   570→    vortex_pea
+   571→    vortex_deopt
+   572→    vortex_inliner
+   573→    vortex_profile
+   574→    vortex_lower
+   575→    vortex_codecache
+   576→    vortex_compile
+   577→    vortex_guard
+   578→    vortex_midtier
+   579→    $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota>
+   580→    vortex_common
+   581→    m
+   582→    pthread
+   583→-Wl,--end-group
+   584→)
+   585→add_test(NAME test_opcodes_b4_b8 COMMAND test_opcodes_b4_b8)
+   586→
+   587→# ==========================================================================
+   588→# TEST-001 fix: Build the orphaned test files in tests/opcode/ that were
+   589→# previously not declared as add_executable() targets.
+   590→# ==========================================================================
+   591→
+   592→# test_jit_deopt: JIT compilation + interpreter→JIT re-enter + deopt
+   593→add_executable(test_jit_deopt
+   594→    opcode/test_jit_deopt.c
+   595→)
+   596→target_link_libraries(test_jit_deopt PRIVATE
+   597→-Wl,--start-group
+   598→    vortex_test_framework
+   599→    vortex_interp
+   600→    vortex_ir
+   601→    vortex_runtime
+   602→    vortex_baseline
+   603→    vortex_trace
+   604→    vortex_region
+   605→    vortex_pea
+   606→    vortex_deopt
+   607→    vortex_inliner
+   608→    vortex_profile
+   609→    vortex_lower
+   610→    vortex_codecache
+   611→    vortex_compile
+   612→    vortex_guard
+   613→    vortex_midtier
+   614→    $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota>
+   615→    vortex_common
+   616→    m
+   617→    pthread
+   618→-Wl,--end-group
+   619→)
+   620→add_test(NAME test_jit_deopt COMMAND test_jit_deopt)
+   621→
+   622→# test_mul5_trace: T2 pipeline mul5 trace bug test
+   623→add_executable(test_mul5_trace
+   624→    opcode/test_mul5_trace.c
+   625→)
+   626→target_link_libraries(test_mul5_trace PRIVATE
+   627→-Wl,--start-group
+   628→    vortex_test_framework
+   629→    vortex_interp
+   630→    vortex_ir
+   631→    vortex_runtime
+   632→    vortex_baseline
+   633→    vortex_trace
+   634→    vortex_region
+   635→    vortex_pea
+   636→    vortex_deopt
+   637→    vortex_inliner
+   638→    vortex_profile
+   639→    vortex_lower
+   640→    vortex_codecache
+   641→    vortex_compile
+   642→    vortex_guard
+   643→    vortex_midtier
+   644→    $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota>
+   645→    vortex_common
+   646→    m
+   647→    pthread
+   648→-Wl,--end-group
+   649→)
+   650→add_test(NAME test_mul5_trace COMMAND test_mul5_trace)
+   651→
+   652→# test_rep_infer: rep_infer pass test
+   653→add_executable(test_rep_infer
+   654→    opcode/test_rep_infer.c
+   655→)
+   656→target_link_libraries(test_rep_infer PRIVATE
+   657→-Wl,--start-group
+   658→    vortex_test_framework
+   659→    vortex_interp
+   660→    vortex_ir
+   661→    vortex_runtime
+   662→    vortex_baseline
+   663→    vortex_trace
+   664→    vortex_region
+   665→    vortex_pea
+   666→    vortex_deopt
+   667→    vortex_inliner
+   668→    vortex_profile
+   669→    vortex_lower
+   670→    vortex_codecache
+   671→    vortex_compile
+   672→    vortex_guard
+   673→    vortex_midtier
+   674→    $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota>
+   675→    vortex_common
+   676→    m
+   677→    pthread
+   678→-Wl,--end-group
+   679→)
+   680→add_test(NAME test_rep_infer COMMAND test_rep_infer)
+   681→
+   682→# test_deopt_dynamic: dynamic deopt system test
+   683→add_executable(test_deopt_dynamic
+   684→    opcode/test_deopt_dynamic.c
+   685→)
+   686→target_link_libraries(test_deopt_dynamic PRIVATE
+   687→-Wl,--start-group
+   688→    vortex_test_framework
+   689→    vortex_interp
+   690→    vortex_ir
+   691→    vortex_runtime
+   692→    vortex_baseline
+   693→    vortex_trace
+   694→    vortex_region
+   695→    vortex_pea
+   696→    vortex_deopt
+   697→    vortex_inliner
+   698→    vortex_profile
+   699→    vortex_lower
+   700→    vortex_codecache
+   701→    vortex_compile
+   702→    vortex_guard
+   703→    vortex_midtier
+   704→    $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota>
+   705→    vortex_common
+   706→    m
+   707→    pthread
+   708→-Wl,--end-group
+   709→)
+   710→add_test(NAME test_deopt_dynamic COMMAND test_deopt_dynamic)
+   711→
+   712→# Note: tests/opcode/test_opcodes.c is intentionally NOT built — it uses
+   713→# popen() to invoke /tmp/vortex (TEST-003), which is not portable.
+   714→
+   715→# ==========================================================================
+   716→# OSR Cluster D regression tests (Concurrency & GC):
+   717→#   OSR-4  — stack walker reads return addr from [RBP+32]
+   718→#   OSR-18 — atomic dedup + atomic profiler counters
+   719→#   OSR-20/21 — code-cache quarantine defers metadata free
+   720→#   OSR-22 — versioned cache on_enter/on_exit wired into dispatch loop
+   721→#   OSR-26 — GC conservative scanner window widened + writeback
+   722→# ==========================================================================
+   723→
+   724→# Shared link group for OSR regression tests. These exercise the full
+   725→# pipeline (interp → JIT → GC → deopt) so they need every library.
+   726→set(VORTEX_OSR_TEST_LIBS
+   727→    vortex_test_framework
+   728→    vortex_interp
+   729→    vortex_ir
+   730→    vortex_runtime
+   731→    vortex_baseline
+   732→    vortex_trace
+   733→    vortex_region
+   734→    vortex_pea
+   735→    vortex_deopt
+   736→    vortex_inliner
+   737→    vortex_profile
+   738→    vortex_lower
+   739→    vortex_codecache
+   740→    vortex_compile
+   741→    vortex_guard
+   742→    vortex_midtier
+   743→    $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota>
+   744→    vortex_common
+   745→    m
+   746→    pthread
+   747→)
+   748→
+   749→# OSR-4: stack-walker return-address offset
+   750→add_executable(test_osr4_stack_walk_return_addr
+   751→    regression/osr/test_osr4_stack_walk_return_addr.c
+   752→)
+   753→target_link_libraries(test_osr4_stack_walk_return_addr PRIVATE
+   754→    -Wl,--start-group
+   755→    ${VORTEX_OSR_TEST_LIBS}
+   756→    -Wl,--end-group
+   757→)
+   758→add_test(NAME test_osr4_stack_walk_return_addr
+   759→    COMMAND test_osr4_stack_walk_return_addr)
+   760→
+   761→# OSR-18: atomic dedup in vtx_request_compilation + atomic profiler counters
+   762→add_executable(test_osr18_atomic_dedup
+   763→    regression/osr/test_osr18_atomic_dedup.c
+   764→)
+   765→target_link_libraries(test_osr18_atomic_dedup PRIVATE
+   766→    -Wl,--start-group
+   767→    ${VORTEX_OSR_TEST_LIBS}
+   768→    -Wl,--end-group
+   769→)
+   770→add_test(NAME test_osr18_atomic_dedup
+   771→    COMMAND test_osr18_atomic_dedup)
+   772→
+   773→# OSR-20 / OSR-21: code-cache quarantine defers metadata free
+   774→add_executable(test_osr20_21_quarantine
+   775→    regression/osr/test_osr20_21_quarantine.c
+   776→)
+   777→target_link_libraries(test_osr20_21_quarantine PRIVATE
+   778→    -Wl,--start-group
+   779→    ${VORTEX_OSR_TEST_LIBS}
+   780→    -Wl,--end-group
+   781→)
+   782→add_test(NAME test_osr20_21_quarantine
+   783→    COMMAND test_osr20_21_quarantine)
+   784→
+   785→# OSR-22: versioned cache on_enter/on_exit wired into dispatch loop's JIT path
+   786→add_executable(test_osr22_versioned_cache_on_enter_exit
+   787→    regression/osr/test_osr22_versioned_cache_on_enter_exit.c
+   788→)
+   789→target_link_libraries(test_osr22_versioned_cache_on_enter_exit PRIVATE
+   790→    -Wl,--start-group
+   791→    ${VORTEX_OSR_TEST_LIBS}
+   792→    -Wl,--end-group
+   793→)
+   794→add_test(NAME test_osr22_versioned_cache_on_enter_exit
+   795→    COMMAND test_osr22_versioned_cache_on_enter_exit)
+   796→
+   797→# OSR-26: GC conservative scanner window widened + forwarded-pointer writeback
+   798→add_executable(test_osr26_gc_conservative_scanner
+   799→    regression/osr/test_osr26_gc_conservative_scanner.c
+   800→)
+   801→target_link_libraries(test_osr26_gc_conservative_scanner PRIVATE
+   802→    -Wl,--start-group
+   803→    ${VORTEX_OSR_TEST_LIBS}
+   804→    -Wl,--end-group
+   805→)
+   806→add_test(NAME test_osr26_gc_conservative_scanner
+   807→    COMMAND test_osr26_gc_conservative_scanner)
+   808→
+   809→# ==========================================================================
+   810→# OSR Cluster A/B/C regression tests (OSR-up trampoline, OSR-down/deopt,
+   811→# OSR entry registration & dispatch).
+   812→# These tests were previously on disk but NOT registered as build targets
+   813→# (Meta-review Blocker B2). Wiring them below so they are compiled and run.
+   814→# Tests that fail to compile or fail at runtime due to known limitations
+   815→# (B3-B6: tests that don't trigger the actual bug path) are still wired
+   816→# here so the build/test status is visible; the test bodies themselves
+   817→# were updated by the FIXUP task to either trigger the bug path or to
+   818→# verify the fix via source-grep.
+   819→# ==========================================================================
+   820→
+   821→# OSR-2: codegen records VTX_STF_OSR_ENTRY side-table entries for loop headers
+   822→add_executable(test_osr_2
+   823→    regression/osr/test_osr_2.c
+   824→)
+   825→target_link_libraries(test_osr_2 PRIVATE
+   826→    -Wl,--start-group
+   827→    ${VORTEX_OSR_TEST_LIBS}
+   828→    -Wl,--end-group
+   829→)
+   830→add_test(NAME test_osr_2 COMMAND test_osr_2)
+   831→
+   832→# OSR-3: vtx_osr_up is void (not bool) — asm-jump success is detected by
+   833→# the function not returning
+   834→add_executable(test_osr_3
+   835→    regression/osr/test_osr_3.c
+   836→)
+   837→target_link_libraries(test_osr_3 PRIVATE
+   838→    -Wl,--start-group
+   839→    ${VORTEX_OSR_TEST_LIBS}
+   840→    -Wl,--end-group
+   841→)
+   842→add_test(NAME test_osr_3 COMMAND test_osr_3)
+   843→
+   844→# OSR-5: side-table OSR entry lookup filters by bytecode_pc
+   845→add_executable(test_osr_5
+   846→    regression/osr/test_osr_5.c
+   847→)
+   848→target_link_libraries(test_osr_5 PRIVATE
+   849→    -Wl,--start-group
+   850→    ${VORTEX_OSR_TEST_LIBS}
+   851→    -Wl,--end-group
+   852→)
+   853→add_test(NAME test_osr_5 COMMAND test_osr_5)
+   854→
+   855→# OSR-6: OSR-up asm saves caller's RBX/R12 to JIT frame's saved-register slots
+   856→add_executable(test_osr_6
+   857→    regression/osr/test_osr_6.c
+   858→)
+   859→target_link_libraries(test_osr_6 PRIVATE
+   860→    -Wl,--start-group
+   861→    ${VORTEX_OSR_TEST_LIBS}
+   862→    -Wl,--end-group
+   863→)
+   864→add_test(NAME test_osr_6 COMMAND test_osr_6)
+   865→
+   866→# OSR-11: vtx_osr_up re-checks registry's current cm version before asm jump
+   867→add_executable(test_osr_11
+   868→    regression/osr/test_osr_11.c
+   869→)
+   870→target_link_libraries(test_osr_11 PRIVATE
+   871→    -Wl,--start-group
+   872→    ${VORTEX_OSR_TEST_LIBS}
+   873→    -Wl,--end-group
+   874→)
+   875→add_test(NAME test_osr_11 COMMAND test_osr_11)
+   876→
+   877→# OSR-12: vtx_osr_up polls GC safepoint immediately before the asm jump
+   878→add_executable(test_osr_12
+   879→    regression/osr/test_osr_12.c
+   880→)
+   881→target_link_libraries(test_osr_12 PRIVATE
+   882→    -Wl,--start-group
+   883→    ${VORTEX_OSR_TEST_LIBS}
+   884→    -Wl,--end-group
+   885→)
+   886→add_test(NAME test_osr_12 COMMAND test_osr_12)
+   887→
+   888→# OSR-16: vtx_osr_up refuses OSR into inlined code (frame shape mismatch)
+   889→add_executable(test_osr_16
+   890→    regression/osr/test_osr_16.c
+   891→)
+   892→target_link_libraries(test_osr_16 PRIVATE
+   893→    -Wl,--start-group
+   894→    ${VORTEX_OSR_TEST_LIBS}
+   895→    -Wl,--end-group
+   896→)
+   897→add_test(NAME test_osr_16 COMMAND test_osr_16)
+   898→
+   899→# OSR-24: vtx_osr_up verifies stack_depth matches interp->stack_top
+   900→add_executable(test_osr_24
+   901→    regression/osr/test_osr_24.c
+   902→)
+   903→target_link_libraries(test_osr_24 PRIVATE
+   904→    -Wl,--start-group
+   905→    ${VORTEX_OSR_TEST_LIBS}
+   906→    -Wl,--end-group
+   907→)
+   908→add_test(NAME test_osr_24 COMMAND test_osr_24)
+   909→
+   910→# OSR-27: NULL check on compiled_code->code in bc_pc_map loop
+   911→add_executable(test_osr_27
+   912→    regression/osr/test_osr_27.c
+   913→)
+   914→target_link_libraries(test_osr_27 PRIVATE
+   915→    -Wl,--start-group
+   916→    ${VORTEX_OSR_TEST_LIBS}
+   917→    -Wl,--end-group
+   918→)
+   919→add_test(NAME test_osr_27 COMMAND test_osr_27)
+   920→
+   921→# OSR-28: asm clobber list includes "rbp" and "rsp" (defensive)
+   922→add_executable(test_osr_28
+   923→    regression/osr/test_osr_28.c
+   924→)
+   925→target_link_libraries(test_osr_28 PRIVATE
+   926→    -Wl,--start-group
+   927→    ${VORTEX_OSR_TEST_LIBS}
+   928→    -Wl,--end-group
+   929→)
+   930→add_test(NAME test_osr_28 COMMAND test_osr_28)
+   931→
+   932→# OSR-30: asm writes profile_data to [RBP+8] (was hardcoded NULL)
+   933→add_executable(test_osr_30
+   934→    regression/osr/test_osr_30.c
+   935→)
+   936→target_link_libraries(test_osr_30 PRIVATE
+   937→    -Wl,--start-group
+   938→    ${VORTEX_OSR_TEST_LIBS}
+   939→    -Wl,--end-group
+   940→)
+   941→add_test(NAME test_osr_30 COMMAND test_osr_30)
+   942→
+   943→# OSR-31: int3 safety trap is preceded by __builtin_unreachable
+   944→add_executable(test_osr_31
+   945→    regression/osr/test_osr_31.c
+   946→)
+   947→target_link_libraries(test_osr_31 PRIVATE
+   948→    -Wl,--start-group
+   949→    ${VORTEX_OSR_TEST_LIBS}
+   950→    -Wl,--end-group
+   951→)
+   952→add_test(NAME test_osr_31 COMMAND test_osr_31)
+   953→
+   954→# OSR-33: vtx_osr_up verifies entry_register_convention == VTX_OSR_CONV_DEFAULT
+   955→add_executable(test_osr_33
+   956→    regression/osr/test_osr_33.c
+   957→)
+   958→target_link_libraries(test_osr_33 PRIVATE
+   959→    -Wl,--start-group
+   960→    ${VORTEX_OSR_TEST_LIBS}
+   961→    -Wl,--end-group
+   962→)
+   963→add_test(NAME test_osr_33 COMMAND test_osr_33)
+   964→
+   965→# ==========================================================================
+   966→# OSR Cluster C-retry-2: 5 missing regression tests (17, 23, 25, 29, 32)
+   967→# Added by Subagent C-retry-2 to address Meta findings (M3 + M4).
+   968→# ==========================================================================
+   969→
+   970→# OSR-17: OSR trigger fires at IF_TRUE/IF_FALSE backedges (not just GOTO)
+   971→add_executable(test_osr_17_backedge_triggers
+   972→    regression/osr/test_osr_17_backedge_triggers.c
+   973→)
+   974→target_link_libraries(test_osr_17_backedge_triggers PRIVATE
+   975→    -Wl,--start-group
+   976→    ${VORTEX_OSR_TEST_LIBS}
+   977→    -Wl,--end-group
+   978→)
+   979→add_test(NAME osr_17_backedge_triggers COMMAND test_osr_17_backedge_triggers)
+   980→
+   981→# OSR-23: vtx_side_table_lookup_osr_entry filters by flag + bytecode_pc
+   982→add_executable(test_osr_23_lookup_filter
+   983→    regression/osr/test_osr_23_lookup_filter.c
+   984→)
+   985→target_link_libraries(test_osr_23_lookup_filter PRIVATE
+   986→    -Wl,--start-group
+   987→    ${VORTEX_OSR_TEST_LIBS}
+   988→    -Wl,--end-group
+   989→)
+   990→add_test(NAME osr_23_lookup_filter COMMAND test_osr_23_lookup_filter)
+   991→
+   992→# OSR-25: cm->frame_layout.codegen override (locals_base=-24, not -8)
+   993→add_executable(test_osr_25_layout
+   994→    regression/osr/test_osr_25_layout.c
+   995→)
+   996→target_link_libraries(test_osr_25_layout PRIVATE
+   997→    -Wl,--start-group
+   998→    ${VORTEX_OSR_TEST_LIBS}
+   999→    -Wl,--end-group
+  1000→)
+  1001→add_test(NAME osr_25_layout COMMAND test_osr_25_layout)
+  1002→
+  1003→# OSR-29: per-method OSR re-attempt rate limiter (helpers + cooldown)
+  1004→add_executable(test_osr_29_rate_limit
+  1005→    regression/osr/test_osr_29_rate_limit.c
+  1006→)
+  1007→target_link_libraries(test_osr_29_rate_limit PRIVATE
+  1008→    -Wl,--start-group
+  1009→    ${VORTEX_OSR_TEST_LIBS}
+  1010→    -Wl,--end-group
+  1011→)
+  1012→add_test(NAME osr_29_rate_limit COMMAND test_osr_29_rate_limit)
+  1013→
+  1014→# OSR-32: dead `osr_active` field removed (compile-time _Static_assert)
+  1015→add_executable(test_osr_32_dead_flag_removed
+  1016→    regression/osr/test_osr_32_dead_flag_removed.c
+  1017→)
+  1018→target_link_libraries(test_osr_32_dead_flag_removed PRIVATE
+  1019→    -Wl,--start-group
+  1020→    ${VORTEX_OSR_TEST_LIBS}
+  1021→    -Wl,--end-group
+  1022→)
+  1023→add_test(NAME osr_32_dead_flag_removed COMMAND test_osr_32_dead_flag_removed)
+  1024→
+  1025→
