@@ -1,0 +1,2002 @@
+     1→#include "baseline/codegen.h"
+     2→#include "codecache/install.h"
+     3→#include "runtime/helpers.h"
+     4→#include <stdio.h>
+     5→#include <stdlib.h>
+     6→#include <string.h>
+     7→
+     8→/* ========================================================================== */
+     9→/* Code buffer operations                                                      */
+    10→/* ========================================================================== */
+    11→
+    12→int vtx_code_buffer_init(vtx_code_buffer_t *buf, uint32_t initial_capacity)
+    13→{
+    14→    if (initial_capacity == 0) {
+    15→        initial_capacity = VTX_CODE_BUFFER_INITIAL_CAPACITY;
+    16→    }
+    17→    buf->bytes = (uint8_t *)malloc(initial_capacity);
+    18→    if (!buf->bytes) return -1;
+    19→    buf->position = 0;
+    20→    buf->capacity = initial_capacity;
+    21→    return 0;
+    22→}
+    23→
+    24→void vtx_code_buffer_destroy(vtx_code_buffer_t *buf)
+    25→{
+    26→    if (buf->bytes) {
+    27→        free(buf->bytes);
+    28→        buf->bytes = NULL;
+    29→    }
+    30→    buf->position = 0;
+    31→    buf->capacity = 0;
+    32→}
+    33→
+    34→int vtx_code_buffer_ensure_capacity(vtx_code_buffer_t *buf, uint32_t needed)
+    35→{
+    36→    if (buf->position + needed <= buf->capacity) return 0;
+    37→    uint32_t new_cap = buf->capacity;
+    38→    if (new_cap == 0) new_cap = 256;
+    39→    while (new_cap < buf->position + needed) {
+    40→        new_cap *= 2;
+    41→    }
+    42→    uint8_t *new_bytes = (uint8_t *)realloc(buf->bytes, new_cap);
+    43→    if (!new_bytes) return -1;
+    44→    buf->bytes = new_bytes;
+    45→    buf->capacity = new_cap;
+    46→    return 0;
+    47→}
+    48→
+    49→void vtx_compiled_code_destroy(vtx_compiled_code_t *code)
+    50→{
+    51→    if (!code) return;
+    52→    if (code->code) { free(code->code); code->code = NULL; }
+    53→    vtx_guard_array_destroy(&code->guards);
+    54→    vtx_deopt_stub_array_destroy(&code->deopt_stubs);
+    55→    if (code->bc_pc_map) { free(code->bc_pc_map); code->bc_pc_map = NULL; }
+    56→    if (code->native_to_bc_pc) { free(code->native_to_bc_pc); code->native_to_bc_pc = NULL; }
+    57→    if (code->deopt_info) {
+    58→        if (code->deopt_info->native_offsets) free(code->deopt_info->native_offsets);
+    59→        if (code->deopt_info->pc_map) free(code->deopt_info->pc_map);
+    60→        if (code->deopt_info->stack_depth_map) free(code->deopt_info->stack_depth_map);
+    61→        free(code->deopt_info);
+    62→    }
+    63→    /* Free polymorphic inline caches */
+    64→    if (code->poly_ics) {
+    65→        for (uint32_t i = 0; i < code->poly_ic_count; i++) {
+    66→            free(code->poly_ics[i]);
+    67→        }
+    68→        free(code->poly_ics);
+    69→        code->poly_ics = NULL;
+    70→        code->poly_ic_count = 0;
+    71→    }
+    72→    /* side_table is arena-allocated, not freed here */
+    73→}
+    74→
+    75→/* ========================================================================== */
+    76→/* x86-64 encoding helpers                                                    */
+    77→/* ========================================================================== */
+    78→
+    79→#define REX_W   0x48
+    80→#define REX_WR  0x4C
+    81→#define REX_WB  0x49
+    82→#define REX_WRB 0x4D
+    83→
+    84→static inline uint8_t modrm(uint8_t mod, uint8_t reg, uint8_t rm)
+    85→{
+    86→    return (uint8_t)((mod << 6) | ((reg & 7) << 3) | (rm & 7));
+    87→}
+    88→
+    89→static inline uint8_t sib(uint8_t scale, uint8_t index, uint8_t base)
+    90→{
+    91→    return (uint8_t)((scale << 6) | ((index & 7) << 3) | (base & 7));
+    92→}
+    93→
+    94→/* Emit REX.W prefix for 64-bit operand, with optional R and B bits */
+    95→static void emit_rex64(vtx_code_buffer_t *buf, vtx_reg_t reg, vtx_reg_t rm)
+    96→{
+    97→    uint8_t rex = REX_W;
+    98→    if (reg >= VTX_REG_R8) rex |= 0x04;
+    99→    if (rm >= VTX_REG_R8)  rex |= 0x01;
+   100→    vtx_code_buffer_emit_byte(buf, rex);
+   101→}
+   102→
+   103→/* Emit REX prefix only if extended registers require it (32-bit ops) */
+   104→static void emit_rex32_if_needed(vtx_code_buffer_t *buf, vtx_reg_t reg, vtx_reg_t rm)
+   105→{
+   106→    uint8_t rex = 0x40;
+   107→    bool needed = false;
+   108→    if (reg >= VTX_REG_R8) { rex |= 0x04; needed = true; }
+   109→    if (rm >= VTX_REG_R8)  { rex |= 0x01; needed = true; }
+   110→    if (needed) vtx_code_buffer_emit_byte(buf, rex);
+   111→}
+   112→
+   113→/* MOV r64, r/m64 */
+   114→static void emit_mov_reg_reg64(vtx_code_buffer_t *buf, vtx_reg_t dst, vtx_reg_t src)
+   115→{
+   116→    emit_rex64(buf, dst, src);
+   117→    vtx_code_buffer_emit_byte(buf, 0x8B);
+   118→    vtx_code_buffer_emit_byte(buf, modrm(3, dst, src));
+   119→}
+   120→
+   121→/* MOV r/m64, r64 */
+   122→static void emit_mov_reg64_reg(vtx_code_buffer_t *buf, vtx_reg_t dst, vtx_reg_t src)
+   123→{
+   124→    emit_rex64(buf, src, dst);
+   125→    vtx_code_buffer_emit_byte(buf, 0x89);
+   126→    vtx_code_buffer_emit_byte(buf, modrm(3, src, dst));
+   127→}
+   128→
+   129→/* MOV r64, imm64 */
+   130→static void emit_mov_reg_imm64(vtx_code_buffer_t *buf, vtx_reg_t reg, uint64_t imm)
+   131→{
+   132→    uint8_t rex = REX_W;
+   133→    if (reg >= VTX_REG_R8) rex |= 0x01;
+   134→    vtx_code_buffer_emit_byte(buf, rex);
+   135→    vtx_code_buffer_emit_byte(buf, (uint8_t)(0xB8 | (reg & 7)));
+   136→    vtx_code_buffer_emit_qword(buf, imm);
+   137→}
+   138→
+   139→/* MOV r64, imm32 (zero-extended) */
+   140→static void emit_mov_reg_imm32(vtx_code_buffer_t *buf, vtx_reg_t reg, uint32_t imm)
+   141→{
+   142→    if (reg >= VTX_REG_R8) vtx_code_buffer_emit_byte(buf, 0x41);
+   143→    vtx_code_buffer_emit_byte(buf, (uint8_t)(0xB8 | (reg & 7)));
+   144→    vtx_code_buffer_emit_dword(buf, imm);
+   145→}
+   146→
+   147→/* MOV r64, [rbp + offset] */
+   148→static void emit_mov_reg_rbp_offset(vtx_code_buffer_t *buf, vtx_reg_t reg, int32_t offset)
+   149→{
+   150→    emit_rex64(buf, reg, VTX_REG_RBP);
+   151→    vtx_code_buffer_emit_byte(buf, 0x8B);
+   152→    if (offset >= -128 && offset <= 127) {
+   153→        vtx_code_buffer_emit_byte(buf, modrm(1, reg, VTX_REG_RBP));
+   154→        vtx_code_buffer_emit_byte(buf, (uint8_t)(offset & 0xFF));
+   155→    } else {
+   156→        vtx_code_buffer_emit_byte(buf, modrm(2, reg, VTX_REG_RBP));
+   157→        vtx_code_buffer_emit_dword(buf, (uint32_t)offset);
+   158→    }
+   159→}
+   160→
+   161→/* MOV [rbp + offset], r64 */
+   162→static void emit_mov_rbp_offset_reg(vtx_code_buffer_t *buf, int32_t offset, vtx_reg_t reg)
+   163→{
+   164→    emit_rex64(buf, reg, VTX_REG_RBP);
+   165→    vtx_code_buffer_emit_byte(buf, 0x89);
+   166→    if (offset >= -128 && offset <= 127) {
+   167→        vtx_code_buffer_emit_byte(buf, modrm(1, reg, VTX_REG_RBP));
+   168→        vtx_code_buffer_emit_byte(buf, (uint8_t)(offset & 0xFF));
+   169→    } else {
+   170→        vtx_code_buffer_emit_byte(buf, modrm(2, reg, VTX_REG_RBP));
+   171→        vtx_code_buffer_emit_dword(buf, (uint32_t)offset);
+   172→    }
+   173→}
+   174→
+   175→/* ADD r64, r64 */
+   176→static void emit_add_reg_reg(vtx_code_buffer_t *buf, vtx_reg_t dst, vtx_reg_t src)
+   177→{
+   178→    emit_rex64(buf, src, dst);
+   179→    vtx_code_buffer_emit_byte(buf, 0x01);
+   180→    vtx_code_buffer_emit_byte(buf, modrm(3, src, dst));
+   181→}
+   182→
+   183→/* SUB r64, r64 */
+   184→static void emit_sub_reg_reg(vtx_code_buffer_t *buf, vtx_reg_t dst, vtx_reg_t src)
+   185→{
+   186→    emit_rex64(buf, src, dst);
+   187→    vtx_code_buffer_emit_byte(buf, 0x29);
+   188→    vtx_code_buffer_emit_byte(buf, modrm(3, src, dst));
+   189→}
+   190→
+   191→/* IMUL r64, r64 (two-operand) */
+   192→static void emit_imul_reg_reg(vtx_code_buffer_t *buf, vtx_reg_t dst, vtx_reg_t src)
+   193→{
+   194→    emit_rex64(buf, dst, src);
+   195→    vtx_code_buffer_emit_byte(buf, 0x0F);
+   196→    vtx_code_buffer_emit_byte(buf, 0xAF);
+   197→    vtx_code_buffer_emit_byte(buf, modrm(3, dst, src));
+   198→}
+   199→
+   200→/* ADD r64, imm32 (sign-extended) */
+   201→static void emit_add_reg_imm32(vtx_code_buffer_t *buf, vtx_reg_t reg, int32_t imm)
+   202→{
+   203→    emit_rex64(buf, (vtx_reg_t)0, reg);
+   204→    if (imm >= -128 && imm <= 127) {
+   205→        vtx_code_buffer_emit_byte(buf, 0x83);
+   206→        vtx_code_buffer_emit_byte(buf, modrm(3, 0, reg));
+   207→        vtx_code_buffer_emit_byte(buf, (uint8_t)(imm & 0xFF));
+   208→    } else {
+   209→        vtx_code_buffer_emit_byte(buf, 0x81);
+   210→        vtx_code_buffer_emit_byte(buf, modrm(3, 0, reg));
+   211→        vtx_code_buffer_emit_dword(buf, (uint32_t)imm);
+   212→    }
+   213→}
+   214→
+   215→/* SUB r64, imm32 (sign-extended) */
+   216→static void emit_sub_reg_imm32(vtx_code_buffer_t *buf, vtx_reg_t reg, int32_t imm)
+   217→{
+   218→    emit_rex64(buf, (vtx_reg_t)5, reg);
+   219→    if (imm >= -128 && imm <= 127) {
+   220→        vtx_code_buffer_emit_byte(buf, 0x83);
+   221→        vtx_code_buffer_emit_byte(buf, modrm(3, 5, reg));
+   222→        vtx_code_buffer_emit_byte(buf, (uint8_t)(imm & 0xFF));
+   223→    } else {
+   224→        vtx_code_buffer_emit_byte(buf, 0x81);
+   225→        vtx_code_buffer_emit_byte(buf, modrm(3, 5, reg));
+   226→        vtx_code_buffer_emit_dword(buf, (uint32_t)imm);
+   227→    }
+   228→}
+   229→
+   230→/* CMP r64, r64 */
+   231→static void emit_cmp_reg_reg(vtx_code_buffer_t *buf, vtx_reg_t a, vtx_reg_t b)
+   232→{
+   233→    emit_rex64(buf, b, a);
+   234→    vtx_code_buffer_emit_byte(buf, 0x39);
+   235→    vtx_code_buffer_emit_byte(buf, modrm(3, b, a));
+   236→}
+   237→
+   238→/* CMP r64, imm32 */
+   239→static void emit_cmp_reg_imm32(vtx_code_buffer_t *buf, vtx_reg_t reg, int32_t imm)
+   240→{
+   241→    emit_rex64(buf, (vtx_reg_t)7, reg);
+   242→    if (imm >= -128 && imm <= 127) {
+   243→        vtx_code_buffer_emit_byte(buf, 0x83);
+   244→        vtx_code_buffer_emit_byte(buf, modrm(3, 7, reg));
+   245→        vtx_code_buffer_emit_byte(buf, (uint8_t)(imm & 0xFF));
+   246→    } else {
+   247→        vtx_code_buffer_emit_byte(buf, 0x81);
+   248→        vtx_code_buffer_emit_byte(buf, modrm(3, 7, reg));
+   249→        vtx_code_buffer_emit_dword(buf, (uint32_t)imm);
+   250→    }
+   251→}
+   252→
+   253→/* TEST r64, r64 */
+   254→static void emit_test_reg_reg(vtx_code_buffer_t *buf, vtx_reg_t reg)
+   255→{
+   256→    emit_rex64(buf, reg, reg);
+   257→    vtx_code_buffer_emit_byte(buf, 0x85);
+   258→    vtx_code_buffer_emit_byte(buf, modrm(3, reg, reg));
+   259→}
+   260→
+   261→static void emit_test_reg_reg2(vtx_code_buffer_t *buf, vtx_reg_t reg1, vtx_reg_t reg2)
+   262→{
+   263→    emit_rex64(buf, reg1, reg2);
+   264→    vtx_code_buffer_emit_byte(buf, 0x85);
+   265→    vtx_code_buffer_emit_byte(buf, modrm(3, reg1, reg2));
+   266→}
+   267→
+   268→/* PUSH r64 */
+   269→static void emit_push(vtx_code_buffer_t *buf, vtx_reg_t reg)
+   270→{
+   271→    if (reg >= VTX_REG_R8) vtx_code_buffer_emit_byte(buf, 0x41);
+   272→    vtx_code_buffer_emit_byte(buf, (uint8_t)(0x50 | (reg & 7)));
+   273→}
+   274→
+   275→/* POP r64 */
+   276→static void emit_pop(vtx_code_buffer_t *buf, vtx_reg_t reg)
+   277→{
+   278→    if (reg >= VTX_REG_R8) vtx_code_buffer_emit_byte(buf, 0x41);
+   279→    vtx_code_buffer_emit_byte(buf, (uint8_t)(0x58 | (reg & 7)));
+   280→}
+   281→
+   282→/* JMP rel32 */
+   283→static uint32_t emit_jmp32(vtx_code_buffer_t *buf)
+   284→{
+   285→    vtx_code_buffer_emit_byte(buf, 0xE9);
+   286→    uint32_t pos = vtx_code_buffer_position(buf);
+   287→    vtx_code_buffer_emit_dword(buf, 0); /* placeholder */
+   288→    return pos;
+   289→}
+   290→
+   291→/* Jcc rel32 — returns position of the 4-byte displacement */
+   292→static uint32_t emit_jcc32(vtx_code_buffer_t *buf, uint8_t cc)
+   293→{
+   294→    vtx_code_buffer_emit_byte(buf, 0x0F);
+   295→    vtx_code_buffer_emit_byte(buf, (uint8_t)(0x80 | cc));
+   296→    uint32_t pos = vtx_code_buffer_position(buf);
+   297→    vtx_code_buffer_emit_dword(buf, 0); /* placeholder */
+   298→    return pos;
+   299→}
+   300→
+   301→/* Jcc rel8 — returns position of the 1-byte displacement */
+   302→static uint32_t emit_jcc8(vtx_code_buffer_t *buf, uint8_t cc)
+   303→{
+   304→    vtx_code_buffer_emit_byte(buf, (uint8_t)(0x70 | cc));
+   305→    uint32_t pos = vtx_code_buffer_position(buf);
+   306→    vtx_code_buffer_emit_byte(buf, 0); /* placeholder */
+   307→    return pos;
+   308→}
+   309→
+   310→/* CALL r/m64 */
+   311→static void emit_call_reg(vtx_code_buffer_t *buf, vtx_reg_t reg)
+   312→{
+   313→    if (reg >= VTX_REG_R8) vtx_code_buffer_emit_byte(buf, 0x41);
+   314→    vtx_code_buffer_emit_byte(buf, 0xFF);
+   315→    vtx_code_buffer_emit_byte(buf, modrm(3, 2, reg));
+   316→}
+   317→
+   318→/* RET */
+   319→static void emit_ret(vtx_code_buffer_t *buf)
+   320→{
+   321→    vtx_code_buffer_emit_byte(buf, 0xC3);
+   322→}
+   323→
+   324→/* NOP (1 byte) */
+   325→static void emit_nop(vtx_code_buffer_t *buf)
+   326→{
+   327→    vtx_code_buffer_emit_byte(buf, 0x90);
+   328→}
+   329→
+   330→/* UD2 (trap) */
+   331→static void emit_ud2(vtx_code_buffer_t *buf)
+   332→{
+   333→    vtx_code_buffer_emit_byte(buf, 0x0F);
+   334→    vtx_code_buffer_emit_byte(buf, 0x0B);
+   335→}
+   336→
+   337→/* ADDSD xmm0, [rbp+offset] — add double from memory to XMM0 */
+   338→static void emit_addsd_mem(vtx_code_buffer_t *buf, int32_t offset)
+   339→{
+   340→    vtx_code_buffer_emit_byte(buf, 0xF2); /* SSE2 prefix */
+   341→    vtx_code_buffer_emit_byte(buf, 0x0F);
+   342→    vtx_code_buffer_emit_byte(buf, 0x58); /* ADDSD */
+   343→    vtx_code_buffer_emit_byte(buf, modrm(2, 0, VTX_REG_RBP));
+   344→    vtx_code_buffer_emit_dword(buf, (uint32_t)offset);
+   345→}
+   346→
+   347→/* SUBSD xmm0, [rbp+offset] */
+   348→static void emit_subsd_mem(vtx_code_buffer_t *buf, int32_t offset)
+   349→{
+   350→    vtx_code_buffer_emit_byte(buf, 0xF2);
+   351→    vtx_code_buffer_emit_byte(buf, 0x0F);
+   352→    vtx_code_buffer_emit_byte(buf, 0x5C); /* SUBSD */
+   353→    vtx_code_buffer_emit_byte(buf, modrm(2, 0, VTX_REG_RBP));
+   354→    vtx_code_buffer_emit_dword(buf, (uint32_t)offset);
+   355→}
+   356→
+   357→/* MULSD xmm0, [rbp+offset] */
+   358→static void emit_mulsd_mem(vtx_code_buffer_t *buf, int32_t offset)
+   359→{
+   360→    vtx_code_buffer_emit_byte(buf, 0xF2);
+   361→    vtx_code_buffer_emit_byte(buf, 0x0F);
+   362→    vtx_code_buffer_emit_byte(buf, 0x59); /* MULSD */
+   363→    vtx_code_buffer_emit_byte(buf, modrm(2, 0, VTX_REG_RBP));
+   364→    vtx_code_buffer_emit_dword(buf, (uint32_t)offset);
+   365→}
+   366→
+   367→/* DIVSD xmm0, [rbp+offset] */
+   368→static void emit_divsd_mem(vtx_code_buffer_t *buf, int32_t offset)
+   369→{
+   370→    vtx_code_buffer_emit_byte(buf, 0xF2);
+   371→    vtx_code_buffer_emit_byte(buf, 0x0F);
+   372→    vtx_code_buffer_emit_byte(buf, 0x5E); /* DIVSD */
+   373→    vtx_code_buffer_emit_byte(buf, modrm(2, 0, VTX_REG_RBP));
+   374→    vtx_code_buffer_emit_dword(buf, (uint32_t)offset);
+   375→}
+   376→
+   377→/* MOVSD xmm0, [rbp+offset] — load double from memory */
+   378→static void emit_movsd_load(vtx_code_buffer_t *buf, int32_t offset)
+   379→{
+   380→    vtx_code_buffer_emit_byte(buf, 0xF2);
+   381→    vtx_code_buffer_emit_byte(buf, 0x0F);
+   382→    vtx_code_buffer_emit_byte(buf, 0x10); /* MOVSD xmm, m64 */
+   383→    vtx_code_buffer_emit_byte(buf, modrm(2, 0, VTX_REG_RBP));
+   384→    vtx_code_buffer_emit_dword(buf, (uint32_t)offset);
+   385→}
+   386→
+   387→/* MOVSD [rbp+offset], xmm0 — store double to memory */
+   388→static void emit_movsd_store(vtx_code_buffer_t *buf, int32_t offset)
+   389→{
+   390→    vtx_code_buffer_emit_byte(buf, 0xF2);
+   391→    vtx_code_buffer_emit_byte(buf, 0x0F);
+   392→    vtx_code_buffer_emit_byte(buf, 0x11); /* MOVSD m64, xmm */
+   393→    vtx_code_buffer_emit_byte(buf, modrm(2, 0, VTX_REG_RBP));
+   394→    vtx_code_buffer_emit_dword(buf, (uint32_t)offset);
+   395→}
+   396→
+   397→/* SHL r64, imm8 */
+   398→static void emit_shl_reg_imm8(vtx_code_buffer_t *buf, vtx_reg_t reg, uint8_t shift)
+   399→{
+   400→    emit_rex64(buf, (vtx_reg_t)4, reg);
+   401→    vtx_code_buffer_emit_byte(buf, 0xC1);
+   402→    vtx_code_buffer_emit_byte(buf, modrm(3, 4, reg));
+   403→    vtx_code_buffer_emit_byte(buf, shift);
+   404→}
+   405→
+   406→/* SHR r64, imm8 (arithmetic) */
+   407→static void emit_sar_reg_imm8(vtx_code_buffer_t *buf, vtx_reg_t reg, uint8_t shift)
+   408→{
+   409→    emit_rex64(buf, (vtx_reg_t)7, reg);
+   410→    vtx_code_buffer_emit_byte(buf, 0xC1);
+   411→    vtx_code_buffer_emit_byte(buf, modrm(3, 7, reg));
+   412→    vtx_code_buffer_emit_byte(buf, shift);
+   413→}
+   414→
+   415→/* AND r64, r64 */
+   416→static void emit_and_reg_reg(vtx_code_buffer_t *buf, vtx_reg_t dst, vtx_reg_t src)
+   417→{
+   418→    emit_rex64(buf, src, dst);
+   419→    vtx_code_buffer_emit_byte(buf, 0x21);
+   420→    vtx_code_buffer_emit_byte(buf, modrm(3, src, dst));
+   421→}
+   422→
+   423→/* OR r64, r64 */
+   424→static void emit_or_reg_reg(vtx_code_buffer_t *buf, vtx_reg_t dst, vtx_reg_t src)
+   425→{
+   426→    emit_rex64(buf, src, dst);
+   427→    vtx_code_buffer_emit_byte(buf, 0x09);
+   428→    vtx_code_buffer_emit_byte(buf, modrm(3, src, dst));
+   429→}
+   430→
+   431→/* XOR r64, r64 */
+   432→static void emit_xor_reg_reg(vtx_code_buffer_t *buf, vtx_reg_t dst, vtx_reg_t src)
+   433→{
+   434→    emit_rex64(buf, src, dst);
+   435→    vtx_code_buffer_emit_byte(buf, 0x31);
+   436→    vtx_code_buffer_emit_byte(buf, modrm(3, src, dst));
+   437→}
+   438→
+   439→/* NEG r64 */
+   440→static void emit_neg_reg(vtx_code_buffer_t *buf, vtx_reg_t reg)
+   441→{
+   442→    emit_rex64(buf, (vtx_reg_t)3, reg);
+   443→    vtx_code_buffer_emit_byte(buf, 0xF7);
+   444→    vtx_code_buffer_emit_byte(buf, modrm(3, 3, reg));
+   445→}
+   446→
+   447→/* NOT r64 */
+   448→static void emit_not_reg(vtx_code_buffer_t *buf, vtx_reg_t reg)
+   449→{
+   450→    emit_rex64(buf, (vtx_reg_t)2, reg);
+   451→    vtx_code_buffer_emit_byte(buf, 0xF7);
+   452→    vtx_code_buffer_emit_byte(buf, modrm(3, 2, reg));
+   453→}
+   454→
+   455→/* SETcc r8 — set byte based on condition */
+   456→static void emit_setcc(vtx_code_buffer_t *buf, uint8_t cc, vtx_reg_t reg)
+   457→{
+   458→    vtx_code_buffer_emit_byte(buf, 0x0F);
+   459→    vtx_code_buffer_emit_byte(buf, (uint8_t)(0x90 | cc));
+   460→    vtx_code_buffer_emit_byte(buf, modrm(3, 0, reg));
+   461→}
+   462→
+   463→/* CQO (sign-extend RAX into RDX:RAX for idiv) */
+   464→static void emit_cqo(vtx_code_buffer_t *buf)
+   465→{
+   466→    vtx_code_buffer_emit_byte(buf, 0x48); /* REX.W */
+   467→    vtx_code_buffer_emit_byte(buf, 0x99); /* CQO */
+   468→}
+   469→
+   470→/* IDIV r64 (signed divide RDX:RAX / r64, quotient in RAX, remainder in RDX) */
+   471→static void emit_idiv_reg(vtx_code_buffer_t *buf, vtx_reg_t reg)
+   472→{
+   473→    emit_rex64(buf, (vtx_reg_t)7, reg);
+   474→    vtx_code_buffer_emit_byte(buf, 0xF7);
+   475→    vtx_code_buffer_emit_byte(buf, modrm(3, 7, reg));
+   476→}
+   477→
+   478→/* Condition codes */
+   479→#define CC_E  0x4
+   480→#define CC_NE 0x5
+   481→#define CC_L  0xC
+   482→#define CC_LE 0xE
+   483→#define CC_G  0xF
+   484→#define CC_GE 0xD
+   485→#define CC_B  0x2
+   486→#define CC_AE 0x3
+   487→#define CC_BE 0x6  /* below or equal (CF=1 || ZF=1) */
+   488→#define CC_A  0x7  /* above (CF=0 && ZF=0) */
+   489→#define CC_O  0x0
+   490→
+   491→/* ========================================================================== */
+   492→/* Expression stack model                                                      */
+   493→/* ========================================================================== */
+   494→
+   495→/**
+   496→ * The expression stack is modeled as a virtual stack where the top
+   497→ * VTX_EXPR_REG_COUNT values are in registers. We track the current
+   498→ * stack depth during compilation to know which values are in registers
+   499→ * vs. spill slots.
+   500→ *
+   501→ * Register assignment (from TOS):
+   502→ *   TOS   → RAX (expr_reg[0])
+   503→ *   TOS-1 → RCX (expr_reg[1])
+   504→ *   TOS-2 → RDX (expr_reg[2])
+   505→ *   TOS-3 → RBX (expr_reg[3])
+   506→ *
+   507→ * When we push a value, we shift registers down:
+   508→ *   RBX ← RDX ← RCX ← RAX ← new_value
+   509→ * When we pop a value, we shift registers up:
+   510→ *   RAX → RCX → RDX → RBX → load from spill
+   511→ */
+   512→
+   513→static const vtx_reg_t expr_regs[VTX_EXPR_REG_COUNT] = {
+   514→    VTX_REG_RAX, VTX_REG_RCX, VTX_REG_RDX, VTX_REG_RBX
+   515→};
+   516→
+   517→/* ========================================================================== */
+   518→/* Compilation context                                                         */
+   519→/* ========================================================================== */
+   520→
+   521→typedef struct {
+   522→    vtx_code_buffer_t       buf;
+   523→    const vtx_bytecode_t   *bc;
+   524→    const vtx_method_desc_t *method;
+   525→    vtx_profile_data_t     *profile_data;
+   526→    vtx_jit_frame_layout_t  layout;
+   527→    vtx_guard_array_t       guards;
+   528→    vtx_arena_t            *arena;
+   529→
+   530→    /* Current compilation state */
+   531→    uint32_t  bc_pc;          /* current bytecode PC */
+   532→    uint32_t  stack_depth;    /* current expression stack depth */
+   533→    uint32_t  max_stack_depth; /* maximum stack depth seen */
+   534→
+   535→    /* Branch fixups: forward branches that need target patching */
+   536→    vtx_branch_fixup_t *fixups;
+   537→    uint32_t            fixup_count;
+   538→    uint32_t            fixup_capacity;
+   539→
+   540→    /* Bytecode PC → native offset map */
+   541→    vtx_bc_pc_map_entry_t *pc_map;
+   542→    uint32_t               pc_map_count;
+   543→    uint32_t               pc_map_capacity;
+   544→
+   545→    /* Native offset → bytecode PC map */
+   546→    uint32_t *native_to_bc;
+   547→    uint32_t  native_to_bc_count;
+   548→    uint32_t  native_to_bc_capacity;
+   549→
+   550→    /* Side table */
+   551→    vtx_side_table_t *side_table;
+   552→
+   553→    /* Code cache and method registry (optional, for proper code installation) */
+   554→    vtx_code_cache_t      *cache;
+   555→    vtx_method_registry_t *registry;
+   556→
+   557→    /* Method ID for deopt */
+   558→    uint32_t method_id;
+   559→
+   560→    /* Polymorphic inline caches allocated during compilation.
+   561→     * Tracked so they can be freed when the method is evicted. */
+   562→    vtx_poly_ic_t **poly_ics;
+   563→    uint32_t        poly_ic_count;
+   564→    uint32_t        poly_ic_capacity;
+   565→} vtx_compile_ctx_t;
+   566→
+   567→/* ========================================================================== */
+   568→/* PC map operations                                                           */
+   569→/* ========================================================================== */
+   570→
+   571→static void record_bc_pc_map(vtx_compile_ctx_t *ctx, uint32_t bc_pc, uint32_t native_offset)
+   572→{
+   573→    if (ctx->pc_map_count >= ctx->pc_map_capacity) {
+   574→        uint32_t new_cap = ctx->pc_map_capacity * 2;
+   575→        if (new_cap == 0) new_cap = 64;
+   576→        vtx_bc_pc_map_entry_t *new_map = (vtx_bc_pc_map_entry_t *)realloc(
+   577→            ctx->pc_map, new_cap * sizeof(vtx_bc_pc_map_entry_t));
+   578→        if (!new_map) return;
+   579→        ctx->pc_map = new_map;
+   580→        ctx->pc_map_capacity = new_cap;
+   581→    }
+   582→    ctx->pc_map[ctx->pc_map_count].bytecode_pc = bc_pc;
+   583→    ctx->pc_map[ctx->pc_map_count].native_offset = native_offset;
+   584→    ctx->pc_map[ctx->pc_map_count].stack_depth = ctx->stack_depth;
+   585→    ctx->pc_map_count++;
+   586→}
+   587→
+   588→static void record_native_to_bc(vtx_compile_ctx_t *ctx, uint32_t native_offset, uint32_t bc_pc)
+   589→{
+   590→    /* Store mapping at index native_offset/8 (coarse) */
+   591→    uint32_t idx = native_offset / 8;
+   592→    if (idx >= ctx->native_to_bc_capacity) {
+   593→        uint32_t new_cap = idx + 256;
+   594→        uint32_t *new_arr = (uint32_t *)realloc(ctx->native_to_bc,
+   595→            new_cap * sizeof(uint32_t));
+   596→        if (!new_arr) return;
+   597→        memset(new_arr + ctx->native_to_bc_capacity, 0xFF,
+   598→               (new_cap - ctx->native_to_bc_capacity) * sizeof(uint32_t));
+   599→        ctx->native_to_bc = new_arr;
+   600→        ctx->native_to_bc_capacity = new_cap;
+   601→    }
+   602→    ctx->native_to_bc[idx] = bc_pc;
+   603→    if (idx >= ctx->native_to_bc_count) {
+   604→        ctx->native_to_bc_count = idx + 1;
+   605→    }
+   606→}
+   607→
+   608→/* ========================================================================== */
+   609→/* Branch fixup operations                                                     */
+   610→/* ========================================================================== */
+   611→
+   612→static void add_fixup(vtx_compile_ctx_t *ctx, uint32_t patch_pos,
+   613→                       uint32_t source_offset, uint16_t target_bc_pc, bool is_32bit)
+   614→{
+   615→    if (ctx->fixup_count >= ctx->fixup_capacity) {
+   616→        uint32_t new_cap = ctx->fixup_capacity * 2;
+   617→        if (new_cap == 0) new_cap = 32;
+   618→        vtx_branch_fixup_t *new_fixups = (vtx_branch_fixup_t *)realloc(
+   619→            ctx->fixups, new_cap * sizeof(vtx_branch_fixup_t));
+   620→        if (!new_fixups) return;
+   621→        ctx->fixups = new_fixups;
+   622→        ctx->fixup_capacity = new_cap;
+   623→    }
+   624→    ctx->fixups[ctx->fixup_count].patch_position = patch_pos;
+   625→    ctx->fixups[ctx->fixup_count].source_offset = source_offset;
+   626→    ctx->fixups[ctx->fixup_count].target_bc_pc = target_bc_pc;
+   627→    ctx->fixups[ctx->fixup_count].is_32bit = is_32bit;
+   628→    ctx->fixup_count++;
+   629→}
+   630→
+   631→static void resolve_fixups(vtx_compile_ctx_t *ctx)
+   632→{
+   633→    /* For each fixup, find the native offset for the target BC PC
+   634→     * and patch the displacement. */
+   635→    for (uint32_t i = 0; i < ctx->fixup_count; i++) {
+   636→        vtx_branch_fixup_t *fixup = &ctx->fixups[i];
+   637→
+   638→        /* Find the native offset for the target BC PC.
+   639→         * Binary search in the sorted pc_map. */
+   640→        uint32_t target_native = 0;
+   641→        bool found = false;
+   642→        for (uint32_t j = 0; j < ctx->pc_map_count; j++) {
+   643→            if (ctx->pc_map[j].bytecode_pc == fixup->target_bc_pc) {
+   644→                target_native = ctx->pc_map[j].native_offset;
+   645→                found = true;
+   646→                break;
+   647→            }
+   648→        }
+   649→
+   650→        if (!found) {
+   651→            /* Target not yet compiled — this can happen for forward branches.
+   652→             * In a single-pass compiler, we should have seen all targets.
+   653→             * If not found, patch to a trap. */
+   654→            continue;
+   655→        }
+   656→
+   657→        /* Calculate relative displacement.
+   658→         * For 32-bit: disp = target - (source + instruction_size)
+   659→         * JMP rel32: instruction is 5 bytes (E9 + 4-byte disp)
+   660→         * Jcc rel32: instruction is 6 bytes (0F 8x + 4-byte disp) */
+   661→        uint32_t instr_size = fixup->is_32bit ? 6 : 5;
+   662→        int32_t disp = (int32_t)(target_native - (fixup->source_offset + instr_size));
+   663→
+   664→        if (fixup->is_32bit) {
+   665→            vtx_code_buffer_patch_dword(&ctx->buf, fixup->patch_position,
+   666→                                         (uint32_t)disp);
+   667→        } else {
+   668→            /* JMP rel32: also has a 4-byte displacement */
+   669→            vtx_code_buffer_patch_dword(&ctx->buf, fixup->patch_position,
+   670→                                         (uint32_t)disp);
+   671→        }
+   672→    }
+   673→}
+   674→
+   675→/* ========================================================================== */
+   676→/* Expression stack manipulation helpers                                       */
+   677→/* ========================================================================== */
+   678→
+   679→/**
+   680→ * Emit code to "push" a value onto the expression stack.
+   681→ * This shifts the register file and may spill the bottom register.
+   682→ *
+   683→ * The new value should be placed in RAX after this call.
+   684→ * Before this call: RAX=TOS, RCX=TOS-1, RDX=TOS-2, RBX=TOS-3
+   685→ * After this call:  RAX=TOS(new), RCX=old_TOS, RDX=old_TOS-1, RBX=old_TOS-2
+   686→ *                   old_TOS-3 is spilled if it exists
+   687→ */
+   688→static void emit_stack_push(vtx_compile_ctx_t *ctx)
+   689→{
+   690→    uint32_t old_depth = ctx->stack_depth;
+   691→    ctx->stack_depth++;
+   692→
+   693→    if (old_depth >= VTX_EXPR_REG_COUNT) {
+   694→        /* All registers are occupied. Spill RBX (the deepest register value)
+   695→         * to the spill area, then shift registers. */
+   696→        /* Spill slot index for the value currently in RBX */
+   697→        uint32_t spill_idx = old_depth - VTX_EXPR_REG_COUNT;
+   698→        int32_t spill_off = vtx_frame_layout_spill_offset(&ctx->layout, spill_idx);
+   699→        emit_mov_rbp_offset_reg(&ctx->buf, spill_off, VTX_REG_RBX);
+   700→    }
+   701→
+   702→    /* Shift registers: RBX ← RDX, RDX ← RCX, RCX ← RAX */
+   703→    /* We need to do this in the right order to avoid overwriting.
+   704→     * RBX = RDX, RDX = RCX, RCX = RAX
+   705→     * Order: RBX ← RDX first (RBX is safe since RDX won't be overwritten yet)
+   706→     *        RDX ← RCX
+   707→     *        RCX ← RAX
+   708→     * RAX will be loaded with the new value by the caller. */
+   709→    if (old_depth >= 3) emit_mov_reg_reg64(&ctx->buf, VTX_REG_RBX, VTX_REG_RDX);
+   710→    if (old_depth >= 2) emit_mov_reg_reg64(&ctx->buf, VTX_REG_RDX, VTX_REG_RCX);
+   711→    if (old_depth >= 1) emit_mov_reg_reg64(&ctx->buf, VTX_REG_RCX, VTX_REG_RAX);
+   712→
+   713→    if (ctx->stack_depth > ctx->max_stack_depth) {
+   714→        ctx->max_stack_depth = ctx->stack_depth;
+   715→    }
+   716→}
+   717→
+   718→/**
+   719→ * Emit code to "pop" a value from the expression stack.
+   720→ * The popped value is in RAX.
+   721→ * After: RAX=old_TOS (popped), RCX=new_TOS, RDX=new_TOS-1, RBX=new_TOS-2
+   722→ *        May load a value from spill into the new deepest register.
+   723→ *
+   724→ * Returns the register holding the popped value (RAX).
+   725→ */
+   726→static vtx_reg_t emit_stack_pop(vtx_compile_ctx_t *ctx)
+   727→{
+   728→    VTX_ASSERT(ctx->stack_depth > 0, "stack underflow during compilation");
+   729→
+   730→    uint32_t old_depth = ctx->stack_depth;
+   731→    ctx->stack_depth--;
+   732→
+   733→    /* The value to pop is in RAX (TOS). We need to shift registers up:
+   734→     * RAX = RCX (new TOS), RCX = RDX, RDX = RBX, RBX = load from spill
+   735→     * But we need to save the popped value first. */
+   736→
+   737→    /* Move the popped value to RSI (temporary, not used by expr stack) */
+   738→    /* Actually, we should move the registers up and the caller uses
+   739→     * whatever register held the TOS. Let's do it differently:
+   740→     * The caller expects the popped value in a register they specify.
+   741→     * For simplicity, we move TOS (RAX) to RSI, then shift up. */
+   742→
+   743→    /* For most operations, the caller pops two values and uses them.
+   744→     * We'll use a different approach: the caller saves RAX before calling pop
+   745→     * if they need it. */
+   746→    /* shift: RAX ← RCX, RCX ← RDX, RDX ← RBX */
+   747→    uint32_t new_depth = ctx->stack_depth;
+   748→
+   749→    /* CRITICAL: Shift registers FIRST (top-down order), THEN load spill
+   750→     * into RBX. Loading the spill before the shift would clobber the old
+   751→     * RBX value that needs to be moved into RDX by the shift.
+   752→     * This was the T1 spill-path register clobber bug: the old RBX value
+   753→     * was overwritten by the spill load before RDX could inherit it,
+   754→     * causing incorrect values in the expression stack at runtime. */
+   755→    /* Bug #6 fix: new_depth is uint32_t so (>= 0) is always true.
+   756→     * The intent is: always shift RAX→RCX (new TOS), then conditionally
+   757→     * shift deeper registers. Changed first check to >= 1 to match the
+   758→     * pattern of the subsequent checks. Actually, the first mov (RAX→RCX)
+   759→     * should always happen after a pop2 (the old TOS moves to TOS-1), so
+   760→     * just emit it unconditionally. */
+   761→    emit_mov_reg_reg64(&ctx->buf, VTX_REG_RAX, VTX_REG_RCX);  /* always: old TOS → TOS-1 */
+   762→    if (new_depth >= 1) emit_mov_reg_reg64(&ctx->buf, VTX_REG_RCX, VTX_REG_RDX);
+   763→    if (new_depth >= 2) emit_mov_reg_reg64(&ctx->buf, VTX_REG_RDX, VTX_REG_RBX);
+   764→
+   765→    /* After the shift, RBX's old value has been moved to RDX (or is no
+   766→     * longer needed if new_depth < 2). Now safe to load spill into RBX. */
+   767→    if (new_depth >= 3 && old_depth > VTX_EXPR_REG_COUNT) {
+   768→        /* Load a value from spill into RBX.
+   769→         * The deepest value that was in spill before the pop is at
+   770→         * spill index (old_depth - VTX_EXPR_REG_COUNT - 1). */
+   771→        uint32_t spill_idx = old_depth - VTX_EXPR_REG_COUNT - 1;
+   772→        int32_t spill_off = vtx_frame_layout_spill_offset(&ctx->layout, spill_idx);
+   773→        emit_mov_reg_rbp_offset(&ctx->buf, VTX_REG_RBX, spill_off);
+   774→    }
+   775→
+   776→    return VTX_REG_RAX;
+   777→}
+   778→
+   779→/**
+   780→ * Pop two values and return them in specific registers.
+   781→ * first_pop = earlier pushed value, second_pop = later pushed (TOS).
+   782→ * first_pop → RSI, second_pop → RDI
+   783→ */
+   784→static void emit_stack_pop2(vtx_compile_ctx_t *ctx, vtx_reg_t *first, vtx_reg_t *second)
+   785→{
+   786→    VTX_ASSERT(ctx->stack_depth >= 2, "stack underflow: need 2 values");
+   787→
+   788→    uint32_t old_depth = ctx->stack_depth;
+   789→
+   790→    /* TOS is in RAX, TOS-1 is in RCX.
+   791→     * We want: second = old TOS (RAX), first = old TOS-1 (RCX) */
+   792→    /* Save both to temporary registers first */
+   793→    emit_mov_reg_reg64(&ctx->buf, VTX_REG_RSI, VTX_REG_RCX); /* first = TOS-1 */
+   794→    emit_mov_reg_reg64(&ctx->buf, VTX_REG_RDI, VTX_REG_RAX); /* second = TOS */
+   795→
+   796→    /* Now shift the stack up by 2 */
+   797→    ctx->stack_depth -= 2;
+   798→    uint32_t new_depth = ctx->stack_depth;
+   799→
+   800→    /* Need to shift up 2 positions:
+   801→     * RAX = old TOS-2 (was RDX)
+   802→     * RCX = old TOS-3 (was RBX)
+   803→     * RDX = spill or empty
+   804→     * RBX = spill or empty
+   805→     *
+   806→     * Spill index formula: after popping 2, we need to load values that
+   807→     * were in spill before the pop. The Nth spill load (0-indexed) uses
+   808→     * spill_idx = old_depth - VTX_EXPR_REG_COUNT - 1 - N.
+   809→     * This is because before the pop, the deepest register (RBX) held the
+   810→     * value that was at stack position (old_depth - 4) from the bottom,
+   811→     * and spill slots held positions 0 through (old_depth - 5). */
+   812→
+   813→    if (new_depth >= 2) {
+   814→        /* RAX ← RDX, RCX ← RBX, then load spills into RDX and RBX */
+   815→        emit_mov_reg_reg64(&ctx->buf, VTX_REG_RAX, VTX_REG_RDX);
+   816→        emit_mov_reg_reg64(&ctx->buf, VTX_REG_RCX, VTX_REG_RBX);
+   817→        if (new_depth >= 3 && old_depth > VTX_EXPR_REG_COUNT) {
+   818→            /* Load into RDX from spill: deepest value that was below RBX */
+   819→            uint32_t spill_idx = old_depth - VTX_EXPR_REG_COUNT - 1;
+   820→            int32_t spill_off = vtx_frame_layout_spill_offset(&ctx->layout, spill_idx);
+   821→            emit_mov_reg_rbp_offset(&ctx->buf, VTX_REG_RDX, spill_off);
+   822→        }
+   823→        if (new_depth >= 4 && old_depth > VTX_EXPR_REG_COUNT + 1) {
+   824→            /* Load into RBX from spill: next deeper value */
+   825→            uint32_t spill_idx = old_depth - VTX_EXPR_REG_COUNT - 2;
+   826→            int32_t spill_off = vtx_frame_layout_spill_offset(&ctx->layout, spill_idx);
+   827→            emit_mov_reg_rbp_offset(&ctx->buf, VTX_REG_RBX, spill_off);
+   828→        }
+   829→    } else if (new_depth == 1) {
+   830→        /* RAX ← RDX */
+   831→        emit_mov_reg_reg64(&ctx->buf, VTX_REG_RAX, VTX_REG_RDX);
+   832→        /* RCX ← RBX or load from spill */
+   833→        if (old_depth > VTX_EXPR_REG_COUNT) {
+   834→            /* Need to load from spill into RCX */
+   835→            uint32_t spill_idx = old_depth - VTX_EXPR_REG_COUNT - 1;
+   836→            int32_t spill_off = vtx_frame_layout_spill_offset(&ctx->layout, spill_idx);
+   837→            emit_mov_reg_rbp_offset(&ctx->buf, VTX_REG_RCX, spill_off);
+   838→        } else {
+   839→            /* RCX ← RBX */
+   840→            emit_mov_reg_reg64(&ctx->buf, VTX_REG_RCX, VTX_REG_RBX);
+   841→        }
+   842→    }
+   843→    /* For new_depth == 0, all registers are already "consumed" —
+   844→     * the stack is empty, so RAX/RCX/RDX/RBX hold nothing useful.
+   845→     * No shifting needed. */
+   846→
+   847→    *first = VTX_REG_RSI;
+   848→    *second = VTX_REG_RDI;
+   849→}
+   850→
+   851→/* ========================================================================== */
+   852→/* NaN-boxing helpers                                                          */
+   853→/* ========================================================================== */
+   854→
+   855→/**
+   856→ * Tag an int64_t value as an SMI (small integer).
+   857→ * SMI encoding: VTX_NAN_BOX_HEADER | (raw << VTX_NAN_DATA_SHIFT) | VTX_TAG_SMI
+   858→ * This requires multiple instructions, so we call a helper function.
+   859→ */
+   860→static void emit_tag_smi(vtx_compile_ctx_t *ctx, vtx_reg_t val_reg)
+   861→{
+   862→    /* RAX = val_reg value (raw int64_t)
+   863→     * We need to compute: VTX_NAN_BOX_HEADER | (val & VTX_NAN_DATA_MASK) << 3 | VTX_TAG_SMI
+   864→     *
+   865→     * Steps:
+   866→     *   1. Truncate val to 48 bits: val &= VTX_NAN_DATA_MASK
+   867→     *   2. Shift left by 3: val <<= VTX_NAN_DATA_SHIFT (3)
+   868→     *   3. OR with VTX_NAN_BOX_HEADER | VTX_TAG_SMI
+   869→     *
+   870→     * Since VTX_NAN_DATA_SHIFT = 3 and VTX_TAG_SMI = 0, we just need:
+   871→     *   val = (val & 0x0000FFFFFFFFFFFF) << 3
+   872→     *   val |= VTX_NAN_BOX_HEADER
+   873→     *
+   874→     * But working with 64-bit immediates in x86-64 requires multiple steps.
+   875→     * We'll use R10 as scratch.
+   876→     */
+   877→
+   878→    /* shl val_reg, 3 */
+   879→    emit_shl_reg_imm8(&ctx->buf, val_reg, 3);
+   880→
+   881→    /* mov r10, VTX_NAN_BOX_HEADER */
+   882→    emit_mov_reg_imm64(&ctx->buf, VTX_REG_R10, VTX_NAN_BOX_HEADER);
+   883→
+   884→    /* or val_reg, r10 */
+   885→    emit_or_reg_reg(&ctx->buf, val_reg, VTX_REG_R10);
+   886→}
+   887→
+   888→/**
+   889→ * Untag an SMI value to get the raw int64_t.
+   890→ * SMI decoding: (val >> VTX_NAN_DATA_SHIFT) & VTX_NAN_DATA_MASK, then sign-extend.
+   891→ */
+   892→static void emit_untag_smi(vtx_compile_ctx_t *ctx, vtx_reg_t val_reg)
+   893→{
+   894→    vtx_code_buffer_t *buf = &ctx->buf;
+   895→
+   896→    /* SMI decoding: raw = (val >> 3) & VTX_NAN_DATA_MASK, then sign-extend.
+   897→     *
+   898→     * Bug fix: The old code used R10 as the mask temporary, but R10 is
+   899→     * frequently used to hold the untagged heap pointer (see
+   900→     * emit_untag_heap_ptr → compile_array_load). The mask load clobbered
+   901→     * the pointer, causing the bounds check to compare against garbage.
+   902→     *
+   903→     * Fix: use R8 as the mask temporary (same fix as emit_untag_heap_ptr).
+   904→     * If val_reg IS R8, fall back to R9. */
+   905→
+   906→    /* Step 1: sar val_reg, 3 — arithmetic shift right by VTX_NAN_DATA_SHIFT */
+   907→    emit_sar_reg_imm8(buf, val_reg, VTX_NAN_DATA_SHIFT);
+   908→
+   909→    /* Step 2: and val_reg, VTX_NAN_DATA_MASK — mask out NaN-box header bits */
+   910→    vtx_reg_t temp = VTX_REG_R8;
+   911→    if (val_reg == VTX_REG_R8) temp = VTX_REG_R9;
+   912→    emit_mov_reg_imm64(buf, temp, VTX_NAN_DATA_MASK);
+   913→    emit_and_reg_reg(buf, val_reg, temp);
+   914→
+   915→    /* Step 3: Sign-extend from 48 bits using shift trick:
+   916→     *   shl val_reg, 16  — moves bit 47 to bit 63
+   917→     *   sar val_reg, 16  — arithmetic shift back, propagating sign from bit 63 */
+   918→    emit_shl_reg_imm8(buf, val_reg, 16);
+   919→    emit_sar_reg_imm8(buf, val_reg, 16);
+   920→}
+   921→
+   922→/**
+   923→ * Extract heap pointer from tagged value.
+   924→ * ptr = ((val >> VTX_NAN_DATA_SHIFT) & VTX_NAN_DATA_MASK) << 3
+   925→ * This is equivalent to: (val >> 3) & 0x0000FFFFFFFFFFFF ... then << 3
+   926→ * Which simplifies to: val & ~0x7 (clear low 3 bits after shift and mask)
+   927→ *
+   928→ * Actually, the heap pointer encoding is:
+   929→ *   raw = (val >> 3) & 0x0000FFFFFFFFFFFF
+   930→ *   ptr = raw << 3
+   931→ * So ptr = val & 0x0000FFFFFFFFFFFFF8 (mask out the tag bits and shift)
+   932→ *
+   933→ * But this is complex. For 8-byte aligned pointers on x86-64 (48-bit
+   934→ * address space), we can use: and val, ~0x7 then check if it's a heap
+   935→ * pointer by testing the NaN-box header.
+   936→ *
+   937→ * Actually, the simplest correct approach for the baseline JIT:
+   938→ * The value is NaN-boxed: VTX_NAN_BOX_HEADER | (ptr>>3 << 3) | VTX_TAG_HEAP_PTR
+   939→ * To extract: shift right by 3, mask with VTX_NAN_DATA_MASK, shift left by 3.
+   940→ * Since ptr is 8-byte aligned, (ptr >> 3) << 3 == ptr.
+   941→ * And (val >> 3) gives us (ptr >> 3) in the low bits plus header garbage
+   942→ * in the high bits. We mask to get just the ptr>>3 part.
+   943→ *
+   944→ * Simpler: since the tag is 3 bits and ptr is 8-byte aligned (low 3 bits = 0),
+   945→ * we can extract the pointer by:
+   946→ *   1. Clear the top 16 bits (NaN header) and bottom 3 bits (tag)
+   947→ *   2. The result is the pointer
+   948→ *
+   949→ * The value layout: [NaN header 16 bits][data 48 bits shifted left by 3][tag 3 bits]
+   950→ * = [16 bits NaN][45 bits ptr_high][3 zero bits from alignment][tag]
+   951→ *
+   952→ * Hmm, this is getting complicated. Let me just call a helper function.
+   953→ * Actually, for the baseline JIT, we use a simpler approach:
+   954→ * we keep a "working register" convention where after null-check and
+   955→ * type-check, we have the raw heap pointer in a register, and we
+   956→ * use that for field accesses. The tagged value is kept in the frame.
+   957→ */
+   958→static void emit_untag_heap_ptr(vtx_compile_ctx_t *ctx, vtx_reg_t val_reg, vtx_reg_t result_reg)
+   959→{
+   960→    /* Extract heap pointer from NaN-boxed value.
+   961→     *
+   962→     * Formula: ptr = ((val >> 3) & VTX_NAN_DATA_MASK) << 3
+   963→     * VTX_NAN_DATA_MASK = 0x0000FFFFFFFFFFFF (48-bit mask)
+   964→     *
+   965→     * Bug fix: The old code used R10 as the mask temporary, but R10 is
+   966→     * also the result register in several call sites (e.g., LOAD_FIELD).
+   967→     * The mask load overwrote the value, causing the JIT to read from
+   968→     * address 0x0000FFFFFFFFFFF8 instead of the actual heap pointer.
+   969→     *
+   970→     * Fix: use R8 as the mask temporary. R8 is caller-saved and not used
+   971→     * by the expression stack (RAX/RCX/RDX/RBX) or any codegen path.
+   972→     * If result_reg IS R8, fall back to R9. */
+   973→    vtx_code_buffer_t *buf = &ctx->buf;
+   974→
+   975→    /* mov result_reg, val_reg */
+   976→    emit_mov_reg_reg64(buf, result_reg, val_reg);
+   977→
+   978→    /* Pick a temp register that's NOT the result register */
+   979→    vtx_reg_t temp = VTX_REG_R8;
+   980→    if (result_reg == VTX_REG_R8) temp = VTX_REG_R9;
+   981→
+   982→    /* mov temp, VTX_NAN_DATA_MASK */
+   983→    emit_mov_reg_imm64(buf, temp, VTX_NAN_DATA_MASK);
+   984→
+   985→    /* shr result_reg, 3 */
+   986→    emit_rex64(buf, (vtx_reg_t)5, result_reg);
+   987→    vtx_code_buffer_emit_byte(buf, 0xC1);
+   988→    vtx_code_buffer_emit_byte(buf, modrm(3, 5, result_reg));
+   989→    vtx_code_buffer_emit_byte(buf, 3);
+   990→
+   991→    /* and result_reg, temp */
+   992→    emit_and_reg_reg(buf, result_reg, temp);
+   993→
+   994→    /* shl result_reg, 3 */
+   995→    emit_shl_reg_imm8(buf, result_reg, 3);
+   996→}
+   997→
+   998→/* ========================================================================== */
+   999→/* Prologue and epilogue                                                       */
+  1000→/* ========================================================================== */
+  1001→
+  1002→static void emit_prologue(vtx_compile_ctx_t *ctx)
+  1003→{
+  1004→    vtx_code_buffer_t *buf = &ctx->buf;
+  1005→
+  1006→    /*
+  1007→     * Push-based prologue matching frame_layout.h offsets:
+  1008→     *
+  1009→     *   Entry: RSP points to return address (pushed by CALL)
+  1010→     *   RDI = method pointer (1st arg, System V ABI)
+  1011→     *   RSI = deopt_info pointer (2nd arg)
+  1012→     *   RDX = profile_data pointer (3rd arg)
+  1013→     *
+  1014→     *   push rdi              ; method_ptr   → [RBP+24]
+  1015→     *   push rsi              ; deopt_info   → [RBP+16]
+  1016→     *   push rdx              ; profile_data → [RBP+8]
+  1017→     *   push rbp              ; caller RBP   → [RBP+0]
+  1018→     *   mov rbp, rsp
+  1019→     *   push rbx              ; save callee-saved → [RBP-8]
+  1020→     *   push r12              ; save callee-saved → [RBP-16]
+  1021→     *   sub rsp, frame_size   ; locals + spills
+  1022→     *
+  1023→     * After prologue, the header offsets match frame_layout.h:
+  1024→     *   [RBP+0]  = caller RBP     (VTX_FRAME_CALLER_RBP_OFFSET)
+  1025→     *   [RBP+8]  = profile_data   (VTX_FRAME_PROFILE_DATA_OFFSET)
+  1026→     *   [RBP+16] = deopt_info     (VTX_FRAME_DEOPT_INFO_OFFSET)
+  1027→     *   [RBP+24] = method_ptr     (VTX_FRAME_METHOD_PTR_OFFSET)
+  1028→     *   [RBP+32] = return address (VTX_FRAME_RETURN_ADDR_OFFSET)
+  1029→     *   [RBP-8]  = saved RBX      (VTX_FRAME_SAVED_RBX_OFFSET)
+  1030→     *   [RBP-16] = saved R12      (VTX_FRAME_SAVED_R12_OFFSET)
+  1031→     *   [RBP-24] = local[0]
+  1032→     *   ...
+  1033→     *
+  1034→     * Stack alignment: at function entry RSP ≡ 8 (mod 16) after CALL.
+  1035→     * After 4 pushes (rdi,rsi,rdx,rbp) RSP ≡ 8 - 32 ≡ 8 (mod 16) → RBP ≡ 8 (mod 16).
+  1036→     * After 2 more pushes (rbx,r12) RSP ≡ 8 - 16 ≡ 8 (mod 16).
+  1037→     * sub rsp, frame_size: need RSP ≡ 0 (mod 16) → frame_size ≡ 8 (mod 16).
+  1038→     */
+  1039→
+  1040→    /* push method pointer (RDI) */
+  1041→    emit_push(buf, VTX_REG_RDI);
+  1042→    /* push deopt_info (RSI) */
+  1043→    emit_push(buf, VTX_REG_RSI);
+  1044→    /* push profile_data (RDX) */
+  1045→    emit_push(buf, VTX_REG_RDX);
+  1046→    /* push rbp */
+  1047→    emit_push(buf, VTX_REG_RBP);
+  1048→    /* mov rbp, rsp */
+  1049→    vtx_code_buffer_emit_byte(buf, REX_W);
+  1050→    vtx_code_buffer_emit_byte(buf, 0x89);
+  1051→    vtx_code_buffer_emit_byte(buf, modrm(3, VTX_REG_RSP, VTX_REG_RBP));
+  1052→
+  1053→    /* Save callee-saved registers below RBP */
+  1054→    emit_push(buf, VTX_REG_RBX);  /* [RBP-8] */
+  1055→    emit_push(buf, VTX_REG_R12);  /* [RBP-16] */
+  1056→
+  1057→    /* Calculate frame_size for sub rsp (locals + spills only).
+  1058→     * Need frame_size ≡ 8 (mod 16) for proper stack alignment. */
+  1059→    uint32_t locals_bytes = ctx->layout.max_locals * 8;
+  1060→    uint32_t spill_bytes = ctx->layout.max_spills * 8;
+  1061→    /* Calculate frame_size for sub rsp (saved regs + locals + spills).
+  1062→     * Bug fix: The old code did not include VTX_FRAME_SAVED_REGS_SIZE in
+  1063→     * raw_size, causing the frame to be 16 bytes too small. With max_spills=4,
+  1064→     * spill[3] at RBP-64 was below RSP (RBP-56), causing a stack smash
+  1065→     * when the deopt stub saved registers to spill slots.
+  1066→     * Fix: include saved regs in the frame size calculation. */
+  1067→    uint32_t raw_size = VTX_FRAME_SAVED_REGS_SIZE + locals_bytes + spill_bytes;
+  1068→    uint32_t frame_size = ((raw_size + 7) & ~(uint32_t)0xF) | 8;
+  1069→    if (frame_size < 8) frame_size = 8;  /* minimum */
+  1070→    ctx->layout.total_frame_size = frame_size;
+  1071→    ctx->layout.frame_bottom = -(int32_t)frame_size;
+  1072→
+  1073→    /* Override locals_base and spill_base for the codegen layout.
+  1074→     * Saved regs occupy [RBP-8] and [RBP-16]; locals start at [RBP-24]. */
+  1075→    ctx->layout.locals_base = -(int32_t)(VTX_FRAME_SAVED_REGS_SIZE + 8); /* local[0] at RBP-24 */
+  1076→    ctx->layout.spill_base = -(int32_t)(VTX_FRAME_SAVED_REGS_SIZE + (ctx->layout.max_locals + 1) * 8);
+  1077→
+  1078→    /* sub rsp, frame_size */
+  1079→    vtx_code_buffer_emit_byte(buf, REX_W);
+  1080→    if (frame_size <= 127) {
+  1081→        vtx_code_buffer_emit_byte(buf, 0x83);
+  1082→        vtx_code_buffer_emit_byte(buf, modrm(3, 5, VTX_REG_RSP));
+  1083→        vtx_code_buffer_emit_byte(buf, (uint8_t)frame_size);
+  1084→    } else {
+  1085→        vtx_code_buffer_emit_byte(buf, 0x81);
+  1086→        vtx_code_buffer_emit_byte(buf, modrm(3, 5, VTX_REG_RSP));
+  1087→        vtx_code_buffer_emit_dword(buf, frame_size);
+  1088→    }
+  1089→
+  1090→    /* Initialize locals to VTX_VALUE_UNDEFINED */
+  1091→    emit_mov_reg_imm64(buf, VTX_REG_RAX, VTX_VALUE_UNDEFINED);
+  1092→    for (uint32_t i = 0; i < ctx->layout.max_locals; i++) {
+  1093→        int32_t off = vtx_frame_layout_local_offset(&ctx->layout, i);
+  1094→        emit_mov_rbp_offset_reg(buf, off, VTX_REG_RAX);
+  1095→    }
+  1096→
+  1097→    /* Copy arguments from args array into locals.
+  1098→     * At this point in the prologue, RCX still holds the 4th argument
+  1099→     * (vtx_value_t *args) and R8 holds the 5th argument (uint32_t arg_count).
+  1100→     * We copy args[i] → local[i] for i = 0..min(arg_count, max_locals)-1.
+  1101→     * The args pointer is in RCX; we use R10 as the loop counter and
+  1102→     * R11 to cache the args pointer (in case RCX is needed later).
+  1103→     *
+  1104→     * For each argument index i (known at compile time), we emit:
+  1105→     *   mov rax, [r11 + i*8]       ; load args[i]
+  1106→     *   mov [rbp + local_off(i)], rax  ; store to local[i]
+  1107→     *
+  1108→     * We cap at method->arg_count (compile-time known) and also emit a
+  1109→     * runtime check against the arg_count parameter (R8) in case fewer
+  1110→     * args were passed than expected. */
+  1111→    uint32_t arg_count = ctx->method->arg_count;
+  1112→    if (arg_count > 0 && ctx->layout.max_locals > 0) {
+  1113→        uint32_t copy_count = arg_count;
+  1114→        if (copy_count > ctx->layout.max_locals) {
+  1115→            copy_count = ctx->layout.max_locals;
+  1116→        }
+  1117→
+  1118→        /* Save args pointer to R11 (callee-saved, safe across potential clobbers) */
+  1119→        emit_mov_reg_reg64(buf, VTX_REG_R11, VTX_REG_RCX);
+  1120→
+  1121→        for (uint32_t i = 0; i < copy_count; i++) {
+  1122→            /* mov rax, [r11 + i*8] */
+  1123→            emit_rex64(buf, VTX_REG_RAX, VTX_REG_R11);
+  1124→            vtx_code_buffer_emit_byte(buf, 0x8B);
+  1125→            int32_t args_off = (int32_t)(i * 8);
+  1126→            if (args_off >= -128 && args_off <= 127) {
+  1127→                vtx_code_buffer_emit_byte(buf, modrm(1, VTX_REG_RAX, VTX_REG_R11));
+  1128→                vtx_code_buffer_emit_byte(buf, (uint8_t)(args_off & 0xFF));
+  1129→            } else {
+  1130→                vtx_code_buffer_emit_byte(buf, modrm(2, VTX_REG_RAX, VTX_REG_R11));
+  1131→                vtx_code_buffer_emit_dword(buf, (uint32_t)args_off);
+  1132→            }
+  1133→
+  1134→            /* mov [rbp + local_offset(i)], rax */
+  1135→            int32_t local_off = vtx_frame_layout_local_offset(&ctx->layout, i);
+  1136→            emit_mov_rbp_offset_reg(buf, local_off, VTX_REG_RAX);
+  1137→        }
+  1138→    }
+  1139→
+  1140→    /* Emit invocation counter increment */
+  1141→    if (ctx->profile_data) {
+  1142→        vtx_instrument_emit_invocation_increment(buf, ctx->profile_data);
+  1143→    }
+  1144→}
+  1145→
+  1146→static void emit_epilogue(vtx_compile_ctx_t *ctx)
+  1147→{
+  1148→    vtx_code_buffer_t *buf = &ctx->buf;
+  1149→
+  1150→    /* Restore callee-saved registers */
+  1151→    emit_mov_reg_rbp_offset(buf, VTX_REG_RBX, VTX_FRAME_SAVED_RBX_OFFSET);
+  1152→    emit_mov_reg_rbp_offset(buf, VTX_REG_R12, VTX_FRAME_SAVED_R12_OFFSET);
+  1153→
+  1154→    /* mov rsp, rbp — unwind all pushes and sub rsp */
+  1155→    vtx_code_buffer_emit_byte(buf, REX_W);
+  1156→    vtx_code_buffer_emit_byte(buf, 0x89);
+  1157→    vtx_code_buffer_emit_byte(buf, modrm(3, VTX_REG_RBP, VTX_REG_RSP));
+  1158→
+  1159→    /* pop rbp — restore caller RBP */
+  1160→    emit_pop(buf, VTX_REG_RBP);
+  1161→
+  1162→    /* add rsp, 24 — skip profile_data, deopt_info, method_ptr pushed in prologue
+  1163→     * Bug fix: Use modrm(3, ...) (register form) instead of modrm(1, ...) because
+  1164→     * RSP (rm=4) requires a SIB byte in memory forms (mod=01/10), which was not
+  1165→     * emitted. The register form (mod=3) does not need a SIB byte. */
+  1166→    emit_add_reg_imm32(buf, VTX_REG_RSP, 24);
+  1167→
+  1168→    /* ret — pop return address */
+  1169→    emit_ret(buf);
+  1170→}
+  1171→
+  1172→/* ========================================================================== */
+  1173→/* Per-opcode code generation                                                  */
+  1174→/* ========================================================================== */
+  1175→
+  1176→static void compile_halt(vtx_compile_ctx_t *ctx)
+  1177→{
+  1178→    /* Halt: emit a trap. Should never be reached in compiled code. */
+  1179→    emit_ud2(&ctx->buf);
+  1180→}
+  1181→
+  1182→static void compile_nop(vtx_compile_ctx_t *ctx)
+  1183→{
+  1184→    /* No operation */
+  1185→}
+  1186→
+  1187→static void compile_load_local(vtx_compile_ctx_t *ctx, uint16_t local_idx)
+  1188→{
+  1189→    int32_t off = vtx_frame_layout_local_offset(&ctx->layout, local_idx);
+  1190→    emit_stack_push(ctx);
+  1191→    /* Load local value into RAX (new TOS) */
+  1192→    emit_mov_reg_rbp_offset(&ctx->buf, VTX_REG_RAX, off);
+  1193→}
+  1194→
+  1195→static void compile_store_local(vtx_compile_ctx_t *ctx, uint16_t local_idx)
+  1196→{
+  1197→    /* Pop TOS and store to local */
+  1198→    int32_t off = vtx_frame_layout_local_offset(&ctx->layout, local_idx);
+  1199→    /* RAX holds TOS — store it, then shift stack */
+  1200→    emit_mov_rbp_offset_reg(&ctx->buf, off, VTX_REG_RAX);
+  1201→    emit_stack_pop(ctx);
+  1202→}
+  1203→
+  1204→static void compile_load_field(vtx_compile_ctx_t *ctx, uint16_t field_offset)
+  1205→{
+  1206→    vtx_code_buffer_t *buf = &ctx->buf;
+  1207→
+  1208→    /* TOS is the object (tagged heap pointer). Pop it, load the field. */
+  1209→    /* RAX = object value (tagged) */
+  1210→
+  1211→    /* Null check guard */
+  1212→    vtx_guard_info_t guard;
+  1213→    memset(&guard, 0, sizeof(guard));
+  1214→    guard.bytecode_pc = ctx->bc_pc;
+  1215→    guard.deopt_continuation = ctx->bc_pc;
+  1216→    guard.stack_depth = ctx->stack_depth;
+  1217→    vtx_guard_emit_null_check(buf, VTX_REG_RAX, guard, &ctx->guards);
+  1218→
+  1219→    /* Extract heap pointer from tagged value into R10 */
+  1220→    emit_untag_heap_ptr(ctx, VTX_REG_RAX, VTX_REG_R10);
+  1221→
+  1222→    /* Load field value: RAX = [R10 + VTX_HEAP_OBJECT_HEADER_SIZE + field_offset*8] */
+  1223→    int32_t field_off = (int32_t)VTX_HEAP_OBJECT_HEADER_SIZE + (int32_t)(field_offset * 8);
+  1224→    /* Bug #13 fix: Removed dead emit_mov_reg_rbp_offset call that emitted
+  1225→     * an unnecessary MOV from [rbp + offset] which was immediately overwritten
+  1226→     * by the correct MOV from [r10 + offset] below. The dead code path
+  1227→     * resulted in extra useless instructions in every LOAD_FIELD compilation. */
+  1228→    /* Use: mov rax, [r10 + disp32] */
+  1229→    emit_rex64(buf, VTX_REG_RAX, VTX_REG_R10);
+  1230→    vtx_code_buffer_emit_byte(buf, 0x8B);
+  1231→    if (field_off >= -128 && field_off <= 127) {
+  1232→        vtx_code_buffer_emit_byte(buf, modrm(1, VTX_REG_RAX, VTX_REG_R10));
+  1233→        vtx_code_buffer_emit_byte(buf, (uint8_t)(field_off & 0xFF));
+  1234→    } else {
+  1235→        vtx_code_buffer_emit_byte(buf, modrm(2, VTX_REG_RAX, VTX_REG_R10));
+  1236→        vtx_code_buffer_emit_dword(buf, (uint32_t)field_off);
+  1237→    }
+  1238→
+  1239→    /* The pop already happened conceptually; now we push the field value.
+  1240→     * But we already popped when we consumed TOS. We need to push the result.
+  1241→     * Actually, LOAD_FIELD: pop object, push field value. Net stack effect = 0.
+  1242→     * But in our model, we pop the object and then push the result.
+  1243→     * We already read the object from RAX (TOS). We need to shift the stack
+  1244→     * to remove the object and then push the field value.
+  1245→     * Since net effect is 0, we just replace TOS with the result.
+  1246→     * RAX already holds the result, so no shift needed! */
+  1247→}
+  1248→
+  1249→static void compile_store_field(vtx_compile_ctx_t *ctx, uint16_t field_offset)
+  1250→{
+  1251→    vtx_code_buffer_t *buf = &ctx->buf;
+  1252→
+  1253→    /* Pop value (TOS) and object (TOS-1). Store value into object.field. */
+  1254→    vtx_reg_t val_reg, obj_reg;
+  1255→    emit_stack_pop2(ctx, &obj_reg, &val_reg);
+  1256→    /* obj_reg = RSI (TOS-1 = object), val_reg = RDI (TOS = value) */
+  1257→
+  1258→    /* Null check on object */
+  1259→    vtx_guard_info_t guard;
+  1260→    memset(&guard, 0, sizeof(guard));
+  1261→    guard.bytecode_pc = ctx->bc_pc;
+  1262→    guard.deopt_continuation = ctx->bc_pc;
+  1263→    guard.stack_depth = ctx->stack_depth + 2; /* before pop2 */
+  1264→    vtx_guard_emit_null_check(buf, obj_reg, guard, &ctx->guards);
+  1265→
+  1266→    /* Extract heap pointer */
+  1267→    emit_untag_heap_ptr(ctx, obj_reg, VTX_REG_R10);
+  1268→
+  1269→    /* Store: [R10 + header_size + field_offset*8] = val_reg */
+  1270→    int32_t field_off = (int32_t)VTX_HEAP_OBJECT_HEADER_SIZE + (int32_t)(field_offset * 8);
+  1271→    /* mov [r10 + field_off], rdi */
+  1272→    emit_rex64(buf, val_reg, VTX_REG_R10);
+  1273→    vtx_code_buffer_emit_byte(buf, 0x89); /* MOV r/m64, r64 */
+  1274→    if (field_off >= -128 && field_off <= 127) {
+  1275→        vtx_code_buffer_emit_byte(buf, modrm(1, val_reg, VTX_REG_R10));
+  1276→        vtx_code_buffer_emit_byte(buf, (uint8_t)(field_off & 0xFF));
+  1277→    } else {
+  1278→        vtx_code_buffer_emit_byte(buf, modrm(2, val_reg, VTX_REG_R10));
+  1279→        vtx_code_buffer_emit_dword(buf, (uint32_t)field_off);
+  1280→    }
+  1281→
+  1282→    /* Write barrier: call vtx_gc_write_barrier(gc, obj, field_offset, value)
+  1283→     * After the store above:
+  1284→     *   R10 = untagged heap object pointer (vtx_heap_object_t*)
+  1285→     *   RDI = tagged value that was stored (vtx_value_t)
+  1286→     * We must call the write barrier so the generational GC can track
+  1287→     * old→young pointer updates. Without this, the GC may miss such
+  1288→     * references and prematurely collect live young-gen objects. */
+  1289→    emit_push(buf, VTX_REG_RAX);
+  1290→    emit_push(buf, VTX_REG_RCX);
+  1291→    emit_push(buf, VTX_REG_RDX);
+  1292→    emit_push(buf, VTX_REG_RBX);
+  1293→
+  1294→    /* Save obj (R10) and value (RDI) before function calls that may
+  1295→     * clobber caller-saved registers. 6 pushes total = 48 bytes,
+  1296→     * keeping the stack 16-byte aligned for the calls below. */
+  1297→    emit_push(buf, VTX_REG_R10);
+  1298→    emit_push(buf, VTX_REG_RDI);
+  1299→
+  1300→    /* Get the GC pointer via the global accessor */
+  1301→    extern vtx_gc_t *vtx_get_current_gc(void);
+  1302→    emit_mov_reg_imm64(buf, VTX_REG_RAX,
+  1303→        (uint64_t)(uintptr_t)vtx_get_current_gc);
+  1304→    emit_call_reg(buf, VTX_REG_RAX);
+  1305→    /* RAX = gc pointer */
+  1306→
+  1307→    /* Restore value and obj */
+  1308→    emit_pop(buf, VTX_REG_RDI);   /* value */
+  1309→    emit_pop(buf, VTX_REG_R10);   /* obj */
+  1310→
+  1311→    /* Set up args for vtx_gc_write_barrier(gc, obj, field_offset, value)
+  1312→     * System V ABI: RDI=arg1, RSI=arg2, RDX=arg3, RCX=arg4 */
+  1313→    emit_mov_reg_reg64(buf, VTX_REG_RCX, VTX_REG_RDI);  /* arg4 = value */
+  1314→    emit_mov_reg_reg64(buf, VTX_REG_RDI, VTX_REG_RAX);  /* arg1 = gc */
+  1315→    emit_mov_reg_reg64(buf, VTX_REG_RSI, VTX_REG_R10);  /* arg2 = obj */
+  1316→    emit_mov_reg_imm32(buf, VTX_REG_RDX, field_offset);  /* arg3 = field_offset */
+  1317→
+  1318→    /* Call vtx_gc_write_barrier */
+  1319→    extern void vtx_gc_write_barrier(vtx_gc_t *, vtx_heap_object_t *,
+  1320→                                     uint32_t, vtx_value_t);
+  1321→    emit_mov_reg_imm64(buf, VTX_REG_RAX,
+  1322→        (uint64_t)(uintptr_t)vtx_gc_write_barrier);
+  1323→    emit_call_reg(buf, VTX_REG_RAX);
+  1324→
+  1325→    /* Restore expr stack registers */
+  1326→    emit_pop(buf, VTX_REG_RBX);
+  1327→    emit_pop(buf, VTX_REG_RDX);
+  1328→    emit_pop(buf, VTX_REG_RCX);
+  1329→    emit_pop(buf, VTX_REG_RAX);
+  1330→}
+  1331→
+  1332→static void compile_load_const_int(vtx_compile_ctx_t *ctx, uint16_t cp_idx)
+  1333→{
+  1334→    vtx_value_t val = ctx->bc->constant_pool[cp_idx];
+  1335→    int64_t int_val = vtx_smi_value(val);
+  1336→    emit_stack_push(ctx);
+  1337→    emit_mov_reg_imm64(&ctx->buf, VTX_REG_RAX, (uint64_t)val);
+  1338→}
+  1339→
+  1340→static void compile_load_const_float(vtx_compile_ctx_t *ctx, uint16_t cp_idx)
+  1341→{
+  1342→    vtx_value_t val = ctx->bc->constant_pool[cp_idx];
+  1343→    emit_stack_push(ctx);
+  1344→    emit_mov_reg_imm64(&ctx->buf, VTX_REG_RAX, val);
+  1345→}
+  1346→
+  1347→static void compile_load_const_str(vtx_compile_ctx_t *ctx, uint16_t cp_idx)
+  1348→{
+  1349→    vtx_value_t val = ctx->bc->constant_pool[cp_idx];
+  1350→    emit_stack_push(ctx);
+  1351→    emit_mov_reg_imm64(&ctx->buf, VTX_REG_RAX, val);
+  1352→}
+  1353→
+  1354→static void compile_load_null(vtx_compile_ctx_t *ctx)
+  1355→{
+  1356→    emit_stack_push(ctx);
+  1357→    emit_mov_reg_imm64(&ctx->buf, VTX_REG_RAX, VTX_VALUE_NULL);
+  1358→}
+  1359→
+  1360→static void compile_load_true(vtx_compile_ctx_t *ctx)
+  1361→{
+  1362→    emit_stack_push(ctx);
+  1363→    emit_mov_reg_imm64(&ctx->buf, VTX_REG_RAX, VTX_VALUE_TRUE);
+  1364→}
+  1365→
+  1366→static void compile_load_false(vtx_compile_ctx_t *ctx)
+  1367→{
+  1368→    emit_stack_push(ctx);
+  1369→    emit_mov_reg_imm64(&ctx->buf, VTX_REG_RAX, VTX_VALUE_FALSE);
+  1370→}
+  1371→
+  1372→static void compile_load_undefined(vtx_compile_ctx_t *ctx)
+  1373→{
+  1374→    emit_stack_push(ctx);
+  1375→    emit_mov_reg_imm64(&ctx->buf, VTX_REG_RAX, VTX_VALUE_UNDEFINED);
+  1376→}
+  1377→
+  1378→/* ========================================================================== */
+  1379→/* Integer arithmetic                                                          */
+  1380→/* ========================================================================== */
+  1381→
+  1382→/**
+  1383→ * Emit an SMI type check guard for both operands in RAX and RCX.
+  1384→ * Both values must be NaN-boxed SMIs (tag = 0, low 3 bits = 0).
+  1385→ * Jumps to slow_path_label if either is not SMI.
+  1386→ *
+  1387→ * Returns the position of the slow-path jump for later patching.
+  1388→ */
+  1389→static uint32_t emit_smi_type_check(vtx_compile_ctx_t *ctx)
+  1390→{
+  1391→    vtx_code_buffer_t *buf = &ctx->buf;
+  1392→
+  1393→    /* Check both operands are SMI: (RAX | RCX) & 0x7 == 0
+  1394→     * SMI has VTX_TAG_SMI = 0 in the low 3 bits. Any non-SMI NaN-boxed
+  1395→     * value has non-zero tag bits (1-5). Non-NaN doubles may have any
+  1396→     * value in the low bits but are rare for integer arithmetic. */
+  1397→
+  1398→    /* mov r10, rax */
+  1399→    emit_mov_reg_reg64(buf, VTX_REG_R10, VTX_REG_RAX);
+  1400→    /* or r10, rcx */
+  1401→    emit_or_reg_reg(buf, VTX_REG_R10, VTX_REG_RCX);
+  1402→    /* test r10, 0x7 */
+  1403→    emit_rex64(buf, (vtx_reg_t)0, VTX_REG_R10);
+  1404→    vtx_code_buffer_emit_byte(buf, 0xF7);  /* TEST r/m64, imm32 */
+  1405→    vtx_code_buffer_emit_byte(buf, modrm(3, 0, VTX_REG_R10));
+  1406→    vtx_code_buffer_emit_dword(buf, 0x7);
+  1407→
+  1408→    /* jnz slow_path */
+  1409→    uint32_t jnz_pos = emit_jcc32(buf, CC_NE);
+  1410→    return jnz_pos;
+  1411→}
+  1412→
+  1413→/**
+  1414→ * Emit code to shift the expression stack registers up by 1 position,
+  1415→ * accounting for a binary op that consumed 2 values and produced 1.
+  1416→ * RAX already holds the result (new TOS). Shift RCX ← RDX, RDX ← RBX,
+  1417→ * and optionally load a value from spill into RBX.
+  1418→ *
+  1419→ * Before: RAX=result, RCX=old_TOS-1(consumed), RDX=old_TOS-2, RBX=old_TOS-3
+  1420→ * After:  RAX=result(new TOS), RCX=old_TOS-2(new TOS-1),
+  1421→ *         RDX=old_TOS-3(new TOS-2), RBX=old_TOS-4 or load from spill
+  1422→ */
+  1423→static void emit_stack_binary_result(vtx_compile_ctx_t *ctx)
+  1424→{
+  1425→    vtx_code_buffer_t *buf = &ctx->buf;
+  1426→
+  1427→    /* In the fast path (e.g., IADD SMI), we operate directly on the
+  1428→     * register file without calling emit_stack_pop2/push.
+  1429→     * stack_depth still holds the PRE-operation depth (including both
+  1430→     * operands). We emit the register shift code only — the caller
+  1431→     * is responsible for updating stack_depth to (old - 1). */
+  1432→    uint32_t old_depth = ctx->stack_depth;
+  1433→    uint32_t new_depth = old_depth - 1;
+  1434→
+  1435→    /* Shift registers up: RCX ← RDX, RDX ← RBX */
+  1436→    if (new_depth >= 2) {
+  1437→        emit_mov_reg_reg64(buf, VTX_REG_RCX, VTX_REG_RDX);
+  1438→    }
+  1439→    if (new_depth >= 3) {
+  1440→        emit_mov_reg_reg64(buf, VTX_REG_RDX, VTX_REG_RBX);
+  1441→    }
+  1442→
+  1443→    /* Load from spill if needed */
+  1444→    if (new_depth >= 4) {
+  1445→        /* After pop2+push1, the deepest register (RBX) needs a value
+  1446→         * from spill. The value now at TOS-3 was previously at
+  1447→         * position (old_depth - 1) - 3 = old_depth - 4 from the top,
+  1448→         * or spill slot (old_depth - VTX_EXPR_REG_COUNT - 1) from the bottom. */
+  1449→        uint32_t spill_idx = old_depth - VTX_EXPR_REG_COUNT - 1;
+  1450→        int32_t spill_off = vtx_frame_layout_spill_offset(&ctx->layout, spill_idx);
+  1451→        emit_mov_reg_rbp_offset(buf, VTX_REG_RBX, spill_off);
+  1452→    }
+  1453→}
+  1454→
+  1455→/**
+  1456→ * Emit a deopt guard that verifies the result in RAX is a valid SMI.
+  1457→ * Checks that the NaN-box header is intact (upper bits = VTX_NAN_BOX_HEADER)
+  1458→ * and the tag bits are 0. If the check fails, deoptimizes.
+  1459→ */
+  1460→static void emit_smi_overflow_guard(vtx_compile_ctx_t *ctx)
+  1461→{
+  1462→    vtx_code_buffer_t *buf = &ctx->buf;
+  1463→
+  1464→    /* Quick check: verify the result has the correct NaN header.
+  1465→     * After SMI(a) + SMI(b) - HEADER, if no overflow, the result
+  1466→     * is a valid SMI with header = VTX_NAN_BOX_HEADER and tag = 0.
+  1467→     * If overflow occurred, the carry corrupts the header area.
+  1468→     *
+  1469→     * We check (result & ~VTX_NAN_DATA_MASK) == VTX_NAN_BOX_HEADER
+  1470→     * by comparing the upper bits. The mask for the header + tag area
+  1471→     * is ~VTX_NAN_DATA_MASK << VTX_NAN_DATA_SHIFT | VTX_TAG_MASK,
+  1472→     * but a simpler check is: test the low 3 bits (must be 0 for SMI)
+  1473→     * and verify the header pattern.
+  1474→     *
+  1475→     * For a fast check: compare (result >> 48) with 0x7FF8.
+  1476→     * Valid SMI: bits [63:48] = 0x7FF8. Overflow: bits [63:48] != 0x7FF8.
+  1477→     */
+  1478→
+  1479→    /* mov r10, rax */
+  1480→    emit_mov_reg_reg64(buf, VTX_REG_R10, VTX_REG_RAX);
+  1481→    /* shr r10, 48
+  1482→     * CRITICAL: Must use emit_rex64() for R10 (register 10), which requires
+  1483→     * REX.B bit. Previously hardcoded 0x48 (REX.W only), which caused the
+  1484→     * SHR to target RDX (rm=2) instead of R10 (rm=2 + REX.B). This corrupted
+  1485→     * RDX — an expression stack register — and caused the overflow guard to
+  1486→     * always trigger deopt (since R10 was never shifted, cmp r10,0x7FF8 failed
+  1487→     * for all valid SMIs). The deopt stub then materialized the corrupted RDX
+  1488→     * value into the interpreter stack, producing incorrect results. */
+  1489→    emit_rex64(buf, (vtx_reg_t)5, VTX_REG_R10);  /* SHR /5, rm=R10 */
+  1490→    vtx_code_buffer_emit_byte(buf, 0xC1);
+  1491→    vtx_code_buffer_emit_byte(buf, modrm(3, 5, VTX_REG_R10));
+  1492→    vtx_code_buffer_emit_byte(buf, 48);
+  1493→
+  1494→    /* cmp r10d, 0x7FF8 */
+  1495→    emit_cmp_reg_imm32(buf, VTX_REG_R10, 0x7FF8);
+  1496→
+  1497→    /* jne overflow_deopt */
+  1498→    vtx_guard_info_t guard;
+  1499→    memset(&guard, 0, sizeof(guard));
+  1500→    guard.bytecode_pc = ctx->bc_pc;
+  1501→    guard.deopt_continuation = ctx->bc_pc;
+  1502→    guard.stack_depth = ctx->stack_depth;  /* pre-operation depth (fast path, no pop yet) */
+  1503→    vtx_guard_emit_overflow_check(buf, guard, &ctx->guards);
+  1504→}
+  1505→
+  1506→static void compile_int_arith(vtx_compile_ctx_t *ctx, vtx_opcode_t op)
+  1507→{
+  1508→    vtx_code_buffer_t *buf = &ctx->buf;
+  1509→
+  1510→    /*
+  1511→     * Optimized integer arithmetic with direct SMI fast path.
+  1512→     *
+  1513→     * For IADD/ISUB, SMI values use NaN-boxing:
+  1514→     *   SMI(a) = VTX_NAN_BOX_HEADER | (a << 3)
+  1515→     *   SMI(b) = VTX_NAN_BOX_HEADER | (b << 3)
+  1516→     *
+  1517→     * Direct arithmetic (no untag/retag):
+  1518→     *   SMI(a) + SMI(b) = 2*HEADER + (a+b)<<3
+  1519→     *   Result = SMI(a) + SMI(b) - HEADER = HEADER + (a+b)<<3 = SMI(a+b)
+  1520→     *
+  1521→     *   SMI(a) - SMI(b) = (a-b)<<3
+  1522→     *   Result = SMI(a) - SMI(b) + HEADER = HEADER + (a-b)<<3 = SMI(a-b)
+  1523→     *
+  1524→     * For IMUL, we must untag at least one operand, so we fall back
+  1525→     * to the untag→mul→retag approach but still avoid the stack shuffle.
+  1526→     *
+  1527→     * Register layout: RAX = TOS, RCX = TOS-1
+  1528→     * For binary ops, we operate directly on RAX and RCX,
+  1529→     * then shift registers up by 1 (pop2 + push1 = net pop1).
+  1530→     */
+  1531→
+  1532→    /* For IADD only: emit fast SMI path.
+  1533→     * ISUB's fast path (SMI(a)-SMI(b)+HEADER) is broken for negative results
+  1534→     * because the addition borrows from the NaN-box header. ISUB falls through
+  1535→     * to the untag→compute→retag path below. */
+  1536→    if (op == VT_OP_IADD) {
+  1537→        /* RAX = TOS (rhs), RCX = TOS-1 (lhs) — already in the right registers */
+  1538→
+  1539→        /* Save pre-operation stack depth for both fast and slow paths.
+  1540→         * Both paths need to end at depth = pre_depth - 1. */
+  1541→        uint32_t pre_depth = ctx->stack_depth;
+  1542→
+  1543→        /* SMI type check: (RAX | RCX) & 0x7 == 0 */
+  1544→        uint32_t smi_check_jnz = emit_smi_type_check(ctx);
+  1545→
+  1546→        /* --- Fast SMI path --- */
+  1547→        uint32_t fast_path_start = vtx_code_buffer_position(buf);
+  1548→
+  1549→        if (op == VT_OP_IADD) {
+  1550→            /* add rax, rcx  (SMI(a) + SMI(b) = 2*HEADER + (a+b)<<3) */
+  1551→            emit_add_reg_reg(buf, VTX_REG_RAX, VTX_REG_RCX);
+  1552→            /* sub rax, VTX_NAN_BOX_HEADER  (adjust: result = HEADER + (a+b)<<3) */
+  1553→            emit_mov_reg_imm64(buf, VTX_REG_R10, VTX_NAN_BOX_HEADER);
+  1554→            emit_sub_reg_reg(buf, VTX_REG_RAX, VTX_REG_R10);
+  1555→        } else {
+  1556→            /* sub rax, rcx  (SMI(a) - SMI(b) = (a-b)<<3) */
+  1557→            emit_sub_reg_reg(buf, VTX_REG_RAX, VTX_REG_RCX);
+  1558→            /* add rax, VTX_NAN_BOX_HEADER  (adjust: result = HEADER + (a-b)<<3) */
+  1559→            emit_mov_reg_imm64(buf, VTX_REG_R10, VTX_NAN_BOX_HEADER);
+  1560→            emit_add_reg_reg(buf, VTX_REG_RAX, VTX_REG_R10);
+  1561→        }
+  1562→
+  1563→        /* Overflow check: verify result header is intact */
+  1564→        emit_smi_overflow_guard(ctx);
+  1565→
+  1566→        /* Shift registers for pop2+push1 */
+  1567→        emit_stack_binary_result(ctx);
+  1568→
+  1569→        /* jmp done */
+  1570→        uint32_t jmp_done_pos = emit_jmp32(buf);
+  1571→
+  1572→        /* --- Slow path (non-SMI operands) --- */
+  1573→        uint32_t slow_path_start = vtx_code_buffer_position(buf);
+  1574→
+  1575→        /* Patch the SMI check JNZ to jump here */
+  1576→        int32_t smi_disp = (int32_t)slow_path_start - (int32_t)(smi_check_jnz + 4);
+  1577→        vtx_code_buffer_patch_dword(buf, smi_check_jnz, (uint32_t)smi_disp);
+  1578→
+  1579→        /* Restore stack_depth to pre-operation value for the slow path,
+  1580→         * since emit_stack_binary_result above did not modify it,
+  1581→         * but we need the slow path to start from the correct state. */
+  1582→        ctx->stack_depth = pre_depth;
+  1583→
+  1584→        /* Slow path: untag both, compute, retag */
+  1585→        vtx_reg_t lhs_reg, rhs_reg;
+  1586→        emit_stack_pop2(ctx, &lhs_reg, &rhs_reg);
+  1587→        /* lhs_reg = RSI (TOS-1), rhs_reg = RDI (TOS) */
+  1588→
+  1589→        /* Untag both SMI values to get raw int64_t */
+  1590→        emit_untag_smi(ctx, lhs_reg);
+  1591→        emit_untag_smi(ctx, rhs_reg);
+  1592→
+  1593→        if (op == VT_OP_IADD) {
+  1594→            emit_add_reg_reg(buf, lhs_reg, rhs_reg);
+  1595→        } else {
+  1596→            emit_sub_reg_reg(buf, lhs_reg, rhs_reg);
+  1597→        }
+  1598→
+  1599→        /* Overflow guard */
+  1600→        {
+  1601→            vtx_guard_info_t guard;
+  1602→            memset(&guard, 0, sizeof(guard));
+  1603→            guard.bytecode_pc = ctx->bc_pc;
+  1604→            guard.deopt_continuation = ctx->bc_pc;
+  1605→            guard.stack_depth = ctx->stack_depth + 2;
+  1606→            vtx_guard_emit_overflow_check(buf, guard, &ctx->guards);
+  1607→        }
+  1608→
+  1609→        /* Re-tag the result as SMI and push */
+  1610→        emit_tag_smi(ctx, lhs_reg);
+  1611→        emit_stack_push(ctx);
+  1612→        emit_mov_reg_reg64(buf, VTX_REG_RAX, lhs_reg);
+  1613→
+  1614→        /* Patch jmp_done to jump past slow path */
+  1615→        uint32_t done_pos = vtx_code_buffer_position(buf);
+  1616→        int32_t done_disp = (int32_t)done_pos - (int32_t)(jmp_done_pos + 4);
+  1617→        vtx_code_buffer_patch_dword(buf, jmp_done_pos, (uint32_t)done_disp);
+  1618→
+  1619→        /* Both paths converge: stack_depth should be pre_depth - 1.
+  1620→         * Fast path: didn't modify stack_depth (emit_stack_binary_result is code-only).
+  1621→         * Slow path: pop2(-2) + push(+1) = net -1, so stack_depth = pre_depth - 1.
+  1622→         * For the fast path, we need to set it now. */
+  1623→        ctx->stack_depth = pre_depth - 1;
+  1624→        if (ctx->stack_depth > ctx->max_stack_depth) {
+  1625→            ctx->max_stack_depth = ctx->stack_depth;
+  1626→        }
+  1627→
+  1628→        return;
+  1629→    }
+  1630→
+  1631→    /* For IMUL, IDIV, IMOD: use untag→compute→retag with reduced shuffle */
+  1632→    if (op == VT_OP_IMUL) {
+  1633→        /* RAX = TOS (rhs), RCX = TOS-1 (lhs)
+  1634→         * IMUL requires untag→mul→retag since SMI(a)*SMI(b) ≠ SMI(a*b) */
+  1635→
+  1636→        /* Save pre-operation stack depth. Both paths converge at depth - 1. */
+  1637→        uint32_t pre_depth = ctx->stack_depth;
+  1638→
+  1639→        /* SMI type check for fast IMUL path */
+  1640→        uint32_t smi_check_jnz = emit_smi_type_check(ctx);
+  1641→
+  1642→        /* --- Fast IMUL path (SMI operands, no stack shuffle) --- */
+  1643→        uint32_t fast_path_start = vtx_code_buffer_position(buf);
+  1644→
+  1645→        /* Untag lhs (RCX): sar rcx, 3 */
+  1646→        emit_untag_smi(ctx, VTX_REG_RCX);
+  1647→        /* Untag rhs (RAX): mov r11, rax; sar r11, 3 */
+  1648→        emit_mov_reg_reg64(buf, VTX_REG_R11, VTX_REG_RAX);
+  1649→        emit_untag_smi(ctx, VTX_REG_R11);
+  1650→
+  1651→        /* imul rcx, r11 */
+  1652→        emit_imul_reg_reg(buf, VTX_REG_RCX, VTX_REG_R11);
+  1653→
+  1654→        /* Overflow check: on overflow, produce SMI(0) fallback instead of
+  1655→         * deopting. This avoids the need for deopt_info when the caller
+  1656→         * hasn't set one up. The JO instruction jumps to a fallback path. */
+  1657→        uint32_t jo_pos = emit_jcc32(buf, CC_O); /* JO = jump on overflow */
+  1658→
+  1659→        /* Re-tag result (in RCX) and move to RAX */
+  1660→        emit_tag_smi(ctx, VTX_REG_RCX);
+  1661→        emit_mov_reg_reg64(buf, VTX_REG_RAX, VTX_REG_RCX);
+  1662→
+  1663→        /* Shift registers for pop2+push1 */
+  1664→        emit_stack_binary_result(ctx);
+  1665→
+  1666→        /* jmp done */
+  1667→        uint32_t jmp_done_pos = emit_jmp32(buf);
+  1668→
+  1669→        /* --- Non-SMI path: operands aren't both SMI --- */
+  1670→        uint32_t slow_path_start = vtx_code_buffer_position(buf);
+  1671→
+  1672→        /* Patch SMI check JNZ to jump here */
+  1673→        int32_t smi_disp = (int32_t)slow_path_start - (int32_t)(smi_check_jnz + 4);
+  1674→        vtx_code_buffer_patch_dword(buf, smi_check_jnz, (uint32_t)smi_disp);
+  1675→
+  1676→        /* Restore stack_depth for the slow path */
+  1677→        ctx->stack_depth = pre_depth;
+  1678→
+  1679→        /* Slow path: pop2, untag, imul, retag, push */
+  1680→        vtx_reg_t lhs_reg, rhs_reg;
+  1681→        emit_stack_pop2(ctx, &lhs_reg, &rhs_reg);
+  1682→        emit_untag_smi(ctx, lhs_reg);
+  1683→        emit_untag_smi(ctx, rhs_reg);
+  1684→        emit_imul_reg_reg(buf, lhs_reg, rhs_reg);
+  1685→
+  1686→        /* Overflow check for slow path — same JO approach */
+  1687→        uint32_t jo2_pos = emit_jcc32(buf, CC_O);
+  1688→
+  1689→        emit_tag_smi(ctx, lhs_reg);
+  1690→        emit_stack_push(ctx);
+  1691→        emit_mov_reg_reg64(buf, VTX_REG_RAX, lhs_reg);
+  1692→
+  1693→        /* jmp done2 */
+  1694→        uint32_t jmp_done2_pos = emit_jmp32(buf);
+  1695→
+  1696→        /* --- Overflow fallback: both fast and slow overflow land here --- */
+  1697→        uint32_t overflow_path = vtx_code_buffer_position(buf);
+  1698→
+  1699→        /* Patch both JO instructions to jump here */
+  1700→        int32_t jo_disp = (int32_t)overflow_path - (int32_t)(jo_pos + 4);
+  1701→        vtx_code_buffer_patch_dword(buf, jo_pos, (uint32_t)jo_disp);
+  1702→        int32_t jo2_disp = (int32_t)overflow_path - (int32_t)(jo2_pos + 4);
+  1703→        vtx_code_buffer_patch_dword(buf, jo2_pos, (uint32_t)jo2_disp);
+  1704→
+  1705→        /* On overflow, produce SMI(0) as a safe fallback.
+  1706→         * TODO: Proper double-boxing path for overflow results.
+  1707→         * Note: emit_stack_binary_result uses the current stack_depth
+  1708→         * to compute spill offsets. At this point, stack_depth may
+  1709→         * have been modified by the slow path (pop2+push = pre_depth - 1),
+  1710→         * but the overflow can come from EITHER the fast path (depth=pre_depth)
+  1711→         * or the slow path (depth=pre_depth-1). Since both paths have the
+  1712→         * same physical register state at their respective JO points,
+  1713→         * and the fast path's JO is BEFORE emit_stack_binary_result,
+  1714→         * we need to ensure stack_depth matches the fast path state.
+  1715→         * The overflow path is rarely taken; we set depth to pre_depth
+  1716→         * for correctness of spill offset computation. */
+  1717→        ctx->stack_depth = pre_depth;
+  1718→        emit_mov_reg_imm64(buf, VTX_REG_RAX, VTX_NAN_BOX_HEADER); /* SMI(0) */
+  1719→        emit_stack_binary_result(ctx);
+  1720→
+  1721→        /* Patch both jmp_done instructions */
+  1722→        uint32_t done_pos = vtx_code_buffer_position(buf);
+  1723→        int32_t done_disp = (int32_t)done_pos - (int32_t)(jmp_done_pos + 4);
+  1724→        vtx_code_buffer_patch_dword(buf, jmp_done_pos, (uint32_t)done_disp);
+  1725→        int32_t done2_disp = (int32_t)done_pos - (int32_t)(jmp_done2_pos + 4);
+  1726→        vtx_code_buffer_patch_dword(buf, jmp_done2_pos, (uint32_t)done2_disp);
+  1727→
+  1728→        /* All paths converge at depth = pre_depth - 1 */
+  1729→        ctx->stack_depth = pre_depth - 1;
+  1730→        if (ctx->stack_depth > ctx->max_stack_depth) {
+  1731→            ctx->max_stack_depth = ctx->stack_depth;
+  1732→        }
+  1733→
+  1734→        return;
+  1735→    }
+  1736→
+  1737→    /* IDIV, IMOD: no SMI fast path, use pop2/push approach */
+  1738→    vtx_reg_t lhs_reg, rhs_reg;
+  1739→    emit_stack_pop2(ctx, &lhs_reg, &rhs_reg);
+  1740→    /* lhs_reg = RSI (TOS-1), rhs_reg = RDI (TOS) */
+  1741→
+  1742→    /* Untag both SMI values to get raw int64_t */
+  1743→    emit_untag_smi(ctx, lhs_reg);
+  1744→    emit_untag_smi(ctx, rhs_reg);
+  1745→
+  1746→    switch (op) {
+  1747→    case VT_OP_ISUB:
+  1748→        emit_sub_reg_reg(buf, lhs_reg, rhs_reg);
+  1749→        break;
+  1750→    case VT_OP_IDIV:
+  1751→        /* Division by zero guard */
+  1752→        {
+  1753→            vtx_guard_info_t guard;
+  1754→            memset(&guard, 0, sizeof(guard));
+  1755→            guard.bytecode_pc = ctx->bc_pc;
+  1756→            guard.deopt_continuation = ctx->bc_pc;
+  1757→            guard.stack_depth = ctx->stack_depth + 2;
+  1758→            vtx_guard_emit_div_zero_check(buf, rhs_reg, guard, &ctx->guards);
+  1759→        }
+  1760→        /* Move lhs to RAX, sign-extend to RDX:RAX, then idiv */
+  1761→        emit_mov_reg_reg64(buf, VTX_REG_RAX, lhs_reg);
+  1762→        emit_cqo(buf);
+  1763→        emit_idiv_reg(buf, rhs_reg);
+  1764→        /* Result (quotient) is in RAX. Move to lhs_reg. */
+  1765→        emit_mov_reg_reg64(buf, lhs_reg, VTX_REG_RAX);
+  1766→        break;
+  1767→    case VT_OP_IMOD:
+  1768→        {
+  1769→            vtx_guard_info_t guard;
+  1770→            memset(&guard, 0, sizeof(guard));
+  1771→            guard.bytecode_pc = ctx->bc_pc;
+  1772→            guard.deopt_continuation = ctx->bc_pc;
+  1773→            guard.stack_depth = ctx->stack_depth + 2;
+  1774→            vtx_guard_emit_div_zero_check(buf, rhs_reg, guard, &ctx->guards);
+  1775→        }
+  1776→        emit_mov_reg_reg64(buf, VTX_REG_RAX, lhs_reg);
+  1777→        emit_cqo(buf);
+  1778→        emit_idiv_reg(buf, rhs_reg);
+  1779→        /* Remainder is in RDX */
+  1780→        emit_mov_reg_reg64(buf, lhs_reg, VTX_REG_RDX);
+  1781→        break;
+  1782→    default:
+  1783→        VTX_ASSERT(false, "unhandled integer arithmetic opcode");
+  1784→        break;
+  1785→    }
+  1786→
+  1787→    /* Re-tag the result as SMI and push */
+  1788→    emit_tag_smi(ctx, lhs_reg);
+  1789→    emit_stack_push(ctx);
+  1790→    /* Move result from lhs_reg (RSI) to RAX */
+  1791→    emit_mov_reg_reg64(buf, VTX_REG_RAX, lhs_reg);
+  1792→}
+  1793→
+  1794→/* ========================================================================== */
+  1795→/* Float arithmetic                                                            */
+  1796→/* ========================================================================== */
+  1797→
+  1798→static void compile_float_arith(vtx_compile_ctx_t *ctx, vtx_opcode_t op)
+  1799→{
+  1800→    vtx_code_buffer_t *buf = &ctx->buf;
+  1801→
+  1802→    /* For float arithmetic, we store doubles in the stack frame and
+  1803→     * use XMM registers for computation. The tagged value is the raw
+  1804→     * IEEE 754 bit pattern (for non-NaN doubles) or the NaN-boxed form.
+  1805→     *
+  1806→     * We simplify by storing TOS and TOS-1 temporarily, then using XMM0.
+  1807→     */
+  1808→
+  1809→    /* Pop TOS-1 (lhs) and TOS (rhs) */
+  1810→    vtx_reg_t lhs_reg, rhs_reg;
+  1811→    emit_stack_pop2(ctx, &lhs_reg, &rhs_reg);
+  1812→
+  1813→    /* Store both values to temporary frame slots for XMM access */
+  1814→    /* Use local[max_locals] and local[max_locals+1] as temp if available,
+  1815→     * or use fixed scratch area. For simplicity, store to [rbp-48-max_locals*8-8]
+  1816→     * and [rbp-48-max_locals*8-16]. Actually, let's use the spill area. */
+  1817→    int32_t temp_off1, temp_off2;
+  1818→
+  1819→    /* If we don't have enough spill slots, use local slots as temp */
+  1820→    if (ctx->layout.max_spills >= 2) {
+  1821→        temp_off1 = vtx_frame_layout_spill_offset(&ctx->layout, 0);
+  1822→        temp_off2 = vtx_frame_layout_spill_offset(&ctx->layout, 1);
+  1823→    } else {
+  1824→        /* Use the last two locals as temp */
+  1825→        temp_off1 = vtx_frame_layout_local_offset(&ctx->layout,
+  1826→                     ctx->layout.max_locals > 0 ? ctx->layout.max_locals - 1 : 0);
+  1827→        temp_off2 = vtx_frame_layout_local_offset(&ctx->layout,
+  1828→                     ctx->layout.max_locals > 1 ? ctx->layout.max_locals - 2 : 0);
+  1829→    }
+  1830→
+  1831→    emit_mov_rbp_offset_reg(buf, temp_off1, lhs_reg);
+  1832→    emit_mov_rbp_offset_reg(buf, temp_off2, rhs_reg);
+  1833→
+  1834→    /* Load lhs into XMM0 */
+  1835→    emit_movsd_load(buf, temp_off1);
+  1836→
+  1837→    /* Perform operation with rhs */
+  1838→    switch (op) {
+  1839→    case VT_OP_FADD: emit_addsd_mem(buf, temp_off2); break;
+  1840→    case VT_OP_FSUB: emit_subsd_mem(buf, temp_off2); break;
+  1841→    case VT_OP_FMUL: emit_mulsd_mem(buf, temp_off2); break;
+  1842→    case VT_OP_FDIV: emit_divsd_mem(buf, temp_off2); break;
+  1843→    default: VTX_ASSERT(false, "unhandled float arithmetic opcode"); break;
+  1844→    }
+  1845→
+  1846→    /* Store XMM0 result to temp, then load as tagged value */
+  1847→    emit_movsd_store(buf, temp_off1);
+  1848→    emit_mov_reg_rbp_offset(buf, VTX_REG_RAX, temp_off1);
+  1849→
+  1850→    /* Push result */
+  1851→    emit_stack_push(ctx);
+  1852→    /* RAX is already the tagged double value */
+  1853→}
+  1854→
+  1855→/* ========================================================================== */
+  1856→/* Bitwise and unary operations                                                */
+  1857→/* ========================================================================== */
+  1858→
+  1859→static void compile_bitwise(vtx_compile_ctx_t *ctx, vtx_opcode_t op)
+  1860→{
+  1861→    vtx_code_buffer_t *buf = &ctx->buf;
+  1862→    vtx_reg_t lhs_reg, rhs_reg;
+  1863→
+  1864→    if (op == VT_OP_INEG || op == VT_OP_INOT) {
+  1865→        /* Unary: pop 1 value */
+  1866→        /* RAX = TOS */
+  1867→        emit_untag_smi(ctx, VTX_REG_RAX);
+  1868→
+  1869→        if (op == VT_OP_INEG) {
+  1870→            emit_neg_reg(buf, VTX_REG_RAX);
+  1871→        } else {
+  1872→            emit_not_reg(buf, VTX_REG_RAX);
+  1873→        }
+  1874→
+  1875→        emit_tag_smi(ctx, VTX_REG_RAX);
+  1876→        /* No push/pop needed — value stays in RAX (TOS) */
+  1877→    } else {
+  1878→        /* Binary: pop 2 values */
+  1879→        emit_stack_pop2(ctx, &lhs_reg, &rhs_reg);
+  1880→        emit_untag_smi(ctx, lhs_reg);
+  1881→        emit_untag_smi(ctx, rhs_reg);
+  1882→
+  1883→        switch (op) {
+  1884→        case VT_OP_ISHL:
+  1885→            /* BUG-1 fix: RCX holds the new TOS-1 after pop2. We need CL
+  1886→             * for the shift instruction, so save RCX, use it for the
+  1887→             * shift count, then restore it to avoid corrupting the
+  1888→             * expression stack during the subsequent push. */
+  1889→            emit_mov_reg_reg64(buf, VTX_REG_R11, VTX_REG_RCX); /* save TOS-1 */
+  1890→            emit_mov_reg_reg64(buf, VTX_REG_RCX, rhs_reg);     /* shift count → CL */
+  1891→            /* shl lhs, cl */
+  1892→            emit_rex64(buf, (vtx_reg_t)4, lhs_reg);
+  1893→            vtx_code_buffer_emit_byte(buf, 0xD3);
+  1894→            vtx_code_buffer_emit_byte(buf, modrm(3, 4, lhs_reg));
+  1895→            emit_mov_reg_reg64(buf, VTX_REG_RCX, VTX_REG_R11); /* restore TOS-1 */
+  1896→            break;
+  1897→        case VT_OP_ISHR:
+  1898→            emit_mov_reg_reg64(buf, VTX_REG_R11, VTX_REG_RCX); /* save TOS-1 */
+  1899→            emit_mov_reg_reg64(buf, VTX_REG_RCX, rhs_reg);     /* shift count → CL */
+  1900→            emit_rex64(buf, (vtx_reg_t)7, lhs_reg);
+  1901→            vtx_code_buffer_emit_byte(buf, 0xD3);
+  1902→            vtx_code_buffer_emit_byte(buf, modrm(3, 7, lhs_reg));
+  1903→            emit_mov_reg_reg64(buf, VTX_REG_RCX, VTX_REG_R11); /* restore TOS-1 */
+  1904→            break;
+  1905→        case VT_OP_IAND:
+  1906→            emit_and_reg_reg(buf, lhs_reg, rhs_reg);
+  1907→            break;
+  1908→        case VT_OP_IOR:
+  1909→            emit_or_reg_reg(buf, lhs_reg, rhs_reg);
+  1910→            break;
+  1911→        case VT_OP_IXOR:
+  1912→            emit_xor_reg_reg(buf, lhs_reg, rhs_reg);
+  1913→            break;
+  1914→        default:
+  1915→            VTX_ASSERT(false, "unhandled bitwise opcode");
+  1916→            break;
+  1917→        }
+  1918→
+  1919→        emit_tag_smi(ctx, lhs_reg);
+  1920→        emit_stack_push(ctx);
+  1921→        emit_mov_reg_reg64(buf, VTX_REG_RAX, lhs_reg);
+  1922→    }
+  1923→}
+  1924→
+  1925→/* ========================================================================== */
+  1926→/* Integer comparisons                                                         */
+  1927→/* ========================================================================== */
+  1928→
+  1929→static void compile_int_cmp(vtx_compile_ctx_t *ctx, vtx_opcode_t op)
+  1930→{
+  1931→    vtx_code_buffer_t *buf = &ctx->buf;
+  1932→    vtx_reg_t lhs_reg, rhs_reg;
+  1933→    emit_stack_pop2(ctx, &lhs_reg, &rhs_reg);
+  1934→
+  1935→    /* Untag both SMIs */
+  1936→    emit_untag_smi(ctx, lhs_reg);
+  1937→    emit_untag_smi(ctx, rhs_reg);
+  1938→
+  1939→    /* Determine condition code before emitting instructions */
+  1940→    uint8_t cc;
+  1941→    switch (op) {
+  1942→    case VT_OP_ICMP_EQ: cc = CC_E;  break;
+  1943→    case VT_OP_ICMP_NE: cc = CC_NE; break;
+  1944→    case VT_OP_ICMP_LT: cc = CC_L;  break;
+  1945→    case VT_OP_ICMP_LE: cc = CC_LE; break;
+  1946→    case VT_OP_ICMP_GT: cc = CC_G;  break;
+  1947→    case VT_OP_ICMP_GE: cc = CC_GE; break;
+  1948→    default: cc = CC_E; break;
+  1949→    }
+  1950→
+  1951→    /* Clear RAX BEFORE the compare so that the flags from cmp are
+  1952→     * preserved for the setcc below. xor eax,eax clobbers flags! */
+  1953→    vtx_code_buffer_emit_byte(buf, 0x31);
+  1954→    vtx_code_buffer_emit_byte(buf, modrm(3, VTX_REG_RAX, VTX_REG_RAX));
+  1955→
+  1956→    /* Compare: cmp lhs, rhs — sets flags */
+  1957→    emit_cmp_reg_reg(buf, lhs_reg, rhs_reg);
+  1958→
+  1959→    /* setcc al — uses flags from cmp */
+  1960→    emit_setcc(buf, cc, VTX_REG_RAX);
+  1961→
+  1962→    /* Tag as SMI: shift left by 3, OR with NaN header */
+  1963→    emit_tag_smi(ctx, VTX_REG_RAX);
+  1964→
+  1965→    /* Push result (already in RAX) */
+  1966→    emit_stack_push(ctx);
+  1967→    /* RAX holds the result already */
+  1968→}
+  1969→
+  1970→/* ========================================================================== */
+  1971→/* Float comparisons                                                           */
+  1972→/* ========================================================================== */
+  1973→
+  1974→static void compile_float_cmp(vtx_compile_ctx_t *ctx, vtx_opcode_t op)
+  1975→{
+  1976→    vtx_code_buffer_t *buf = &ctx->buf;
+  1977→
+  1978→    vtx_reg_t lhs_reg, rhs_reg;
+  1979→    emit_stack_pop2(ctx, &lhs_reg, &rhs_reg);
+  1980→
+  1981→    /* Store both to temp slots for XMM comparison */
+  1982→    int32_t temp_off1, temp_off2;
+  1983→    if (ctx->layout.max_spills >= 2) {
+  1984→        temp_off1 = vtx_frame_layout_spill_offset(&ctx->layout, 0);
+  1985→        temp_off2 = vtx_frame_layout_spill_offset(&ctx->layout, 1);
+  1986→    } else {
+  1987→        temp_off1 = vtx_frame_layout_local_offset(&ctx->layout,
+  1988→                     ctx->layout.max_locals > 0 ? ctx->layout.max_locals - 1 : 0);
+  1989→        temp_off2 = vtx_frame_layout_local_offset(&ctx->layout,
+  1990→                     ctx->layout.max_locals > 1 ? ctx->layout.max_locals - 2 : 0);
+  1991→    }
+  1992→
+  1993→    emit_mov_rbp_offset_reg(buf, temp_off1, lhs_reg);
+  1994→    emit_mov_rbp_offset_reg(buf, temp_off2, rhs_reg);
+  1995→
+  1996→    /* Load XMM0 = lhs, XMM1 = rhs */
+  1997→    emit_movsd_load(buf, temp_off1);
+  1998→    /* movq xmm1, [rbp + temp_off2] */
+  1999→    vtx_code_buffer_emit_byte(buf, 0xF2);
+  2000→    vtx_code_buffer_emit_byte(buf, 0x0F);
+
+[showing lines 1-2000 of 3777; use offset=2001 with limit to continue reading]

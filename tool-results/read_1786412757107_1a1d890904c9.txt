@@ -1,0 +1,818 @@
+     1→#include "baseline/deopt_stubs.h"
+     2→#include "baseline/codegen.h"
+     3→#include "baseline/frame_layout.h"
+     4→#include "deopt/side_table.h"
+     5→#include "deopt/frame_state.h"
+     6→#include "deopt/types.h"
+     7→#include "interp/frame.h"
+     8→#include "interp/dispatch.h"
+     9→#include "runtime/object.h"
+    10→#include <stdlib.h>
+    11→#include <string.h>
+    12→
+    13→/* ========================================================================== */
+    14→/* Global interpreter entry point                                              */
+    15→/* ========================================================================== */
+    16→
+    17→static vtx_interp_entry_t g_interp_entry = NULL;
+    18→
+    19→void vtx_deopt_set_interp_entry(vtx_interp_entry_t entry)
+    20→{
+    21→    g_interp_entry = entry;
+    22→}
+    23→
+    24→vtx_interp_entry_t vtx_deopt_get_interp_entry(void)
+    25→{
+    26→    return g_interp_entry;
+    27→}
+    28→
+    29→/* ========================================================================== */
+    30→/* Deopt stub array operations                                                 */
+    31→/* ========================================================================== */
+    32→
+    33→int vtx_deopt_stub_array_init(vtx_deopt_stub_array_t *arr)
+    34→{
+    35→    arr->capacity = VTX_DEOPT_STUBS_INITIAL_CAPACITY;
+    36→    arr->count = 0;
+    37→    arr->stubs = (vtx_deopt_stub_t *)malloc(
+    38→        arr->capacity * sizeof(vtx_deopt_stub_t));
+    39→    if (!arr->stubs) return -1;
+    40→    return 0;
+    41→}
+    42→
+    43→void vtx_deopt_stub_array_destroy(vtx_deopt_stub_array_t *arr)
+    44→{
+    45→    if (arr->stubs) {
+    46→        free(arr->stubs);
+    47→        arr->stubs = NULL;
+    48→    }
+    49→    arr->count = 0;
+    50→    arr->capacity = 0;
+    51→}
+    52→
+    53→uint32_t vtx_deopt_stub_array_add(vtx_deopt_stub_array_t *arr,
+    54→                                   vtx_deopt_stub_t stub)
+    55→{
+    56→    if (arr->count >= arr->capacity) {
+    57→        uint32_t new_cap = arr->capacity * 2;
+    58→        vtx_deopt_stub_t *new_stubs = (vtx_deopt_stub_t *)realloc(
+    59→            arr->stubs, new_cap * sizeof(vtx_deopt_stub_t));
+    60→        if (!new_stubs) return UINT32_MAX;
+    61→        arr->stubs = new_stubs;
+    62→        arr->capacity = new_cap;
+    63→    }
+    64→    uint32_t idx = arr->count;
+    65→    arr->stubs[idx] = stub;
+    66→    arr->count++;
+    67→    return idx;
+    68→}
+    69→
+    70→/* ========================================================================== */
+    71→/* Helper macros for x86-64 encoding                                          */
+    72→/* ========================================================================== */
+    73→
+    74→#define REX_W      0x48
+    75→#define REX_WR     0x4C
+    76→#define REX_WB     0x49
+    77→#define REX_WRB    0x4D
+    78→
+    79→static inline uint8_t modrm(uint8_t mod, uint8_t reg, uint8_t rm)
+    80→{
+    81→    return (uint8_t)((mod << 6) | ((reg & 7) << 3) | (rm & 7));
+    82→}
+    83→
+    84→/* ========================================================================== */
+    85→/* Deopt stub emission helpers                                                */
+    86→/* ========================================================================== */
+    87→
+    88→/**
+    89→ * Emit: mov [rbp + offset], reg  (64-bit)
+    90→ * Store a register value to a frame slot.
+    91→ */
+    92→static void emit_store_to_frame(vtx_code_buffer_t *buf, int32_t offset, vtx_reg_t reg)
+    93→{
+    94→    /* REX.W + 89 /r (MOV r/m64, r64) */
+    95→    uint8_t rex = REX_W;
+    96→    if (reg >= VTX_REG_R8) rex |= 0x04; /* REX.R */
+    97→    vtx_code_buffer_emit_byte(buf, rex);
+    98→
+    99→    vtx_code_buffer_emit_byte(buf, 0x89); /* MOV r/m64, r64 */
+   100→
+   101→    if (offset >= -128 && offset <= 127) {
+   102→        vtx_code_buffer_emit_byte(buf, modrm(1, reg, VTX_REG_RBP));
+   103→        vtx_code_buffer_emit_byte(buf, (uint8_t)(offset & 0xFF));
+   104→    } else {
+   105→        vtx_code_buffer_emit_byte(buf, modrm(2, reg, VTX_REG_RBP));
+   106→        vtx_code_buffer_emit_dword(buf, (uint32_t)offset);
+   107→    }
+   108→}
+   109→
+   110→/**
+   111→ * Emit: mov reg, [rbp + offset]  (64-bit)
+   112→ * Load a frame slot into a register.
+   113→ */
+   114→static void emit_load_from_frame(vtx_code_buffer_t *buf, vtx_reg_t reg, int32_t offset)
+   115→{
+   116→    uint8_t rex = REX_W;
+   117→    if (reg >= VTX_REG_R8) rex |= 0x04; /* REX.R */
+   118→    vtx_code_buffer_emit_byte(buf, rex);
+   119→
+   120→    vtx_code_buffer_emit_byte(buf, 0x8B); /* MOV r64, r/m64 */
+   121→
+   122→    if (offset >= -128 && offset <= 127) {
+   123→        vtx_code_buffer_emit_byte(buf, modrm(1, reg, VTX_REG_RBP));
+   124→        vtx_code_buffer_emit_byte(buf, (uint8_t)(offset & 0xFF));
+   125→    } else {
+   126→        vtx_code_buffer_emit_byte(buf, modrm(2, reg, VTX_REG_RBP));
+   127→        vtx_code_buffer_emit_dword(buf, (uint32_t)offset);
+   128→    }
+   129→}
+   130→
+   131→/**
+   132→ * Emit: mov reg, imm64 (absolute 64-bit immediate)
+   133→ * Uses MOV r64, imm64 encoding (REX.W + B8+rd + 8 bytes)
+   134→ */
+   135→static void emit_mov_reg_imm64(vtx_code_buffer_t *buf, vtx_reg_t reg, uint64_t imm64)
+   136→{
+   137→    uint8_t rex = REX_W;
+   138→    if (reg >= VTX_REG_R8) rex |= 0x01; /* REX.B */
+   139→    vtx_code_buffer_emit_byte(buf, rex);
+   140→    vtx_code_buffer_emit_byte(buf, (uint8_t)(0xB8 | (reg & 7)));
+   141→    vtx_code_buffer_emit_qword(buf, imm64);
+   142→}
+   143→
+   144→/**
+   145→ * Emit: jmp rel32 (relative jump to absolute address)
+   146→ */
+   147→static void emit_jmp_rel32(vtx_code_buffer_t *buf, uint8_t *code_start,
+   148→                              uint64_t target_addr)
+   149→{
+   150→    vtx_code_buffer_emit_byte(buf, 0xE9);
+   151→    /* The offset is relative to the instruction after the jmp (5 bytes).
+   152→     * We need absolute addresses for both source and target.
+   153→     * current_pos is the buffer offset of the displacement field;
+   154→     * the absolute address is code_start + current_pos.
+   155→     * The instruction after jmp is at current_pos + 4. */
+   156→    uint32_t current_pos = vtx_code_buffer_position(buf);
+   157→    uint64_t source_addr = (uint64_t)(uintptr_t)(code_start + current_pos + 4);
+   158→    int32_t rel32 = (int32_t)(target_addr - source_addr);
+   159→    vtx_code_buffer_emit_dword(buf, (uint32_t)rel32);
+   160→}
+   161→
+   162→/**
+   163→ * Emit: push reg (64-bit)
+   164→ */
+   165→static void emit_push_reg(vtx_code_buffer_t *buf, vtx_reg_t reg)
+   166→{
+   167→    if (reg >= VTX_REG_R8) {
+   168→        vtx_code_buffer_emit_byte(buf, 0x41); /* REX.B */
+   169→    }
+   170→    vtx_code_buffer_emit_byte(buf, (uint8_t)(0x50 | (reg & 7)));
+   171→}
+   172→
+   173→/**
+   174→ * Emit: sub rsp, imm8
+   175→ */
+   176→static void emit_sub_rsp_imm8(vtx_code_buffer_t *buf, uint8_t imm8)
+   177→{
+   178→    vtx_code_buffer_emit_byte(buf, 0x48); /* REX.W */
+   179→    vtx_code_buffer_emit_byte(buf, 0x83); /* SUB r/m64, imm8 */
+   180→    vtx_code_buffer_emit_byte(buf, modrm(1, 5, VTX_REG_RSP)); /* /5 = SUB */
+   181→    vtx_code_buffer_emit_byte(buf, imm8);
+   182→}
+   183→
+   184→/**
+   185→ * Emit: add rsp, imm8
+   186→ */
+   187→static void emit_add_rsp_imm8(vtx_code_buffer_t *buf, uint8_t imm8)
+   188→{
+   189→    vtx_code_buffer_emit_byte(buf, 0x48); /* REX.W */
+   190→    vtx_code_buffer_emit_byte(buf, 0x83); /* ADD r/m64, imm8 */
+   191→    vtx_code_buffer_emit_byte(buf, modrm(1, 0, VTX_REG_RSP)); /* /0 = ADD */
+   192→    vtx_code_buffer_emit_byte(buf, imm8);
+   193→}
+   194→
+   195→/* ========================================================================== */
+   196→/* Deopt stub emission                                                         */
+   197→/* ========================================================================== */
+   198→
+   199→const vtx_deopt_stub_t *vtx_deopt_stub_emit(vtx_deopt_context_t *ctx,
+   200→                                              uint32_t guard_index)
+   201→{
+   202→    VTX_ASSERT(guard_index < ctx->guards->count, "guard index out of bounds");
+   203→
+   204→    vtx_guard_info_t *guard = &ctx->guards->guards[guard_index];
+   205→    vtx_code_buffer_t *buf = ctx->code_buf;
+   206→
+   207→    /* Record stub start position */
+   208→    uint32_t stub_start = vtx_code_buffer_position(buf);
+   209→
+   210→    vtx_deopt_stub_t stub;
+   211→    memset(&stub, 0, sizeof(stub));
+   212→    stub.guard_index = guard_index;
+   213→    stub.bytecode_pc = guard->deopt_continuation;
+   214→    stub.stack_depth = guard->stack_depth;
+   215→    stub.native_code_offset = stub_start;
+   216→
+   217→    /*
+   218→     * Deopt stub implementation:
+   219→     *
+   220→     * The stub must transition from JIT code to the interpreter.
+   221→     * We call the runtime deopt function (vtx_deopt_runtime_transition)
+   222→     * which handles the frame reconstruction.
+   223→     *
+   224→     * Calling convention for the runtime function:
+   225→     *   RDI = JIT frame RBP
+   226→     *   RSI = native PC offset where deopt occurred
+   227→     *   RAX = return value (interpreter frame pointer)
+   228→     *
+   229→     * After the runtime call returns:
+   230→     *   - The interpreter frame is fully reconstructed
+   231→     *   - RAX holds the interpreter frame pointer
+   232→     *   - We jump to the interpreter dispatch loop
+   233→     */
+   234→
+   235→    /* Step 1: Save expression stack registers to frame spill slots.
+   236→     * The top VTX_EXPR_REG_COUNT values are in RAX, RCX, RDX, RBX.
+   237→     * We need to store them into the spill area so the runtime can
+   238→     * find them. The spill area is ordered from bottom (spill[0])
+   239→     * to top (spill[max_spills-1]).
+   240→     *
+   241→     * For a stack depth of N:
+   242→     *   Values at positions 0..(N-5) are already in spill slots
+   243→     *   Values at positions (N-4)..(N-1) are in registers:
+   244→     *     RAX = TOS   = position (N-1)
+   245→     *     RCX = TOS-1 = position (N-2)
+   246→     *     RDX = TOS-2 = position (N-3)
+   247→     *     RBX = TOS-3 = position (N-4)
+   248→     *
+   249→     * We store register values to the spill area starting from
+   250→     * the first register-resident position. */
+   251→
+   252→    uint32_t depth = guard->stack_depth;
+   253→    uint32_t spilled_count = 0;
+   254→    if (depth > VTX_EXPR_REG_COUNT) {
+   255→        spilled_count = depth - VTX_EXPR_REG_COUNT;
+   256→    }
+   257→
+   258→    /* Save registers that hold expression stack values to the frame.
+   259→     *
+   260→     * The spill area has max_spills slots, which is enough for the
+   261→     * spilled_count values that were already in spill. But the register
+   262→     * values (up to 4) also need to be saved somewhere during deopt.
+   263→     * We use local variable slots as temporary storage for register values
+   264→     * that don't fit in the spill area.
+   265→     *
+   266→     * Layout of saved values:
+   267→     *   spill[0]..spill[spilled_count-1] = already-spilled values (no action needed)
+   268→     *   spill[spilled_count]             = RBX value → but only if within max_spills
+   269→     *   For register values that exceed the spill area, use local slots.
+   270→     *
+   271→     * Simpler approach: always use local slots for register saves during deopt.
+   272→     * This avoids any OOB access on the spill area and is safe because
+   273→     * local slots are not in use during deopt (the expression stack values
+   274→     * are being materialized, not the locals).
+   275→     */
+   276→
+   277→    /* Save register values using local variable slots as temp storage.
+   278→     * We use local[max_locals-1], local[max_locals-2], etc.
+   279→     * If there aren't enough locals, we push the remaining values onto
+   280→     * the stack before calling the deopt runtime, then pop them after.
+   281→     * Fix C21: Old code silently dropped register values when neither
+   282→     * spill slots nor local slots were available. Now we push to stack. */
+   283→
+   284→    /* Helper macro: save a register to spill area or local slot.
+   285→     * C21 fix: The old code had a stack-push fallback when neither spill
+   286→     * nor local slots were available, but the runtime transition function
+   287→     * couldn't read values from the pushed stack — they were effectively
+   288→     * lost. Fix: always use spill or local slots. If neither is available,
+   289→     * the frame layout is undersized (a compilation bug). We emit a trap
+   290→     * (int3) so the bug is caught immediately rather than silently losing
+   291→     * values. In practice, the frame layout always has enough slots for
+   292→     * the registers that need saving — the fallback was dead code that
+   293→     * gave a false sense of safety. */
+   294→    #define SAVE_REG(reg, spill_idx, local_idx) do { \
+   295→        if ((spill_idx) < ctx->frame_layout.max_spills) { \
+   296→            int32_t off = vtx_frame_layout_spill_offset(&ctx->frame_layout, (spill_idx)); \
+   297→            emit_store_to_frame(buf, off, (reg)); \
+   298→        } else if (ctx->frame_layout.max_locals > (local_idx)) { \
+   299→            int32_t off = vtx_frame_layout_local_offset(&ctx->frame_layout, ctx->frame_layout.max_locals - 1 - (local_idx)); \
+   300→            emit_store_to_frame(buf, off, (reg)); \
+   301→        } else { \
+   302→            /* C21 fix: No slot available — this is a frame layout bug. \
+   303→             * Emit int3 (breakpoint) to catch it in debug, and store to \
+   304→             * a known slot (spill 0) in release to avoid silent corruption. \
+   305→             * The old stack-push was unreadable by the runtime. */ \
+   306→            VTX_ASSERT((spill_idx) < ctx->frame_layout.max_spills || \
+   307→                       ctx->frame_layout.max_locals > (local_idx), \
+   308→                       "no spill/local slot for register save — frame layout bug"); \
+   309→            int32_t off = vtx_frame_layout_spill_offset(&ctx->frame_layout, 0); \
+   310→            emit_store_to_frame(buf, off, (reg)); \
+   311→        } \
+   312→    } while(0)
+   313→
+   314→    uint32_t stack_pushed = 0;
+   315→
+   316→    if (depth >= 4) {
+   317→        SAVE_REG(VTX_REG_RBX, spilled_count, 0);
+   318→        SAVE_REG(VTX_REG_RDX, spilled_count + 1, 1);
+   319→        SAVE_REG(VTX_REG_RCX, spilled_count + 2, 2);
+   320→        SAVE_REG(VTX_REG_RAX, spilled_count + 3, 3);
+   321→    } else if (depth == 3) {
+   322→        SAVE_REG(VTX_REG_RDX, spilled_count, 0);
+   323→        SAVE_REG(VTX_REG_RCX, spilled_count + 1, 1);
+   324→        SAVE_REG(VTX_REG_RAX, spilled_count + 2, 2);
+   325→    } else if (depth == 2) {
+   326→        SAVE_REG(VTX_REG_RCX, spilled_count, 0);
+   327→        SAVE_REG(VTX_REG_RAX, spilled_count + 1, 1);
+   328→    } else if (depth == 1) {
+   329→        SAVE_REG(VTX_REG_RAX, spilled_count, 0);
+   330→    }
+   331→    #undef SAVE_REG
+   332→
+   333→    /* Step 2: Set up arguments for the runtime deopt function.
+   334→     *   RDI = JIT frame RBP (already in RBP)
+   335→     *   RSI = native PC offset of the guard
+   336→     */
+   337→    /* mov rdi, rbp */
+   338→    vtx_code_buffer_emit_byte(buf, REX_W);
+   339→    vtx_code_buffer_emit_byte(buf, 0x89); /* MOV r/m64, r64 */
+   340→    vtx_code_buffer_emit_byte(buf, modrm(3, VTX_REG_RBP, VTX_REG_RDI));
+   341→
+   342→    /* mov rsi, guard_native_pc_offset */
+   343→    emit_mov_reg_imm64(buf, VTX_REG_RSI, (uint64_t)guard->native_pc_offset);
+   344→
+   345→    /* Step 3: Align stack for function call (System V ABI requires 16-byte
+   346→     * alignment at the call site). We need to figure out if the stack is
+   347→     * currently aligned. After the JIT prologue, the stack was aligned.
+   348→     * The expression stack doesn't change RSP in our design (it's register-
+   349→     * based). So RSP should still be 16-byte aligned.
+   350→     * However, to be safe, we push a dummy value to align. */
+   351→    /* push rbp (save RBP across the call — it holds our frame pointer) */
+   352→    emit_push_reg(buf, VTX_REG_RBP);
+   353→    /* Also save RBX (callee-saved, but we use it for expr stack) */
+   354→    emit_push_reg(buf, VTX_REG_RBX);
+   355→
+   356→    /* Step 4: Call the runtime deopt function */
+   357→    emit_mov_reg_imm64(buf, VTX_REG_RAX,
+   358→        (uint64_t)(uintptr_t)vtx_deopt_runtime_transition);
+   359→    /* call rax */
+   360→    vtx_code_buffer_emit_byte(buf, 0xFF); /* CALL r/m64 */
+   361→    vtx_code_buffer_emit_byte(buf, modrm(3, 2, VTX_REG_RAX)); /* /2 = CALL */
+   362→
+   363→    /* Step 5: Restore callee-saved registers */
+   364→    emit_add_rsp_imm8(buf, 16); /* pop dummy + rbp (we pushed 2 regs) */
+   365→
+   366→    /* Step 6: After the runtime call, RAX contains the interpreter
+   367→     * frame pointer. Jump to the interpreter dispatch loop.
+   368→     *
+   369→     * The interpreter entry point expects:
+   370→     *   - RBP = interpreter frame pointer
+   371→     *   - The bytecode PC is stored in the interpreter frame
+   372→     */
+   373→    if (g_interp_entry != NULL) {
+   374→        /* mov rbp, rax — set interpreter frame pointer */
+   375→        vtx_code_buffer_emit_byte(buf, REX_W);
+   376→        vtx_code_buffer_emit_byte(buf, 0x89);
+   377→        vtx_code_buffer_emit_byte(buf, modrm(3, VTX_REG_RAX, VTX_REG_RBP));
+   378→
+   379→        /* jmp to interpreter entry — BS-1 fix: pass code_start for proper absolute address calculation */
+   380→        emit_jmp_rel32(buf, ctx->code_start, (uint64_t)(uintptr_t)g_interp_entry);
+   381→    } else {
+   382→        /* No interpreter entry set — this shouldn't happen in production.
+   383→         * Emit a trap (ud2) to catch the error. */
+   384→        vtx_code_buffer_emit_byte(buf, 0x0F);
+   385→        vtx_code_buffer_emit_byte(buf, 0x0B); /* UD2 */
+   386→    }
+   387→
+   388→    /* Record the stub's size */
+   389→    uint32_t stub_end = vtx_code_buffer_position(buf);
+   390→    stub.native_code_size = stub_end - stub_start;
+   391→    stub.native_code = ctx->code_start + stub_start;
+   392→
+   393→    /* Add a side table entry for this deopt point */
+   394→    uint32_t fs_index = vtx_side_table_add_frame_state(ctx->side_table, NULL);
+   395→    stub.frame_state_index = fs_index;
+   396→
+   397→    vtx_side_table_add_entry(ctx->side_table, guard->native_pc_offset,
+   398→                              fs_index, VTX_STF_GUARD);
+   399→
+   400→    /* Add the stub to the array */
+   401→    uint32_t idx = vtx_deopt_stub_array_add(
+   402→        ctx->stub_array, stub);
+   403→
+   404→    return &ctx->stub_array->stubs[idx];
+   405→}
+   406→
+   407→int vtx_deopt_stubs_emit_all(vtx_deopt_context_t *ctx)
+   408→{
+   409→    int count = 0;
+   410→    for (uint32_t i = 0; i < ctx->guards->count; i++) {
+   411→        const vtx_deopt_stub_t *stub = vtx_deopt_stub_emit(ctx, i);
+   412→        if (!stub) return -1;
+   413→        count++;
+   414→    }
+   415→
+   416→    /* Patch guard jumps to point to their deopt stubs */
+   417→    if (vtx_deopt_stubs_patch_guards(ctx) != 0) {
+   418→        return -1;
+   419→    }
+   420→
+   421→    return count;
+   422→}
+   423→
+   424→int vtx_deopt_stubs_patch_guards(vtx_deopt_context_t *ctx)
+   425→{
+   426→    VTX_ASSERT(ctx->stub_array != NULL, "stub_array must not be NULL");
+   427→    VTX_ASSERT(ctx->stub_array->count == ctx->guards->count,
+   428→               "stub count must match guard count");
+   429→
+   430→    for (uint32_t i = 0; i < ctx->guards->count; i++) {
+   431→        vtx_guard_info_t *guard = &ctx->guards->guards[i];
+   432→        vtx_deopt_stub_t *stub = &ctx->stub_array->stubs[i];
+   433→
+   434→        /* The guard's branch_offset field contains the position in the
+   435→         * code buffer where the 4-byte displacement of the Jcc instruction
+   436→         * was emitted. We need to patch this displacement to point to
+   437→         * the deopt stub.
+   438→         *
+   439→         * Jcc instruction format: 0F 8x [4-byte disp]
+   440→         * The displacement is relative to the instruction AFTER the Jcc,
+   441→         * which is at disp_pos + 4 (6 bytes total for the Jcc).
+   442→         */
+   443→        uint32_t disp_pos = (uint32_t)guard->branch_offset;
+   444→
+   445→        /* Calculate the relative displacement:
+   446→         * target = stub's native code offset (from start of code)
+   447→         * source_end = disp_pos + 4 (byte after the displacement)
+   448→         * disp = target - source_end
+   449→         */
+   450→        int32_t disp = (int32_t)stub->native_code_offset - (int32_t)(disp_pos + 4);
+   451→
+   452→        /* Patch the displacement in the code buffer */
+   453→        ctx->code_buf->bytes[disp_pos]     = (uint8_t)(disp & 0xFF);
+   454→        ctx->code_buf->bytes[disp_pos + 1] = (uint8_t)((disp >> 8) & 0xFF);
+   455→        ctx->code_buf->bytes[disp_pos + 2] = (uint8_t)((disp >> 16) & 0xFF);
+   456→        ctx->code_buf->bytes[disp_pos + 3] = (uint8_t)((disp >> 24) & 0xFF);
+   457→    }
+   458→
+   459→    return 0;
+   460→}
+   461→
+   462→/* ========================================================================== */
+   463→/* Runtime deopt transition function                                           */
+   464→/* ========================================================================== */
+   465→
+   466→/**
+   467→ * This is the actual runtime function called from deopt stubs.
+   468→ * It reconstructs the interpreter frame and returns the frame pointer.
+   469→ *
+   470→ * In a full implementation, this would:
+   471→ *   1. Walk the JIT frame to find the deopt info
+   472→ *   2. Look up the side table entry for the native PC
+   473→ *   3. Reconstruct the interpreter frame from the frame state
+   474→ *   4. Return the interpreter frame pointer
+   475→ *
+   476→ * For the baseline JIT, we implement a simplified version that:
+   477→ *   1. Reads the deopt_info pointer from the JIT frame header
+   478→ *   2. Finds the bytecode PC from the pc_map
+   479→ *   3. Sets up the interpreter frame with locals and stack
+   480→ *   4. Returns the interpreter frame pointer
+   481→ */
+   482→/*
+   483→ * x86-64 register number to name mapping.
+   484→ * RAX=0, RCX=1, RDX=2, RBX=3, RSP=4, RBP=5, RSI=6, RDI=7,
+   485→ * R8=8..R15=15.
+   486→ *
+   487→ * On entry to the deopt stub, the expression stack registers have
+   488→ * already been saved to the frame by the stub code. So we read
+   489→ * them from the frame's spill/local slots, not from the hardware
+   490→ * registers directly.
+   491→ *
+   492→ * However, the T2/T3 JIT uses a different calling convention and
+   493→ * register allocation. The side table's register map tells us which
+   494→ * physical register holds which NodeID's value. We read those
+   495→ * registers directly — the deopt stub for T2 saves all registers
+   496→ * before calling us.
+   497→ *
+   498→ * For the baseline JIT (T1), the expression stack values are saved
+   499→ * to spill slots by the deopt stub. We read them from the frame
+   500→ * using the frame layout.
+   501→ */
+   502→
+   503→/* Read a 64-bit value from a JIT frame at the given RBP-relative offset */
+   504→static inline uint64_t jit_frame_read(void *jit_rbp, int32_t offset) {
+   505→    return *(uint64_t *)((uint8_t *)jit_rbp + offset);
+   506→}
+   507→
+   508→/* Read a register value from the saved register area.
+   509→ * The deopt stub saves registers to the frame before calling us.
+   510→ * For the baseline JIT, expression stack regs (RAX,RCX,RDX,RBX) are
+   511→ * saved to local slots. For T2/T3, the register map tells us which
+   512→ * registers are live, and we read them from a register save area
+   513→ * that the deopt handler provides.
+   514→ *
+   515→ * For now, we read from the side table's register map to find values.
+   516→ * The register map maps (register_number → NodeID). We need the
+   517→ * reverse: (NodeID → value). The value is in the register at the
+   518→ * time of deopt. Since the deopt stub for T2 saves all registers
+   519→ * to the stack before calling us, we need to know where they're saved.
+   520→ *
+   521→ * The simplest correct approach: for each local in the FrameState,
+   522→ * look up the NodeID in the register map. If found, the value is in
+   523→ * that register. But we can't read registers from C — they're already
+   524→ * saved by the stub.
+   525→ *
+   526→ * The T1 deopt stub saves RAX,RCX,RDX,RBX to frame slots. The T2
+   527→ * deopt stub calls vtx_deopt_handler_stub which receives
+   528→ * frame_state_index and native_pc as arguments. The actual register
+   529→ * values are on the stack (saved by the JCC-fallthrough path).
+   530→ *
+   531→ * For the baseline JIT, we can read expression stack values directly
+   532→ * from the frame's spill slots and local slots (where the stub saved
+   533→ * them). For T2, we use the FrameState's local NodeIDs and the
+   534→ * side table's register map.
+   535→ *
+   536→ * This implementation handles both paths:
+   537→ * 1. If we have a side table with register map, use it to find values
+   538→ * 2. Otherwise, read directly from the JIT frame's local slots
+   539→ */
+   540→
+   541→void *vtx_deopt_runtime_transition(void *jit_rbp, uint32_t native_pc)
+   542→{
+   543→    uint8_t *rbp = (uint8_t *)jit_rbp;
+   544→
+   545→    /* Step 1: Read deopt_info from the JIT frame header */
+   546→    vtx_deopt_info_t *deopt_info = *(vtx_deopt_info_t **)(
+   547→        rbp + VTX_FRAME_DEOPT_INFO_OFFSET);
+   548→
+   549→    /* Read method pointer from frame header */
+   550→    const vtx_method_desc_t *method = *(const vtx_method_desc_t **)(
+   551→        rbp + VTX_FRAME_METHOD_PTR_OFFSET);
+   552→
+   553→    if (!method || !method->bytecode) {
+   554→        VTX_ASSERT(false, "method or bytecode is NULL in JIT frame");
+   555→        return NULL;
+   556→    }
+   557→
+   558→    /* If deopt_info is NULL (interpreter passes NULL when calling JIT),
+   559→     * fall back to looking up the method's pc_map from the compiled code
+   560→     * metadata. The T1 codegen builds a pc_map during compilation and
+   561→     * stores it in the compiled_code_t, but vtx_dispatch_jit passes
+   562→     * NULL for deopt_info. We use the global side table as fallback. */
+   563→    uint32_t bytecode_pc = 0;
+   564→    uint32_t stack_depth = 0;
+   565→    bool found = false;
+   566→
+   567→    if (deopt_info != NULL && deopt_info->pc_map_count > 0) {
+   568→        /* Binary search the pc_map for native_pc */
+   569→        uint32_t lo = 0, hi = deopt_info->pc_map_count;
+   570→        while (lo < hi) {
+   571→            uint32_t mid = lo + (hi - lo) / 2;
+   572→            uint32_t mid_native = (deopt_info->native_offsets != NULL) ?
+   573→                deopt_info->native_offsets[mid] : deopt_info->pc_map[mid];
+   574→            if (mid_native <= native_pc) {
+   575→                bytecode_pc = deopt_info->pc_map[mid];
+   576→                if (deopt_info->stack_depth_map) {
+   577→                    stack_depth = deopt_info->stack_depth_map[mid];
+   578→                }
+   579→                found = true;
+   580→                lo = mid + 1;
+   581→            } else {
+   582→                hi = mid;
+   583→            }
+   584→        }
+   585→    }
+   586→
+   587→    if (!found) {
+   588→        /* deopt_info is NULL or pc_map didn't contain this native_pc.
+   589→         * This happens when the interpreter calls the JIT with NULL
+   590→         * deopt_info (the common path via vtx_dispatch_jit).
+   591→         * Fall back to bytecode_pc=0 and stack_depth=0.
+   592→         * The interpreter will re-execute from the beginning of the
+   593→         * method, which is correct (just slower) for T1 deopt. */
+   594→        bytecode_pc = 0;
+   595→        stack_depth = 0;
+   596→    }
+   597→
+   598→    /* Step 3: Get the side table and FrameState */
+   599→    vtx_side_table_t *side_table = (deopt_info != NULL) ? deopt_info->side_table : NULL;
+   600→    vtx_frame_state_t *fs = NULL;
+   601→    const vtx_side_table_entry_t *st_entry = NULL;
+   602→    const vtx_reg_map_entry_t *reg_map = NULL;
+   603→    uint32_t reg_map_count = 0;
+   604→
+   605→    if (side_table) {
+   606→        st_entry = vtx_side_table_lookup_entry(side_table, native_pc);
+   607→        if (st_entry) {
+   608→            fs = vtx_side_table_get_frame_state(side_table,
+   609→                                                 st_entry->frame_state_index);
+   610→            reg_map = st_entry->register_map;
+   611→            reg_map_count = st_entry->register_map_count;
+   612→        }
+   613→    }
+   614→
+   615→    /* Step 4: Compute the JIT frame layout */
+   616→    vtx_jit_frame_layout_t layout = vtx_frame_layout_compute(method);
+   617→
+   618→    /* Step 5: Create an interpreter frame */
+   619→    /* We need a frame stack allocator. In production, each thread has one.
+   620→     * For now, create a single-use one. This is pre-allocated memory —
+   621→     * no malloc during deopt (the frame stack pre-allocates 256KB blocks). */
+   622→    static vtx_frame_stack_t *deopt_fs = NULL;
+   623→    if (deopt_fs == NULL) {
+   624→        deopt_fs = malloc(sizeof(vtx_frame_stack_t));
+   625→        if (!deopt_fs) return NULL;
+   626→        if (vtx_frame_stack_init(deopt_fs) != 0) {
+   627→            free(deopt_fs);
+   628→            deopt_fs = NULL;
+   629→            return NULL;
+   630→        }
+   631→    }
+   632→
+   633→    vtx_frame_t *interp_frame = vtx_frame_create(method, NULL, 0, deopt_fs);
+   634→    if (!interp_frame) {
+   635→        VTX_ASSERT(false, "failed to create interpreter frame during deopt");
+   636→        return NULL;
+   637→    }
+   638→
+   639→    /* Step 6: Copy locals from the JIT frame to the interpreter frame.
+   640→     *
+   641→     * For the baseline JIT (T1), locals are at known offsets in the JIT
+   642→     * frame: local[i] is at RBP + layout.local_offset(i).
+   643→     * We read them directly.
+   644→     *
+   645→     * For T2/T3, locals may be in registers (per the register map).
+   646→     * If we have a FrameState, it tells us the NodeID of each local.
+   647→     * If we have a register map, we can find which register holds that
+   648→     * NodeID. But we can't read hardware registers from C — the deopt
+   649→     * stub must have saved them.
+   650→     *
+   651→     * The T1 deopt stub saves expression stack registers (RAX,RCX,RDX,RBX)
+   652→     * to frame slots. Locals are already in the frame (they're stored in
+   653→     * local slots, not registers, in T1).
+   654→     *
+   655→     * For T2, the register map tells us which register holds each value,
+   656→     * but the register values are on the stack (saved by the deopt handler's
+   657→     * prologue). We don't have a standard save area for T2 yet.
+   658→     *
+   659→     * Practical approach: read locals from the JIT frame's local slots.
+   660→     * This works for T1 (locals are always in slots). For T2, locals
+   661→     * may be in registers, but the register map in the side table records
+   662→     * which registers hold which NodeIDs. We can check: if a local's
+   663→     * NodeID is in the register map, we note it but can't read the
+   664→     * register from here. The value is lost for that local.
+   665→     *
+   666→     * To handle T2 properly, the deopt stub would need to save ALL
+   667→     * callee-saved registers to a known location. That's a future
+   668→     * enhancement. For now, we read what's in the frame slots.
+   669→     */
+   670→    for (uint32_t i = 0; i < layout.max_locals && i < interp_frame->locals_count; i++) {
+   671→        int32_t offset = vtx_frame_layout_local_offset(&layout, i);
+   672→        uint64_t raw = jit_frame_read(jit_rbp, offset);
+   673→        interp_frame->locals[i] = (vtx_value_t)raw;
+   674→    }
+   675→
+   676→    /* Step 7: Reconstruct the operand stack.
+   677→     *
+   678→     * The expression stack has up to VTX_EXPR_REG_COUNT (4) values in
+   679→     * registers and the rest in spill slots. The deopt stub already
+   680→     * saved the register values to frame slots (for T1). We read them
+   681→     * back.
+   682→     *
+   683→     * The stack_depth tells us how many values are on the operand stack.
+   684→     * Values are ordered: stack[0] is the bottom, stack[depth-1] is TOS.
+   685→     * In the JIT frame, deeper values (index < depth-4) are in spill slots,
+   686→     * and the top 4 (or fewer) are in registers that the stub saved.
+   687→     *
+   688→     * The T1 deopt stub saves registers to specific local/spill slots.
+   689→     * The exact location depends on the stack depth and frame layout.
+   690→     * We use vtx_frame_layout_expr_location to determine where each
+   691→     * value was at deopt time, then read it from that location.
+   692→     *
+   693→     * However, the stub may have saved registers to DIFFERENT slots
+   694→     * than where they originally were (it uses local slots as temp
+   695→     * storage when spill area is full). This makes exact reconstruction
+   696→     * dependent on the stub's save logic.
+   697→     *
+   698→     * For correctness, we reconstruct what we can: read spill slots
+   699→     * for deep values, and for the top 4 values, read from the slots
+   700→     * where the stub saved them. If the stub saved to local slots,
+   701→     * those locals have been overwritten — but that's fine because
+   702→     * we already copied locals in Step 6.
+   703→     *
+   704→     * For T2/T3, the side table's register map is the authority.
+   705→     * But without a register save area, we can only read frame slots.
+   706→     */
+   707→    for (uint32_t i = 0; i < stack_depth && i < (uint32_t)interp_frame->stack_capacity; i++) {
+   708→        int reg = -1;
+   709→        int32_t spill_off = 0;
+   710→        vtx_frame_layout_expr_location(i, stack_depth, &layout, &reg, &spill_off);
+   711→
+   712→        vtx_value_t val = VTX_VALUE_UNDEFINED;
+   713→        if (reg >= 0) {
+   714→            /* Value was in a register. The T1 deopt stub saved it to
+   715→             * a frame slot. For the baseline, the stub saves:
+   716→             *   RAX → spill[spilled_count+3] or local slot
+   717→             *   RCX → spill[spilled_count+2] or local slot
+   718→             *   RDX → spill[spilled_count+1] or local slot
+   719→             *   RBX → spill[spilled_count] or local slot
+   720→             *
+   721→             * But we don't know spilled_count here without re-deriving it.
+   722→             * The stub code computes it from stack_depth.
+   723→             *
+   724→             * For register i (0=RAX,1=RCX,2=RDX,3=RBX), the saved
+   725→             * location is at a specific offset. Let's compute it:
+   726→             *   spilled_count = max(0, stack_depth - VTX_EXPR_REG_COUNT)
+   727→             *   The register values are saved to:
+   728→             *     spill[spilled_count + (reg_index)]
+   729→             *   where reg_index goes 0=RBX(deepest), 1=RDX, 2=RCX, 3=RAX(TOS)
+   730→             *
+   731→             * The mapping from stack position to register:
+   732→             *   TOS   (index depth-1) → RAX (reg 0)
+   733→             *   TOS-1 (index depth-2) → RCX (reg 1)
+   734→             *   TOS-2 (index depth-3) → RDX (reg 2)
+   735→             *   TOS-3 (index depth-4) → RBX (reg 3)
+   736→             *
+   737→             * And the stub saves them in order to:
+   738→             *   spill[spilled_count + 0] = RBX (if room)
+   739→             *   spill[spilled_count + 1] = RDX
+   740→             *   spill[spilled_count + 2] = RCX
+   741→             *   spill[spilled_count + 3] = RAX
+   742→             *
+   743→             * So for stack position i (0-based from bottom):
+   744→             *   If i < spilled_count: value is in spill[i] (already there)
+   745→             *   If i >= spilled_count: value is in a register, saved to
+   746→             *     spill[spilled_count + (i - spilled_count)]
+   747→             *   In both cases, the value ends up in spill[i]!
+   748→             *
+   749→             * This means we can just read spill[i] for all values. */
+   750→            uint32_t spilled_count = (stack_depth > VTX_EXPR_REG_COUNT) ?
+   751→                stack_depth - VTX_EXPR_REG_COUNT : 0;
+   752→
+   753→            if (i < spilled_count) {
+   754→                /* Value was already in spill[i] */
+   755→                int32_t off = vtx_frame_layout_spill_offset(&layout, i);
+   756→                val = (vtx_value_t)jit_frame_read(jit_rbp, off);
+   757→            } else {
+   758→                /* Value was in a register, saved to spill[spilled_count + (i - spilled_count)]
+   759→                 * which is spill[i]. But only if there's room in the spill area.
+   760→                 * If not, the stub uses local slots. */
+   761→                uint32_t save_idx = i; /* same as spill index */
+   762→                if (save_idx < layout.max_spills) {
+   763→                    int32_t off = vtx_frame_layout_spill_offset(&layout, save_idx);
+   764→                    val = (vtx_value_t)jit_frame_read(jit_rbp, off);
+   765→                } else if (layout.max_locals > 0) {
+   766→                    /* Stub saved to a local slot. We need to figure out which one.
+   767→                     * The stub uses local[max_locals-1], local[max_locals-2], etc.
+   768→                     * for overflow. The first overflow goes to local[max_locals-1].
+   769→                     * But we already read locals in Step 6 — these slots have been
+   770→                     * overwritten by the stub's register saves.
+   771→                     *
+   772→                     * We need to read from the SAME slots the stub wrote to.
+   773→                     * The stub saves register values starting from the first
+   774→                     * register-resident position. For stack_depth N:
+   775→                     *   positions spilled_count..N-1 are register-resident
+   776→                     *   The stub saves them to spill[spilled_count]..spill[N-1]
+   777→                     *   if those indices fit in max_spills.
+   778→                     *   Otherwise, overflow goes to local slots.
+   779→                     *
+   780→                     * For simplicity and correctness, we read from spill[i]
+   781→                     * if i < max_spills, otherwise from a local slot.
+   782→                     * The local slot index for overflow position j (0-based) is:
+   783→                     *   local[max_locals - 1 - j]
+   784→                     */
+   785→                    uint32_t overflow_idx = save_idx - layout.max_spills;
+   786→                    if (overflow_idx < layout.max_locals) {
+   787→                        uint32_t local_idx = layout.max_locals - 1 - overflow_idx;
+   788→                        int32_t off = vtx_frame_layout_local_offset(&layout, local_idx);
+   789→                        val = (vtx_value_t)jit_frame_read(jit_rbp, off);
+   790→                    }
+   791→                }
+   792→            }
+   793→        } else {
+   794→            /* Value is in a spill slot */
+   795→            if (spill_off != 0) {
+   796→                val = (vtx_value_t)jit_frame_read(jit_rbp, spill_off);
+   797→            }
+   798→        }
+   799→        interp_frame->operand_stack[interp_frame->stack_top++] = val;
+   800→    }
+   801→
+   802→    /* Step 8: Set the interpreter's PC to the bytecode PC where deopt occurred.
+   803→     * The interpreter's dispatch loop reads the PC from the frame's bytecode
+   804→     * and continues from there. We set it by finding the PC in the bytecode
+   805→     * and setting the interpreter's current position.
+   806→     *
+   807→     * The vtx_frame_t doesn't have a PC field — the PC is maintained by the
+   808→     * interpreter's dispatch loop. We store it in a thread-local that the
+   809→     * interpreter reads on re-entry. */
+   810→    extern void vtx_interp_set_deopt_pc(vtx_frame_t *frame, uint32_t pc);
+   811→    vtx_interp_set_deopt_pc(interp_frame, bytecode_pc);
+   812→
+   813→    /* Step 9: Return the interpreter frame. The deopt handler will
+   814→     * transfer control to the interpreter dispatch loop, which will
+   815→     * resume execution at bytecode_pc with the reconstructed frame. */
+   816→    return interp_frame;
+   817→}
+   818→

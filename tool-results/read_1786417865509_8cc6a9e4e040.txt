@@ -1,0 +1,632 @@
+     1→/* ============================================================================ *
+     2→ * AI-MODIFIED CODE
+     3→ *
+     4→ * This file was originally written by a human developer. It has been
+     5→ * substantially modified by an AI assistant (GLM/Z.ai) for bug fixes,
+     6→ * performance improvements, and feature additions.
+     7→ *
+     8→ * Original human-written structure is preserved; AI changes are marked
+     9→ * with bug fix IDs (B1-B28) or perf notes (Perf 1-10) in comments.
+    10→ *
+    11→ * If reviewing, please verify AI changes against the original logic.
+    12→ * ============================================================================ */
+    13→
+    14→#include "deopt/osr.h"
+    15→#include <stdlib.h>
+    16→#include <string.h>
+    17→#include <stdio.h>
+    18→
+    19→/* ========================================================================== */
+    20→/* Internal: node resolution                                                  */
+    21→/* ========================================================================== */
+    22→
+    23→/**
+    24→ * The register map is a sparse array indexed by NodeID. For nodes that
+    25→ * are not in the register map (e.g., constants, nodes that were spilled
+    26→ * to the stack), we need to look up the value differently.
+    27→ *
+    28→ * For OSR down, the register_map is laid out as:
+    29→ *   register_map[0] = number of entries
+    30→ *   register_map[1..2*N] = (node_id, value) pairs
+    31→ *
+    32→ * This allows for sparse mapping without allocating a huge array.
+    33→ */
+    34→typedef struct {
+    35→    vtx_nodeid_t node_id;
+    36→    vtx_value_t  value;
+    37→} vtx_node_value_pair_t;
+    38→
+    39→vtx_value_t vtx_osr_resolve_node(vtx_nodeid_t node_id,
+    40→                                   const vtx_value_t *register_map,
+    41→                                   uint32_t map_size)
+    42→{
+    43→    /* DEOPT-004 fix: the old code did
+    44→     *   const vtx_node_value_pair_t *pairs = (const vtx_node_value_pair_t *)register_map;
+    45→     * which type-puns vtx_value_t[] as vtx_node_value_pair_t[] — strict
+    46→     * aliasing UB. Fix: read each pair via memcpy so the compiler can't
+    47→     * mis-optimize. The map layout is:
+    48→     *   [count: uint32_t in first vtx_value_t's low 32 bits]
+    49→     *   [pair[0].node_id, pair[0].value, pair[1].node_id, pair[1].value, ...]
+    50→     * Each element is sizeof(vtx_value_t) bytes. The first element's low
+    51→     * 32 bits are the count; the remaining elements form (node_id, value)
+    52→     * pairs of 2 vtx_value_t each. */
+    53→    if (!register_map || map_size == 0) return VTX_VALUE_UNDEFINED;
+    54→
+    55→    /* Validate we have at least the count header + 1 pair. */
+    56→    if (map_size < 3) return VTX_VALUE_UNDEFINED;
+    57→
+    58→    /* Read the count via memcpy (no type punning). */
+    59→    uint32_t pair_count;
+    60→    vtx_value_t first_elem = register_map[0];
+    61→    memcpy(&pair_count, &first_elem, sizeof(uint32_t));
+    62→
+    63→    /* Validate pair_count against map_size (1 header + 2*pair_count). */
+    64→    if ((uint64_t)1 + (uint64_t)pair_count * 2ULL > (uint64_t)map_size) {
+    65→        return VTX_VALUE_UNDEFINED;
+    66→    }
+    67→
+    68→    /* Linear scan via memcpy — no type punning. */
+    69→    for (uint32_t i = 0; i < pair_count; i++) {
+    70→        vtx_value_t id_elem = register_map[1 + i * 2];
+    71→        vtx_value_t val_elem = register_map[1 + i * 2 + 1];
+    72→        vtx_nodeid_t this_id;
+    73→        memcpy(&this_id, &id_elem, sizeof(vtx_nodeid_t));
+    74→        if (this_id == node_id) {
+    75→            return val_elem;
+    76→        }
+    77→    }
+    78→
+    79→    return VTX_VALUE_UNDEFINED;
+    80→}
+    81→
+    82→/* ========================================================================== */
+    83→/* Internal: resolve NodeID from FrameState using register map               */
+    84→/* ========================================================================== */
+    85→
+    86→/**
+    87→ * Context for the node-to-value resolution callback.
+    88→ */
+    89→typedef struct {
+    90→    const vtx_value_t *register_map;
+    91→    uint32_t           register_map_size;
+    92→} vtx_resolve_context_t;
+    93→
+    94→static vtx_value_t resolve_node_callback(vtx_nodeid_t node_id, void *ctx)
+    95→{
+    96→    vtx_resolve_context_t *rc = (vtx_resolve_context_t *)ctx;
+    97→    if (node_id == VTX_NODEID_INVALID) {
+    98→        return VTX_VALUE_UNDEFINED;
+    99→    }
+   100→    return vtx_osr_resolve_node(node_id, rc->register_map,
+   101→                                 rc->register_map_size);
+   102→}
+   103→
+   104→/* ========================================================================== */
+   105→/* Build interpreter frame from FrameState                                    */
+   106→/* ========================================================================== */
+   107→
+   108→vtx_interp_frame_t *vtx_osr_build_interp_frame(
+   109→    const vtx_frame_state_t *fs,
+   110→    vtx_value_t (*node_to_value)(vtx_nodeid_t, void *),
+   111→    void *context)
+   112→{
+   113→    if (!fs) return NULL;
+   114→
+   115→    vtx_interp_frame_t *frame = calloc(1, sizeof(vtx_interp_frame_t));
+   116→    if (!frame) return NULL;
+   117→
+   118→    frame->method_id = fs->method_id;
+   119→    frame->bytecode_pc = fs->bytecode_pc;
+   120→    frame->local_count = fs->local_count;
+   121→    frame->stack_top = fs->stack_count;
+   122→    frame->stack_capacity = fs->stack_count;
+   123→    frame->caller = NULL;
+   124→
+   125→    /* Initialize enhanced fields */
+   126→    frame->monitors = NULL;
+   127→    frame->monitor_count = 0;
+   128→    frame->monitor_capacity = 0;
+   129→    frame->catch_handler_pc = (fs->exception.handler_pc != VTX_DEOPT_NO_HANDLER)
+   130→                              ? fs->exception.handler_pc : VTX_CATCH_NONE;
+   131→    frame->return_pc = 0;  /* Set by caller during frame chain reconstruction */
+   132→    frame->frame_kind = VTX_FRAME_INTERPRETED;
+   133→
+   134→    /* Allocate and fill locals */
+   135→    if (fs->local_count > 0) {
+   136→        frame->locals = calloc(fs->local_count, sizeof(vtx_value_t));
+   137→        if (!frame->locals) {
+   138→            free(frame);
+   139→            return NULL;
+   140→        }
+   141→        for (uint32_t i = 0; i < fs->local_count; i++) {
+   142→            if (fs->locals[i] != VTX_NODEID_INVALID) {
+   143→                frame->locals[i] = node_to_value(fs->locals[i], context);
+   144→            } else {
+   145→                frame->locals[i] = VTX_VALUE_UNDEFINED;
+   146→            }
+   147→        }
+   148→    }
+   149→
+   150→    /* Allocate and fill operand stack */
+   151→    if (fs->stack_count > 0) {
+   152→        frame->stack = calloc(fs->stack_count, sizeof(vtx_value_t));
+   153→        if (!frame->stack) {
+   154→            free(frame->locals);
+   155→            free(frame);
+   156→            return NULL;
+   157→        }
+   158→        for (uint32_t i = 0; i < fs->stack_count; i++) {
+   159→            if (fs->stack[i] != VTX_NODEID_INVALID) {
+   160→                frame->stack[i] = node_to_value(fs->stack[i], context);
+   161→            } else {
+   162→                frame->stack[i] = VTX_VALUE_UNDEFINED;
+   163→            }
+   164→        }
+   165→    }
+   166→
+   167→    /* Reconstruct monitor state from FrameState */
+   168→    if (fs->monitor_count > 0) {
+   169→        frame->monitors = calloc(fs->monitor_count, sizeof(vtx_osr_monitor_entry_t));
+   170→        if (!frame->monitors) {
+   171→            free(frame->stack);
+   172→            free(frame->locals);
+   173→            free(frame);
+   174→            return NULL;
+   175→        }
+   176→        frame->monitor_count = fs->monitor_count;
+   177→        frame->monitor_capacity = fs->monitor_count;
+   178→        for (uint32_t i = 0; i < fs->monitor_count; i++) {
+   179→            frame->monitors[i].local_index = 0; /* will be resolved during deopt */
+   180→            if (fs->monitors[i].monitor_object != VTX_NODEID_INVALID) {
+   181→                frame->monitors[i].object = node_to_value(fs->monitors[i].monitor_object, context);
+   182→            } else {
+   183→                frame->monitors[i].object = VTX_VALUE_UNDEFINED;
+   184→            }
+   185→        }
+   186→    }
+   187→
+   188→    return frame;
+   189→}
+   190→
+   191→/* ========================================================================== */
+   192→/* OSR Up: Interpreter → Compiled Code                                        */
+   193→/* ========================================================================== */
+   194→
+   195→__attribute__((optimize("O0")))
+   196→bool vtx_osr_up(vtx_interp_frame_t *interp,
+   197→                 uint32_t method_id,
+   198→                 const vtx_compiled_code_t *compiled_code,
+   199→                 uint32_t loop_header_pc)
+   200→{
+   201→    if (!interp || !compiled_code || !compiled_code->entry_point) {
+   202→        fprintf(stderr, "[osr] FAIL: null check (interp=%p code=%p entry=%p)\n",
+   203→                (void*)interp, (void*)compiled_code,
+   204→                compiled_code ? (void*)compiled_code->entry_point : NULL);
+   205→        return false;
+   206→    }
+   207→
+   208→    /* Verify the method matches */
+   209→    if (compiled_code->method_id != method_id) {
+   210→        fprintf(stderr, "[osr] FAIL: method_id mismatch (code=%u frame=%u)\n",
+   211→                compiled_code->method_id, method_id);
+   212→        return false;
+   213→    }
+   214→
+   215→    /* Verify the interpreter is at the loop header PC */
+   216→    if (interp->bytecode_pc != loop_header_pc) {
+   217→        fprintf(stderr, "[osr] FAIL: pc mismatch (frame_pc=%u loop_header=%u)\n",
+   218→                interp->bytecode_pc, loop_header_pc);
+   219→        return false;
+   220→    }
+   221→
+   222→    /* Verify frame size compatibility */
+   223→    if (interp->local_count > compiled_code->local_slots) {
+   224→        fprintf(stderr, "[osr] FAIL: locals overflow (frame=%u code=%u)\n",
+   225→                interp->local_count, compiled_code->local_slots);
+   226→        return false;
+   227→    }
+   228→    if (interp->stack_top > compiled_code->stack_slots) {
+   229→        fprintf(stderr, "[osr] FAIL: stack overflow (frame=%u code=%u)\n",
+   230→                interp->stack_top, compiled_code->stack_slots);
+   231→        return false;
+   232→    }
+   233→
+   234→    /* ---- Step 1: Look up the OSR entry point in the side table ----
+   235→     *
+   236→     * DEOPT-003 fix: the old code defaulted osr_entry to the function
+   237→     * entry point, so when no side-table/bc_pc_map entry matched the
+   238→     * requested loop_header_pc, OSR "succeeded" by jumping to the
+   239→     * method entry — re-executing the entire method from PC 0. Side
+   240→     * effects before the loop would run twice, and the interpreter's
+   241→     * assumption that we're at the loop header was violated.
+   242→     *
+   243→     * Fix: start with osr_entry = NULL and return false if no entry
+   244→     * is found, so the interpreter continues interpreting instead. */
+   245→    void *osr_entry = NULL;
+   246→
+   247→    if (compiled_code->side_table != NULL) {
+   248→        /* Search the side table for an OSR entry point at loop_header_pc.
+   249→         * The side table entries may have VTX_STF_OSR_ENTRY flag. */
+   250→        for (uint32_t i = 0; i < vtx_side_table_entry_count(compiled_code->side_table); i++) {
+   251→            const vtx_side_table_entry_t *entry = vtx_side_table_get_entry(
+   252→                compiled_code->side_table, i);
+   253→            if (entry && (entry->flags & VTX_STF_OSR_ENTRY)) {
+   254→                /* Found an OSR entry point. Compute the native code address
+   255→                 * from the code start + native_pc_offset. */
+   256→                osr_entry = (uint8_t *)compiled_code->entry_point + entry->native_pc_offset;
+   257→                break;
+   258→            }
+   259→        }
+   260→    }
+   261→
+   262→    /* ---- Step 2: Look up the bytecode-to-native PC mapping ---- */
+   263→    /* If bc_pc_map is available, find the native offset for the loop header.
+   264→     * This gives us the exact entry point in the compiled code. */
+   265→    if (compiled_code->bc_pc_map != NULL && compiled_code->bc_pc_map_count > 0) {
+   266→        for (uint32_t i = 0; i < compiled_code->bc_pc_map_count; i++) {
+   267→            if (compiled_code->bc_pc_map[i].bytecode_pc == loop_header_pc) {
+   268→                /* Found the mapping — use this as the OSR entry */
+   269→                osr_entry = (uint8_t *)compiled_code->code +
+   270→                            compiled_code->bc_pc_map[i].native_offset;
+   271→                break;
+   272→            }
+   273→        }
+   274→    }
+   275→
+   276→    /* DEOPT-003 fix: if no OSR entry was found, fail instead of silently
+   277→     * jumping to the function entry (which would re-execute the prologue
+   278→     * and all code before the loop, violating side-effect-once semantics
+   279→     * and the interpreter's loop-header assumption). */
+   280→    if (osr_entry == NULL) {
+   281→        fprintf(stderr, "[osr] no OSR entry for loop_header_pc=%u — "
+   282→                "continuing in interpreter\n", loop_header_pc);
+   283→        return false;
+   284→    }
+   285→
+   286→    /* ---- Step 3: Set up the JIT frame with interpreter values ----
+   287→     *
+   288→     * The JIT frame layout (from the compiled_code's frame_layout) is:
+   289→     *   [RBP+32]  = return address
+   290→     *   [RBP+24]  = method pointer
+   291→     *   [RBP+16]  = deopt_info pointer
+   292→     *   [RBP+8]   = profile_data pointer
+   293→     *   [RBP+0]   = caller RBP
+   294→     *   [RBP-8]   = first local slot
+   295→     *   [RBP-16]  = second local slot
+   296→     *   ...
+   297→     *   [RBP-8*N] = Nth local slot
+   298→     *   [RBP+spill_base] = first spill slot (operand stack)
+   299→     *   ...
+   300→     *
+   301→     * We build the JIT frame on the native stack using inline assembly,
+   302→     * copy interpreter locals and operand stack into the frame slots,
+   303→     * then jump to osr_entry. The C function never returns normally
+   304→     * after a successful transition.
+   305→     */
+   306→
+   307→    const vtx_jit_frame_layout_t *layout = &compiled_code->frame_layout;
+   308→    uint32_t frame_sz  = layout->total_frame_size;
+   309→    int32_t  l_base    = layout->locals_base;   /* negative offset of local[0] from RBP */
+   310→    int32_t  s_base    = layout->spill_base;    /* negative offset of spill[0] from RBP */
+   311→    uint32_t nlocals   = interp->local_count;
+   312→    uint32_t nstack    = interp->stack_top;
+   313→
+   314→    /* Mark the interpreter frame as OSR'd so GC doesn't collect it.
+   315→     * The frame is now superseded by the JIT frame. */
+   316→    interp->osr_active = true;
+   317→
+   318→    /* Prepare ALL parameters in a struct on the stack to reduce
+   319→     * register pressure on the inline asm. x86-64 has limited
+   320→     * registers and we clobber many, so passing a single pointer
+   321→     * avoids "impossible constraints" errors.
+   322→     *
+   323→     * Struct layout (all 8-byte slots, natural alignment):
+   324→     *   [0]  frame_sz     (uint64_t)
+   325→     *   [8]  l_base       (int64_t, sign-extended)
+   326→     *   [16] s_base       (int64_t, sign-extended)
+   327→     *   [24] nlocals      (uint64_t)
+   328→     *   [32] nstack       (uint64_t)
+   329→     *   [40] src_locals   (pointer)
+   330→     *   [48] src_stack    (pointer)
+   331→     *   [56] target       (pointer)
+   332→     *   [64] method_desc  (pointer)
+   333→     *   [72] deopt_ptr    (pointer)
+   334→     */
+   335→    struct osr_params {
+   336→        uint64_t frame_sz;
+   337→        int64_t  l_base;
+   338→        int64_t  s_base;
+   339→        uint64_t nlocals;
+   340→        uint64_t nstack;
+   341→        vtx_value_t             *src_locals;
+   342→        vtx_value_t             *src_stack;
+   343→        void                    *target;
+   344→        const vtx_method_desc_t *method_desc;
+   345→        vtx_deopt_info_t        *deopt_ptr;
+   346→    };
+   347→
+   348→    struct osr_params params;
+   349→    params.frame_sz    = (uint64_t)frame_sz;
+   350→    params.l_base      = (int64_t)l_base;
+   351→    params.s_base      = (int64_t)s_base;
+   352→    params.nlocals     = (uint64_t)nlocals;
+   353→    params.nstack      = (uint64_t)nstack;
+   354→    params.src_locals  = interp->locals;
+   355→    params.src_stack   = interp->stack;
+   356→    params.target      = osr_entry;
+   357→    params.method_desc = compiled_code->method;
+   358→    params.deopt_ptr   = compiled_code->deopt_info;
+   359→
+   360→    /*
+   361→     * Inline assembly trampoline (x86-64, System V ABI, Linux).
+   362→     *
+   363→     * We:
+   364→     *   1. Read the current C frame's caller RBP and return address
+   365→     *      (so the JIT frame returns to the right place)
+   366→     *   2. Allocate the JIT frame on the stack
+   367→     *   3. Write the frame header (caller RBP, profile_data, deopt_info,
+   368→     *      method_ptr, return address)
+   369→     *   4. Copy interpreter locals into JIT local slots
+   370→     *   5. Copy interpreter operand stack into JIT spill slots
+   371→     *   6. Load top stack values into expression registers (RAX, RCX, RDX, RBX)
+   372→     *   7. Set RBP/RSP to the new JIT frame
+   373→     *   8. Jump to osr_entry
+   374→     *
+   375→     * After this asm block, the C function never returns.
+   376→     *
+   377→     * Register usage:
+   378→     *   r12 = caller RBP
+   379→     *   r13 = return address
+   380→     *   r14 = new RBP
+   381→     *   r15 = pointer to osr_params struct (loaded once, used throughout)
+   382→     *   rax, rcx, rdx, rsi, r8, r9, r10 = temporaries
+   383→     */
+   384→    __asm__ __volatile__ (
+   385→        /* ---- Read current frame link data before modifying RBP ---- */
+   386→        "movq (%%rbp), %%r12\n\t"           /* r12 = caller's RBP (from current C frame) */
+   387→        "movq 8(%%rbp), %%r13\n\t"          /* r13 = return address   (from current C frame) */
+   388→
+   389→        /* ---- Load params pointer into r15 (single input register) ---- */
+   390→        "movq %[params], %%r15\n\t"
+   391→
+   392→        /* ---- Step 1: Allocate the JIT frame on the stack ---- */
+   393→        "movq 0(%%r15), %%rax\n\t"          /* load frame_sz from params[0] */
+   394→        "addq $48, %%rax\n\t"               /* 48 = 40 header + 8 for alignment margin */
+   395→        "addq $15, %%rax\n\t"               /* Fix C24: round UP for alignment */
+   396→        "andq $-16, %%rax\n\t"              /* align to 16 bytes (rounds up, not down) */
+   397→        "subq %%rax, %%rsp\n\t"             /* allocate frame on stack */
+   398→
+   399→        /* ---- Step 2: Compute new RBP ---- */
+   400→        "movq 0(%%r15), %%rax\n\t"          /* reload frame_sz */
+   401→        "leaq 8(%%rsp, %%rax), %%r14\n\t"   /* r14 = new RBP */
+   402→
+   403→        /* ---- Step 3: Write frame header above RBP ---- */
+   404→        "movq %%r12, 0(%%r14)\n\t"          /* [RBP+0]  = caller RBP */
+   405→        "xorq %%rax, %%rax\n\t"
+   406→        "movq %%rax, 8(%%r14)\n\t"          /* [RBP+8]  = profile_data (NULL) */
+   407→        "movq 72(%%r15), %%rax\n\t"         /* load deopt_ptr from params[72] */
+   408→        "movq %%rax, 16(%%r14)\n\t"         /* [RBP+16] = deopt_info */
+   409→        "movq 64(%%r15), %%rax\n\t"         /* load method_desc from params[64] */
+   410→        "movq %%rax, 24(%%r14)\n\t"         /* [RBP+24] = method_ptr */
+   411→        "movq %%r13, 32(%%r14)\n\t"         /* [RBP+32] = return address */
+   412→
+   413→        /* ---- Step 4: Copy interpreter locals into JIT frame local slots ---- */
+   414→        "movq 24(%%r15), %%rcx\n\t"         /* load nlocals from params[24] */
+   415→        "testq %%rcx, %%rcx\n\t"
+   416→        "jz 1f\n\t"                         /* skip if no locals */
+   417→        "movq 40(%%r15), %%rsi\n\t"         /* src_locals from params[40] */
+   418→        "movq 8(%%r15), %%rax\n\t"          /* l_base from params[8] */
+   419→        "0:\n\t"
+   420→        "movq (%%rsi), %%rdx\n\t"           /* load local value */
+   421→        "movq %%rdx, (%%r14, %%rax)\n\t"    /* store at [RBP + offset] */
+   422→        "addq $8, %%rsi\n\t"                /* next source slot */
+   423→        "subq $8, %%rax\n\t"                /* next offset (more negative) */
+   424→        "decq %%rcx\n\t"
+   425→        "jnz 0b\n\t"
+   426→        "1:\n\t"
+   427→
+   428→        /* ---- Step 5: Copy interpreter operand stack into JIT frame spill slots ---- */
+   429→        "movq 32(%%r15), %%rcx\n\t"         /* load nstack from params[32] */
+   430→        "testq %%rcx, %%rcx\n\t"
+   431→        "jz 2f\n\t"                         /* skip if no stack values */
+   432→        "movq 48(%%r15), %%rsi\n\t"         /* src_stack from params[48] */
+   433→        "movq 16(%%r15), %%rax\n\t"         /* s_base from params[16] */
+   434→        "0:\n\t"
+   435→        "movq (%%rsi), %%rdx\n\t"           /* load stack value */
+   436→        "movq %%rdx, (%%r14, %%rax)\n\t"    /* store at [RBP + offset] */
+   437→        "addq $8, %%rsi\n\t"                /* next source slot */
+   438→        "subq $8, %%rax\n\t"                /* next offset */
+   439→        "decq %%rcx\n\t"
+   440→        "jnz 0b\n\t"
+   441→        "2:\n\t"
+   442→
+   443→        /* ---- Step 6: Load top expression stack values into JIT registers ---- */
+   444→        "movq 32(%%r15), %%r8\n\t"          /* save nstack for reuse */
+   445→        "movq 16(%%r15), %%r9\n\t"          /* save sbase for reuse */
+   446→        "testq %%r8, %%r8\n\t"
+   447→        "jz 4f\n\t"                         /* skip if no stack values */
+   448→
+   449→        /* Load TOS (stack[stack_top-1]) → RAX */
+   450→        "movq %%r8, %%rax\n\t"
+   451→        "decq %%rax\n\t"
+   452→        "shlq $3, %%rax\n\t"               /* rax = (stack_top-1) * 8 */
+   453→        "movq %%r9, %%rdx\n\t"
+   454→        "subq %%rax, %%rdx\n\t"            /* rdx = s_base - (stack_top-1)*8 */
+   455→        "movq (%%r14, %%rdx), %%rax\n\t"   /* RAX = TOS value */
+   456→
+   457→        "cmpq $1, %%r8\n\t"
+   458→        "je 4f\n\t"                         /* only 1 stack value */
+   459→
+   460→        /* Load TOS-1 (stack[stack_top-2]) → RCX */
+   461→        "movq %%r8, %%rcx\n\t"
+   462→        "subq $2, %%rcx\n\t"
+   463→        "shlq $3, %%rcx\n\t"               /* rcx = (stack_top-2) * 8 */
+   464→        "movq %%r9, %%rdx\n\t"
+   465→        "subq %%rcx, %%rdx\n\t"
+   466→        "movq (%%r14, %%rdx), %%rcx\n\t"   /* RCX = TOS-1 value */
+   467→
+   468→        "cmpq $2, %%r8\n\t"
+   469→        "je 4f\n\t"                         /* only 2 stack values */
+   470→
+   471→        /* Load TOS-2 (stack[stack_top-3]) → RDX */
+   472→        "movq %%r8, %%rdx\n\t"
+   473→        "subq $3, %%rdx\n\t"
+   474→        "shlq $3, %%rdx\n\t"               /* rdx = (stack_top-3) * 8 */
+   475→        "movq %%r9, %%r10\n\t"
+   476→        "subq %%rdx, %%r10\n\t"
+   477→        "movq (%%r14, %%r10), %%rdx\n\t"   /* RDX = TOS-2 value */
+   478→
+   479→        "cmpq $3, %%r8\n\t"
+   480→        "je 4f\n\t"                         /* only 3 stack values */
+   481→
+   482→        /* Load TOS-3 (stack[stack_top-4]) → RBX */
+   483→        "movq %%r8, %%rbx\n\t"
+   484→        "subq $4, %%rbx\n\t"
+   485→        "shlq $3, %%rbx\n\t"               /* rbx = (stack_top-4) * 8 */
+   486→        "movq %%r9, %%r10\n\t"
+   487→        "subq %%rbx, %%r10\n\t"
+   488→        "movq (%%r14, %%r10), %%rbx\n\t"   /* RBX = TOS-3 value */
+   489→        "jmp 4f\n\t"
+   490→
+   491→        "4:\n\t"
+   492→
+   493→        /* ---- Step 7: Set RBP and RSP to the new JIT frame ---- */
+   494→        "movq %%r14, %%rbp\n\t"             /* RBP = new frame base */
+   495→        "movq 0(%%r15), %%rax\n\t"          /* reload frame_sz */
+   496→        "negq %%rax\n\t"
+   497→        "leaq (%%rbp, %%rax), %%rsp\n\t"   /* RSP = RBP - frame_sz */
+   498→
+   499→        /* ---- Step 8: Jump to the OSR entry point ---- */
+   500→        "movq 56(%%r15), %%rax\n\t"         /* load target from params[56] */
+   501→        "jmp *%%rax\n\t"
+   502→
+   503→        /* Should never reach here */
+   504→        "int3\n\t"
+   505→
+   506→        : /* no outputs — we never return */
+   507→        : [params]  "r"(&params)
+   508→        : "rax", "rbx", "rcx", "rdx", "rsi", "r8", "r9", "r10",
+   509→          "r12", "r13", "r14", "r15", "memory"
+   510→    );
+   511→
+   512→    /* The asm block jumps to osr_entry and never returns here. */
+   513→    __builtin_unreachable();
+   514→}
+   515→
+   516→/* ========================================================================== */
+   517→/* OSR Down: Compiled Code → Interpreter                                      */
+   518→/* ========================================================================== */
+   519→
+   520→vtx_interp_frame_t *vtx_osr_down(vtx_interp_frame_t *interp,
+   521→                                   const vtx_osr_deopt_context_t *deopt_ctx)
+   522→{
+   523→    if (!deopt_ctx || !deopt_ctx->frame_state) {
+   524→        return NULL;
+   525→    }
+   526→
+   527→    /* Step 1: Look up FrameState from side table (already provided in deopt_ctx) */
+   528→    const vtx_frame_state_t *fs = deopt_ctx->frame_state;
+   529→
+   530→    /* Step 2: Set up the resolution context */
+   531→    vtx_resolve_context_t ctx;
+   532→    ctx.register_map = deopt_ctx->register_map;
+   533→    ctx.register_map_size = deopt_ctx->register_count;
+   534→
+   535→    /* Step 3: Build the interpreter frame for the innermost method */
+   536→    vtx_interp_frame_t *new_frame = vtx_osr_build_interp_frame(
+   537→        fs, resolve_node_callback, &ctx);
+   538→    if (!new_frame) return NULL;
+   539→
+   540→    /* Step 4: Handle monitors — relock if needed.
+   541→     * For each monitor in the FrameState, we need to reacquire the lock
+   542→     * on the monitor object. The monitor object's value is resolved from
+   543→     * the register map. */
+   544→    if (fs->monitor_count > 0) {
+   545→        for (uint32_t i = 0; i < fs->monitor_count; i++) {
+   546→            vtx_nodeid_t mon_node = fs->monitors[i].monitor_object;
+   547→            if (mon_node != VTX_NODEID_INVALID) {
+   548→                vtx_value_t mon_val = resolve_node_callback(mon_node, &ctx);
+   549→                /* In a real implementation, we would call the runtime
+   550→                 * to re-enter the monitor on the resolved object.
+   551→                 * The object must be a heap pointer. */
+   552→                if (vtx_is_heap_ptr(mon_val)) {
+   553→                    /* vtx_runtime_monitor_enter(vtx_heap_ptr(mon_val)); */
+   554→                }
+   555→            }
+   556→        }
+   557→    }
+   558→
+   559→    /* Step 5: Handle exception handler state */
+   560→    if (fs->exception.handler_pc != VTX_DEOPT_NO_HANDLER) {
+   561→        /* The interpreter will pick up the exception handler from
+   562→         * the method's exception table at the deopt PC. No additional
+   563→         * work needed here — the bytecode_pc is set correctly. */
+   564→    }
+   565→
+   566→    /* Step 6: Walk the caller chain and reconstruct caller frames.
+   567→     *
+   568→     * B24 fix: The `caller` field is typed as `vtx_frame_state_t*` but
+   569→     * stores `vtx_interp_frame_t*`. Use a union/cast through void* to
+   570→     * avoid undefined behavior. The field is only used as a linked-list
+   571→     * next pointer — it never accesses vtx_frame_state_t fields through it. */
+   572→    vtx_interp_frame_t *current = new_frame;
+   573→    const vtx_frame_state_t *caller_fs = fs->caller;
+   574→    while (caller_fs != NULL) {
+   575→        vtx_interp_frame_t *caller_frame = vtx_osr_build_interp_frame(
+   576→            caller_fs, resolve_node_callback, &ctx);
+   577→        if (!caller_frame) {
+   578→            /* Clean up already-built frames */
+   579→            vtx_interp_frame_t *f = new_frame;
+   580→            while (f) {
+   581→                /* DEOPT-005 fix: caller is void * now, cast directly. */
+   582→                vtx_interp_frame_t *next = (vtx_interp_frame_t *)f->caller;
+   583→                free(f->locals);
+   584→                free(f->stack);
+   585→                free(f);
+   586→                f = next;
+   587→            }
+   588→            return NULL;
+   589→        }
+   590→        /* DEOPT-005 fix: caller is void *, store the interp frame pointer
+   591→         * directly (no type punning). */
+   592→        current->caller = caller_frame;
+   593→        current = caller_frame;
+   594→        caller_fs = caller_fs->caller;
+   595→    }
+   596→
+   597→    /* Step 7: Transfer to interpreter.
+   598→     *
+   599→     * B25 fix: Use the frame_state's bytecode_pc (the actual deopt PC)
+   600→     * not the return_pc (which is the caller's resume PC). The old code
+   601→     * used new_frame->bytecode_pc which was set from return_pc in
+   602→     * vtx_osr_build_interp_frame — that resumes at the wrong instruction.
+   603→     *
+   604→     * OSR-8 fix: previously this block only copied method_id and bytecode_pc,
+   605→     * dropping ALL the reconstructed locals/stack/monitors/caller chain.
+   606→     * The caller received new_frame (with the reconstructed state) but
+   607→     * interp was left with stale pre-deopt data — if the caller resumed
+   608→     * via interp (the documented contract per the .h file), it would use
+   609→     * the OLD locals/stack and leak new_frame. Surgical fix: copy every
+   610→     * field from new_frame into interp so both views agree. The caller
+   611→     * owns new_frame's heap allocations (locals/stack/monitors) and is
+   612→     * responsible for freeing them when interp is destroyed. */
+   613→    if (interp) {
+   614→        interp->method_id        = new_frame->method_id;
+   615→        interp->bytecode_pc      = fs->bytecode_pc;   /* B25: deopt PC */
+   616→        interp->locals           = new_frame->locals;
+   617→        interp->local_count      = new_frame->local_count;
+   618→        interp->stack            = new_frame->stack;
+   619→        interp->stack_top        = new_frame->stack_top;
+   620→        interp->stack_capacity   = new_frame->stack_capacity;
+   621→        interp->caller           = new_frame->caller;
+   622→        interp->monitors         = new_frame->monitors;
+   623→        interp->monitor_count    = new_frame->monitor_count;
+   624→        interp->monitor_capacity = new_frame->monitor_capacity;
+   625→        interp->catch_handler_pc = new_frame->catch_handler_pc;
+   626→        interp->return_pc        = new_frame->return_pc;
+   627→        interp->frame_kind       = new_frame->frame_kind;
+   628→    }
+   629→
+   630→    return new_frame;
+   631→}
+   632→

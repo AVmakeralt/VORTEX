@@ -1,0 +1,730 @@
+     1→/* ============================================================================ *
+     2→ * AI-MODIFIED CODE
+     3→ *
+     4→ * This file was originally written by a human developer. It has been
+     5→ * substantially modified by an AI assistant (GLM/Z.ai) for bug fixes,
+     6→ * performance improvements, and feature additions.
+     7→ *
+     8→ * Original human-written structure is preserved; AI changes are marked
+     9→ * with bug fix IDs (B1-B28) or perf notes (Perf 1-10) in comments.
+    10→ *
+    11→ * If reviewing, please verify AI changes against the original logic.
+    12→ * ============================================================================ */
+    13→
+    14→#include "deopt/stack_walk.h"
+    15→#include "interp/frame.h"
+    16→#include <stdlib.h>
+    17→#include <string.h>
+    18→
+    19→/* ========================================================================== */
+    20→/* Reconstructed stack lifecycle                                              */
+    21→/* ========================================================================== */
+    22→
+    23→vtx_reconstructed_stack_t *vtx_reconstructed_stack_create(void)
+    24→{
+    25→    vtx_reconstructed_stack_t *stack = calloc(1, sizeof(vtx_reconstructed_stack_t));
+    26→    if (!stack) return NULL;
+    27→
+    28→    stack->frame_capacity = 16;
+    29→    stack->frames = calloc(stack->frame_capacity,
+    30→                            sizeof(vtx_reconstructed_frame_t));
+    31→    if (!stack->frames) {
+    32→        free(stack);
+    33→        return NULL;
+    34→    }
+    35→    stack->frame_count = 0;
+    36→
+    37→    return stack;
+    38→}
+    39→
+    40→void vtx_reconstructed_stack_destroy(vtx_reconstructed_stack_t *stack)
+    41→{
+    42→    if (!stack) return;
+    43→
+    44→    for (uint32_t i = 0; i < stack->frame_count; i++) {
+    45→        free(stack->frames[i].locals);
+    46→        free(stack->frames[i].stack);
+    47→        free(stack->frames[i].compressed_snapshot);
+    48→    }
+    49→    free(stack->frames);
+    50→    free(stack);
+    51→}
+    52→
+    53→int vtx_reconstructed_stack_add_frame(
+    54→    vtx_reconstructed_stack_t *stack,
+    55→    const vtx_reconstructed_frame_t *frame)
+    56→{
+    57→    if (!stack || !frame) return -1;
+    58→
+    59→    if (stack->frame_count >= stack->frame_capacity) {
+    60→        uint32_t new_cap = stack->frame_capacity * 2;
+    61→        vtx_reconstructed_frame_t *new_frames = realloc(
+    62→            stack->frames,
+    63→            (size_t)new_cap * sizeof(vtx_reconstructed_frame_t));
+    64→        if (!new_frames) return -1;
+    65→        stack->frames = new_frames;
+    66→        stack->frame_capacity = new_cap;
+    67→    }
+    68→
+    69→    vtx_reconstructed_frame_t *slot = &stack->frames[stack->frame_count];
+    70→
+    71→    /* Deep copy the frame */
+    72→    slot->method_id = frame->method_id;
+    73→    slot->bytecode_pc = frame->bytecode_pc;
+    74→    slot->local_count = frame->local_count;
+    75→    slot->stack_count = frame->stack_count;
+    76→    slot->original_kind = frame->original_kind;
+    77→    slot->is_inlined = frame->is_inlined;
+    78→    slot->is_materialized = frame->is_materialized;
+    79→    slot->snapshot_size = frame->snapshot_size;
+    80→
+    81→    if (frame->compressed_snapshot != NULL && frame->snapshot_size > 0) {
+    82→        slot->compressed_snapshot = (uint8_t *)malloc(frame->snapshot_size);
+    83→        if (!slot->compressed_snapshot) return -1;
+    84→        memcpy(slot->compressed_snapshot, frame->compressed_snapshot, frame->snapshot_size);
+    85→    } else {
+    86→        slot->compressed_snapshot = NULL;
+    87→    }
+    88→
+    89→    if (frame->local_count > 0) {
+    90→        slot->locals = calloc(frame->local_count, sizeof(vtx_value_t));
+    91→        if (!slot->locals) return -1;
+    92→        memcpy(slot->locals, frame->locals,
+    93→               (size_t)frame->local_count * sizeof(vtx_value_t));
+    94→    } else {
+    95→        slot->locals = NULL;
+    96→    }
+    97→
+    98→    if (frame->stack_count > 0) {
+    99→        slot->stack = calloc(frame->stack_count, sizeof(vtx_value_t));
+   100→        if (!slot->stack) {
+   101→            free(slot->locals);
+   102→            return -1;
+   103→        }
+   104→        memcpy(slot->stack, frame->stack,
+   105→               (size_t)frame->stack_count * sizeof(vtx_value_t));
+   106→    } else {
+   107→        slot->stack = NULL;
+   108→    }
+   109→
+   110→    stack->frame_count++;
+   111→    return 0;
+   112→}
+   113→
+   114→/* ========================================================================== */
+   115→/* Side table registry                                                        */
+   116→/* ========================================================================== */
+   117→
+   118→int vtx_side_table_registry_init(vtx_side_table_registry_t *registry)
+   119→{
+   120→    if (!registry) return -1;
+   121→
+   122→    registry->descriptor_capacity = 32;
+   123→    registry->descriptors = calloc(registry->descriptor_capacity,
+   124→                                    sizeof(vtx_code_descriptor_t));
+   125→    if (!registry->descriptors) return -1;
+   126→
+   127→    registry->descriptor_count = 0;
+   128→    return 0;
+   129→}
+   130→
+   131→void vtx_side_table_registry_destroy(vtx_side_table_registry_t *registry)
+   132→{
+   133→    if (!registry) return;
+   134→    free(registry->descriptors);
+   135→    memset(registry, 0, sizeof(*registry));
+   136→}
+   137→
+   138→int vtx_side_table_registry_add(vtx_side_table_registry_t *registry,
+   139→                                 void *code_start,
+   140→                                 uint32_t code_size,
+   141→                                 vtx_side_table_t *side_table)
+   142→{
+   143→    if (!registry || !code_start || !side_table) return -1;
+   144→
+   145→    if (registry->descriptor_count >= registry->descriptor_capacity) {
+   146→        uint32_t new_cap = registry->descriptor_capacity * 2;
+   147→        vtx_code_descriptor_t *new_desc = realloc(
+   148→            registry->descriptors,
+   149→            (size_t)new_cap * sizeof(vtx_code_descriptor_t));
+   150→        if (!new_desc) return -1;
+   151→        registry->descriptors = new_desc;
+   152→        registry->descriptor_capacity = new_cap;
+   153→    }
+   154→
+   155→    vtx_code_descriptor_t *desc = &registry->descriptors[registry->descriptor_count++];
+   156→    desc->code_start = code_start;
+   157→    desc->code_size = code_size;
+   158→    desc->side_table = side_table;
+   159→
+   160→    return 0;
+   161→}
+   162→
+   163→vtx_side_table_t *vtx_side_table_registry_lookup(
+   164→    const vtx_side_table_registry_t *registry,
+   165→    const void *code_addr)
+   166→{
+   167→    if (!registry || !code_addr) return NULL;
+   168→
+   169→    const uint8_t *addr = (const uint8_t *)code_addr;
+   170→
+   171→    for (uint32_t i = 0; i < registry->descriptor_count; i++) {
+   172→        const vtx_code_descriptor_t *desc = &registry->descriptors[i];
+   173→        const uint8_t *start = (const uint8_t *)desc->code_start;
+   174→        if (addr >= start && addr < start + desc->code_size) {
+   175→            return desc->side_table;
+   176→        }
+   177→    }
+   178→
+   179→    return NULL;
+   180→}
+   181→
+   182→/* ========================================================================== */
+   183→/* Frame pointer chain walking                                                */
+   184→/* ========================================================================== */
+   185→
+   186→/**
+   187→ * Read a pointer from the target process memory at the given address.
+   188→ * In a real implementation, this would handle cross-process debugging,
+   189→ * signal safety, and stack bounds checking. For an in-process implementation,
+   190→ * we do a direct read with basic validity checks.
+   191→ */
+   192→static bool read_ptr(void *fp, size_t offset, void **out)
+   193→{
+   194→    if (!fp) return false;
+   195→
+   196→    /* On x86-64, user-space stack addresses are in the range
+   197→     * 0x7FFF_FFFF_FFFF downward. We do a basic sanity check. */
+   198→    uintptr_t addr = (uintptr_t)fp;
+   199→    if (addr < 0x1000 || addr > 0x7FFFFFFFFFFFull) {
+   200→        return false;
+   201→    }
+   202→
+   203→    void **slot = (void **)((uint8_t *)fp + offset);
+   204→    *out = *slot;
+   205→    return true;
+   206→}
+   207→
+   208→int vtx_stack_walk_read_caller_fp(void *fp, void **out_caller_fp)
+   209→{
+   210→    if (!out_caller_fp) return -1;
+   211→    if (!read_ptr(fp, 0, out_caller_fp)) return -1;
+   212→    return 0;
+   213→}
+   214→
+   215→int vtx_stack_walk_read_return_addr(void *fp, void **out_return_addr)
+   216→{
+   217→    if (!out_return_addr) return -1;
+   218→    if (!read_ptr(fp, sizeof(void *), out_return_addr)) return -1;
+   219→    return 0;
+   220→}
+   221→
+   222→vtx_frame_kind_t vtx_stack_walk_classify_frame(
+   223→    const vtx_side_table_registry_t *registry,
+   224→    void *fp)
+   225→{
+   226→    if (!fp) return VTX_FRAME_NATIVE;
+   227→
+   228→    void *return_addr;
+   229→    if (vtx_stack_walk_read_return_addr(fp, &return_addr) != 0) {
+   230→        return VTX_FRAME_NATIVE;
+   231→    }
+   232→
+   233→    /* Check if the return address falls within a known compiled code range */
+   234→    if (registry) {
+   235→        vtx_side_table_t *st = vtx_side_table_registry_lookup(registry,
+   236→                                                                return_addr);
+   237→        if (st) {
+   238→            return VTX_FRAME_COMPILED;
+   239→        }
+   240→    }
+   241→
+   242→    /* Heuristic: if the return address is in the low address range,
+   243→     * it's likely an interpreter dispatch address. In a real implementation,
+   244→     * we would check against the interpreter's code range. */
+   245→    return VTX_FRAME_NATIVE;
+   246→}
+   247→
+   248→/* ========================================================================== */
+   249→/* Internal: reconstruct frames from a FrameState chain                      */
+   250→/* ========================================================================== */
+   251→
+   252→/**
+   253→ * Reconstruct interpreter frames from a FrameState chain.
+   254→ * A single compiled frame may produce multiple logical frames if methods
+   255→ * were inlined: the FrameState chain encodes the inlined call stack.
+   256→ *
+   257→ * @param fs          The innermost FrameState
+   258→ * @param node_to_val Function to resolve NodeID → vtx_value_t
+   259→ * @param ctx         Opaque context for node_to_val
+   260→ * @param stack       The reconstructed stack to add frames to
+   261→ * @return 0 on success, -1 on failure
+   262→ */
+   263→static int reconstruct_from_frame_state(
+   264→    const vtx_frame_state_t *fs,
+   265→    vtx_value_t (*node_to_val)(vtx_nodeid_t, void *),
+   266→    void *ctx,
+   267→    vtx_reconstructed_stack_t *stack)
+   268→{
+   269→    for (const vtx_frame_state_t *cur = fs; cur != NULL; cur = cur->caller) {
+   270→        vtx_reconstructed_frame_t frame;
+   271→        memset(&frame, 0, sizeof(frame));
+   272→
+   273→        frame.method_id = cur->method_id;
+   274→        frame.bytecode_pc = cur->bytecode_pc;
+   275→        frame.local_count = cur->local_count;
+   276→        frame.stack_count = cur->stack_count;
+   277→        frame.original_kind = VTX_FRAME_COMPILED;
+   278→        frame.is_inlined = (cur != fs && cur->caller != NULL);
+   279→
+   280→        /* Resolve locals */
+   281→        if (cur->local_count > 0) {
+   282→            frame.locals = calloc(cur->local_count, sizeof(vtx_value_t));
+   283→            if (!frame.locals) return -1;
+   284→            for (uint32_t i = 0; i < cur->local_count; i++) {
+   285→                if (cur->locals[i] != VTX_NODEID_INVALID) {
+   286→                    frame.locals[i] = node_to_val(cur->locals[i], ctx);
+   287→                } else {
+   288→                    frame.locals[i] = VTX_VALUE_UNDEFINED;
+   289→                }
+   290→            }
+   291→        }
+   292→
+   293→        /* Resolve operand stack */
+   294→        if (cur->stack_count > 0) {
+   295→            frame.stack = calloc(cur->stack_count, sizeof(vtx_value_t));
+   296→            if (!frame.stack) {
+   297→                free(frame.locals);
+   298→                return -1;
+   299→            }
+   300→            for (uint32_t i = 0; i < cur->stack_count; i++) {
+   301→                if (cur->stack[i] != VTX_NODEID_INVALID) {
+   302→                    frame.stack[i] = node_to_val(cur->stack[i], ctx);
+   303→                } else {
+   304→                    frame.stack[i] = VTX_VALUE_UNDEFINED;
+   305→                }
+   306→            }
+   307→        }
+   308→
+   309→        if (vtx_reconstructed_stack_add_frame(stack, &frame) != 0) {
+   310→            free(frame.locals);
+   311→            free(frame.stack);
+   312→            return -1;
+   313→        }
+   314→
+   315→        free(frame.locals);
+   316→        free(frame.stack);
+   317→    }
+   318→
+   319→    return 0;
+   320→}
+   321→
+   322→/* ========================================================================== */
+   323→/* Main stack walking function                                                */
+   324→/* ========================================================================== */
+   325→
+   326→/**
+   327→ * Default node-to-value resolution for stack walking.
+   328→ * Resolves Constant nodes directly from the node table.
+   329→ * For other node kinds, returns VTX_VALUE_UNDEFINED since we don't
+   330→ * have access to actual register/stack maps at this level — the OSR
+   331→ * module handles full resolution at deopt time.
+   332→ */
+   333→static vtx_value_t default_node_to_value(vtx_nodeid_t node_id, void *ctx)
+   334→{
+   335→    if (node_id == VTX_NODEID_INVALID) {
+   336→        return VTX_VALUE_UNDEFINED;
+   337→    }
+   338→
+   339→    /* Try to resolve constant values directly */
+   340→    vtx_node_table_t *table = (vtx_node_table_t *)ctx;
+   341→    if (table) {
+   342→        const vtx_node_t *node = vtx_node_get_const(table, node_id);
+   343→        if (node && node->opcode == VTX_OP_Constant) {
+   344→            switch (node->constval.kind) {
+   345→            case VTX_TYPE_Int:
+   346→                return vtx_make_smi(node->constval.as.int_val);
+   347→            case VTX_TYPE_Float:
+   348→                return vtx_make_double(node->constval.as.float_val);
+   349→            case VTX_TYPE_Ptr:
+   350→                if (node->constval.as.ptr_val == NULL) {
+   351→                    return VTX_VALUE_NULL;
+   352→                }
+   353→                return vtx_make_heap_ptr(node->constval.as.ptr_val);
+   354→            default:
+   355→                break;
+   356→            }
+   357→        }
+   358→    }
+   359→
+   360→    return VTX_VALUE_UNDEFINED;
+   361→}
+   362→
+   363→vtx_reconstructed_stack_t *vtx_stack_walk(
+   364→    const vtx_stack_walk_config_t *config)
+   365→{
+   366→    if (!config || !config->start_fp) return NULL;
+   367→
+   368→    vtx_reconstructed_stack_t *stack = vtx_reconstructed_stack_create();
+   369→    if (!stack) return NULL;
+   370→
+   371→    void *current_fp = config->start_fp;
+   372→    uint32_t depth = 0;
+   373→    uint32_t max_depth = config->max_depth;
+   374→    if (max_depth == 0) max_depth = 1024; /* reasonable default */
+   375→
+   376→    while (current_fp != NULL && depth < max_depth) {
+   377→        vtx_frame_kind_t kind = vtx_stack_walk_classify_frame(
+   378→            config->registry, current_fp);
+   379→
+   380→        switch (kind) {
+   381→        case VTX_FRAME_COMPILED: {
+   382→            /* Read return address to determine native PC */
+   383→            void *return_addr;
+   384→            if (vtx_stack_walk_read_return_addr(current_fp, &return_addr) != 0) {
+   385→                goto done;
+   386→            }
+   387→
+   388→            /* Look up side table for this compiled code */
+   389→            vtx_side_table_t *side_table =
+   390→                vtx_side_table_registry_lookup(config->registry, return_addr);
+   391→            if (!side_table) {
+   392→                /* Unknown compiled code — treat as native frame */
+   393→                goto next_frame;
+   394→            }
+   395→
+   396→            /* Compute native PC offset within the compiled code.
+   397→             * We need to find the code_start for this side table. */
+   398→            uint32_t native_pc_offset = 0;
+   399→            for (uint32_t i = 0; i < config->registry->descriptor_count; i++) {
+   400→                const vtx_code_descriptor_t *desc =
+   401→                    &config->registry->descriptors[i];
+   402→                if (desc->side_table == side_table) {
+   403→                    uintptr_t offset = (uintptr_t)return_addr -
+   404→                                       (uintptr_t)desc->code_start;
+   405→                    native_pc_offset = (uint32_t)offset;
+   406→                    break;
+   407→                }
+   408→            }
+   409→
+   410→            /* Look up FrameState from side table */
+   411→            uint32_t fs_index = vtx_side_table_lookup(side_table,
+   412→                                                        native_pc_offset);
+   413→            if (fs_index == UINT32_MAX) {
+   414→                /* No FrameState at this PC — skip */
+   415→                goto next_frame;
+   416→            }
+   417→
+   418→            vtx_frame_state_t *fs = vtx_side_table_get_frame_state(
+   419→                side_table, fs_index);
+   420→            if (!fs) goto next_frame;
+   421→
+   422→            /* Reconstruct interpreter frames from the FrameState chain.
+   423→             * A compiled frame may contain inlined methods, producing
+   424→             * multiple logical frames. */
+   425→            if (reconstruct_from_frame_state(fs, default_node_to_value,
+   426→                                              (void *)config->node_table, stack) != 0) {
+   427→                vtx_reconstructed_stack_destroy(stack);
+   428→                return NULL;
+   429→            }
+   430→            break;
+   431→        }
+   432→
+   433→        case VTX_FRAME_INTERPRETED: {
+   434→            /* For interpreter frames, we read the state directly.
+   435→             * The interpreter frame layout is defined in src/interp/frame.h.
+   436→             *
+   437→             * Layout of vtx_frame_t on the stack:
+   438→             *   The frame is a struct, so we read it via the frame pointer.
+   439→             *   Key fields:
+   440→             *     frame->method->id         → method_id
+   441→             *     frame->bytecode->pc_offset + frame->return_pc → PC
+   442→             *     frame->locals[]           → local variable values
+   443→             *     frame->locals_count       → number of locals
+   444→             *     frame->operand_stack[]    → operand stack values
+   445→             *     frame->stack_top          → current stack depth
+   446→             *
+   447→             * Since vtx_frame_t is an in-memory struct (not a stack-allocated
+   448→             * frame in the traditional sense), we can read it directly from
+   449→             * the frame pointer if the pointer is valid. */
+   450→            vtx_reconstructed_frame_t frame;
+   451→            memset(&frame, 0, sizeof(frame));
+   452→            frame.original_kind = VTX_FRAME_INTERPRETED;
+   453→            frame.is_inlined = false;
+   454→
+   455→            /* Try to read the interpreter frame from the frame pointer.
+   456→             * The current_fp points to an interpreter frame (vtx_frame_t *).
+   457→             * We read the fields through pointer arithmetic. */
+   458→            const vtx_frame_t *interp_frame = (const vtx_frame_t *)current_fp;
+   459→
+   460→            /* Validate the frame pointer before reading */
+   461→            uintptr_t fp_addr = (uintptr_t)current_fp;
+   462→            if (fp_addr >= 0x1000 && fp_addr <= 0x7FFFFFFFFFFFull) {
+   463→                /* Read method_id from the frame's method descriptor.
+   464→                 * Bug #8 fix: Use method_symbol_id as the method identifier.
+   465→                 * This uniquely identifies the method by its interned name
+   466→                 * symbol, which is sufficient for deopt/stack-walk purposes.
+   467→                 * If method_symbol_id is invalid, fall back to vtable_index. */
+   468→                if (interp_frame->method != NULL) {
+   469→                    frame.method_id = interp_frame->method->method_symbol_id;
+   470→                    if (frame.method_id == VTX_SYMBOL_INVALID) {
+   471→                        frame.method_id = interp_frame->method->vtable_index;
+   472→                    }
+   473→                }
+   474→
+   475→                /* Read the bytecode PC.
+   476→                 * The interpreter's current PC is tracked by the dispatch
+   477→                 * loop, not stored in the frame struct itself. The return_pc
+   478→                 * is the PC to resume in the *caller* after return, not the
+   479→                 * current method's PC. For a reconstructed frame, we use
+   480→                 * return_pc as an approximation — the actual PC is available
+   481→                 * only from the dispatch loop state. */
+   482→                frame.bytecode_pc = interp_frame->return_pc;
+   483→
+   484→                /* Read local variables */
+   485→                frame.local_count = interp_frame->locals_count;
+   486→                if (frame.local_count > 0 && interp_frame->locals != NULL) {
+   487→                    frame.locals = calloc(frame.local_count, sizeof(vtx_value_t));
+   488→                    if (frame.locals) {
+   489→                        uint32_t to_copy = frame.local_count;
+   490→                        /* Safety: don't copy more than VTX_FRAME_MAX_LOCALS */
+   491→                        if (to_copy > VTX_FRAME_MAX_LOCALS) to_copy = VTX_FRAME_MAX_LOCALS;
+   492→                        memcpy(frame.locals, interp_frame->locals,
+   493→                               to_copy * sizeof(vtx_value_t));
+   494→                    }
+   495→                }
+   496→
+   497→                /* Read operand stack */
+   498→                frame.stack_count = (uint32_t)(interp_frame->stack_top > 0 ?
+   499→                                                interp_frame->stack_top : 0);
+   500→                if (frame.stack_count > 0 && interp_frame->operand_stack != NULL) {
+   501→                    frame.stack = calloc(frame.stack_count, sizeof(vtx_value_t));
+   502→                    if (frame.stack) {
+   503→                        uint32_t to_copy = frame.stack_count;
+   504→                        if (to_copy > VTX_FRAME_MAX_STACK_DEPTH)
+   505→                            to_copy = VTX_FRAME_MAX_STACK_DEPTH;
+   506→                        memcpy(frame.stack, interp_frame->operand_stack,
+   507→                               to_copy * sizeof(vtx_value_t));
+   508→                    }
+   509→                }
+   510→            }
+   511→
+   512→            if (vtx_reconstructed_stack_add_frame(stack, &frame) != 0) {
+   513→                free(frame.locals);
+   514→                free(frame.stack);
+   515→                vtx_reconstructed_stack_destroy(stack);
+   516→                return NULL;
+   517→            }
+   518→            break;
+   519→        }
+   520→
+   521→        case VTX_FRAME_DEOPTLESS: {
+   522→            /* Deoptless continuation frames are handled similarly to
+   523→             * compiled frames, but use the continuation's side table. */
+   524→            void *return_addr;
+   525→            if (vtx_stack_walk_read_return_addr(current_fp, &return_addr) != 0) {
+   526→                goto done;
+   527→            }
+   528→
+   529→            vtx_side_table_t *side_table =
+   530→                vtx_side_table_registry_lookup(config->registry, return_addr);
+   531→            if (!side_table) goto next_frame;
+   532→
+   533→            uint32_t native_pc_offset = 0;
+   534→            for (uint32_t i = 0; i < config->registry->descriptor_count; i++) {
+   535→                const vtx_code_descriptor_t *desc =
+   536→                    &config->registry->descriptors[i];
+   537→                if (desc->side_table == side_table) {
+   538→                    uintptr_t offset = (uintptr_t)return_addr -
+   539→                                       (uintptr_t)desc->code_start;
+   540→                    native_pc_offset = (uint32_t)offset;
+   541→                    break;
+   542→                }
+   543→            }
+   544→
+   545→            uint32_t fs_index = vtx_side_table_lookup(side_table,
+   546→                                                        native_pc_offset);
+   547→            if (fs_index == UINT32_MAX) goto next_frame;
+   548→
+   549→            vtx_frame_state_t *fs = vtx_side_table_get_frame_state(
+   550→                side_table, fs_index);
+   551→            if (!fs) goto next_frame;
+   552→
+   553→            if (reconstruct_from_frame_state(fs, default_node_to_value,
+   554→                                              (void *)config->node_table, stack) != 0) {
+   555→                vtx_reconstructed_stack_destroy(stack);
+   556→                return NULL;
+   557→            }
+   558→            break;
+   559→        }
+   560→
+   561→        case VTX_FRAME_NATIVE:
+   562→        case VTX_FRAME_STUB:
+   563→            /* Cannot walk through native or stub frames.
+   564→             * Stop the walk here. */
+   565→            goto done;
+   566→        }
+   567→
+   568→    next_frame:
+   569→        depth++;
+   570→
+   571→        /* Follow frame pointer chain to caller */
+   572→        void *caller_fp;
+   573→        if (vtx_stack_walk_read_caller_fp(current_fp, &caller_fp) != 0) {
+   574→            break;
+   575→        }
+   576→
+   577→        /* Sanity check: frame pointers should decrease (stack grows down) */
+   578→        if (caller_fp != NULL && (uintptr_t)caller_fp <= (uintptr_t)current_fp) {
+   579→            break; /* corrupted frame pointer */
+   580→        }
+   581→
+   582→        current_fp = caller_fp;
+   583→    }
+   584→
+   585→done:
+   586→    return stack;
+   587→}
+   588→
+   589→/* ========================================================================== */
+   590→/* Lazy frame materialization (Proposal #8)                                      */
+   591→/* ========================================================================== */
+   592→
+   593→/**
+   594→ * RLE entry: a value followed by a count of consecutive occurrences.
+   595→ * For vtx_value_t (which is uint64_t / NaN-boxed), we store each value
+   596→ * and its repetition count as 8 + 4 = 12 bytes.
+   597→ */
+   598→#define VTX_RLE_VALUE_SIZE 8   /* sizeof(vtx_value_t) */
+   599→#define VTX_RLE_COUNT_SIZE 4   /* uint32_t for count */
+   600→#define VTX_RLE_ENTRY_SIZE (VTX_RLE_VALUE_SIZE + VTX_RLE_COUNT_SIZE)
+   601→
+   602→uint8_t *vtx_frame_compress(const vtx_reconstructed_frame_t *frame)
+   603→{
+   604→    if (!frame) return NULL;
+   605→    if (!frame->locals && !frame->stack) return NULL;
+   606→
+   607→    /* Worst-case size: every value is unique, so we need an entry per value.
+   608→     * Total values = (size_t)local_count + (size_t)stack_count.
+   609→     * Each entry = VTX_RLE_ENTRY_SIZE bytes. */
+   610→    uint32_t total_values = frame->local_count + frame->stack_count;
+   611→    if (total_values == 0) return NULL;
+   612→
+   613→    uint32_t max_size = total_values * VTX_RLE_ENTRY_SIZE + 8; /* 8 for header */
+   614→    uint8_t *buf = (uint8_t *)malloc(max_size);
+   615→    if (!buf) return NULL;
+   616→
+   617→    uint32_t pos = 0;
+   618→
+   619→    /* Header: local_count (4 bytes) + stack_count (4 bytes) */
+   620→    memcpy(buf + pos, &frame->local_count, 4); pos += 4;
+   621→    memcpy(buf + pos, &frame->stack_count, 4); pos += 4;
+   622→
+   623→    /* Compress locals + stack as a single RLE stream */
+   624→    vtx_value_t *all = (vtx_value_t *)malloc(total_values * sizeof(vtx_value_t));
+   625→    if (!all) { free(buf); return NULL; }
+   626→
+   627→    uint32_t idx = 0;
+   628→    for (uint32_t i = 0; i < frame->local_count; i++) {
+   629→        all[idx++] = frame->locals[i];
+   630→    }
+   631→    for (uint32_t i = 0; i < frame->stack_count; i++) {
+   632→        all[idx++] = frame->stack[i];
+   633→    }
+   634→
+   635→    /* RLE encode */
+   636→    uint32_t i = 0;
+   637→    while (i < total_values) {
+   638→        vtx_value_t current = all[i];
+   639→        uint32_t count = 1;
+   640→        while (i + count < total_values && all[i + count] == current) {
+   641→            count++;
+   642→        }
+   643→
+   644→        /* Write value (8 bytes) + count (4 bytes) */
+   645→        memcpy(buf + pos, &current, VTX_RLE_VALUE_SIZE); pos += VTX_RLE_VALUE_SIZE;
+   646→        memcpy(buf + pos, &count, VTX_RLE_COUNT_SIZE); pos += VTX_RLE_COUNT_SIZE;
+   647→
+   648→        i += count;
+   649→    }
+   650→
+   651→    free(all);
+   652→
+   653→    /* Shrink to actual size */
+   654→    uint8_t *result = (uint8_t *)realloc(buf, pos);
+   655→    return result ? result : buf;  /* if realloc fails, use original */
+   656→}
+   657→
+   658→int vtx_frame_decompress(vtx_reconstructed_frame_t *frame)
+   659→{
+   660→    if (!frame || !frame->compressed_snapshot || frame->snapshot_size == 0) return -1;
+   661→
+   662→    uint8_t *buf = frame->compressed_snapshot;
+   663→    uint32_t pos = 0;
+   664→
+   665→    /* Read header */
+   666→    uint32_t local_count = 0, stack_count = 0;
+   667→    memcpy(&local_count, buf + pos, 4); pos += 4;
+   668→    memcpy(&stack_count, buf + pos, 4); pos += 4;
+   669→
+   670→    /* Allocate locals and stack */
+   671→    if (local_count > 0) {
+   672→        frame->locals = (vtx_value_t *)malloc(local_count * sizeof(vtx_value_t));
+   673→        if (!frame->locals) return -1;
+   674→    }
+   675→    frame->local_count = local_count;
+   676→
+   677→    if (stack_count > 0) {
+   678→        frame->stack = (vtx_value_t *)malloc(stack_count * sizeof(vtx_value_t));
+   679→        if (!frame->stack) {
+   680→            free(frame->locals);
+   681→            frame->locals = NULL;
+   682→            return -1;
+   683→        }
+   684→    }
+   685→    frame->stack_count = stack_count;
+   686→
+   687→    /* Decode RLE */
+   688→    uint32_t out_idx = 0;
+   689→    vtx_value_t *all = (vtx_value_t *)malloc(
+   690→        (local_count + stack_count) * sizeof(vtx_value_t));
+   691→    if (!all) {
+   692→        free(frame->locals); frame->locals = NULL;
+   693→        free(frame->stack); frame->stack = NULL;
+   694→        return -1;
+   695→    }
+   696→
+   697→    while (pos + VTX_RLE_ENTRY_SIZE <= frame->snapshot_size && out_idx < local_count + stack_count) {
+   698→        vtx_value_t value;
+   699→        uint32_t count;
+   700→        memcpy(&value, buf + pos, VTX_RLE_VALUE_SIZE); pos += VTX_RLE_VALUE_SIZE;
+   701→        memcpy(&count, buf + pos, VTX_RLE_COUNT_SIZE); pos += VTX_RLE_COUNT_SIZE;
+   702→
+   703→        for (uint32_t j = 0; j < count && out_idx < local_count + stack_count; j++) {
+   704→            all[out_idx++] = value;
+   705→        }
+   706→    }
+   707→
+   708→    /* Split into locals and stack */
+   709→    memcpy(frame->locals, all, local_count * sizeof(vtx_value_t));
+   710→    memcpy(frame->stack, all + local_count, stack_count * sizeof(vtx_value_t));
+   711→    free(all);
+   712→
+   713→    frame->is_materialized = true;
+   714→    return 0;
+   715→}
+   716→
+   717→int vtx_frame_materialize_on_demand(vtx_reconstructed_frame_t *frame)
+   718→{
+   719→    if (!frame) return -1;
+   720→
+   721→    if (frame->is_materialized) return 0; /* already done */
+   722→
+   723→    if (frame->compressed_snapshot != NULL && frame->snapshot_size > 0) {
+   724→        return vtx_frame_decompress(frame);
+   725→    }
+   726→
+   727→    /* No data available — can't materialize */
+   728→    return -1;
+   729→}
+   730→

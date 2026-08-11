@@ -1,0 +1,681 @@
+     1→/* ============================================================================ *
+     2→ * AI-MODIFIED CODE
+     3→ *
+     4→ * This file was originally written by a human developer. It has been
+     5→ * substantially modified by an AI assistant (GLM/Z.ai) for bug fixes,
+     6→ * performance improvements, and feature additions.
+     7→ *
+     8→ * Original human-written structure is preserved; AI changes are marked
+     9→ * with bug fix IDs (B1-B28) or perf notes (Perf 1-10) in comments.
+    10→ *
+    11→ * If reviewing, please verify AI changes against the original logic.
+    12→ * ============================================================================ */
+    13→
+    14→/**
+    15→ * VORTEX Dependency-Set Invalidation
+    16→ *
+    17→ * Maintains an inverted index from TypeID/ShapeID to sets of compiled
+    18→ * methods. When a type changes, all dependent methods are found and
+    19→ * invalidated efficiently.
+    20→ */
+    21→
+    22→#include "codecache/invalidate.h"
+    23→#include "codecache/quarantine.h"
+    24→#include <stdlib.h>
+    25→#include <string.h>
+    26→
+    27→/* ========================================================================== */
+    28→/* Hash function                                                               */
+    29→/* ========================================================================== */
+    30→
+    31→static uint32_t index_hash(uint64_t key)
+    32→{
+    33→    /* FNV-1a hash for 64-bit key */
+    34→    uint32_t h = 2166136261u;
+    35→    h ^= (uint32_t)(key & 0xFF);
+    36→    h *= 16777619u;
+    37→    h ^= (uint32_t)((key >> 8) & 0xFF);
+    38→    h *= 16777619u;
+    39→    h ^= (uint32_t)((key >> 16) & 0xFF);
+    40→    h *= 16777619u;
+    41→    h ^= (uint32_t)((key >> 24) & 0xFF);
+    42→    h *= 16777619u;
+    43→    h ^= (uint32_t)((key >> 32) & 0xFF);
+    44→    h *= 16777619u;
+    45→    h ^= (uint32_t)((key >> 40) & 0xFF);
+    46→    h *= 16777619u;
+    47→    h ^= (uint32_t)((key >> 48) & 0xFF);
+    48→    h *= 16777619u;
+    49→    h ^= (uint32_t)((key >> 56) & 0xFF);
+    50→    h *= 16777619u;
+    51→    return h % VTX_INVERTED_INDEX_CAPACITY;
+    52→}
+    53→
+    54→/* ========================================================================== */
+    55→/* Lifecycle                                                                   */
+    56→/* ========================================================================== */
+    57→
+    58→int vtx_inverted_index_init(vtx_inverted_index_t *index, vtx_arena_t *arena)
+    59→{
+    60→    if (!index) return -1;
+    61→    memset(index->buckets, 0, sizeof(index->buckets));
+    62→    index->entry_count = 0;
+    63→    index->arena = arena;
+    64→    return 0;
+    65→}
+    66→
+    67→void vtx_inverted_index_destroy(vtx_inverted_index_t *index)
+    68→{
+    69→    if (!index) return;
+    70→
+    71→    /* Free all entries */
+    72→    for (uint32_t b = 0; b < VTX_INVERTED_INDEX_CAPACITY; b++) {
+    73→        vtx_index_entry_t *entry = index->buckets[b];
+    74→        while (entry) {
+    75→            vtx_index_entry_t *next = entry->next;
+    76→            if (entry->dep_set.method_ids) {
+    77→                free(entry->dep_set.method_ids);
+    78→            }
+    79→            free(entry);
+    80→            entry = next;
+    81→        }
+    82→        index->buckets[b] = NULL;
+    83→    }
+    84→    index->entry_count = 0;
+    85→}
+    86→
+    87→/* ========================================================================== */
+    88→/* Find or create an entry                                                     */
+    89→/* ========================================================================== */
+    90→
+    91→static vtx_index_entry_t *find_entry(vtx_inverted_index_t *index, uint64_t key)
+    92→{
+    93→    uint32_t bucket = index_hash(key);
+    94→    vtx_index_entry_t *entry = index->buckets[bucket];
+    95→    while (entry) {
+    96→        if (entry->key == key) return entry;
+    97→        entry = entry->next;
+    98→    }
+    99→    return NULL;
+   100→}
+   101→
+   102→static vtx_index_entry_t *create_entry(vtx_inverted_index_t *index, uint64_t key)
+   103→{
+   104→    uint32_t bucket = index_hash(key);
+   105→
+   106→    vtx_index_entry_t *entry = (vtx_index_entry_t *)malloc(sizeof(vtx_index_entry_t));
+   107→    if (!entry) return NULL;
+   108→    memset(entry, 0, sizeof(*entry));
+   109→
+   110→    entry->key = key;
+   111→    entry->dep_set.method_ids = (uint32_t *)malloc(
+   112→        VTX_DEP_SET_INITIAL_CAPACITY * sizeof(uint32_t));
+   113→    if (!entry->dep_set.method_ids) {
+   114→        free(entry);
+   115→        return NULL;
+   116→    }
+   117→    entry->dep_set.count = 0;
+   118→    entry->dep_set.capacity = VTX_DEP_SET_INITIAL_CAPACITY;
+   119→
+   120→    /* Insert at head of bucket chain */
+   121→    entry->next = index->buckets[bucket];
+   122→    index->buckets[bucket] = entry;
+   123→    index->entry_count++;
+   124→
+   125→    return entry;
+   126→}
+   127→
+   128→/* ========================================================================== */
+   129→/* Add dependency                                                              */
+   130→/* ========================================================================== */
+   131→
+   132→static int add_to_dep_set(vtx_dep_set_t *set, uint32_t method_id)
+   133→{
+   134→    /* Check if already present */
+   135→    for (uint32_t i = 0; i < set->count; i++) {
+   136→        if (set->method_ids[i] == method_id) return 0;
+   137→    }
+   138→
+   139→    /* Grow if needed */
+   140→    if (set->count >= set->capacity) {
+   141→        uint32_t new_cap = set->capacity * 2;
+   142→        uint32_t *new_ids = (uint32_t *)realloc(set->method_ids,
+   143→            new_cap * sizeof(uint32_t));
+   144→        if (!new_ids) return -1;
+   145→        set->method_ids = new_ids;
+   146→        set->capacity = new_cap;
+   147→    }
+   148→
+   149→    set->method_ids[set->count++] = method_id;
+   150→    return 0;
+   151→}
+   152→
+   153→int vtx_inverted_index_add(vtx_inverted_index_t *index,
+   154→                            uint64_t typeid_, uint32_t method_id)
+   155→{
+   156→    if (!index) return -1;
+   157→
+   158→    vtx_index_entry_t *entry = find_entry(index, typeid_);
+   159→    if (!entry) {
+   160→        entry = create_entry(index, typeid_);
+   161→        if (!entry) return -1;
+   162→    }
+   163→
+   164→    return add_to_dep_set(&entry->dep_set, method_id);
+   165→}
+   166→
+   167→#define VTX_SHAPE_KEY_OFFSET 0x40000000u
+   168→
+   169→int vtx_inverted_index_add_shape(vtx_inverted_index_t *index,
+   170→                                  uint32_t shapeid, uint32_t method_id)
+   171→{
+   172→    /* Shape IDs use a different key space: offset by VTX_SHAPE_KEY_OFFSET
+   173→     * to avoid collision with TypeIDs. Use 64-bit arithmetic to prevent
+   174→     * overflow when shapeid >= 0xC0000000u. */
+   175→    return vtx_inverted_index_add(index, (uint64_t)shapeid + VTX_SHAPE_KEY_OFFSET, method_id);
+   176→}
+   177→
+   178→/* ========================================================================== */
+   179→/* Remove method from all sets                                                 */
+   180→/* ========================================================================== */
+   181→
+   182→static void remove_from_dep_set(vtx_dep_set_t *set, uint32_t method_id)
+   183→{
+   184→    for (uint32_t i = 0; i < set->count; i++) {
+   185→        if (set->method_ids[i] == method_id) {
+   186→            /* Shift remaining entries down */
+   187→            for (uint32_t j = i; j < set->count - 1; j++) {
+   188→                set->method_ids[j] = set->method_ids[j + 1];
+   189→            }
+   190→            set->count--;
+   191→            return;
+   192→        }
+   193→    }
+   194→}
+   195→
+   196→int vtx_inverted_index_remove_method(vtx_inverted_index_t *index,
+   197→                                      uint32_t method_id)
+   198→{
+   199→    if (!index) return -1;
+   200→
+   201→    /* Walk all buckets and remove the method from any dep set it's in */
+   202→    for (uint32_t b = 0; b < VTX_INVERTED_INDEX_CAPACITY; b++) {
+   203→        vtx_index_entry_t *entry = index->buckets[b];
+   204→        while (entry) {
+   205→            remove_from_dep_set(&entry->dep_set, method_id);
+   206→            entry = entry->next;
+   207→        }
+   208→    }
+   209→    return 0;
+   210→}
+   211→
+   212→/* ========================================================================== */
+   213→/* Lookup                                                                      */
+   214→/* ========================================================================== */
+   215→
+   216→const vtx_dep_set_t *vtx_inverted_index_lookup(vtx_inverted_index_t *index,
+   217→                                                 uint64_t typeid_)
+   218→{
+   219→    if (!index) return NULL;
+   220→    vtx_index_entry_t *entry = find_entry(index, typeid_);
+   221→    if (!entry) return NULL;
+   222→    return &entry->dep_set;
+   223→}
+   224→
+   225→/* ========================================================================== */
+   226→/* Invalidation                                                                */
+   227→/* ========================================================================== */
+   228→
+   229→int vtx_invalidate_dependencies(uint64_t typeid_,
+   230→                                 vtx_code_cache_t *cache,
+   231→                                 vtx_method_registry_t *registry,
+   232→                                 vtx_inverted_index_t *index)
+   233→{
+   234→    if (!cache || !registry || !index) return -1;
+   235→
+   236→    const vtx_dep_set_t *deps = vtx_inverted_index_lookup(index, typeid_);
+   237→    if (!deps || deps->count == 0) return 0;
+   238→
+   239→    /* Make a copy of the method IDs to iterate over, since
+   240→     * invalidation will modify the dep set */
+   241→    uint32_t count = deps->count;
+   242→    uint32_t *method_ids = (uint32_t *)malloc(count * sizeof(uint32_t));
+   243→    if (!method_ids) return -1;
+   244→    memcpy(method_ids, deps->method_ids, count * sizeof(uint32_t));
+   245→
+   246→    int invalidated = 0;
+   247→
+   248→    for (uint32_t i = 0; i < count; i++) {
+   249→        uint32_t mid = method_ids[i];
+   250→        vtx_compiled_method_t *cm = vtx_method_registry_get(registry, mid);
+   251→        if (!cm || !cm->is_installed) continue;
+   252→
+   253→        /* C10 fix: The old code freed the compiled code immediately after
+   254→         * setting compiled_code = NULL. But another thread could have
+   255→         * already loaded the old compiled_code pointer and be executing
+   256→         * it. Freeing the code while it's being executed = UAF.
+   257→         *
+   258→         * Fix: DON'T free the code or metadata. Just mark the method as
+   259→         * invalid and set compiled_code = NULL. The code cache's LRU
+   260→         * eviction will reclaim the memory later when it's safe (no
+   261→         * thread can be executing it because compiled_code is NULL,
+   262→         * which means new calls go to the interpreter).
+   263→         *
+   264→         * The tradeoff: we temporarily leak the old code's memory. This
+   265→         * is safe — the code cache has eviction to handle pressure.
+   266→         * The old code can't be entered (compiled_code is NULL), so no
+   267→         * new thread will execute it. Existing threads that already
+   268→         * loaded the pointer will finish execution safely because the
+   269→         * code memory is still valid (just not freed). */
+   270→        cm->is_installed = false;
+   271→        cm->is_valid = false;
+   272→
+   273→        /* Set the method's code pointer to NULL atomically.
+   274→         * This prevents NEW calls from entering the code, but doesn't
+   275→         * affect threads already executing it (they have the old pointer). */
+   276→        if (cm->method_desc) {
+   277→            __atomic_store_n(&cm->method_desc->compiled_code, NULL, __ATOMIC_RELEASE);
+   278→        }
+   279→
+   280→        /* DON'T free the code or metadata here. The code may still be
+   281→         * executing on another thread's stack. The code cache will
+   282→         * reclaim the segment when it needs space (eviction), at which
+   283→         * point the code is guaranteed not to be executing (because
+   284→         * compiled_code has been NULL long enough for all threads to
+   285→         * have exited via safepoint or natural return).
+   286→         *
+   287→         * We DO mark the cache region as free so the cache knows it's
+   288→         * available for reuse (the cache's free-list tracks freed
+   289→         * regions within segments). The actual memory isn't unmapped
+   290→         * until the segment is recycled, which only happens under
+   291→         * cache pressure — by which time no thread can be executing it.
+   292→         *
+   293→         * C7 BUGFIX: The old code freed code immediately via
+   294→         * vtx_code_cache_free. This is a UAF if another thread is
+   295→         * still executing it. The code cache uses segment-based
+   296→         * allocation where free() doesn't actually unmap — it just
+   297→         * marks the region as available for reuse. So this is "safe"
+   298→         * in the sense that the memory isn't unmapped, but the
+   299→         * contents can be overwritten by a subsequent allocation.
+   300→         *
+   301→         * TODO: Implement a proper quarantine queue that delays
+   302→         * reuse until a safepoint confirms no thread is in JIT code.
+   303→         * For now, the segment-based allocation provides a natural
+   304→         * quarantine — the freed region won't be reused until the
+   305→         * segment is recycled, which requires significant allocation
+   306→         * pressure. */
+   307→        vtx_code_cache_free(cache, cm->code_start, cm->code_size);
+   308→
+   309→        /* Don't free metadata either — same reasoning. Just NULL the
+   310→         * pointers in the registry entry so they're not double-freed
+   311→         * when the registry entry itself is cleaned up.
+   312→         *
+   313→         * OSR-21 fix: NULLing cm->side_table / cm->deopt_info /
+   314→         * cm->bc_pc_map here is still a UAF risk if another thread
+   315→         * (in vtx_osr_up or vtx_deopt_runtime_transition) already
+   316→         * cached a pointer to one of these objects. The fix:
+   317→         * instead of NULLing, retire each object to the quarantine.
+   318→         * The object stays alive (so cached pointers are still valid)
+   319→         * until the quarantine drains at the next safepoint — at
+   320→         * which point no thread can be in JIT code, so no thread
+   321→         * can be holding a cached pointer.
+   322→         *
+   323→         * For callers that read cm->side_table AFTER this invalidation
+   324→         * (e.g., a fresh vtx_osr_up that starts after invalidation),
+   325→         * they see NULL and gracefully skip the metadata (degrade
+   326→         * to "no side table" behavior). */
+   327→        vtx_codecache_quarantine_t *q = vtx_codecache_get_quarantine();
+   328→        if (q != NULL) {
+   329→            /* Move metadata ownership to the quarantine. The cm's
+   330→             * pointers are NULLed so subsequent reads see NULL. */
+   331→            vtx_side_table_t *old_st = cm->side_table;
+   332→            vtx_deopt_info_t *old_di = cm->deopt_info;
+   333→            vtx_bc_pc_map_entry_t *old_map = cm->bc_pc_map;
+   334→            vtx_poly_ic_t **old_poly_ics = cm->poly_ics;
+   335→            uint32_t old_poly_ic_count = cm->poly_ic_count;
+   336→            /* poly_ics: the cm struct itself isn't freed here (the
+   337→             * comment below explains why), so we just NULL the
+   338→             * pointer. poly_ics are owned by the cm struct and freed
+   339→             * when the cm struct is freed (in
+   340→             * vtx_codecache_destroy_compiled_method, when the cm
+   341→             * eventually gets retired). To preserve the old poly_ics
+   342→             * for any thread holding a pointer, retire them too. */
+   343→            struct vtx_poly_ic_pair {
+   344→                void   **poly_ics;
+   345→                uint32_t poly_ic_count;
+   346→            };
+   347→            cm->side_table = NULL;
+   348→            cm->deopt_info = NULL;
+   349→            cm->bc_pc_map = NULL;
+   350→            cm->poly_ics = NULL;
+   351→            cm->poly_ic_count = 0;
+   352→
+   353→            if (old_st != NULL) {
+   354→                vtx_codecache_quarantine_retire(q, old_st,
+   355→                                                  vtx_codecache_destroy_side_table,
+   356→                                                  "invalidate.c: side_table");
+   357→            }
+   358→            if (old_di != NULL) {
+   359→                vtx_codecache_quarantine_retire(q, old_di,
+   360→                                                  vtx_codecache_destroy_deopt_info,
+   361→                                                  "invalidate.c: deopt_info");
+   362→            }
+   363→            if (old_map != NULL) {
+   364→                vtx_codecache_quarantine_retire(q, old_map,
+   365→                                                  vtx_codecache_destroy_bc_pc_map,
+   366→                                                  "invalidate.c: bc_pc_map");
+   367→            }
+   368→            if (old_poly_ics != NULL) {
+   369→                /* Wrap (poly_ics, count) in a heap pair so the
+   370→                 * destructor can free each IC. */
+   371→                struct vtx_poly_ic_pair *pair =
+   372→                    (struct vtx_poly_ic_pair *)malloc(sizeof(*pair));
+   373→                if (pair != NULL) {
+   374→                    pair->poly_ics = (void **)old_poly_ics;
+   375→                    pair->poly_ic_count = old_poly_ic_count;
+   376→                    vtx_codecache_quarantine_retire(q, pair,
+   377→                                                      vtx_codecache_destroy_poly_ics,
+   378→                                                      "invalidate.c: poly_ics");
+   379→                } else {
+   380→                    /* OOM — fall back to immediate free (still risky). */
+   381→                    for (uint32_t i = 0; i < old_poly_ic_count; i++) {
+   382→                        free(old_poly_ics[i]);
+   383→                    }
+   384→                    free(old_poly_ics);
+   385→                }
+   386→            }
+   387→        } else {
+   388→            /* No quarantine — fall back to NULLing (the pre-fix
+   389→             * behavior). Safe in single-threaded mode. */
+   390→            cm->side_table = NULL;
+   391→            cm->deopt_info = NULL;
+   392→            cm->bc_pc_map = NULL;
+   393→            cm->poly_ics = NULL;
+   394→            cm->poly_ic_count = 0;
+   395→        }
+   396→        /* dep_type_ids / dep_shape_ids: these are dependency-set
+   397→         * metadata used by the inverted index, NOT by OSR-up /
+   398→         * deopt-runtime-transition. NULLing them here is safe because
+   399→         * no thread in JIT code reads them (they're only used by
+   400→         * the compile-cache layer for invalidation, which is what
+   401→         * we're doing right now). */
+   402→        cm->dep_type_ids = NULL;
+   403→        cm->dep_type_count = 0;
+   404→        cm->dep_shape_ids = NULL;
+   405→        cm->dep_shape_count = 0;
+   406→        /* BUGFIX (audit High #25): Null out code_start to prevent dangling
+   407→         * pointer, and free remaining metadata to prevent leaks. */
+   408→        cm->code_start = NULL;
+   409→        cm->code_size = 0;
+   410→        cm->reloc_table = NULL;
+   411→
+   412→        /* Remove from registry (but don't free cm — the code cache
+   413→         * owns the code memory, and freeing cm here would lose the
+   414→         * reference needed for cache eviction cleanup). */
+   415→        /* vtx_method_registry_remove(registry, mid); — removed: UAF */
+   416→
+   417→        invalidated++;
+   418→    }
+   419→
+   420→    /* Clear the dep set for this typeid */
+   421→    vtx_index_entry_t *entry = find_entry(index, typeid_);
+   422→    if (entry) {
+   423→        entry->dep_set.count = 0;
+   424→    }
+   425→
+   426→    free(method_ids);
+   427→    return invalidated;
+   428→}
+   429→
+   430→int vtx_invalidate_shape(vtx_shapeid_t shapeid,
+   431→                          vtx_code_cache_t *cache,
+   432→                          vtx_method_registry_t *registry,
+   433→                          vtx_inverted_index_t *index)
+   434→{
+   435→    /* Shape IDs are stored with VTX_SHAPE_KEY_OFFSET to avoid TypeID collision.
+   436→     * Use 64-bit arithmetic to prevent overflow. */
+   437→    return vtx_invalidate_dependencies((uint64_t)shapeid + VTX_SHAPE_KEY_OFFSET,
+   438→                                        cache, registry, index);
+   439→}
+   440→
+   441→/* ========================================================================== */
+   442→/* Register method dependencies                                                */
+   443→/* ========================================================================== */
+   444→
+   445→int vtx_invalidate_register(vtx_inverted_index_t *index,
+   446→                             const vtx_compiled_method_t *method)
+   447→{
+   448→    if (!index || !method) return -1;
+   449→
+   450→    /* Register TypeID dependencies */
+   451→    for (uint32_t i = 0; i < method->dep_type_count; i++) {
+   452→        if (vtx_inverted_index_add(index, method->dep_type_ids[i],
+   453→                                    method->method_id) != 0) {
+   454→            return -1;
+   455→        }
+   456→    }
+   457→
+   458→    /* Register ShapeID dependencies */
+   459→    for (uint32_t i = 0; i < method->dep_shape_count; i++) {
+   460→        if (vtx_inverted_index_add_shape(index, method->dep_shape_ids[i],
+   461→                                          method->method_id) != 0) {
+   462→            return -1;
+   463→        }
+   464→    }
+   465→
+   466→    return 0;
+   467→}
+   468→
+   469→/* ========================================================================== */
+   470→/* Guard-level dependency index (Proposal #4)                                    */
+   471→/* ========================================================================== */
+   472→
+   473→int vtx_guard_dep_index_init(vtx_guard_dep_index_t *index, vtx_arena_t *arena)
+   474→{
+   475→    if (!index) return -1;
+   476→    memset(index->buckets, 0, sizeof(index->buckets));
+   477→    index->entry_count = 0;
+   478→    index->arena = arena;
+   479→    return 0;
+   480→}
+   481→
+   482→void vtx_guard_dep_index_destroy(vtx_guard_dep_index_t *index)
+   483→{
+   484→    if (!index) return;
+   485→
+   486→    for (uint32_t b = 0; b < VTX_INVERTED_INDEX_CAPACITY; b++) {
+   487→        vtx_guard_dep_entry_t *entry = index->buckets[b];
+   488→        while (entry) {
+   489→            vtx_guard_dep_entry_t *next = entry->next;
+   490→            if (entry->deps) free(entry->deps);
+   491→            free(entry);
+   492→            entry = next;
+   493→        }
+   494→        index->buckets[b] = NULL;
+   495→    }
+   496→    index->entry_count = 0;
+   497→}
+   498→
+   499→static vtx_guard_dep_entry_t *find_guard_dep_entry(vtx_guard_dep_index_t *index,
+   500→                                                      uint32_t type_id)
+   501→{
+   502→    uint32_t bucket = index_hash(type_id);  /* reuse the same hash function */
+   503→    vtx_guard_dep_entry_t *entry = index->buckets[bucket];
+   504→    while (entry) {
+   505→        if (entry->type_id == type_id) return entry;
+   506→        entry = entry->next;
+   507→    }
+   508→    return NULL;
+   509→}
+   510→
+   511→static vtx_guard_dep_entry_t *create_guard_dep_entry(vtx_guard_dep_index_t *index,
+   512→                                                        uint32_t type_id)
+   513→{
+   514→    uint32_t bucket = index_hash(type_id);
+   515→
+   516→    vtx_guard_dep_entry_t *entry = (vtx_guard_dep_entry_t *)malloc(
+   517→        sizeof(vtx_guard_dep_entry_t));
+   518→    if (!entry) return NULL;
+   519→    memset(entry, 0, sizeof(*entry));
+   520→
+   521→    entry->type_id = type_id;
+   522→    entry->deps = (vtx_guard_dep_t *)malloc(
+   523→        VTX_GUARD_DEP_INITIAL_CAPACITY * sizeof(vtx_guard_dep_t));
+   524→    if (!entry->deps) {
+   525→        free(entry);
+   526→        return NULL;
+   527→    }
+   528→    entry->dep_count = 0;
+   529→    entry->dep_capacity = VTX_GUARD_DEP_INITIAL_CAPACITY;
+   530→
+   531→    /* Insert at head of bucket chain */
+   532→    entry->next = index->buckets[bucket];
+   533→    index->buckets[bucket] = entry;
+   534→    index->entry_count++;
+   535→
+   536→    return entry;
+   537→}
+   538→
+   539→int vtx_guard_dep_index_add(vtx_guard_dep_index_t *index,
+   540→                              uint32_t type_id,
+   541→                              uint32_t guard_id,
+   542→                              uint32_t method_id,
+   543→                              uint32_t guard_branch_offset,
+   544→                              uint8_t *code_start)
+   545→{
+   546→    if (!index) return -1;
+   547→
+   548→    vtx_guard_dep_entry_t *entry = find_guard_dep_entry(index, type_id);
+   549→    if (!entry) {
+   550→        entry = create_guard_dep_entry(index, type_id);
+   551→        if (!entry) return -1;
+   552→    }
+   553→
+   554→    /* Check for duplicate */
+   555→    for (uint32_t i = 0; i < entry->dep_count; i++) {
+   556→        if (entry->deps[i].guard_id == guard_id &&
+   557→            entry->deps[i].method_id == method_id) {
+   558→            return 0; /* already recorded */
+   559→        }
+   560→    }
+   561→
+   562→    /* Grow array if needed */
+   563→    if (entry->dep_count >= entry->dep_capacity) {
+   564→        uint32_t new_cap = entry->dep_capacity * 2;
+   565→        vtx_guard_dep_t *new_deps = (vtx_guard_dep_t *)realloc(
+   566→            entry->deps, new_cap * sizeof(vtx_guard_dep_t));
+   567→        if (!new_deps) return -1;
+   568→        entry->deps = new_deps;
+   569→        entry->dep_capacity = new_cap;
+   570→    }
+   571→
+   572→    /* Add the guard dependency */
+   573→    vtx_guard_dep_t *dep = &entry->deps[entry->dep_count++];
+   574→    dep->type_id = type_id;
+   575→    dep->guard_id = guard_id;
+   576→    dep->method_id = method_id;
+   577→    dep->guard_branch_offset = guard_branch_offset;
+   578→    dep->code_start = code_start;
+   579→
+   580→    return 0;
+   581→}
+   582→
+   583→const vtx_guard_dep_t *vtx_guard_dep_index_lookup(vtx_guard_dep_index_t *index,
+   584→                                                     uint32_t type_id,
+   585→                                                     uint32_t *out_count)
+   586→{
+   587→    if (!index || !out_count) {
+   588→        if (out_count) *out_count = 0;
+   589→        return NULL;
+   590→    }
+   591→
+   592→    vtx_guard_dep_entry_t *entry = find_guard_dep_entry(index, type_id);
+   593→    if (!entry) {
+   594→        *out_count = 0;
+   595→        return NULL;
+   596→    }
+   597→
+   598→    *out_count = entry->dep_count;
+   599→    return entry->deps;
+   600→}
+   601→
+   602→/* ========================================================================== */
+   603→/* Fine-grained invalidation (Proposal #4)                                       */
+   604→/* ========================================================================== */
+   605→
+   606→int vtx_invalidate_guard_fine_grained(uint32_t typeid_,
+   607→                                        vtx_guard_dep_index_t *index,
+   608→                                        vtx_code_cache_t *cache)
+   609→{
+   610→    if (!index || !cache) return -1;
+   611→
+   612→    uint32_t dep_count = 0;
+   613→    const vtx_guard_dep_t *deps = vtx_guard_dep_index_lookup(index, typeid_, &dep_count);
+   614→    if (!deps || dep_count == 0) return 0;
+   615→
+   616→    int patched = 0;
+   617→
+   618→    for (uint32_t i = 0; i < dep_count; i++) {
+   619→        const vtx_guard_dep_t *dep = &deps[i];
+   620→
+   621→        if (!dep->code_start || dep->guard_branch_offset == 0) continue;
+   622→
+   623→        /* Bug #7 fix: Actually patch the guard's JCC instruction in the
+   624→         * compiled code to unconditionally jump (deopt).
+   625→         *
+   626→         * On x86-64, a near JCC has format: 0F 8x [4-byte rel32] (6 bytes)
+   627→         * We patch it to: E9 [4-byte rel32] 90 (JMP + NOP, also 6 bytes)
+   628→         *
+   629→         * The JMP displacement needs +1 adjustment relative to the JCC
+   630→         * displacement because JMP is 5 bytes (displacement relative to
+   631→         * JMP end) while JCC is 6 bytes (displacement relative to JCC end).
+   632→         * So: new_rel32 = old_rel32 + 1
+   633→         *
+   634→         * This makes the guard always jump to the deopt path, effectively
+   635→         * invalidating it without requiring whole-method deoptimization. */
+   636→
+   637→        uint8_t *jcc_addr = dep->code_start + dep->guard_branch_offset;
+   638→
+   639→        /* Verify this looks like a near JCC (0F 8x) before patching */
+   640→        if (jcc_addr[0] != 0x0F || (jcc_addr[1] & 0xF0) != 0x80) {
+   641→            /* Not a near JCC — skip this guard to avoid corrupting code */
+   642→            continue;
+   643→        }
+   644→
+   645→        /* Read the existing 4-byte rel32 displacement (little-endian) */
+   646→        int32_t old_rel32;
+   647→        memcpy(&old_rel32, jcc_addr + 2, sizeof(int32_t));
+   648→
+   649→        /* Adjust displacement: JMP is 5 bytes, JCC is 6 bytes.
+   650→         * The displacement is relative to the end of the instruction,
+   651→         * so we add 1 to compensate for the shorter instruction. */
+   652→        int32_t new_rel32 = old_rel32 + 1;
+   653→
+   654→        /* COMPILE-005 fix: the code page is PROT_EXEC|PROT_READ after
+   655→         * install (vtx_code_cache_make_exec in vtx_install_method).
+   656→         * Writing to it without mprotect triggers SIGSEGV on x86-64.
+   657→         * Wrap the patch in make_writable / make_exec, and add a
+   658→         * release fence so concurrent threads on other cores see the
+   659→         * complete 6-byte patch atomically (not torn). */
+   660→        if (vtx_code_cache_make_writable(cache, jcc_addr, 6) != 0) {
+   661→            continue; /* mprotect failed — skip this guard */
+   662→        }
+   663→
+   664→        /* Write the patched instruction: E9 [rel32] 90 */
+   665→        jcc_addr[0] = 0xE9;  /* near JMP rel32 */
+   666→        memcpy(jcc_addr + 1, &new_rel32, sizeof(int32_t));
+   667→        jcc_addr[5] = 0x90;  /* NOP padding */
+   668→
+   669→        /* Memory fence: ensure the 6-byte patch is visible to all cores
+   670→         * before we flip the page back to exec-only. */
+   671→        __atomic_thread_fence(__ATOMIC_RELEASE);
+   672→
+   673→        /* Restore execute permission. */
+   674→        vtx_code_cache_make_exec(cache, jcc_addr, 6);
+   675→
+   676→        patched++;
+   677→    }
+   678→
+   679→    return patched;
+   680→}
+   681→

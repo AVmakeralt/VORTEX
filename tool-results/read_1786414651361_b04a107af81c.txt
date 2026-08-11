@@ -1,0 +1,712 @@
+     1→#include "interp/profiler.h"
+     2→
+     3→#include <stdlib.h>
+     4→#include <string.h>
+     5→
+     6→/* ========================================================================== */
+     7→/* Profiler init / destroy                                                     */
+     8→/* ========================================================================== */
+     9→
+    10→#define VTX_PROFILER_INITIAL_CAPACITY 64
+    11→
+    12→int vtx_profiler_init(vtx_profiler_t *profiler)
+    13→{
+    14→    VTX_ASSERT(profiler != NULL, "profiler must not be NULL");
+    15→
+    16→    profiler->capacity = VTX_PROFILER_INITIAL_CAPACITY;
+    17→    profiler->data = (vtx_profile_data_t *)calloc(
+    18→        profiler->capacity, sizeof(vtx_profile_data_t));
+    19→    if (profiler->data == NULL) {
+    20→        profiler->count = 0;
+    21→        return -1;
+    22→    }
+    23→    profiler->count = 0;
+    24→
+    25→    /* Initialize LRU cache to empty */
+    26→    memset(profiler->lru, 0, sizeof(profiler->lru));
+    27→
+    28→    /* OSR-18 fix: initialize the LRU/data-array mutex. The mutex is
+    29→     * recursive-safe via per-call lock/unlock (no nested locking). */
+    30→    if (pthread_mutex_init(&profiler->mutex, NULL) != 0) {
+    31→        free(profiler->data);
+    32→        profiler->data = NULL;
+    33→        profiler->capacity = 0;
+    34→        profiler->mutex_initialized = false;
+    35→        return -1;
+    36→    }
+    37→    profiler->mutex_initialized = true;
+    38→
+    39→    return 0;
+    40→}
+    41→
+    42→void vtx_profiler_destroy(vtx_profiler_t *profiler)
+    43→{
+    44→    VTX_ASSERT(profiler != NULL, "profiler must not be NULL");
+    45→
+    46→    for (uint32_t i = 0; i < profiler->count; i++) {
+    47→        vtx_profile_data_t *pd = &profiler->data[i];
+    48→        free(pd->call_site_types);
+    49→        pd->call_site_types = NULL;
+    50→        free(pd->branch_taken_counts);
+    51→        pd->branch_taken_counts = NULL;
+    52→        free(pd->branch_total_counts);
+    53→        pd->branch_total_counts = NULL;
+    54→        free(pd->field_shape_ids);
+    55→        pd->field_shape_ids = NULL;
+    56→    }
+    57→
+    58→    free(profiler->data);
+    59→    profiler->data = NULL;
+    60→    profiler->count = 0;
+    61→    profiler->capacity = 0;
+    62→
+    63→    if (profiler->mutex_initialized) {
+    64→        pthread_mutex_destroy(&profiler->mutex);
+    65→        profiler->mutex_initialized = false;
+    66→    }
+    67→}
+    68→
+    69→/* ========================================================================== */
+    70→/* Helper: grow the profiler array                                             */
+    71→/* ========================================================================== */
+    72→
+    73→static int profiler_ensure_capacity(vtx_profiler_t *profiler, uint32_t needed)
+    74→{
+    75→    if (needed <= profiler->capacity) {
+    76→        return 0;
+    77→    }
+    78→
+    79→    uint32_t new_capacity = profiler->capacity;
+    80→    while (new_capacity < needed) {
+    81→        new_capacity *= 2;
+    82→    }
+    83→
+    84→    vtx_profile_data_t *new_data = (vtx_profile_data_t *)realloc(
+    85→        profiler->data, new_capacity * sizeof(vtx_profile_data_t));
+    86→    if (new_data == NULL) {
+    87→        return -1;
+    88→    }
+    89→
+    90→    /* Zero-initialize new slots */
+    91→    memset(new_data + profiler->capacity, 0,
+    92→           (new_capacity - profiler->capacity) * sizeof(vtx_profile_data_t));
+    93→
+    94→    profiler->data = new_data;
+    95→    profiler->capacity = new_capacity;
+    96→
+    97→    /* Invalidate LRU cache — realloc may have moved the data array,
+    98→     * making cached pointers stale (use-after-free) */
+    99→    memset(profiler->lru, 0, sizeof(profiler->lru));
+   100→
+   101→    return 0;
+   102→}
+   103→
+   104→/* ========================================================================== */
+   105→/* Helper: ensure branch and field arrays are allocated for a method           */
+   106→/* ========================================================================== */
+   107→
+   108→static void ensure_profile_arrays(vtx_profile_data_t *pd)
+   109→{
+   110→    if (pd->method == NULL || pd->method->bytecode == NULL) {
+   111→        return;
+   112→    }
+   113→
+   114→    uint32_t code_length = (uint32_t)pd->method->bytecode->length;
+   115→
+   116→    /* Allocate branch frequency arrays if needed */
+   117→    if (pd->branch_taken_counts == NULL && code_length > 0) {
+   118→        pd->branch_taken_counts = (uint32_t *)calloc(code_length, sizeof(uint32_t));
+   119→        pd->branch_total_counts = (uint32_t *)calloc(code_length, sizeof(uint32_t));
+   120→        pd->branch_array_size = code_length;
+   121→    }
+   122→
+   123→    /* Allocate field shape array if needed */
+   124→    if (pd->field_shape_ids == NULL && code_length > 0) {
+   125→        pd->field_shape_ids = (uint32_t *)calloc(code_length, sizeof(uint32_t));
+   126→        pd->field_array_size = code_length;
+   127→    }
+   128→}
+   129→
+   130→/* ========================================================================== */
+   131→/* LRU cache helpers                                                           */
+   132→/* ========================================================================== */
+   133→
+   134→/**
+   135→ * Look up a method in the LRU cache. Returns the profile data pointer
+   136→ * if found, or NULL. On hit, moves the entry to MRU position (slot 0).
+   137→ */
+   138→static vtx_profile_data_t *lru_lookup(vtx_profiler_t *profiler,
+   139→                                       const vtx_method_desc_t *method)
+   140→{
+   141→    for (int i = 0; i < VTX_PROFILER_LRU_SIZE; i++) {
+   142→        if (profiler->lru[i].method == method && profiler->lru[i].pd != NULL) {
+   143→            /* Hit — move to MRU (slot 0) by shifting entries down */
+   144→            if (i > 0) {
+   145→                const vtx_method_desc_t *tmp_method = profiler->lru[i].method;
+   146→                vtx_profile_data_t      *tmp_pd     = profiler->lru[i].pd;
+   147→                memmove(&profiler->lru[1], &profiler->lru[0],
+   148→                        i * sizeof(profiler->lru[0]));
+   149→                profiler->lru[0].method = tmp_method;
+   150→                profiler->lru[0].pd     = tmp_pd;
+   151→            }
+   152→            return profiler->lru[0].pd;
+   153→        }
+   154→    }
+   155→    return NULL;
+   156→}
+   157→
+   158→/**
+   159→ * Insert a method→pd mapping into the LRU cache at MRU position.
+   160→ * Evicts the least recently used entry (last slot).
+   161→ */
+   162→static void lru_insert(vtx_profiler_t *profiler,
+   163→                        const vtx_method_desc_t *method,
+   164→                        vtx_profile_data_t *pd)
+   165→{
+   166→    /* Shift everything down by one, evicting the last entry */
+   167→    memmove(&profiler->lru[1], &profiler->lru[0],
+   168→            (VTX_PROFILER_LRU_SIZE - 1) * sizeof(profiler->lru[0]));
+   169→    profiler->lru[0].method = method;
+   170→    profiler->lru[0].pd = pd;
+   171→}
+   172→
+   173→/* ========================================================================== */
+   174→/* Get or create method profile data                                           */
+   175→/* ========================================================================== */
+   176→
+   177→vtx_profile_data_t *vtx_profiler_get_method_data(vtx_profiler_t *profiler,
+   178→                                                   const vtx_method_desc_t *method)
+   179→{
+   180→    VTX_ASSERT(profiler != NULL, "profiler must not be NULL");
+   181→    VTX_ASSERT(method != NULL, "method must not be NULL");
+   182→
+   183→    /* OSR-18 fix: serialize access to the data array + LRU cache.
+   184→     * The threadpool worker thread calls this concurrently with the
+   185→     * interpreter (during tier-up reset / set_compiled_tier). Without
+   186→     * this lock, the LRU lookup could read stale pointers from the
+   187→     * LRU cache after the data array was realloc'd by the interp. */
+   188→    if (profiler->mutex_initialized) {
+   189→        pthread_mutex_lock(&profiler->mutex);
+   190→    }
+   191→
+   192→    /* Fast path: check LRU cache first (O(1) for repeated calls) */
+   193→    vtx_profile_data_t *cached = lru_lookup(profiler, method);
+   194→    if (cached != NULL) {
+   195→        if (profiler->mutex_initialized) {
+   196→            pthread_mutex_unlock(&profiler->mutex);
+   197→        }
+   198→        return cached;
+   199→    }
+   200→
+   201→    /* Slow path: linear search for existing entry */
+   202→    for (uint32_t i = 0; i < profiler->count; i++) {
+   203→        if (profiler->data[i].method == method) {
+   204→            vtx_profile_data_t *pd = &profiler->data[i];
+   205→            lru_insert(profiler, method, pd);
+   206→            if (profiler->mutex_initialized) {
+   207→                pthread_mutex_unlock(&profiler->mutex);
+   208→            }
+   209→            return pd;
+   210→        }
+   211→    }
+   212→
+   213→    /* Not found — create a new entry */
+   214→    if (profiler_ensure_capacity(profiler, profiler->count + 1) != 0) {
+   215→        /* OOM: try to reuse the least-recently-used entry in the data array.
+   216→         * The LRU entry is the one with the lowest invocation_count (proxy
+   217→         * for coldness). This ensures profiling data is not silently dropped
+   218→         * under memory pressure. */
+   219→        uint32_t lru_idx = 0;
+   220→        uint64_t min_heat = UINT64_MAX;
+   221→        for (uint32_t i = 0; i < profiler->count; i++) {
+   222→            uint64_t heat = __atomic_load_n(&profiler->data[i].invocation_count,
+   223→                                              __ATOMIC_RELAXED)
+   224→                          + __atomic_load_n(&profiler->data[i].backward_branch_count,
+   225→                                              __ATOMIC_RELAXED) * 2;
+   226→            if (heat < min_heat) {
+   227→                min_heat = heat;
+   228→                lru_idx = i;
+   229→            }
+   230→        }
+   231→        if (profiler->count > 0) {
+   232→            /* Free the LRU entry's sub-allocations and reuse the slot */
+   233→            vtx_profile_data_t *pd = &profiler->data[lru_idx];
+   234→            free(pd->call_site_types);
+   235→            pd->call_site_types = NULL;
+   236→            free(pd->branch_taken_counts);
+   237→            pd->branch_taken_counts = NULL;
+   238→            free(pd->branch_total_counts);
+   239→            pd->branch_total_counts = NULL;
+   240→            free(pd->field_shape_ids);
+   241→            pd->field_shape_ids = NULL;
+   242→
+   243→            /* Reinitialize the slot for the new method */
+   244→            memset(pd, 0, sizeof(vtx_profile_data_t));
+   245→            pd->method = method;
+   246→            pd->compiled_tier = VT_TIER_T0;
+   247→            pd->deopt_count = 0;
+   248→            __atomic_store_n(&pd->invocation_count, 0, __ATOMIC_RELAXED);
+   249→            __atomic_store_n(&pd->backward_branch_count, 0, __ATOMIC_RELAXED);
+   250→            pd->call_site_types = NULL;
+   251→            pd->call_site_count = 0;
+   252→            __atomic_store_n(&pd->tier_up.tier_up_counter,
+   253→                              VTX_TIER_UP_INITIAL_COUNT, __ATOMIC_RELAXED);
+   254→            __atomic_store_n(&pd->tier_up.compilation_requested, false,
+   255→                              __ATOMIC_RELAXED);
+   256→            ensure_profile_arrays(pd);
+   257→
+   258→            /* Invalidate LRU cache — pointers may be stale */
+   259→            memset(profiler->lru, 0, sizeof(profiler->lru));
+   260→            lru_insert(profiler, method, pd);
+   261→            if (profiler->mutex_initialized) {
+   262→                pthread_mutex_unlock(&profiler->mutex);
+   263→            }
+   264→            return pd;
+   265→        }
+   266→        if (profiler->mutex_initialized) {
+   267→            pthread_mutex_unlock(&profiler->mutex);
+   268→        }
+   269→        return NULL;
+   270→    }
+   271→
+   272→    vtx_profile_data_t *pd = &profiler->data[profiler->count];
+   273→    memset(pd, 0, sizeof(vtx_profile_data_t));
+   274→    pd->method = method;
+   275→    pd->compiled_tier = VT_TIER_T0;
+   276→    pd->deopt_count = 0;
+   277→    __atomic_store_n(&pd->invocation_count, 0, __ATOMIC_RELAXED);
+   278→    __atomic_store_n(&pd->backward_branch_count, 0, __ATOMIC_RELAXED);
+   279→    pd->call_site_types = NULL;
+   280→    pd->call_site_count = 0;
+   281→
+   282→    /* D7: Initialize tier-up counter */
+   283→    __atomic_store_n(&pd->tier_up.tier_up_counter, VTX_TIER_UP_INITIAL_COUNT,
+   284→                      __ATOMIC_RELAXED);
+   285→    __atomic_store_n(&pd->tier_up.compilation_requested, false,
+   286→                      __ATOMIC_RELAXED);
+   287→
+   288→    /* Allocate per-PC arrays based on bytecode length */
+   289→    ensure_profile_arrays(pd);
+   290→
+   291→    profiler->count++;
+   292→
+   293→    /* Insert into LRU cache */
+   294→    lru_insert(profiler, method, pd);
+   295→
+   296→    if (profiler->mutex_initialized) {
+   297→        pthread_mutex_unlock(&profiler->mutex);
+   298→    }
+   299→    return pd;
+   300→}
+   301→
+   302→/* ========================================================================== */
+   303→/* Recording functions                                                         */
+   304→/* ========================================================================== */
+   305→
+   306→void vtx_profiler_record_invocation(vtx_profiler_t *profiler,
+   307→                                     const vtx_method_desc_t *method)
+   308→{
+   309→    VTX_ASSERT(profiler != NULL, "profiler must not be NULL");
+   310→    VTX_ASSERT(method != NULL, "method must not be NULL");
+   311→
+   312→    vtx_profile_data_t *pd = vtx_profiler_get_method_data(profiler, method);
+   313→    if (pd == NULL) {
+   314→        return;
+   315→    }
+   316→
+   317→    /* OSR-18 fix: atomic saturating increment. The interp thread is the
+   318→     * only writer, but the threadpool worker may read this field via
+   319→     * vtx_profiler_method_heat — RELAXED is sufficient since the value
+   320→     * is a best-effort heat estimate, not a synchronization primitive. */
+   321→    uint64_t cur = __atomic_load_n(&pd->invocation_count, __ATOMIC_RELAXED);
+   322→    while (cur < UINT64_MAX) {
+   323→        if (__atomic_compare_exchange_n(&pd->invocation_count, &cur, cur + 1,
+   324→                                          false, __ATOMIC_RELAXED,
+   325→                                          __ATOMIC_RELAXED)) {
+   326→            break;
+   327→        }
+   328→    }
+   329→}
+   330→
+   331→void vtx_profiler_record_backward_branch(vtx_profiler_t *profiler,
+   332→                                          const vtx_method_desc_t *method)
+   333→{
+   334→    VTX_ASSERT(profiler != NULL, "profiler must not be NULL");
+   335→    VTX_ASSERT(method != NULL, "method must not be NULL");
+   336→
+   337→    vtx_profile_data_t *pd = vtx_profiler_get_method_data(profiler, method);
+   338→    if (pd == NULL) {
+   339→        return;
+   340→    }
+   341→
+   342→    /* OSR-18 fix: atomic saturating increment (see record_invocation). */
+   343→    uint64_t cur = __atomic_load_n(&pd->backward_branch_count, __ATOMIC_RELAXED);
+   344→    while (cur < UINT64_MAX) {
+   345→        if (__atomic_compare_exchange_n(&pd->backward_branch_count, &cur, cur + 1,
+   346→                                          false, __ATOMIC_RELAXED,
+   347→                                          __ATOMIC_RELAXED)) {
+   348→            break;
+   349→        }
+   350→    }
+   351→}
+   352→
+   353→void vtx_profiler_record_branch(vtx_profiler_t *profiler,
+   354→                                 const vtx_method_desc_t *method,
+   355→                                 uint32_t pc,
+   356→                                 bool taken)
+   357→{
+   358→    VTX_ASSERT(profiler != NULL, "profiler must not be NULL");
+   359→    VTX_ASSERT(method != NULL, "method must not be NULL");
+   360→
+   361→    vtx_profile_data_t *pd = vtx_profiler_get_method_data(profiler, method);
+   362→    if (pd == NULL) {
+   363→        return;
+   364→    }
+   365→
+   366→    /* Ensure arrays are allocated */
+   367→    ensure_profile_arrays(pd);
+   368→
+   369→    /* Bounds check on PC */
+   370→    if (pd->branch_total_counts == NULL || pc >= pd->branch_array_size) {
+   371→        return;
+   372→    }
+   373→
+   374→    /* Saturating increments */
+   375→    if (pd->branch_total_counts[pc] < UINT32_MAX) {
+   376→        pd->branch_total_counts[pc]++;
+   377→    }
+   378→    if (taken && pd->branch_taken_counts[pc] < UINT32_MAX) {
+   379→        pd->branch_taken_counts[pc]++;
+   380→    }
+   381→}
+   382→
+   383→void vtx_profiler_record_call_type(vtx_profiler_t *profiler,
+   384→                                    const vtx_method_desc_t *method,
+   385→                                    uint32_t call_pc,
+   386→                                    vtx_typeid_t typeid_)
+   387→{
+   388→    VTX_ASSERT(profiler != NULL, "profiler must not be NULL");
+   389→    VTX_ASSERT(method != NULL, "method must not be NULL");
+   390→
+   391→    vtx_profile_data_t *pd = vtx_profiler_get_method_data(profiler, method);
+   392→    if (pd == NULL) {
+   393→        return;
+   394→    }
+   395→
+   396→    /* Ensure call_site_types array is large enough.
+   397→     * We use the call_pc as an index. If the array is too small,
+   398→     * grow it. */
+   399→    uint32_t needed_count = call_pc + 1;
+   400→    if (pd->call_site_types == NULL || needed_count > pd->call_site_count) {
+   401→        uint32_t new_count = pd->call_site_count > 0 ? pd->call_site_count : 16;
+   402→        while (new_count < needed_count) {
+   403→            new_count *= 2;
+   404→        }
+   405→
+   406→        vtx_call_site_profile_t *new_arr = (vtx_call_site_profile_t *)realloc(
+   407→            pd->call_site_types, new_count * sizeof(vtx_call_site_profile_t));
+   408→        if (new_arr == NULL) {
+   409→            return;
+   410→        }
+   411→
+   412→        /* Zero-initialize new slots */
+   413→        memset(new_arr + pd->call_site_count, 0,
+   414→               (new_count - pd->call_site_count) * sizeof(vtx_call_site_profile_t));
+   415→
+   416→        pd->call_site_types = new_arr;
+   417→        pd->call_site_count = new_count;
+   418→    }
+   419→
+   420→    /* Record the type at this call site */
+   421→    vtx_call_site_profile_t *site = &pd->call_site_types[call_pc];
+   422→
+   423→    /* Check if this typeid is already recorded */
+   424→    for (uint32_t i = 0; i < site->count; i++) {
+   425→        if (site->entries[i].typeid_ == typeid_) {
+   426→            return; /* already recorded */
+   427→        }
+   428→    }
+   429→
+   430→    /* Add the new type if there's room */
+   431→    if (site->count < VTX_POLY_LIMIT) {
+   432→        site->entries[site->count].typeid_ = typeid_;
+   433→        site->entries[site->count].method = NULL; /* filled in by lookup */
+   434→        site->count++;
+   435→    }
+   436→    /* If VTX_POLY_LIMIT reached, we stop recording (megamorphic,
+   437→     * the optimizer will fall back to vtable) */
+   438→}
+   439→
+   440→void vtx_profiler_record_field_shape(vtx_profiler_t *profiler,
+   441→                                      const vtx_method_desc_t *method,
+   442→                                      uint32_t field_pc,
+   443→                                      vtx_shapeid_t shapeid)
+   444→{
+   445→    VTX_ASSERT(profiler != NULL, "profiler must not be NULL");
+   446→    VTX_ASSERT(method != NULL, "method must not be NULL");
+   447→
+   448→    vtx_profile_data_t *pd = vtx_profiler_get_method_data(profiler, method);
+   449→    if (pd == NULL) {
+   450→        return;
+   451→    }
+   452→
+   453→    /* Ensure arrays are allocated */
+   454→    ensure_profile_arrays(pd);
+   455→
+   456→    /* Record the shape at this PC */
+   457→    if (pd->field_shape_ids != NULL && field_pc < pd->field_array_size) {
+   458→        pd->field_shape_ids[field_pc] = shapeid;
+   459→    }
+   460→}
+   461→
+   462→/* ========================================================================== */
+   463→/* Heat calculation and tier decisions                                         */
+   464→/* ========================================================================== */
+   465→
+   466→uint64_t vtx_profiler_method_heat(vtx_profiler_t *profiler,
+   467→                                   const vtx_method_desc_t *method)
+   468→{
+   469→    VTX_ASSERT(profiler != NULL, "profiler must not be NULL");
+   470→    VTX_ASSERT(method != NULL, "method must not be NULL");
+   471→
+   472→    vtx_profile_data_t *pd = vtx_profiler_get_method_data(profiler, method);
+   473→    if (pd == NULL) {
+   474→        return 0;
+   475→    }
+   476→
+   477→    /* OSR-18 fix: atomic loads (the worker thread may read this while
+   478→     * the interp thread is incrementing). */
+   479→    uint64_t invocations = __atomic_load_n(&pd->invocation_count,
+   480→                                             __ATOMIC_RELAXED);
+   481→    uint64_t backward_branches = __atomic_load_n(&pd->backward_branch_count,
+   482→                                                    __ATOMIC_RELAXED);
+   483→
+   484→    /* heat = invocations + backward_branches * 2
+   485→     * This doubles the weight of backward branches, penalizing hot loops.
+   486→     * A method with many loop iterations is hotter than one that's called
+   487→     * often but does little work per call. */
+   488→    uint64_t heat = invocations + backward_branches * 2;
+   489→
+   490→    /* Saturating: check for overflow */
+   491→    if (heat < invocations) {
+   492→        heat = UINT64_MAX;
+   493→    }
+   494→
+   495→    return heat;
+   496→}
+   497→
+   498→bool vtx_profiler_should_compile_t1(vtx_profiler_t *profiler,
+   499→                                     const vtx_method_desc_t *method)
+   500→{
+   501→    VTX_ASSERT(profiler != NULL, "profiler must not be NULL");
+   502→    VTX_ASSERT(method != NULL, "method must not be NULL");
+   503→
+   504→    uint64_t heat = vtx_profiler_method_heat(profiler, method);
+   505→    return heat > (uint64_t)VORTEX_T1_THRESHOLD;
+   506→}
+   507→
+   508→bool vtx_profiler_should_compile_t2(vtx_profiler_t *profiler,
+   509→                                     const vtx_method_desc_t *method)
+   510→{
+   511→    VTX_ASSERT(profiler != NULL, "profiler must not be NULL");
+   512→    VTX_ASSERT(method != NULL, "method must not be NULL");
+   513→
+   514→    uint64_t heat = vtx_profiler_method_heat(profiler, method);
+   515→    return heat > (uint64_t)VORTEX_T2_THRESHOLD;
+   516→}
+   517→
+   518→/* ========================================================================== */
+   519→/* Query functions                                                             */
+   520→/* ========================================================================== */
+   521→
+   522→const vtx_call_site_profile_t *vtx_profiler_get_call_site_profile(
+   523→    const vtx_profiler_t *profiler,
+   524→    const vtx_method_desc_t *method,
+   525→    uint32_t call_pc)
+   526→{
+   527→    VTX_ASSERT(profiler != NULL, "profiler must not be NULL");
+   528→    VTX_ASSERT(method != NULL, "method must not be NULL");
+   529→
+   530→    /* Find the method's profile data — check LRU cache first */
+   531→    const vtx_profile_data_t *pd = lru_lookup((vtx_profiler_t *)profiler, method);
+   532→    if (pd == NULL) {
+   533→        /* Slow path: linear search */
+   534→        for (uint32_t i = 0; i < profiler->count; i++) {
+   535→            if (profiler->data[i].method == method) {
+   536→                pd = &profiler->data[i];
+   537→                break;
+   538→            }
+   539→        }
+   540→    }
+   541→    if (pd == NULL) return NULL;
+   542→
+   543→    if (pd->call_site_types != NULL && call_pc < pd->call_site_count) {
+   544→        return &pd->call_site_types[call_pc];
+   545→    }
+   546→    return NULL;
+   547→}
+   548→
+   549→double vtx_profiler_get_branch_probability(const vtx_profiler_t *profiler,
+   550→                                            const vtx_method_desc_t *method,
+   551→                                            uint32_t pc)
+   552→{
+   553→    VTX_ASSERT(profiler != NULL, "profiler must not be NULL");
+   554→    VTX_ASSERT(method != NULL, "method must not be NULL");
+   555→
+   556→    /* Find the method's profile data — check LRU cache first */
+   557→    const vtx_profile_data_t *pd = lru_lookup((vtx_profiler_t *)profiler, method);
+   558→    if (pd == NULL) {
+   559→        for (uint32_t i = 0; i < profiler->count; i++) {
+   560→            if (profiler->data[i].method == method) {
+   561→                pd = &profiler->data[i];
+   562→                break;
+   563→            }
+   564→        }
+   565→    }
+   566→    if (pd == NULL) return 0.5;
+   567→
+   568→    if (pd->branch_total_counts != NULL && pc < pd->branch_array_size) {
+   569→        uint32_t total = pd->branch_total_counts[pc];
+   570→        uint32_t taken = pd->branch_taken_counts[pc];
+   571→        if (total == 0) {
+   572→            return 0.5; /* unknown */
+   573→        }
+   574→        return (double)taken / (double)total;
+   575→    }
+   576→    return 0.5;
+   577→}
+   578→
+   579→vtx_shapeid_t vtx_profiler_get_field_shape(const vtx_profiler_t *profiler,
+   580→                                             const vtx_method_desc_t *method,
+   581→                                             uint32_t field_pc)
+   582→{
+   583→    VTX_ASSERT(profiler != NULL, "profiler must not be NULL");
+   584→    VTX_ASSERT(method != NULL, "method must not be NULL");
+   585→
+   586→    /* Find the method's profile data — check LRU cache first */
+   587→    const vtx_profile_data_t *pd = lru_lookup((vtx_profiler_t *)profiler, method);
+   588→    if (pd == NULL) {
+   589→        for (uint32_t i = 0; i < profiler->count; i++) {
+   590→            if (profiler->data[i].method == method) {
+   591→                pd = &profiler->data[i];
+   592→                break;
+   593→            }
+   594→        }
+   595→    }
+   596→    if (pd == NULL) return VTX_SHAPE_INVALID;
+   597→
+   598→    if (pd->field_shape_ids != NULL && field_pc < pd->field_array_size) {
+   599→        return (vtx_shapeid_t)pd->field_shape_ids[field_pc];
+   600→    }
+   601→    return VTX_SHAPE_INVALID;
+   602→}
+   603→
+   604→void vtx_profiler_record_deopt(vtx_profiler_t *profiler,
+   605→                                const vtx_method_desc_t *method)
+   606→{
+   607→    VTX_ASSERT(profiler != NULL, "profiler must not be NULL");
+   608→    VTX_ASSERT(method != NULL, "method must not be NULL");
+   609→
+   610→    vtx_profile_data_t *pd = vtx_profiler_get_method_data(profiler, method);
+   611→    if (pd == NULL) {
+   612→        return;
+   613→    }
+   614→
+   615→    if (pd->deopt_count < UINT32_MAX) {
+   616→        pd->deopt_count++;
+   617→    }
+   618→}
+   619→
+   620→void vtx_profiler_set_compiled_tier(vtx_profiler_t *profiler,
+   621→                                     const vtx_method_desc_t *method,
+   622→                                     vtx_compile_tier_t tier)
+   623→{
+   624→    VTX_ASSERT(profiler != NULL, "profiler must not be NULL");
+   625→    VTX_ASSERT(method != NULL, "method must not be NULL");
+   626→
+   627→    vtx_profile_data_t *pd = vtx_profiler_get_method_data(profiler, method);
+   628→    if (pd == NULL) {
+   629→        return;
+   630→    }
+   631→
+   632→    pd->compiled_tier = tier;
+   633→}
+   634→
+   635→/* ========================================================================== */
+   636→/* D7: Tier-up counter                                                         */
+   637→/* ========================================================================== */
+   638→
+   639→bool vtx_profiler_tier_up_check(vtx_profiler_t *profiler,
+   640→                                  const vtx_method_desc_t *method)
+   641→{
+   642→    VTX_ASSERT(profiler != NULL, "profiler must not be NULL");
+   643→    VTX_ASSERT(method != NULL, "method must not be NULL");
+   644→
+   645→    vtx_profile_data_t *pd = vtx_profiler_get_method_data(profiler, method);
+   646→    if (pd == NULL) {
+   647→        return false;
+   648→    }
+   649→
+   650→    /* If compilation was already requested, this is a no-op.
+   651→     * This prevents re-queueing a method that's already waiting
+   652→     * to be compiled. */
+   653→    if (__atomic_load_n(&pd->tier_up.compilation_requested,
+   654→                          __ATOMIC_RELAXED)) {
+   655→        return false;
+   656→    }
+   657→
+   658→    /* Decrement the counter.
+   659→     * This is the key insight: on x86-64, this compiles to a single
+   660→     * `dec [mem]` instruction (2-3 bytes). The subsequent check is
+   661→     * a `jle` (2 bytes). Total: 4-5 bytes of overhead per backward
+   662→     * branch, which is essentially zero compared to the cost of the
+   663→     * branch itself and the safepoint check.
+   664→     *
+   665→     * OSR-18 fix: use atomic fetch_sub so the decrement is visible to
+   666→     * the threadpool worker's tier_up_reset. The CAS on the dedup flag
+   667→     * in vtx_request_compilation handles the multi-threaded race — but
+   668→     * the decrement itself still needs to be atomic to avoid lost
+   669→     * updates if the worker reads the counter concurrently. */
+   670→    int32_t prev = __atomic_fetch_sub(&pd->tier_up.tier_up_counter, 1,
+   671→                                        __ATOMIC_RELAXED);
+   672→
+   673→    if (prev <= 1) {
+   674→        /* Threshold reached (counter was <= 1 before the decrement,
+   675→         * i.e. now <= 0). Use an atomic CAS to claim the compilation
+   676→         * request — if another thread beat us to it, no-op. */
+   677→        bool expected = false;
+   678→        if (__atomic_compare_exchange_n(&pd->tier_up.compilation_requested,
+   679→                                          &expected, true,
+   680→                                          false, __ATOMIC_RELAXED,
+   681→                                          __ATOMIC_RELAXED)) {
+   682→            return true;
+   683→        }
+   684→    }
+   685→
+   686→    return false;
+   687→}
+   688→
+   689→void vtx_profiler_tier_up_reset(vtx_profiler_t *profiler,
+   690→                                  const vtx_method_desc_t *method,
+   691→                                  int32_t new_initial_count)
+   692→{
+   693→    VTX_ASSERT(profiler != NULL, "profiler must not be NULL");
+   694→    VTX_ASSERT(method != NULL, "method must not be NULL");
+   695→
+   696→    vtx_profile_data_t *pd = vtx_profiler_get_method_data(profiler, method);
+   697→    if (pd == NULL) {
+   698→        return;
+   699→    }
+   700→
+   701→    if (new_initial_count <= 0) {
+   702→        new_initial_count = VTX_TIER_UP_INITIAL_COUNT;
+   703→    }
+   704→
+   705→    /* OSR-18 fix: atomic stores so the interp thread sees the reset
+   706→     * immediately (the interp may be decrementing concurrently). */
+   707→    __atomic_store_n(&pd->tier_up.tier_up_counter, new_initial_count,
+   708→                      __ATOMIC_RELAXED);
+   709→    __atomic_store_n(&pd->tier_up.compilation_requested, false,
+   710→                      __ATOMIC_RELAXED);
+   711→}
+   712→
