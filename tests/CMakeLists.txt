@@ -1205,3 +1205,16 @@ target_link_libraries(test_pea3_4 PRIVATE
 )
 add_test(NAME pea3_4_multiple_stores_disabled
     COMMAND test_pea3_4)
+
+# PEA-1-3: build_block_node_lists consumes vtx_schedule_t (replaces
+# buggy region/control/memory + bytecode_pc heuristic).
+add_executable(test_pea1_3_block_node_assignment
+    regression/pea/test_pea1_3_block_node_assignment.c
+)
+target_link_libraries(test_pea1_3_block_node_assignment PRIVATE
+    -Wl,--start-group
+    ${VORTEX_OSR_TEST_LIBS}
+    -Wl,--end-group
+)
+add_test(NAME pea1_3_block_node_assignment
+    COMMAND test_pea1_3_block_node_assignment)

@@ -20,6 +20,7 @@
  */
 
 #include "pea/analysis.h"
+#include "ir/schedule.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -173,38 +174,6 @@ static int build_block_states(vtx_graph_t *graph, vtx_pea_analysis_t *result,
     }
 
     return 0;
-}
-
-/* ========================================================================== */
-/* Internal: find block index for a region node                                */
-/* ========================================================================== */
-
-static inline int32_t find_block_for_region(vtx_graph_t *graph, vtx_nodeid_t region_id)
-    __attribute__((unused));
-static inline int32_t find_block_for_region(vtx_graph_t *graph, vtx_nodeid_t region_id)
-{
-    for (uint32_t i = 0; i < graph->block_count; i++) {
-        if (graph->blocks[i].region_node == region_id) {
-            return (int32_t)i;
-        }
-    }
-    return -1;
-}
-
-/* ========================================================================== */
-/* Internal: compute block successors                                          */
-/* ========================================================================== */
-
-static inline void get_block_successors(vtx_graph_t *graph, uint32_t block_idx,
-                                  uint32_t *succs, uint32_t *succ_count)
-    __attribute__((unused));
-static inline void get_block_successors(vtx_graph_t *graph, uint32_t block_idx,
-                                  uint32_t *succs, uint32_t *succ_count)
-{
-    *succ_count = graph->blocks[block_idx].succ_count;
-    for (uint32_t i = 0; i < *succ_count && i < graph->blocks[block_idx].succ_capacity; i++) {
-        succs[i] = graph->blocks[block_idx].succ_indices[i];
-    }
 }
 
 /* ========================================================================== */
@@ -452,25 +421,36 @@ static void transfer_node(vtx_node_t *node, vtx_node_table_t *table,
 /* Internal: pre-compute block-to-node mapping (§2.1 — fix O(N×B) scan)      */
 /* ========================================================================== */
 /*
- * PEA audit: transfer_block re-scans ALL N nodes for EVERY block to find
- * which nodes belong to that block. For a graph with B blocks and N nodes,
- * this is O(N×B) per dataflow iteration — for T2 graphs with 5000 nodes
- * and 50 blocks, that's 250K comparisons per iteration × ~10 iterations
- * = 2.5M comparisons.
+ * PEA-1-3: This routine used to use a buggy heuristic to map nodes to
+ * PEA blocks: a node "belonged" to block B if (a) its id matched B's
+ * region/control/memory node, OR (b) one of its inputs matched one of
+ * those three, OR (c) its bytecode_pc equaled the region's bytecode_pc.
  *
- * GraalVM's PEA uses a pre-computed BlockMap (BlockBag in
- * EscapeAnalysisPhase). V8's escape analysis uses a schedule
- * (Schedule::rpo_order) to iterate nodes per-block.
+ * Many real nodes failed all three checks — Phi nodes at block heads
+ * (their inputs are data, not control), Return/Proj/Goto terminators
+ * (their control input was updated), and pure data nodes whose control
+ * dependency had been rewritten. The bytecode_pc fallback could match
+ * multiple blocks; first-match `break` arbitrarily assigned them.
+ * Unassigned nodes were silently skipped by transfer_block_fast →
+ * escape propagation never ran for them.
  *
- * Fix: pre-compute a block→node-list mapping once before the worklist,
- * then iterate only the relevant nodes in transfer_block. */
+ * Fix: consume the existing vtx_schedule_t infrastructure, which uses
+ * dominator-based placement (Phase 5 of vtx_schedule_run) to assign
+ * every node to its correct block — equivalent to V8's
+ * Schedule::rpo_order and GraalVM's BlockBag. The schedule is built
+ * locally in vtx_pea_run (the pipeline runs PEA before its own
+ * scheduling pass). We map each schedule block back to a PEA block
+ * via the shared region_node field, then bucket all nodes by their
+ * schedule-assigned block.
+ */
 typedef struct {
     vtx_nodeid_t *nodes;    /* node IDs belonging to this block */
     uint32_t      count;    /* number of nodes in this block */
 } vtx_block_node_list_t;
 
 static vtx_block_node_list_t *build_block_node_lists(vtx_graph_t *graph,
-                                                       vtx_arena_t *arena)
+                                                       vtx_arena_t *arena,
+                                                       const vtx_schedule_t *schedule)
 {
     uint32_t block_count = graph->block_count;
     uint32_t node_count = graph->node_table.count;
@@ -481,42 +461,42 @@ static vtx_block_node_list_t *build_block_node_lists(vtx_graph_t *graph,
     if (!lists) return NULL;
     memset(lists, 0, block_count * sizeof(vtx_block_node_list_t));
 
-    /* First pass: count nodes per block */
-    for (uint32_t i = 0; i < node_count; i++) {
-        vtx_node_t *node = &graph->node_table.nodes[i];
-        if (node->dead) continue;
-
-        /* Determine which block this node belongs to */
-        for (uint32_t b = 0; b < block_count; b++) {
-            vtx_block_info_t *block = &graph->blocks[b];
-            bool belongs = false;
-
-            if (node->id == block->region_node ||
-                node->id == block->control_node ||
-                node->id == block->memory_node) {
-                belongs = true;
-            } else {
-                for (uint32_t j = 0; j < node->input_count; j++) {
-                    if (node->inputs[j] == block->region_node ||
-                        node->inputs[j] == block->control_node ||
-                        node->inputs[j] == block->memory_node) {
-                        belongs = true;
-                        break;
-                    }
-                }
-                if (!belongs && block->region_node < node_count) {
-                    vtx_node_t *region = &graph->node_table.nodes[block->region_node];
-                    if (node->bytecode_pc == region->bytecode_pc) {
-                        belongs = true;
-                    }
-                }
-            }
-
-            if (belongs) {
-                lists[b].count++;
-                break;  /* each node belongs to at most one block */
+    /* PEA-1-3: Map each schedule block index back to a PEA block index
+     * via the shared region_node. The schedule creates one block per
+     * Region/LoopBegin/Start/Catch node; PEA's graph->blocks[] is also
+     * keyed by region_node, so the mapping is 1:1 (or 1:0 for schedule
+     * blocks whose region_node isn't in PEA's block table — these get
+     * skipped, which is the safe behavior). */
+    int32_t *pe_for_sched = vtx_arena_alloc(arena,
+        schedule->count * sizeof(int32_t));
+    if (!pe_for_sched) return NULL;
+    for (uint32_t sb = 0; sb < schedule->count; sb++) {
+        pe_for_sched[sb] = -1;
+    }
+    for (uint32_t b = 0; b < block_count; b++) {
+        vtx_nodeid_t r = graph->blocks[b].region_node;
+        for (uint32_t sb = 0; sb < schedule->count; sb++) {
+            if (schedule->blocks[sb].region_node == r) {
+                pe_for_sched[sb] = (int32_t)b;
+                break;
             }
         }
+    }
+
+    /* First pass: count nodes per PEA block, using the schedule's
+     * node_block[] assignment (computed via dominator-based placement
+     * in vtx_schedule_run). This replaces the buggy region/control/
+     * memory_node + bytecode_pc heuristic. */
+    uint32_t nb_count = schedule->node_block_count;
+    uint32_t scan_count = (node_count < nb_count) ? node_count : nb_count;
+    for (uint32_t i = 0; i < scan_count; i++) {
+        vtx_node_t *node = &graph->node_table.nodes[i];
+        if (node->dead) continue;
+        uint32_t sb = schedule->node_block[i];
+        if (sb == (uint32_t)-1 || sb >= schedule->count) continue;
+        int32_t pb = pe_for_sched[sb];
+        if (pb < 0) continue;
+        lists[pb].count++;
     }
 
     /* Allocate arrays */
@@ -530,40 +510,14 @@ static vtx_block_node_list_t *build_block_node_lists(vtx_graph_t *graph,
     }
 
     /* Second pass: fill arrays */
-    for (uint32_t i = 0; i < node_count; i++) {
+    for (uint32_t i = 0; i < scan_count; i++) {
         vtx_node_t *node = &graph->node_table.nodes[i];
         if (node->dead) continue;
-
-        for (uint32_t b = 0; b < block_count; b++) {
-            vtx_block_info_t *block = &graph->blocks[b];
-            bool belongs = false;
-
-            if (node->id == block->region_node ||
-                node->id == block->control_node ||
-                node->id == block->memory_node) {
-                belongs = true;
-            } else {
-                for (uint32_t j = 0; j < node->input_count; j++) {
-                    if (node->inputs[j] == block->region_node ||
-                        node->inputs[j] == block->control_node ||
-                        node->inputs[j] == block->memory_node) {
-                        belongs = true;
-                        break;
-                    }
-                }
-                if (!belongs && block->region_node < node_count) {
-                    vtx_node_t *region = &graph->node_table.nodes[block->region_node];
-                    if (node->bytecode_pc == region->bytecode_pc) {
-                        belongs = true;
-                    }
-                }
-            }
-
-            if (belongs) {
-                lists[b].nodes[lists[b].count++] = node->id;
-                break;
-            }
-        }
+        uint32_t sb = schedule->node_block[i];
+        if (sb == (uint32_t)-1 || sb >= schedule->count) continue;
+        int32_t pb = pe_for_sched[sb];
+        if (pb < 0) continue;
+        lists[pb].nodes[lists[pb].count++] = node->id;
     }
 
     return lists;
@@ -695,8 +649,24 @@ vtx_pea_analysis_t *vtx_pea_run(vtx_graph_t *graph, vtx_arena_t *arena)
     /* §2.1: Pre-compute block-to-node lists to avoid O(N×B) scan
      * in transfer_block. This is built once before the worklist loop.
      * GraalVM: BlockBag in EscapeAnalysisPhase.
-     * V8: Schedule::rpo_order in EscapeAnalysis. */
-    vtx_block_node_list_t *block_lists = build_block_node_lists(graph, arena);
+     * V8: Schedule::rpo_order in EscapeAnalysis.
+     *
+     * PEA-1-3: Build a vtx_schedule_t locally and consume its
+     * dominator-based node→block assignment. The pipeline runs PEA
+     * (Phase 6) before its own scheduling pass (Phase 7), so we can't
+     * reuse a pipeline-built schedule. The schedule is malloc'd
+     * internally (vtx_schedule_run) and destroyed here once the
+     * per-block node lists have been materialized into the arena. */
+    vtx_schedule_t schedule;
+    memset(&schedule, 0, sizeof(schedule));
+    if (vtx_schedule_run(graph, arena, &schedule) != 0) {
+        return NULL;
+    }
+
+    vtx_block_node_list_t *block_lists = build_block_node_lists(graph, arena, &schedule);
+    /* The block_lists contain copies of node IDs in arena memory, so the
+     * schedule (malloc'd by vtx_schedule_run) is no longer needed. */
+    vtx_schedule_destroy(&schedule);
     if (!block_lists) return NULL;
 
     /* Step 4: Initialize worklist with all blocks in RPO */
