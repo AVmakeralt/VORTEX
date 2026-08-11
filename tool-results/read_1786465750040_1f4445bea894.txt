@@ -1,0 +1,715 @@
+     1→     1→/* ============================================================================ *
+     2→     2→ * AI-MODIFIED CODE
+     3→     3→ *
+     4→     4→ * This file was originally written by a human developer. It has been
+     5→     5→ * substantially modified by an AI assistant (GLM/Z.ai) for bug fixes,
+     6→     6→ * performance improvements, and feature additions.
+     7→     7→ *
+     8→     8→ * Original human-written structure is preserved; AI changes are marked
+     9→     9→ * with bug fix IDs (B1-B28) or perf notes (Perf 1-10) in comments.
+    10→    10→ *
+    11→    11→ * If reviewing, please verify AI changes against the original logic.
+    12→    12→ * ============================================================================ */
+    13→    13→
+    14→    14→/**
+    15→    15→ * VORTEX Cross-Object Scalar Replacement
+    16→    16→ *
+    17→    17→ * Builds an allocation graph, computes effective escape states, and
+    18→    18→ * rewrites field accesses to scalar locals for non-escaping inner objects.
+    19→    19→ */
+    20→    20→
+    21→    21→#include "pea/cross_object_sr.h"
+    22→    22→#include <stdlib.h>
+    23→    23→#include <string.h>
+    24→    24→
+    25→    25→/* ========================================================================== */
+    26→    26→/* Internal: check if opcode is an allocation                                  */
+    27→    27→/* ========================================================================== */
+    28→    28→
+    29→    29→static inline bool is_allocation(vtx_node_opcode_t opcode)
+    30→    30→{
+    31→    31→    return opcode == VTX_OP_NewObject ||
+    32→    32→           opcode == VTX_OP_NewArray  ||
+    33→    33→           opcode == VTX_OP_Allocate;
+    34→    34→}
+    35→    35→
+    36→    36→/* ========================================================================== */
+    37→    37→/* Internal: allocation graph construction                                     */
+    38→    38→/* ========================================================================== */
+    39→    39→
+    40→    40→/**
+    41→    41→ * Add an edge to the allocation graph.
+    42→    42→ */
+    43→    43→static int alloc_graph_add_edge(vtx_alloc_graph_t *g, vtx_arena_t *arena,
+    44→    44→                                 vtx_nodeid_t container_id,
+    45→    45→                                 vtx_nodeid_t value_id,
+    46→    46→                                 uint32_t field_offset,
+    47→    47→                                 vtx_nodeid_t store_node_id)
+    48→    48→{
+    49→    49→    /* Grow the all_edges array if needed */
+    50→    50→    if (g->edge_count >= g->edge_capacity) {
+    51→    51→        uint32_t new_cap = g->edge_capacity == 0 ? 32 : g->edge_capacity * 2;
+    52→    52→        vtx_alloc_edge_t *new_edges = vtx_arena_alloc(arena,
+    53→    53→            new_cap * sizeof(vtx_alloc_edge_t));
+    54→    54→        if (!new_edges) return -1;
+    55→    55→        if (g->all_edges && g->edge_count > 0) {
+    56→    56→            memcpy(new_edges, g->all_edges,
+    57→    57→                   g->edge_count * sizeof(vtx_alloc_edge_t));
+    58→    58→        }
+    59→    59→        g->all_edges = new_edges;
+    60→    60→        g->edge_capacity = new_cap;
+    61→    61→    }
+    62→    62→
+    63→    63→    vtx_alloc_edge_t *edge = &g->all_edges[g->edge_count];
+    64→    64→    edge->container_id  = container_id;
+    65→    65→    edge->value_id      = value_id;
+    66→    66→    edge->field_offset  = field_offset;
+    67→    67→    edge->store_node_id = store_node_id;
+    68→    68→    edge->next          = NULL;
+    69→    69→    edge->rev_next      = NULL;
+    70→    70→
+    71→    71→    /* Add to forward adjacency list */
+    72→    72→    if (container_id < g->edge_array_size) {
+    73→    73→        edge->next = g->alloc_edges[container_id];
+    74→    74→        g->alloc_edges[container_id] = edge;
+    75→    75→    }
+    76→    76→
+    77→    77→    /* Add to reverse adjacency list */
+    78→    78→    if (value_id < g->reverse_array_size) {
+    79→    79→        edge->rev_next = g->reverse_edges[value_id];
+    80→    80→        g->reverse_edges[value_id] = edge;
+    81→    81→    }
+    82→    82→
+    83→    83→    g->edge_count++;
+    84→    84→    return 0;
+    85→    85→}
+    86→    86→
+    87→    87→/**
+    88→    88→ * Build the allocation graph from the SoN graph.
+    89→    89→ * Scans all StoreField nodes for edges between allocations.
+    90→    90→ */
+    91→    91→static int build_alloc_graph(vtx_graph_t *graph, vtx_alloc_graph_t *g,
+    92→    92→                              vtx_arena_t *arena)
+    93→    93→{
+    94→    94→    vtx_node_table_t *table = &graph->node_table;
+    95→    95→    uint32_t node_count = table->count;
+    96→    96→
+    97→    97→    memset(g, 0, sizeof(*g));
+    98→    98→
+    99→    99→    /* Allocate adjacency arrays */
+   100→   100→    g->edge_array_size = node_count;
+   101→   101→    g->alloc_edges = vtx_arena_alloc(arena,
+   102→   102→        node_count * sizeof(vtx_alloc_edge_t *));
+   103→   103→    if (!g->alloc_edges) return -1;
+   104→   104→    memset(g->alloc_edges, 0, node_count * sizeof(vtx_alloc_edge_t *));
+   105→   105→
+   106→   106→    g->reverse_array_size = node_count;
+   107→   107→    g->reverse_edges = vtx_arena_alloc(arena,
+   108→   108→        node_count * sizeof(vtx_alloc_edge_t *));
+   109→   109→    if (!g->reverse_edges) return -1;
+   110→   110→    memset(g->reverse_edges, 0, node_count * sizeof(vtx_alloc_edge_t *));
+   111→   111→
+   112→   112→    /* Scan for StoreField nodes that create edges between allocations */
+   113→   113→    for (uint32_t i = 0; i < node_count; i++) {
+   114→   114→        vtx_node_t *node = &table->nodes[i];
+   115→   115→        if (node->dead || node->opcode != VTX_OP_StoreField) continue;
+   116→   116→
+   117→   117→        /* StoreField inputs: [control?, memory?, receiver, value]
+   118→   118→         * We need at least 2 inputs for receiver and value */
+   119→   119→        if (node->input_count < 2) continue;
+   120→   120→
+   121→   121→        /* Find the receiver and value inputs.
+   122→   122→         * The last two inputs are typically the receiver and value. */
+   123→   123→        vtx_nodeid_t receiver_id = node->inputs[node->input_count - 2];
+   124→   124→        vtx_nodeid_t value_id    = node->inputs[node->input_count - 1];
+   125→   125→
+   126→   126→        /* Check if both receiver and value are allocations */
+   127→   127→        vtx_node_t *recv_node = vtx_node_get(table, receiver_id);
+   128→   128→        vtx_node_t *val_node  = vtx_node_get(table, value_id);
+   129→   129→
+   130→   130→        if (!recv_node || recv_node->dead || !is_allocation(recv_node->opcode))
+   131→   131→            continue;
+   132→   132→        if (!val_node || val_node->dead || !is_allocation(val_node->opcode))
+   133→   133→            continue;
+   134→   134→
+   135→   135→        /* Add edge: receiver → value via field_offset */
+   136→   136→        if (alloc_graph_add_edge(g, arena, receiver_id, value_id,
+   137→   137→                                  node->field_offset, node->id) != 0) {
+   138→   138→            return -1;
+   139→   139→        }
+   140→   140→    }
+   141→   141→
+   142→   142→    /* Reverse adjacency lists are now populated in alloc_graph_add_edge()
+   143→   143→     * as edges are added, so no separate build pass is needed. */
+   144→   144→
+   145→   145→    return 0;
+   146→   146→}
+   147→   147→
+   148→   148→/* ========================================================================== */
+   149→   149→/* Internal: check if a field is read at an escape point                       */
+   150→   150→/* ========================================================================== */
+   151→   151→
+   152→   152→/**
+   153→   153→ * Bug 9 fix: Check if the field storing B into A is ever read at an
+   154→   154→ * actual escape point. If not, B does not effectively escape through A.
+   155→   155→ *
+   156→   156→ * Previously, the code assumed that if A escapes and A.field is read
+   157→   157→ * anywhere, then B (stored in A.field) also escapes. This is over-
+   158→   158→ * conservative because the read of A.field might not be at the escape
+   159→   159→ * point — the read value might only be used locally.
+   160→   160→ *
+   161→   161→ * This function checks whether the LoadField result actually reaches
+   162→   162→ * an escape point (return, call argument, etc.). Only if the loaded
+   163→   163→ * value is consumed at an escape point does B effectively escape.
+   164→   164→ */
+   165→   165→static bool is_field_read_at_escape(vtx_graph_t *graph,
+   166→   166→                                      vtx_nodeid_t container_id,
+   167→   167→                                      uint32_t field_offset,
+   168→   168→                                      const vtx_pea_analysis_t *analysis)
+   169→   169→{
+   170→   170→    vtx_node_table_t *table = &graph->node_table;
+   171→   171→    (void)analysis; /* may be used for more precise checks in the future */
+   172→   172→
+   173→   173→    for (uint32_t i = 0; i < table->count; i++) {
+   174→   174→        vtx_node_t *node = &table->nodes[i];
+   175→   175→        if (node->dead) continue;
+   176→   176→        if (node->opcode != VTX_OP_LoadField) continue;
+   177→   177→        if (node->field_offset != field_offset) continue;
+   178→   178→        if (node->input_count < 1) continue;
+   179→   179→
+   180→   180→        /* Check if the receiver is the container */
+   181→   181→        vtx_nodeid_t receiver_id = node->inputs[node->input_count - 1];
+   182→   182→        if (receiver_id != container_id) continue;
+   183→   183→
+   184→   184→        /* Found a LoadField that reads this field from the container.
+   185→   185→         * Now check if the loaded value reaches an escape point.
+   186→   186→         * We do a simple reachability check: walk all users of this
+   187→   187→         * LoadField node and check if any of them are escape points. */
+   188→   188→        for (uint32_t u = 0; u < table->count; u++) {
+   189→   189→            vtx_node_t *user = &table->nodes[u];
+   190→   190→            if (user->dead) continue;
+   191→   191→
+   192→   192→            /* Check if this user takes the LoadField as input */
+   193→   193→            bool uses_load = false;
+   194→   194→            for (uint32_t inp = 0; inp < user->input_count; inp++) {
+   195→   195→                if (user->inputs[inp] == node->id) {
+   196→   196→                    uses_load = true;
+   197→   197→                    break;
+   198→   198→                }
+   199→   199→            }
+   200→   200→            if (!uses_load) continue;
+   201→   201→
+   202→   202→            /* Check if this user is an escape point */
+   203→   203→            switch (user->opcode) {
+   204→   204→            case VTX_OP_Return:
+   205→   205→            case VTX_OP_CallStatic:
+   206→   206→            case VTX_OP_CallVirtual:
+   207→   207→            case VTX_OP_CallInterface:
+   208→   208→            case VTX_OP_CallRuntime:
+   209→   209→                /* The loaded value is consumed at an escape point.
+   210→   210→                 * This means the field IS read at escape, and B
+   211→   211→                 * effectively escapes through A.field. */
+   212→   212→                return true;
+   213→   213→            default:
+   214→   214→                break;
+   215→   215→            }
+   216→   216→        }
+   217→   217→    }
+   218→   218→
+   219→   219→    return false;
+   220→   220→}
+   221→   221→
+   222→   222→/* ========================================================================== */
+   223→   223→/* Internal: compute effective escape states                                   */
+   224→   224→/* ========================================================================== */
+   225→   225→
+   226→   226→/**
+   227→   227→ * For each allocation, trace all paths in the allocation graph to
+   228→   228→ * escape points. An allocation's effective escape is NoEscape if:
+   229→   229→ *   - Its raw escape state is NoEscape, OR
+   230→   230→ *   - Its only escape paths go through field stores into containers
+   231→   231→ *     that DO escape, but the specific field that holds this allocation
+   232→   232→ *     is never read at the actual escape point.
+   233→   233→ *
+   234→   234→ * D3 enhancement: The analysis is now TRANSITIVE. If A→B→C in the
+   235→   235→ * allocation graph (A.f=B, B.g=C), and A escapes but the field f
+   236→   236→ * is never read at escape, then B effectively does NOT escape, and
+   237→   237→ * transitively C does NOT escape either. Even if B.g IS read, C
+   238→   238→ * doesn't escape because B itself doesn't effectively escape.
+   239→   239→ *
+   240→   240→ * The transitive analysis uses a fixed-point iteration:
+   241→   241→ *   1. Initialize effective states = raw escape states
+   242→   242→ *   2. For each allocation with effective > NoEscape:
+   243→   243→ *      a. Check non-field escape paths
+   244→   244→ *      b. Check outgoing edges: is the allocation stored in a
+   245→   245→ *         container whose field is read at escape?
+   246→   246→ *      c. Use EFFECTIVE (not raw) escape of containers — if a
+   247→   247→ *         container has effective NoEscape, values stored in it
+   248→   248→ *         don't escape through it
+   249→   249→ *   3. Repeat until no more states can be lowered
+   250→   250→ */
+   251→   251→static vtx_effective_escape_t *compute_effective_escape(
+   252→   252→    vtx_graph_t *graph,
+   253→   253→    const vtx_pea_analysis_t *analysis,
+   254→   254→    const vtx_alloc_graph_t *alloc_graph,
+   255→   255→    vtx_arena_t *arena)
+   256→   256→{
+   257→   257→    vtx_node_table_t *table = &graph->node_table;
+   258→   258→    uint32_t state_count = analysis->escape_map.state_count;
+   259→   259→
+   260→   260→    vtx_effective_escape_t *eff = vtx_arena_alloc(arena,
+   261→   261→        sizeof(vtx_effective_escape_t));
+   262→   262→    if (!eff) return NULL;
+   263→   263→    memset(eff, 0, sizeof(*eff));
+   264→   264→
+   265→   265→    eff->state_count = state_count;
+   266→   266→    eff->effective_states = vtx_arena_alloc(arena,
+   267→   267→        state_count * sizeof(vtx_escape_state_t));
+   268→   268→    if (!eff->effective_states) return NULL;
+   269→   269→
+   270→   270→    /* Start with the raw escape states */
+   271→   271→    memcpy(eff->effective_states, analysis->escape_map.states,
+   272→   272→           state_count * sizeof(vtx_escape_state_t));
+   273→   273→
+   274→   274→    eff->scalar_field_count = state_count;
+   275→   275→    eff->scalar_fields = vtx_arena_alloc(arena,
+   276→   276→        state_count * sizeof(uint32_t));
+   277→   277→    if (!eff->scalar_fields) return NULL;
+   278→   278→    memset(eff->scalar_fields, 0, state_count * sizeof(uint32_t));
+   279→   279→
+   280→   280→    /* D3: Fixed-point iteration for transitive effective escape.
+   281→   281→     * We iterate until no more effective states can be lowered.
+   282→   282→     * Each iteration may lower an allocation's effective escape,
+   283→   283→     * which can then allow other allocations stored into it to
+   284→   284→     * also be lowered in the next iteration.
+   285→   285→     *
+   286→   286→     * BUGFIX (audit): Was 10 — too low for deep allocation chains
+   287→   287→     * (factory patterns with >10 levels of nesting). Increased to 50. */
+   288→   288→    const uint32_t MAX_ITERATIONS = 50; /* was 10 */
+   289→   289→    for (uint32_t iter = 0; iter < MAX_ITERATIONS; iter++) {
+   290→   290→        bool any_changed = false;
+   291→   291→
+   292→   292→        for (uint32_t a = 0; a < analysis->escape_map.alloc_count; a++) {
+   293→   293→            vtx_nodeid_t alloc_id = analysis->escape_map.alloc_ids[a];
+   294→   294→            vtx_escape_state_t raw_state = analysis->escape_map.states[alloc_id];
+   295→   295→
+   296→   296→            if (raw_state == VTX_ESCAPE_NONE) continue; /* already NoEscape */
+   297→   297→            if (eff->effective_states[alloc_id] == VTX_ESCAPE_NONE) continue; /* already lowered */
+   298→   298→
+   299→   299→            /* Check if this allocation escapes through non-field paths:
+   300→   300→             * return, call argument, global store, monitor */
+   301→   301→            bool has_non_field_escape = false;
+   302→   302→            for (uint32_t i = 0; i < table->count; i++) {
+   303→   303→                vtx_node_t *node = &table->nodes[i];
+   304→   304→                if (node->dead) continue;
+   305→   305→
+   306→   306→                switch (node->opcode) {
+   307→   307→                case VTX_OP_Return:
+   308→   308→                case VTX_OP_CallStatic:
+   309→   309→                case VTX_OP_CallVirtual:
+   310→   310→                case VTX_OP_CallInterface:
+   311→   311→                case VTX_OP_CallRuntime:
+   312→   312→                    for (uint32_t j = 0; j < node->input_count; j++) {
+   313→   313→                        if (node->inputs[j] == alloc_id) {
+   314→   314→                            has_non_field_escape = true;
+   315→   315→                            break;
+   316→   316→                        }
+   317→   317→                    }
+   318→   318→                    break;
+   319→   319→                default:
+   320→   320→                    break;
+   321→   321→                }
+   322→   322→                if (has_non_field_escape) break;
+   323→   323→            }
+   324→   324→
+   325→   325→            /* If the allocation escapes through a non-field path, effective
+   326→   326→             * escape cannot be lowered */
+   327→   327→            if (has_non_field_escape) continue;
+   328→   328→
+   329→   329→            /* Check outgoing field-store edges (where this allocation is
+   330→   330→             * the value stored into a container's field).
+   331→   331→             *
+   332→   332→             * Bug 9 fix + D3: We check if the container's field is actually
+   333→   333→             * read at an escape point using is_field_read_at_escape(), and
+   334→   334→             * we consider the EFFECTIVE escape state of the container (not
+   335→   335→             * the raw state). If the container has effective NoEscape, the
+   336→   336→             * value stored in it doesn't escape through that edge, even if
+   337→   337→             * the field is read somewhere (because the container itself is
+   338→   338→             * not reachable at any escape point). */
+   339→   339→            uint32_t incoming_count = 0;
+   340→   340→            bool escapes_through_any_edge = false;
+   341→   341→
+   342→   342→            for (uint32_t e = 0; e < alloc_graph->edge_count; e++) {
+   343→   343→                vtx_alloc_edge_t *edge = &alloc_graph->all_edges[e];
+   344→   344→                if (edge->value_id == alloc_id) {
+   345→   345→                    incoming_count++;
+   346→   346→
+   347→   347→                    /* D3: Check the EFFECTIVE escape of the container.
+   348→   348→                     * If the container has effective NoEscape, the value
+   349→   349→                     * stored in it doesn't escape through this edge. */
+   350→   350→                    if (edge->container_id < state_count &&
+   351→   351→                        eff->effective_states[edge->container_id] == VTX_ESCAPE_NONE) {
+   352→   352→                        /* Container effectively doesn't escape, so the
+   353→   353→                         * value stored in it doesn't escape through this
+   354→   354→                         * edge either. Skip this edge. */
+   355→   355→                        continue;
+   356→   356→                    }
+   357→   357→
+   358→   358→                    /* Container has effective escape > NoEscape.
+   359→   359→                     * Check if the field is actually read at an escape point. */
+   360→   360→                    bool field_read_at_escape = is_field_read_at_escape(
+   361→   361→                        graph, edge->container_id, edge->field_offset, analysis);
+   362→   362→
+   363→   363→                    if (field_read_at_escape) {
+   364→   364→                        escapes_through_any_edge = true;
+   365→   365→                        break; /* no need to check more edges */
+   366→   366→                    }
+   367→   367→                }
+   368→   368→            }
+   369→   369→
+   370→   370→            /* If the allocation doesn't escape through any edge (all
+   371→   371→             * edges either point to effectively non-escaping containers
+   372→   372→             * or have fields that are not read at escape), lower its
+   373→   373→             * effective escape to NoEscape. */
+   374→   374→            if (!escapes_through_any_edge && incoming_count > 0) {
+   375→   375→                eff->effective_states[alloc_id] = VTX_ESCAPE_NONE;
+   376→   376→                any_changed = true;
+   377→   377→            }
+   378→   378→        }
+   379→   379→
+   380→   380→        if (!any_changed) break; /* fixed point reached */
+   381→   381→    }
+   382→   382→
+   383→   383→    /* Count scalar fields for each allocation that can be replaced */
+   384→   384→    for (uint32_t a = 0; a < analysis->escape_map.alloc_count; a++) {
+   385→   385→        vtx_nodeid_t alloc_id = analysis->escape_map.alloc_ids[a];
+   386→   386→        if (eff->effective_states[alloc_id] != VTX_ESCAPE_NONE) continue;
+   387→   387→
+   388→   388→        vtx_node_t *alloc_node = vtx_node_get(table, alloc_id);
+   389→   389→        if (!alloc_node) continue;
+   390→   390→
+   391→   391→        /* Count fields: for NewObject, the field count comes from the
+   392→   392→         * type descriptor. For our purposes, we count the number of
+   393→   393→         * distinct field_offsets accessed via LoadField/StoreField. */
+   394→   394→        uint32_t field_count = 0;
+   395→   395→        uint32_t *offsets = NULL;
+   396→   396→        uint32_t offset_count = 0;
+   397→   397→        uint32_t offset_capacity = 0;
+   398→   398→
+   399→   399→        for (uint32_t n = 0; n < table->count; n++) {
+   400→   400→            vtx_node_t *node = &table->nodes[n];
+   401→   401→            if (node->dead) continue;
+   402→   402→            if (node->opcode != VTX_OP_LoadField &&
+   403→   403→                node->opcode != VTX_OP_StoreField) continue;
+   404→   404→
+   405→   405→            /* Check if this field access is on the allocation */
+   406→   406→            vtx_nodeid_t receiver = VTX_NODEID_INVALID;
+   407→   407→            if (node->input_count >= 1) {
+   408→   408→                if (node->opcode == VTX_OP_LoadField) {
+   409→   409→                    receiver = node->inputs[node->input_count - 1];
+   410→   410→                } else {
+   411→   411→                    /* StoreField: last two are receiver and value */
+   412→   412→                    receiver = node->inputs[node->input_count - 2];
+   413→   413→                }
+   414→   414→            }
+   415→   415→
+   416→   416→            if (receiver == alloc_id) {
+   417→   417→                /* Check if this offset is already counted */
+   418→   418→                bool found = false;
+   419→   419→                for (uint32_t k = 0; k < offset_count; k++) {
+   420→   420→                    if (offsets[k] == node->field_offset) {
+   421→   421→                        found = true;
+   422→   422→                        break;
+   423→   423→                    }
+   424→   424→                }
+   425→   425→                if (!found) {
+   426→   426→                    /* Grow offsets array if needed */
+   427→   427→                    if (offset_count >= offset_capacity) {
+   428→   428→                        uint32_t new_cap = offset_capacity == 0 ? 8 : offset_capacity * 2;
+   429→   429→                        uint32_t *new_offsets = vtx_arena_alloc(arena,
+   430→   430→                            new_cap * sizeof(uint32_t));
+   431→   431→                        if (!new_offsets) break;
+   432→   432→                        if (offsets && offset_count > 0) {
+   433→   433→                            memcpy(new_offsets, offsets,
+   434→   434→                                   offset_count * sizeof(uint32_t));
+   435→   435→                        }
+   436→   436→                        offsets = new_offsets;
+   437→   437→                        offset_capacity = new_cap;
+   438→   438→                    }
+   439→   439→                    offsets[offset_count++] = node->field_offset;
+   440→   440→                }
+   441→   441→            }
+   442→   442→        }
+   443→   443→
+   444→   444→        if (alloc_id < eff->scalar_field_count) {
+   445→   445→            eff->scalar_fields[alloc_id] = offset_count;
+   446→   446→        }
+   447→   447→    }
+   448→   448→
+   449→   449→    return eff;
+   450→   450→}
+   451→   451→
+   452→   452→/* ========================================================================== */
+   453→   453→/* Internal: create scalar local nodes and rewrite field accesses              */
+   454→   454→/* ========================================================================== */
+   455→   455→
+   456→   456→/**
+   457→   457→ * For each allocation with effective NoEscape:
+   458→   458→ *   - Create a scalar local variable for each accessed field
+   459→   459→ *   - Rewrite LoadField accesses to read from the local
+   460→   460→ *   - Rewrite StoreField accesses to write to the local
+   461→   461→ *   - Mark the allocation as dead (to be removed by DCE)
+   462→   462→ */
+   463→   463→static int rewrite_scalar_replacements(vtx_graph_t *graph,
+   464→   464→                                        const vtx_pea_analysis_t *analysis,
+   465→   465→                                        const vtx_effective_escape_t *eff,
+   466→   466→                                        vtx_cross_sr_result_t *result,
+   467→   467→                                        vtx_arena_t *arena)
+   468→   468→{
+   469→   469→    vtx_node_table_t *table = &graph->node_table;
+   470→   470→
+   471→   471→    /* Initialize result */
+   472→   472→    result->mapping_capacity = 64;
+   473→   473→    result->mappings = vtx_arena_alloc(arena,
+   474→   474→        result->mapping_capacity * sizeof(vtx_sr_mapping_t));
+   475→   475→    if (!result->mappings) return -1;
+   476→   476→    result->mapping_count = 0;
+   477→   477→
+   478→   478→    /* For each allocation with effective NoEscape */
+   479→   479→    for (uint32_t a = 0; a < analysis->escape_map.alloc_count; a++) {
+   480→   480→        vtx_nodeid_t alloc_id = analysis->escape_map.alloc_ids[a];
+   481→   481→        if (eff->effective_states[alloc_id] != VTX_ESCAPE_NONE) continue;
+   482→   482→
+   483→   483→        vtx_node_t *alloc_node = vtx_node_get(table, alloc_id);
+   484→   484→        if (!alloc_node || alloc_node->dead) continue;
+   485→   485→
+   486→   486→        /* Create scalar locals for each field.
+   487→   487→         * We use Parameter-like nodes to represent locals, but since
+   488→   488→         * we can't add real Parameter nodes, we use Constant nodes
+   489→   489→         * as placeholders and then replace them with actual value
+   490→   490→         * nodes when we encounter StoreField operations.
+   491→   491→         *
+   492→   492→         * A better approach: for each StoreField to this allocation,
+   493→   493→         * record the stored value as the local. For LoadField, replace
+   494→   494→         * with the local value. */
+   495→   495→        bool alloc_fully_replaced = true;
+   496→   496→
+   497→   497→        /* First pass: create mappings for all stored field values */
+   498→   498→        for (uint32_t n = 0; n < table->count; n++) {
+   499→   499→            vtx_node_t *node = &table->nodes[n];
+   500→   500→            if (node->dead) continue;
+   501→   501→            if (node->opcode != VTX_OP_StoreField) continue;
+   502→   502→
+   503→   503→            /* Check if this store is to our allocation */
+   504→   504→            if (node->input_count < 2) continue;
+   505→   505→            vtx_nodeid_t receiver_id = node->inputs[node->input_count - 2];
+   506→   506→            vtx_nodeid_t value_id    = node->inputs[node->input_count - 1];
+   507→   507→
+   508→   508→            if (receiver_id != alloc_id) continue;
+   509→   509→
+   510→   510→            /* The stored value becomes the scalar local for this field.
+   511→   511→             * We don't create a new node — we just record the mapping
+   512→   512→             * from (alloc_id, field_offset) → value_id. */
+   513→   513→            if (result->mapping_count >= result->mapping_capacity) {
+   514→   514→                uint32_t new_cap = result->mapping_capacity * 2;
+   515→   515→                vtx_sr_mapping_t *new_mappings = vtx_arena_alloc(arena,
+   516→   516→                    new_cap * sizeof(vtx_sr_mapping_t));
+   517→   517→                if (!new_mappings) return -1;
+   518→   518→                memcpy(new_mappings, result->mappings,
+   519→   519→                       result->mapping_count * sizeof(vtx_sr_mapping_t));
+   520→   520→                result->mappings = new_mappings;
+   521→   521→                result->mapping_capacity = new_cap;
+   522→   522→            }
+   523→   523→
+   524→   524→            result->mappings[result->mapping_count].alloc_id     = alloc_id;
+   525→   525→            result->mappings[result->mapping_count].field_offset = node->field_offset;
+   526→   526→            result->mappings[result->mapping_count].local_id     = value_id;
+   527→   527→            result->mapping_count++;
+   528→   528→
+   529→   529→            /* Mark the StoreField as dead — the store now goes to the local */
+   530→   530→            node->dead = true;
+   531→   531→            result->field_accesses_rewritten++;
+   532→   532→        }
+   533→   533→
+   534→   534→        /* Second pass: rewrite LoadField accesses to use the scalar local */
+   535→   535→        for (uint32_t n = 0; n < table->count; n++) {
+   536→   536→            vtx_node_t *node = &table->nodes[n];
+   537→   537→            if (node->dead) continue;
+   538→   538→            if (node->opcode != VTX_OP_LoadField) continue;
+   539→   539→
+   540→   540→            if (node->input_count < 1) continue;
+   541→   541→            vtx_nodeid_t receiver_id = node->inputs[node->input_count - 1];
+   542→   542→
+   543→   543→            if (receiver_id != alloc_id) continue;
+   544→   544→
+   545→   545→            /* Find the scalar local for this field */
+   546→   546→            vtx_nodeid_t local_id = VTX_NODEID_INVALID;
+   547→   547→            for (int32_t m = (int32_t)result->mapping_count - 1; m >= 0; m--) {
+   548→   548→                if (result->mappings[m].alloc_id == alloc_id &&
+   549→   549→                    result->mappings[m].field_offset == node->field_offset) {
+   550→   550→                    local_id = result->mappings[m].local_id;
+   551→   551→                    break;
+   552→   552→                }
+   553→   553→            }
+   554→   554→
+   555→   555→            if (local_id != VTX_NODEID_INVALID) {
+   556→   556→                /* Replace all uses of this LoadField with the local */
+   557→   557→                /* We can't easily replace all uses in the SoN graph,
+   558→   558→                 * so we mark the LoadField as having a replacement.
+   559→   559→                 * A proper implementation would redirect all output
+   560→   560→                 * edges. Instead, we'll do a graph-wide replacement. */
+   561→   561→                for (uint32_t u = 0; u < table->count; u++) {
+   562→   562→                    vtx_node_t *user = &table->nodes[u];
+   563→   563→                    if (user->dead) continue;
+   564→   564→                    for (uint32_t inp = 0; inp < user->input_count; inp++) {
+   565→   565→                        if (user->inputs[inp] == node->id) {
+   566→   566→                            vtx_node_replace_input(table, user->id, inp, local_id);
+   567→   567→                        }
+   568→   568→                    }
+   569→   569→                }
+   570→   570→                node->dead = true;
+   571→   571→                result->field_accesses_rewritten++;
+   572→   572→            } else {
+   573→   573→                /* Field was never stored — this means the field has the
+   574→   574→                 * default value (null/zero). Create a null constant. */
+   575→   575→                vtx_nodeid_t null_id = vtx_node_create(table, VTX_OP_Constant);
+   576→   576→                if (null_id != VTX_NODEID_INVALID) {
+   577→   577→                    vtx_node_t *null_node = vtx_node_get(table, null_id);
+   578→   578→                    null_node->type = VTX_TYPE_Ptr;
+   579→   579→                    null_node->constval = vtx_constval_ptr(NULL);
+   580→   580→
+   581→   581→                    /* Record the mapping */
+   582→   582→                    if (result->mapping_count >= result->mapping_capacity) {
+   583→   583→                        uint32_t new_cap = result->mapping_capacity * 2;
+   584→   584→                        vtx_sr_mapping_t *new_mappings = vtx_arena_alloc(arena,
+   585→   585→                            new_cap * sizeof(vtx_sr_mapping_t));
+   586→   586→                        if (!new_mappings) return -1;
+   587→   587→                        memcpy(new_mappings, result->mappings,
+   588→   588→                               result->mapping_count * sizeof(vtx_sr_mapping_t));
+   589→   589→                        result->mappings = new_mappings;
+   590→   590→                        result->mapping_capacity = new_cap;
+   591→   591→                    }
+   592→   592→                    result->mappings[result->mapping_count].alloc_id     = alloc_id;
+   593→   593→                    result->mappings[result->mapping_count].field_offset = node->field_offset;
+   594→   594→                    result->mappings[result->mapping_count].local_id     = null_id;
+   595→   595→                    result->mapping_count++;
+   596→   596→
+   597→   597→                    /* Replace uses */
+   598→   598→                    for (uint32_t u = 0; u < table->count; u++) {
+   599→   599→                        vtx_node_t *user = &table->nodes[u];
+   600→   600→                        if (user->dead) continue;
+   601→   601→                        for (uint32_t inp = 0; inp < user->input_count; inp++) {
+   602→   602→                            if (user->inputs[inp] == node->id) {
+   603→   603→                                vtx_node_replace_input(table, user->id, inp, null_id);
+   604→   604→                            }
+   605→   605→                        }
+   606→   606→                    }
+   607→   607→                    node->dead = true;
+   608→   608→                    result->field_accesses_rewritten++;
+   609→   609→                }
+   610→   610→            }
+   611→   611→        }
+   612→   612→
+   613→   613→        /* Mark the allocation as dead if all its uses are rewritten */
+   614→   614→        if (alloc_fully_replaced) {
+   615→   615→            /* Check if there are any remaining uses of the allocation */
+   616→   616→            bool has_remaining_uses = false;
+   617→   617→            for (uint32_t n = 0; n < table->count; n++) {
+   618→   618→                vtx_node_t *node = &table->nodes[n];
+   619→   619→                if (node->dead) continue;
+   620→   620→                if (node->id == alloc_id) continue; /* skip self */
+   621→   621→
+   622→   622→                for (uint32_t inp = 0; inp < node->input_count; inp++) {
+   623→   623→                    if (node->inputs[inp] == alloc_id) {
+   624→   624→                        /* Check if this use is a StoreField receiver or
+   625→   625→                         * LoadField receiver (already handled) or something else */
+   626→   626→                        if (node->opcode == VTX_OP_StoreField ||
+   627→   627→                            node->opcode == VTX_OP_LoadField) {
+   628→   628→                            continue; /* already handled */
+   629→   629→                        }
+   630→   630→                        has_remaining_uses = true;
+   631→   631→                        break;
+   632→   632→                    }
+   633→   633→                }
+   634→   634→                if (has_remaining_uses) break;
+   635→   635→            }
+   636→   636→
+   637→   637→            if (!has_remaining_uses) {
+   638→   638→                alloc_node->dead = true;
+   639→   639→                result->allocs_replaced++;
+   640→   640→            }
+   641→   641→        }
+   642→   642→    }
+   643→   643→
+   644→   644→    return 0;
+   645→   645→}
+   646→   646→
+   647→   647→/* ========================================================================== */
+   648→   648→/* Main entry point                                                            */
+   649→   649→/* ========================================================================== */
+   650→   650→
+   651→   651→vtx_cross_sr_result_t *vtx_cross_object_sr_run(vtx_graph_t *graph,
+   652→   652→                                                 const vtx_pea_analysis_t *analysis,
+   653→   653→                                                 vtx_arena_t *arena)
+   654→   654→{
+   655→   655→    VTX_ASSERT(graph != NULL, "graph must not be NULL");
+   656→   656→    VTX_ASSERT(analysis != NULL, "analysis must not be NULL");
+   657→   657→    VTX_ASSERT(arena != NULL, "arena must not be NULL");
+   658→   658→
+   659→   659→    /* Allocate result */
+   660→   660→    vtx_cross_sr_result_t *result = vtx_arena_alloc(arena,
+   661→   661→        sizeof(vtx_cross_sr_result_t));
+   662→   662→    if (!result) return NULL;
+   663→   663→    memset(result, 0, sizeof(*result));
+   664→   664→
+   665→   665→    /* Step 1: Build the allocation graph */
+   666→   666→    vtx_alloc_graph_t alloc_graph;
+   667→   667→    if (build_alloc_graph(graph, &alloc_graph, arena) != 0) {
+   668→   668→        return NULL;
+   669→   669→    }
+   670→   670→
+   671→   671→    result->edges_analyzed = alloc_graph.edge_count;
+   672→   672→
+   673→   673→    /* Step 2: Compute effective escape states */
+   674→   674→    vtx_effective_escape_t *eff = compute_effective_escape(
+   675→   675→        graph, analysis, &alloc_graph, arena);
+   676→   676→    if (!eff) return NULL;
+   677→   677→
+   678→   678→    /* Step 3: Create scalar locals and rewrite field accesses */
+   679→   679→    if (rewrite_scalar_replacements(graph, analysis, eff, result, arena) != 0) {
+   680→   680→        return NULL;
+   681→   681→    }
+   682→   682→
+   683→   683→    return result;
+   684→   684→}
+   685→   685→
+   686→   686→/* ========================================================================== */
+   687→   687→/* Query helpers                                                               */
+   688→   688→/* ========================================================================== */
+   689→   689→
+   690→   690→vtx_nodeid_t vtx_cross_sr_get_local(const vtx_cross_sr_result_t *result,
+   691→   691→                                      vtx_nodeid_t alloc_id,
+   692→   692→                                      uint32_t field_offset)
+   693→   693→{
+   694→   694→    VTX_ASSERT(result != NULL, "result must not be NULL");
+   695→   695→    for (uint32_t i = 0; i < result->mapping_count; i++) {
+   696→   696→        if (result->mappings[i].alloc_id == alloc_id &&
+   697→   697→            result->mappings[i].field_offset == field_offset) {
+   698→   698→            return result->mappings[i].local_id;
+   699→   699→        }
+   700→   700→    }
+   701→   701→    return VTX_NODEID_INVALID;
+   702→   702→}
+   703→   703→
+   704→   704→bool vtx_cross_sr_is_replaced(const vtx_cross_sr_result_t *result,
+   705→   705→                               vtx_nodeid_t alloc_id)
+   706→   706→{
+   707→   707→    VTX_ASSERT(result != NULL, "result must not be NULL");
+   708→   708→    for (uint32_t i = 0; i < result->mapping_count; i++) {
+   709→   709→        if (result->mappings[i].alloc_id == alloc_id) {
+   710→   710→            return true;
+   711→   711→        }
+   712→   712→    }
+   713→   713→    return false;
+   714→   714→}
+   715→   715→

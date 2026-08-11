@@ -1,0 +1,825 @@
+     1→/* ============================================================================ *
+     2→ * AI-MODIFIED CODE
+     3→ *
+     4→ * This file was originally written by a human developer. It has been
+     5→ * substantially modified by an AI assistant (GLM/Z.ai) for bug fixes,
+     6→ * performance improvements, and feature additions.
+     7→ *
+     8→ * Original human-written structure is preserved; AI changes are marked
+     9→ * with bug fix IDs (B1-B28) or perf notes (Perf 1-10) in comments.
+    10→ *
+    11→ * If reviewing, please verify AI changes against the original logic.
+    12→ * ============================================================================ */
+    13→
+    14→/**
+    15→ * VORTEX Partial Escape Analysis — Flow-Sensitive Escape Analysis
+    16→ *
+    17→ * Implementation of the dataflow framework that computes per-allocation
+    18→ * escape states. Uses a reverse-postorder worklist iteration to reach
+    19→ * a fixed point.
+    20→ */
+    21→
+    22→#include "pea/analysis.h"
+    23→#include <stdlib.h>
+    24→#include <string.h>
+    25→
+    26→/* ========================================================================== */
+    27→/* Escape state name                                                           */
+    28→/* ========================================================================== */
+    29→
+    30→const char *vtx_escape_state_name(vtx_escape_state_t s)
+    31→{
+    32→    switch (s) {
+    33→    case VTX_ESCAPE_NONE:   return "NoEscape";
+    34→    case VTX_ESCAPE_ARG:    return "ArgEscape";
+    35→    case VTX_ESCAPE_GLOBAL: return "GlobalEscape";
+    36→    }
+    37→    return "Unknown";
+    38→}
+    39→
+    40→/* ========================================================================== */
+    41→/* Internal: check if a node is an allocation                                  */
+    42→/* ========================================================================== */
+    43→
+    44→static inline bool is_allocation(vtx_node_opcode_t opcode)
+    45→{
+    46→    return opcode == VTX_OP_NewObject ||
+    47→           opcode == VTX_OP_NewArray  ||
+    48→           opcode == VTX_OP_Allocate;
+    49→}
+    50→
+    51→/* ========================================================================== */
+    52→/* Internal: identify allocations and build the map                            */
+    53→/* ========================================================================== */
+    54→
+    55→static int build_allocation_map(vtx_graph_t *graph, vtx_escape_map_t *map,
+    56→                                 vtx_arena_t *arena)
+    57→{
+    58→    vtx_node_table_t *table = &graph->node_table;
+    59→    uint32_t count = table->count;
+    60→
+    61→    map->state_count = count;
+    62→    map->states = vtx_arena_alloc(arena, count * sizeof(vtx_escape_state_t));
+    63→    if (!map->states) return -1;
+    64→
+    65→    /* Initialize all states to NoEscape */
+    66→    memset(map->states, 0, count * sizeof(vtx_escape_state_t));
+    67→
+    68→    /* Count allocations first for capacity */
+    69→    uint32_t alloc_count = 0;
+    70→    for (uint32_t i = 0; i < count; i++) {
+    71→        vtx_node_t *node = &table->nodes[i];
+    72→        if (!node->dead && is_allocation(node->opcode)) {
+    73→            alloc_count++;
+    74→        }
+    75→    }
+    76→
+    77→    map->alloc_capacity = alloc_count > 0 ? alloc_count : 1;
+    78→    map->alloc_ids = vtx_arena_alloc(arena, map->alloc_capacity * sizeof(vtx_nodeid_t));
+    79→    if (!map->alloc_ids) return -1;
+    80→
+    81→    map->alloc_count = 0;
+    82→    for (uint32_t i = 0; i < count; i++) {
+    83→        vtx_node_t *node = &table->nodes[i];
+    84→        if (!node->dead && is_allocation(node->opcode)) {
+    85→            map->alloc_ids[map->alloc_count++] = node->id;
+    86→        }
+    87→    }
+    88→
+    89→    return 0;
+    90→}
+    91→
+    92→/* ========================================================================== */
+    93→/* Internal: copy escape state array                                           */
+    94→/* ========================================================================== */
+    95→
+    96→static void copy_escape_states(vtx_escape_state_t *dst,
+    97→                                const vtx_escape_state_t *src,
+    98→                                uint32_t count)
+    99→{
+   100→    memcpy(dst, src, count * sizeof(vtx_escape_state_t));
+   101→}
+   102→
+   103→/* ========================================================================== */
+   104→/* Internal: compare two escape state arrays, return true if different         */
+   105→/* ========================================================================== */
+   106→
+   107→static bool escape_states_differ(const vtx_escape_state_t *a,
+   108→                                  const vtx_escape_state_t *b,
+   109→                                  uint32_t count)
+   110→{
+   111→    return memcmp(a, b, count * sizeof(vtx_escape_state_t)) != 0;
+   112→}
+   113→
+   114→/* ========================================================================== */
+   115→/* Internal: join two escape state arrays (dst = join(dst, src))               */
+   116→/* Returns true if dst changed.                                                */
+   117→/* ========================================================================== */
+   118→
+   119→static bool join_escape_states(vtx_escape_state_t *dst,
+   120→                                const vtx_escape_state_t *src,
+   121→                                uint32_t count)
+   122→{
+   123→    bool changed = false;
+   124→    for (uint32_t i = 0; i < count; i++) {
+   125→        vtx_escape_state_t joined = vtx_escape_join(dst[i], src[i]);
+   126→        if (joined != dst[i]) {
+   127→            dst[i] = joined;
+   128→            changed = true;
+   129→        }
+   130→    }
+   131→    return changed;
+   132→}
+   133→
+   134→/* ========================================================================== */
+   135→/* Internal: build per-block state arrays                                      */
+   136→/* ========================================================================== */
+   137→
+   138→static int build_block_states(vtx_graph_t *graph, vtx_pea_analysis_t *result,
+   139→                               vtx_arena_t *arena)
+   140→{
+   141→    uint32_t block_count = graph->block_count;
+   142→    uint32_t state_count = result->escape_map.state_count;
+   143→
+   144→    result->block_state_count = block_count;
+   145→    result->block_states = vtx_arena_alloc(arena,
+   146→        block_count * sizeof(vtx_pea_block_state_t));
+   147→    if (!result->block_states) return -1;
+   148→
+   149→    for (uint32_t i = 0; i < block_count; i++) {
+   150→        vtx_pea_block_state_t *bs = &result->block_states[i];
+   151→        bs->state_count = state_count;
+   152→        bs->entry_changed = false;
+   153→
+   154→        bs->entry_state = vtx_arena_alloc(arena,
+   155→            state_count * sizeof(vtx_escape_state_t));
+   156→        bs->exit_state = vtx_arena_alloc(arena,
+   157→            state_count * sizeof(vtx_escape_state_t));
+   158→
+   159→        if (!bs->entry_state || !bs->exit_state) return -1;
+   160→
+   161→        /* Initialize all to NoEscape */
+   162→        memset(bs->entry_state, 0, state_count * sizeof(vtx_escape_state_t));
+   163→        memset(bs->exit_state, 0, state_count * sizeof(vtx_escape_state_t));
+   164→    }
+   165→
+   166→    return 0;
+   167→}
+   168→
+   169→/* ========================================================================== */
+   170→/* Internal: find block index for a region node                                */
+   171→/* ========================================================================== */
+   172→
+   173→static inline int32_t find_block_for_region(vtx_graph_t *graph, vtx_nodeid_t region_id)
+   174→    __attribute__((unused));
+   175→static inline int32_t find_block_for_region(vtx_graph_t *graph, vtx_nodeid_t region_id)
+   176→{
+   177→    for (uint32_t i = 0; i < graph->block_count; i++) {
+   178→        if (graph->blocks[i].region_node == region_id) {
+   179→            return (int32_t)i;
+   180→        }
+   181→    }
+   182→    return -1;
+   183→}
+   184→
+   185→/* ========================================================================== */
+   186→/* Internal: compute block successors                                          */
+   187→/* ========================================================================== */
+   188→
+   189→static inline void get_block_successors(vtx_graph_t *graph, uint32_t block_idx,
+   190→                                  uint32_t *succs, uint32_t *succ_count)
+   191→    __attribute__((unused));
+   192→static inline void get_block_successors(vtx_graph_t *graph, uint32_t block_idx,
+   193→                                  uint32_t *succs, uint32_t *succ_count)
+   194→{
+   195→    *succ_count = graph->blocks[block_idx].succ_count;
+   196→    for (uint32_t i = 0; i < *succ_count && i < graph->blocks[block_idx].succ_capacity; i++) {
+   197→        succs[i] = graph->blocks[block_idx].succ_indices[i];
+   198→    }
+   199→}
+   200→
+   201→/* ========================================================================== */
+   202→/* Internal: transfer function for a single node                               */
+   203→/*                                                                           */
+   204→/* Examines how the node uses values and updates escape states accordingly.   */
+   205→/* ========================================================================== */
+   206→
+   207→static void transfer_node(vtx_node_t *node, vtx_node_table_t *table,
+   208→                           vtx_escape_state_t *state, uint32_t state_count)
+   209→{
+   210→    if (node->dead) return;
+   211→
+   212→    switch (node->opcode) {
+   213→    /* ---- Return: any returned allocation escapes globally ---- */
+   214→    case VTX_OP_Return:
+   215→        for (uint32_t i = 0; i < node->input_count; i++) {
+   216→            vtx_nodeid_t input_id = node->inputs[i];
+   217→            if (input_id < state_count) {
+   218→                /* The returned value itself is a data value. If it is an
+   219→                 * allocation, it escapes globally. If it references an
+   220→                 * allocation indirectly, we need to check the input node. */
+   221→                vtx_node_t *input = vtx_node_get(table, input_id);
+   222→                if (input && !input->dead && is_allocation(input->opcode)) {
+   223→                    state[input_id] = vtx_escape_join(state[input_id],
+   224→                                                       VTX_ESCAPE_GLOBAL);
+   225→                }
+   226→            }
+   227→        }
+   228→        break;
+   229→
+   230→    /* ---- StoreField: if the stored value is an allocation, it escapes
+   231→       based on the receiver's escape state ---- */
+   232→    case VTX_OP_StoreField:
+   233→        if (node->input_count >= 2) {
+   234→            /* Input layout: [control?, memory?, receiver, value] */
+   235→            /* Find the receiver and value inputs — they are the last two
+   236→             * data inputs. We search for them by position. */
+   237→            vtx_nodeid_t receiver_id = node->inputs[node->input_count - 2];
+   238→            vtx_nodeid_t value_id    = node->inputs[node->input_count - 1];
+   239→
+   240→            /* If the stored value is an allocation, it escapes at least
+   241→             * as much as the container object */
+   242→            if (value_id < state_count) {
+   243→                vtx_node_t *val_node = vtx_node_get(table, value_id);
+   244→                if (val_node && !val_node->dead && is_allocation(val_node->opcode)) {
+   245→                    vtx_escape_state_t container_state = VTX_ESCAPE_GLOBAL;
+   246→                    if (receiver_id < state_count) {
+   247→                        vtx_node_t *recv_node = vtx_node_get(table, receiver_id);
+   248→                        if (recv_node && !recv_node->dead && is_allocation(recv_node->opcode)) {
+   249→                            container_state = state[receiver_id];
+   250→                        }
+   251→                    }
+   252→                    /* Stored into a container that escapes → the stored value
+   253→                     * escapes at least as much as the container */
+   254→                    state[value_id] = vtx_escape_join(state[value_id],
+   255→                                                       vtx_escape_join(container_state, VTX_ESCAPE_ARG));
+   256→                }
+   257→            }
+   258→        }
+   259→        break;
+   260→
+   261→    /* ---- StoreIndexed: storing into an array — the value escapes
+   262→       at least as much as the array ---- */
+   263→    case VTX_OP_StoreIndexed:
+   264→        if (node->input_count >= 3) {
+   265→            vtx_nodeid_t array_id = node->inputs[node->input_count - 3];
+   266→            vtx_nodeid_t value_id = node->inputs[node->input_count - 1];
+   267→
+   268→            if (value_id < state_count) {
+   269→                vtx_node_t *val_node = vtx_node_get(table, value_id);
+   270→                if (val_node && !val_node->dead && is_allocation(val_node->opcode)) {
+   271→                    vtx_escape_state_t array_state = VTX_ESCAPE_GLOBAL;
+   272→                    if (array_id < state_count) {
+   273→                        vtx_node_t *arr_node = vtx_node_get(table, array_id);
+   274→                        if (arr_node && !arr_node->dead && is_allocation(arr_node->opcode)) {
+   275→                            array_state = state[array_id];
+   276→                        }
+   277→                    }
+   278→                    state[value_id] = vtx_escape_join(state[value_id],
+   279→                                                       vtx_escape_join(array_state, VTX_ESCAPE_ARG));
+   280→                }
+   281→            }
+   282→        }
+   283→        break;
+   284→
+   285→    /* ---- Calls: any allocation passed as argument escapes ---- */
+   286→    case VTX_OP_CallStatic:
+   287→    case VTX_OP_CallVirtual:
+   288→    case VTX_OP_CallInterface:
+   289→    case VTX_OP_CallRuntime:
+   290→        /* All allocation arguments to unknown functions escape.
+   291→         * For CallVirtual/CallInterface, the receiver also escapes. */
+   292→        for (uint32_t i = 0; i < node->input_count; i++) {
+   293→            vtx_nodeid_t input_id = node->inputs[i];
+   294→            if (input_id < state_count) {
+   295→                vtx_node_t *input = vtx_node_get(table, input_id);
+   296→                if (input && !input->dead && is_allocation(input->opcode)) {
+   297→                    /* Arguments to unknown functions escape at least through args.
+   298→                     * For CallRuntime (which may store globally), be conservative. */
+   299→                    if (node->opcode == VTX_OP_CallRuntime) {
+   300→                        state[input_id] = vtx_escape_join(state[input_id],
+   301→                                                           VTX_ESCAPE_GLOBAL);
+   302→                    } else {
+   303→                        state[input_id] = vtx_escape_join(state[input_id],
+   304→                                                           VTX_ESCAPE_ARG);
+   305→                    }
+   306→                }
+   307→            }
+   308→        }
+   309→
+   310→        /* For virtual/interface calls, the receiver may dispatch to an
+   311→         * unknown method that stores the object globally. Conservative:
+   312→         * ArgEscape (could be made more precise with callee analysis). */
+   313→        if (node->opcode == VTX_OP_CallVirtual ||
+   314→            node->opcode == VTX_OP_CallInterface) {
+   315→            /* The receiver is typically the first data input after control/memory.
+   316→             * We check all inputs for allocation nodes — already handled above. */
+   317→        }
+   318→        break;
+   319→
+   320→    /* ---- Monitor: using an object in a monitor makes it globally escape ---- */
+   321→    case VTX_OP_DeoptGuard:
+   322→        /* DeoptGuard: the guarded value is consumed but doesn't escape */
+   323→        break;
+   324→
+   325→    /* ---- CheckCast / InstanceOf: the object doesn't escape through these
+   326→       (they are pure queries on the object's type) ---- */
+   327→    case VTX_OP_CheckCast:
+   328→    case VTX_OP_InstanceOf:
+   329→        /* No escape — these are read-only type checks */
+   330→        break;
+   331→
+   332→    /* ---- Guard: the checked value doesn't escape ---- */
+   333→    case VTX_OP_Guard:
+   334→        /* Guards don't cause escape — they just check a condition */
+   335→        break;
+   336→
+   337→    /* ---- Phi: a Phi of allocations — propagate escape states ---- */
+   338→    case VTX_OP_Phi:
+   339→        /* Phi nodes merge values from multiple control flow paths.
+   340→         * If any input allocation has a non-NoEscape state, all allocation
+   341→         * inputs of the Phi must have at least that escape state, because
+   342→         * the Phi merges them into a single value that may escape.
+   343→         *
+   344→         * Bug 8 fix: Previously, the Phi transfer was a no-op — it just
+   345→         * iterated over inputs without propagating escape states. This meant
+   346→         * that if Phi(A, B) where A escapes but B doesn't, B would remain
+   347→         * NoEscape even though the merged value escapes. Now we compute
+   348→         * the maximum escape state across all Phi inputs and propagate it
+   349→         * to every allocation input of the Phi. */
+   350→        {
+   351→            vtx_escape_state_t max_state = VTX_ESCAPE_NONE;
+   352→            /* First pass: compute the maximum escape state across all inputs */
+   353→            for (uint32_t i = 0; i < node->input_count; i++) {
+   354→                vtx_nodeid_t input_id = node->inputs[i];
+   355→                if (input_id < state_count) {
+   356→                    vtx_node_t *input = vtx_node_get(table, input_id);
+   357→                    if (input && !input->dead && is_allocation(input->opcode)) {
+   358→                        max_state = vtx_escape_join(max_state, state[input_id]);
+   359→                    }
+   360→                }
+   361→            }
+   362→            /* Second pass: propagate max_state to all allocation inputs.
+   363→             * If any input allocation has a lower escape state than the
+   364→             * Phi's maximum, it must be elevated because the Phi's result
+   365→             * (which merges all inputs) carries the highest escape state. */
+   366→            for (uint32_t i = 0; i < node->input_count; i++) {
+   367→                vtx_nodeid_t input_id = node->inputs[i];
+   368→                if (input_id < state_count) {
+   369→                    vtx_node_t *input = vtx_node_get(table, input_id);
+   370→                    if (input && !input->dead && is_allocation(input->opcode)) {
+   371→                        if (state[input_id] < max_state) {
+   372→                            state[input_id] = max_state;
+   373→                            /* changed flag is not accessible here, but the
+   374→                             * caller (transfer_block -> worklist) will detect
+   375→                             * the state change when comparing exit states. */
+   376→                        }
+   377→                    }
+   378→                }
+   379→            }
+   380→        }
+   381→        break;
+   382→
+   383→    default:
+   384→        break;
+   385→    }
+   386→}
+   387→
+   388→/* ========================================================================== */
+   389→/* Internal: pre-compute block-to-node mapping (§2.1 — fix O(N×B) scan)      */
+   390→/* ========================================================================== */
+   391→/*
+   392→ * PEA audit: transfer_block re-scans ALL N nodes for EVERY block to find
+   393→ * which nodes belong to that block. For a graph with B blocks and N nodes,
+   394→ * this is O(N×B) per dataflow iteration — for T2 graphs with 5000 nodes
+   395→ * and 50 blocks, that's 250K comparisons per iteration × ~10 iterations
+   396→ * = 2.5M comparisons.
+   397→ *
+   398→ * GraalVM's PEA uses a pre-computed BlockMap (BlockBag in
+   399→ * EscapeAnalysisPhase). V8's escape analysis uses a schedule
+   400→ * (Schedule::rpo_order) to iterate nodes per-block.
+   401→ *
+   402→ * Fix: pre-compute a block→node-list mapping once before the worklist,
+   403→ * then iterate only the relevant nodes in transfer_block. */
+   404→typedef struct {
+   405→    vtx_nodeid_t *nodes;    /* node IDs belonging to this block */
+   406→    uint32_t      count;    /* number of nodes in this block */
+   407→} vtx_block_node_list_t;
+   408→
+   409→static vtx_block_node_list_t *build_block_node_lists(vtx_graph_t *graph,
+   410→                                                       vtx_arena_t *arena)
+   411→{
+   412→    uint32_t block_count = graph->block_count;
+   413→    uint32_t node_count = graph->node_table.count;
+   414→
+   415→    /* Allocate per-block lists */
+   416→    vtx_block_node_list_t *lists = vtx_arena_alloc(arena,
+   417→        block_count * sizeof(vtx_block_node_list_t));
+   418→    if (!lists) return NULL;
+   419→    memset(lists, 0, block_count * sizeof(vtx_block_node_list_t));
+   420→
+   421→    /* First pass: count nodes per block */
+   422→    for (uint32_t i = 0; i < node_count; i++) {
+   423→        vtx_node_t *node = &graph->node_table.nodes[i];
+   424→        if (node->dead) continue;
+   425→
+   426→        /* Determine which block this node belongs to */
+   427→        for (uint32_t b = 0; b < block_count; b++) {
+   428→            vtx_block_info_t *block = &graph->blocks[b];
+   429→            bool belongs = false;
+   430→
+   431→            if (node->id == block->region_node ||
+   432→                node->id == block->control_node ||
+   433→                node->id == block->memory_node) {
+   434→                belongs = true;
+   435→            } else {
+   436→                for (uint32_t j = 0; j < node->input_count; j++) {
+   437→                    if (node->inputs[j] == block->region_node ||
+   438→                        node->inputs[j] == block->control_node ||
+   439→                        node->inputs[j] == block->memory_node) {
+   440→                        belongs = true;
+   441→                        break;
+   442→                    }
+   443→                }
+   444→                if (!belongs && block->region_node < node_count) {
+   445→                    vtx_node_t *region = &graph->node_table.nodes[block->region_node];
+   446→                    if (node->bytecode_pc == region->bytecode_pc) {
+   447→                        belongs = true;
+   448→                    }
+   449→                }
+   450→            }
+   451→
+   452→            if (belongs) {
+   453→                lists[b].count++;
+   454→                break;  /* each node belongs to at most one block */
+   455→            }
+   456→        }
+   457→    }
+   458→
+   459→    /* Allocate arrays */
+   460→    for (uint32_t b = 0; b < block_count; b++) {
+   461→        if (lists[b].count > 0) {
+   462→            lists[b].nodes = vtx_arena_alloc(arena,
+   463→                lists[b].count * sizeof(vtx_nodeid_t));
+   464→            if (!lists[b].nodes) return NULL;
+   465→            lists[b].count = 0;  /* reset for second pass */
+   466→        }
+   467→    }
+   468→
+   469→    /* Second pass: fill arrays */
+   470→    for (uint32_t i = 0; i < node_count; i++) {
+   471→        vtx_node_t *node = &graph->node_table.nodes[i];
+   472→        if (node->dead) continue;
+   473→
+   474→        for (uint32_t b = 0; b < block_count; b++) {
+   475→            vtx_block_info_t *block = &graph->blocks[b];
+   476→            bool belongs = false;
+   477→
+   478→            if (node->id == block->region_node ||
+   479→                node->id == block->control_node ||
+   480→                node->id == block->memory_node) {
+   481→                belongs = true;
+   482→            } else {
+   483→                for (uint32_t j = 0; j < node->input_count; j++) {
+   484→                    if (node->inputs[j] == block->region_node ||
+   485→                        node->inputs[j] == block->control_node ||
+   486→                        node->inputs[j] == block->memory_node) {
+   487→                        belongs = true;
+   488→                        break;
+   489→                    }
+   490→                }
+   491→                if (!belongs && block->region_node < node_count) {
+   492→                    vtx_node_t *region = &graph->node_table.nodes[block->region_node];
+   493→                    if (node->bytecode_pc == region->bytecode_pc) {
+   494→                        belongs = true;
+   495→                    }
+   496→                }
+   497→            }
+   498→
+   499→            if (belongs) {
+   500→                lists[b].nodes[lists[b].count++] = node->id;
+   501→                break;
+   502→            }
+   503→        }
+   504→    }
+   505→
+   506→    return lists;
+   507→}
+   508→
+   509→/* ========================================================================== */
+   510→/* Internal: fast transfer function using pre-computed block-node lists        */
+   511→/* ========================================================================== */
+   512→/*
+   513→ * §2.1: Uses the pre-computed block_node_lists to iterate only the nodes
+   514→ * that belong to this block, instead of scanning all N nodes.
+   515→ * GraalVM: EscapeAnalysisPhase uses BlockBag for per-block iteration.
+   516→ * V8: EscapeAnalysis uses Schedule::rpo_order for per-block iteration.
+   517→ */
+   518→static void transfer_block_fast(vtx_graph_t *graph, uint32_t block_idx,
+   519→                                 vtx_pea_block_state_t *bs,
+   520→                                 vtx_node_table_t *table,
+   521→                                 const vtx_block_node_list_t *block_lists)
+   522→{
+   523→    /* Start from entry state */
+   524→    copy_escape_states(bs->exit_state, bs->entry_state, bs->state_count);
+   525→
+   526→    const vtx_block_node_list_t *list = &block_lists[block_idx];
+   527→    for (uint32_t i = 0; i < list->count; i++) {
+   528→        vtx_node_t *node = &table->nodes[list->nodes[i]];
+   529→        if (node->dead) continue;
+   530→        transfer_node(node, table, bs->exit_state, bs->state_count);
+   531→    }
+   532→}
+   533→
+   534→/* ========================================================================== */
+   535→/* Internal: compute reverse postorder for worklist                            */
+   536→/* ========================================================================== */
+   537→
+   538→static uint32_t *compute_reverse_postorder(vtx_graph_t *graph, vtx_arena_t *arena,
+   539→                                             uint32_t *rpo_count)
+   540→{
+   541→    uint32_t n = graph->block_count;
+   542→    if (n == 0) {
+   543→        *rpo_count = 0;
+   544→        return NULL;
+   545→    }
+   546→
+   547→    uint32_t *rpo = vtx_arena_alloc(arena, n * sizeof(uint32_t));
+   548→    if (!rpo) return NULL;
+   549→
+   550→    /* Simple DFS-based reverse postorder computation.
+   551→     * We start from block 0 (entry block) and traverse successors. */
+   552→    bool *visited = vtx_arena_alloc(arena, n * sizeof(bool));
+   553→    uint32_t *stack = vtx_arena_alloc(arena, n * sizeof(uint32_t));
+   554→    if (!visited || !stack) return NULL;
+   555→
+   556→    memset(visited, 0, n * sizeof(bool));
+   557→
+   558→    uint32_t rpo_idx = n; /* fill from end */
+   559→    int32_t top = 0;
+   560→    stack[0] = 0;
+   561→    visited[0] = true;
+   562→
+   563→    while (top >= 0) {
+   564→        uint32_t current = stack[top];
+   565→        bool has_unvisited_succ = false;
+   566→
+   567→        vtx_block_info_t *block = &graph->blocks[current];
+   568→        for (uint32_t i = 0; i < block->succ_count; i++) {
+   569→            uint32_t succ = block->succ_indices[i];
+   570→            if (succ < n && !visited[succ]) {
+   571→                visited[succ] = true;
+   572→                top++;
+   573→                stack[top] = succ;
+   574→                has_unvisited_succ = true;
+   575→                break;
+   576→            }
+   577→        }
+   578→
+   579→        if (!has_unvisited_succ) {
+   580→            rpo_idx--;
+   581→            rpo[rpo_idx] = current;
+   582→            top--;
+   583→        }
+   584→    }
+   585→
+   586→    *rpo_count = n - rpo_idx;
+   587→    if (rpo_idx > 0) {
+   588→        /* Some blocks were unreachable; shift the array */
+   589→        memmove(rpo, rpo + rpo_idx, *rpo_count * sizeof(uint32_t));
+   590→    }
+   591→
+   592→    return rpo;
+   593→}
+   594→
+   595→/* ========================================================================== */
+   596→/* Main analysis entry point                                                   */
+   597→/* ========================================================================== */
+   598→
+   599→vtx_pea_analysis_t *vtx_pea_run(vtx_graph_t *graph, vtx_arena_t *arena)
+   600→{
+   601→    VTX_ASSERT(graph != NULL, "graph must not be NULL");
+   602→    VTX_ASSERT(arena != NULL, "arena must not be NULL");
+   603→
+   604→    if (graph->block_count == 0) {
+   605→        /* No blocks — degenerate graph */
+   606→        return NULL;
+   607→    }
+   608→
+   609→    /* Allocate the result */
+   610→    vtx_pea_analysis_t *result = vtx_arena_alloc(arena, sizeof(vtx_pea_analysis_t));
+   611→    if (!result) return NULL;
+   612→    memset(result, 0, sizeof(*result));
+   613→
+   614→    /* Step 1: Identify all allocations */
+   615→    if (build_allocation_map(graph, &result->escape_map, arena) != 0) {
+   616→        return NULL;
+   617→    }
+   618→
+   619→    /* Step 2: Build per-block state arrays */
+   620→    if (build_block_states(graph, result, arena) != 0) {
+   621→        return NULL;
+   622→    }
+   623→
+   624→    vtx_node_table_t *table = &graph->node_table;
+   625→    uint32_t state_count = result->escape_map.state_count;
+   626→    uint32_t block_count = graph->block_count;
+   627→
+   628→    /* Step 3: Compute reverse postorder for efficient worklist */
+   629→    uint32_t rpo_count = 0;
+   630→    uint32_t *rpo = compute_reverse_postorder(graph, arena, &rpo_count);
+   631→
+   632→    /* §2.1: Pre-compute block-to-node lists to avoid O(N×B) scan
+   633→     * in transfer_block. This is built once before the worklist loop.
+   634→     * GraalVM: BlockBag in EscapeAnalysisPhase.
+   635→     * V8: Schedule::rpo_order in EscapeAnalysis. */
+   636→    vtx_block_node_list_t *block_lists = build_block_node_lists(graph, arena);
+   637→    if (!block_lists) return NULL;
+   638→
+   639→    /* Step 4: Initialize worklist with all blocks in RPO */
+   640→    /* We use a simple flag-based worklist: a block is on the worklist
+   641→     * if its `entry_changed` flag is true. */
+   642→    bool *on_worklist = vtx_arena_alloc(arena, block_count * sizeof(bool));
+   643→    if (!on_worklist) return NULL;
+   644→    memset(on_worklist, 0, block_count * sizeof(bool));
+   645→
+   646→    /* Circular buffer worklist */
+   647→    uint32_t wl_capacity = block_count + 1;
+   648→    uint32_t *worklist = vtx_arena_alloc(arena, wl_capacity * sizeof(uint32_t));
+   649→    if (!worklist) return NULL;
+   650→
+   651→    uint32_t wl_head = 0, wl_tail = 0;
+   652→
+   653→    /* Enqueue all blocks in RPO */
+   654→    for (uint32_t i = 0; i < rpo_count; i++) {
+   655→        uint32_t block_idx = rpo[i];
+   656→        worklist[wl_tail] = block_idx;
+   657→        wl_tail = (wl_tail + 1) % wl_capacity;
+   658→        on_worklist[block_idx] = true;
+   659→    }
+   660→
+   661→    /* Step 5: Iterate to fixed point.
+   662→     *
+   663→     * BUGFIX (audit #4): The old hard cap of 100 iterations was too low
+   664→     * for large CFGs. If the worklist hadn't converged by iteration 100,
+   665→     * the escape states were left in an intermediate (wrong) state.
+   666→     * Allocations that should be GlobalEscape might be marked NoEscape
+   667→     * → heap corruption from scalar replacement.
+   668→     *
+   669→     * Fix: Increase to 10000 (sufficient for any real-world CFG), and
+   670→     * if we hit the cap, conservatively mark ALL allocations as
+   671→     * GlobalEscape (safe fallback — no scalar replacement). */
+   672→    uint32_t iterations = 0;
+   673→    const uint32_t MAX_ITERATIONS = 10000; /* safety bound — was 100 */
+   674→    bool hit_cap = false;
+   675→
+   676→    while (wl_head != wl_tail && iterations < MAX_ITERATIONS) {
+   677→        iterations++;
+   678→
+   679→        uint32_t block_idx = worklist[wl_head];
+   680→        wl_head = (wl_head + 1) % wl_capacity;
+   681→        on_worklist[block_idx] = false;
+   682→
+   683→        vtx_pea_block_state_t *bs = &result->block_states[block_idx];
+   684→        vtx_block_info_t *block = &graph->blocks[block_idx];
+   685→
+   686→        /* Compute entry state as join of predecessor exit states */
+   687→        vtx_escape_state_t *new_entry = vtx_arena_alloc(arena,
+   688→            state_count * sizeof(vtx_escape_state_t));
+   689→        if (!new_entry) return NULL;
+   690→        memset(new_entry, 0, state_count * sizeof(vtx_escape_state_t));
+   691→
+   692→        if (block->pred_count == 0) {
+   693→            /* Entry block: entry state is all NoEscape (already zeroed) */
+   694→        } else {
+   695→            /* Join all predecessor exit states */
+   696→            for (uint32_t p = 0; p < block->pred_count; p++) {
+   697→                uint32_t pred_idx = block->pred_indices[p];
+   698→                if (pred_idx < block_count) {
+   699→                    join_escape_states(new_entry,
+   700→                                       result->block_states[pred_idx].exit_state,
+   701→                                       state_count);
+   702→                }
+   703→            }
+   704→        }
+   705→
+   706→        /* Check if entry state changed */
+   707→        bool entry_changed = escape_states_differ(new_entry, bs->entry_state,
+   708→                                                    state_count);
+   709→        if (entry_changed) {
+   710→            copy_escape_states(bs->entry_state, new_entry, state_count);
+   711→        }
+   712→
+   713→        /* Apply transfer function */
+   714→        vtx_escape_state_t *old_exit = vtx_arena_alloc(arena,
+   715→            state_count * sizeof(vtx_escape_state_t));
+   716→        if (!old_exit) return NULL;
+   717→        copy_escape_states(old_exit, bs->exit_state, state_count);
+   718→
+   719→        /* §2.1: Use fast transfer with pre-computed block-node lists */
+   720→        transfer_block_fast(graph, block_idx, bs, table, block_lists);
+   721→
+   722→        bool exit_changed = escape_states_differ(bs->exit_state, old_exit,
+   723→                                                   state_count);
+   724→
+   725→        /* If exit state changed, add successors to worklist */
+   726→        if (entry_changed || exit_changed) {
+   727→            for (uint32_t s = 0; s < block->succ_count; s++) {
+   728→                uint32_t succ_idx = block->succ_indices[s];
+   729→                if (succ_idx < block_count && !on_worklist[succ_idx]) {
+   730→                    worklist[wl_tail] = succ_idx;
+   731→                    wl_tail = (wl_tail + 1) % wl_capacity;
+   732→                    on_worklist[succ_idx] = true;
+   733→                }
+   734→            }
+   735→        }
+   736→    }
+   737→
+   738→    result->iterations = iterations;
+   739→
+   740→    /* If we hit the iteration cap, the escape states may not have
+   741→     * converged. Conservatively mark ALL allocations as GlobalEscape
+   742→     * to prevent incorrect scalar replacement. */
+   743→    if (iterations >= MAX_ITERATIONS) {
+   744→        hit_cap = true;
+   745→        for (uint32_t a = 0; a < result->escape_map.alloc_count; a++) {
+   746→            vtx_nodeid_t alloc_id = result->escape_map.alloc_ids[a];
+   747→            for (uint32_t b = 0; b < block_count; b++) {
+   748→                if (alloc_id < result->block_states[b].state_count) {
+   749→                    result->block_states[b].exit_state[alloc_id] = VTX_ESCAPE_GLOBAL;
+   750→                    result->block_states[b].entry_state[alloc_id] = VTX_ESCAPE_GLOBAL;
+   751→                }
+   752→            }
+   753→        }
+   754→    }
+   755→
+   756→    /* Step 6: Finalize — compute the global escape state for each allocation
+   757→     * as the join of all block exit states */
+   758→    for (uint32_t a = 0; a < result->escape_map.alloc_count; a++) {
+   759→        vtx_nodeid_t alloc_id = result->escape_map.alloc_ids[a];
+   760→        vtx_escape_state_t final_state = VTX_ESCAPE_NONE;
+   761→        for (uint32_t b = 0; b < block_count; b++) {
+   762→            if (alloc_id < result->block_states[b].state_count) {
+   763→                final_state = vtx_escape_join(final_state,
+   764→                    result->block_states[b].exit_state[alloc_id]);
+   765→            }
+   766→        }
+   767→
+   768→        result->escape_map.states[alloc_id] = final_state;
+   769→
+   770→        /* Update statistics */
+   771→        result->total_allocs++;
+   772→        switch (final_state) {
+   773→        case VTX_ESCAPE_NONE:   result->no_escape_count++; break;
+   774→        case VTX_ESCAPE_ARG:    result->arg_escape_count++; break;
+   775→        case VTX_ESCAPE_GLOBAL: result->global_escape_count++; break;
+   776→        }
+   777→    }
+   778→
+   779→    return result;
+   780→}
+   781→
+   782→/* ========================================================================== */
+   783→/* Query helpers                                                               */
+   784→/* ========================================================================== */
+   785→
+   786→vtx_escape_state_t vtx_pea_get_escape(const vtx_pea_analysis_t *analysis,
+   787→                                       vtx_nodeid_t node_id)
+   788→{
+   789→    VTX_ASSERT(analysis != NULL, "analysis must not be NULL");
+   790→    if (node_id < analysis->escape_map.state_count) {
+   791→        return analysis->escape_map.states[node_id];
+   792→    }
+   793→    return VTX_ESCAPE_GLOBAL; /* conservative default */
+   794→}
+   795→
+   796→bool vtx_pea_is_scalar_replaceable(const vtx_pea_analysis_t *analysis,
+   797→                                    vtx_nodeid_t node_id)
+   798→{
+   799→    return vtx_pea_get_escape(analysis, node_id) == VTX_ESCAPE_NONE;
+   800→}
+   801→
+   802→vtx_escape_state_t vtx_pea_block_entry_state(const vtx_pea_analysis_t *analysis,
+   803→                                              uint32_t block_idx,
+   804→                                              vtx_nodeid_t alloc_id)
+   805→{
+   806→    VTX_ASSERT(analysis != NULL, "analysis must not be NULL");
+   807→    if (block_idx < analysis->block_state_count &&
+   808→        alloc_id < analysis->block_states[block_idx].state_count) {
+   809→        return analysis->block_states[block_idx].entry_state[alloc_id];
+   810→    }
+   811→    return VTX_ESCAPE_GLOBAL;
+   812→}
+   813→
+   814→vtx_escape_state_t vtx_pea_block_exit_state(const vtx_pea_analysis_t *analysis,
+   815→                                             uint32_t block_idx,
+   816→                                             vtx_nodeid_t alloc_id)
+   817→{
+   818→    VTX_ASSERT(analysis != NULL, "analysis must not be NULL");
+   819→    if (block_idx < analysis->block_state_count &&
+   820→        alloc_id < analysis->block_states[block_idx].state_count) {
+   821→        return analysis->block_states[block_idx].exit_state[alloc_id];
+   822→    }
+   823→    return VTX_ESCAPE_GLOBAL;
+   824→}
+   825→

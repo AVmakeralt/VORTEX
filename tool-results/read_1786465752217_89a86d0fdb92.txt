@@ -1,0 +1,677 @@
+     1→     1→/* ============================================================================ *
+     2→     2→ * AI-MODIFIED CODE
+     3→     3→ *
+     4→     4→ * This file was originally written by a human developer. It has been
+     5→     5→ * substantially modified by an AI assistant (GLM/Z.ai) for bug fixes,
+     6→     6→ * performance improvements, and feature additions.
+     7→     7→ *
+     8→     8→ * Original human-written structure is preserved; AI changes are marked
+     9→     9→ * with bug fix IDs (B1-B28) or perf notes (Perf 1-10) in comments.
+    10→    10→ *
+    11→    11→ * If reviewing, please verify AI changes against the original logic.
+    12→    12→ * ============================================================================ */
+    13→    13→
+    14→    14→/**
+    15→    15→ * VORTEX Object Materialization
+    16→    16→ *
+    17→    17→ * Inserts NewObject + StoreField nodes at escape/deopt points to reify
+    18→    18→ * scalar-replaced objects back into real heap objects.
+    19→    19→ */
+    20→    20→
+    21→    21→#include "pea/materialize.h"
+    22→    22→#include <stdlib.h>
+    23→    23→#include <string.h>
+    24→    24→
+    25→    25→/* ========================================================================== */
+    26→    26→/* Internal: check if opcode is an allocation                                  */
+    27→    27→/* ========================================================================== */
+    28→    28→
+    29→    29→static inline bool is_allocation(vtx_node_opcode_t opcode)
+    30→    30→{
+    31→    31→    return opcode == VTX_OP_NewObject ||
+    32→    32→           opcode == VTX_OP_NewArray  ||
+    33→    33→           opcode == VTX_OP_Allocate;
+    34→    34→}
+    35→    35→
+    36→    36→/* ========================================================================== */
+    37→    37→/* Internal: find all field values for a scalar-replaced allocation            */
+    38→    38→/* ========================================================================== */
+    39→    39→
+    40→    40→/**
+    41→    41→ * Collect the current values of all fields of a scalar-replaced allocation.
+    42→    42→ * For each StoreField that targets this allocation, record the stored value.
+    43→    43→ * Returns the field count and fills the offsets/values arrays.
+    44→    44→ *
+    45→    45→ * B22 fix: The previous implementation iterated over all StoreField nodes
+    46→    46→ * in TABLE ORDER (i.e., node-creation order) and applied "last write wins"
+    47→    47→ * based on that order. But node-creation order does NOT match execution
+    48→    48→ * order after inlining/GVN/LICM passes — a StoreField created later (higher
+    49→    49→ * node id) might actually execute BEFORE an earlier-created StoreField if
+    50→    50→ * it was moved or cloned by a transformation.
+    51→    51→ *
+    52→    52→ * The fix: walk the MEMORY CHAIN (threaded through StoreField.inputs[0])
+    53→    53→ * to determine execution order. Each StoreField's first input is the
+    54→    54→ * previous memory state — either the alloc itself, an earlier StoreField,
+    55→    55→ * or some other memory-producing node. Following this chain from head to
+    56→    56→ * tail gives us the writes in execution order; overwriting as we go means
+    57→    57→ * the LAST write in execution order wins for each field offset.
+    58→    58→ */
+    59→    59→static uint32_t collect_field_values(vtx_graph_t *graph, vtx_nodeid_t alloc_id,
+    60→    60→                                      uint32_t *offsets, vtx_nodeid_t *values,
+    61→    61→                                      uint32_t max_fields)
+    62→    62→{
+    63→    63→    vtx_node_table_t *table = &graph->node_table;
+    64→    64→    uint32_t count = 0;
+    65→    65→
+    66→    66→    /* Step 1: collect all StoreField node IDs targeting this alloc.
+    67→    67→     *
+    68→    68→     * PEA-001 fix: the old code used a fixed [256] buffer and stopped
+    69→    69→     * at sf_count < MAX_SF. An allocation with >256 StoreField nodes
+    70→    70→     * (e.g., after aggressive loop unrolling, or a large initializer)
+    71→    71→     * would silently drop stores beyond 256, producing incorrect
+    72→    72→     * materialization (stale field values). Fix: first count the
+    73→    73→     * stores, then heap-allocate an array sized to the actual count. */
+    74→    74→    uint32_t sf_total = 0;
+    75→    75→    for (uint32_t i = 0; i < table->count; i++) {
+    76→    76→        vtx_node_t *n = &table->nodes[i];
+    77→    77→        if (n->dead || n->opcode != VTX_OP_StoreField) continue;
+    78→    78→        if (n->input_count < 2) continue;
+    79→    79→        vtx_nodeid_t recv = n->inputs[n->input_count - 2];
+    80→    80→        if (recv != alloc_id) continue;
+    81→    81→        sf_total++;
+    82→    82→    }
+    83→    83→
+    84→    84→    if (sf_total == 0) return 0;
+    85→    85→
+    86→    86→    vtx_nodeid_t *sf_nodes = (vtx_nodeid_t *)malloc(sf_total * sizeof(vtx_nodeid_t));
+    87→    87→    if (sf_nodes == NULL) return 0; /* OOM — bail out of PEA for this alloc */
+    88→    88→    uint32_t sf_count = 0;
+    89→    89→
+    90→    90→    for (uint32_t i = 0; i < table->count && sf_count < sf_total; i++) {
+    91→    91→        vtx_node_t *node = &table->nodes[i];
+    92→    92→        if (node->dead) continue;
+    93→    93→        if (node->opcode != VTX_OP_StoreField) continue;
+    94→    94→        if (node->input_count < 2) continue;
+    95→    95→
+    96→    96→        vtx_nodeid_t receiver_id = node->inputs[node->input_count - 2];
+    97→    97→        if (receiver_id != alloc_id) continue;
+    98→    98→
+    99→    99→        sf_nodes[sf_count++] = node->id;
+   100→   100→    }
+   101→   101→
+   102→   102→    if (sf_count == 0) return 0;
+   103→   103→
+   104→   104→    /* Step 2: find the chain HEAD — the StoreField whose memory input
+   105→   105→     * is NOT another StoreField in sf_nodes. (The head's mem input is
+   106→   106→     * typically the alloc itself or some entry memory state.) */
+   107→   107→    vtx_nodeid_t head = VTX_NODEID_INVALID;
+   108→   108→    for (uint32_t i = 0; i < sf_count; i++) {
+   109→   109→        vtx_node_t *node = vtx_node_get(table, sf_nodes[i]);
+   110→   110→        if (!node || node->input_count < 1) continue;
+   111→   111→        vtx_nodeid_t mem_in = node->inputs[0];
+   112→   112→
+   113→   113→        bool is_chain_member = false;
+   114→   114→        for (uint32_t j = 0; j < sf_count; j++) {
+   115→   115→            if (sf_nodes[j] == mem_in) { is_chain_member = true; break; }
+   116→   116→        }
+   117→   117→        if (!is_chain_member) {
+   118→   118→            head = sf_nodes[i];
+   119→   119→            break;
+   120→   120→        }
+   121→   121→    }
+   122→   122→    /* Fallback: if no head found (e.g., a cycle, which shouldn't happen
+   123→   123→     * in valid SSA), use the first node in table order. */
+   124→   124→    if (head == VTX_NODEID_INVALID) head = sf_nodes[0];
+   125→   125→
+   126→   126→    /* Step 3: walk forward from head, overwriting field values as we
+   127→   127→     * encounter later writes. The last write in the chain wins (which
+   128→   128→     * is the last in EXECUTION order, not table order). */
+   129→   129→    vtx_nodeid_t cur = head;
+   130→   130→    uint32_t safety = 0;
+   131→   131→    while (cur != VTX_NODEID_INVALID && safety++ < sf_count + 1) {
+   132→   132→        vtx_node_t *node = vtx_node_get(table, cur);
+   133→   133→        if (!node || node->input_count < 2) break;
+   134→   134→
+   135→   135→        uint32_t field_offset = node->field_offset;
+   136→   136→        vtx_nodeid_t value_id = node->inputs[node->input_count - 1];
+   137→   137→
+   138→   138→        bool found = false;
+   139→   139→        for (uint32_t k = 0; k < count; k++) {
+   140→   140→            if (offsets[k] == field_offset) {
+   141→   141→                values[k] = value_id; /* overwrite: last write in chain wins */
+   142→   142→                found = true;
+   143→   143→                break;
+   144→   144→            }
+   145→   145→        }
+   146→   146→        if (!found && count < max_fields) {
+   147→   147→            offsets[count] = field_offset;
+   148→   148→            values[count]  = value_id;
+   149→   149→            count++;
+   150→   150→        }
+   151→   151→
+   152→   152→        /* Find the next StoreField in the chain — the one whose memory
+   153→   153→         * input is `cur`. */
+   154→   154→        vtx_nodeid_t next = VTX_NODEID_INVALID;
+   155→   155→        for (uint32_t j = 0; j < sf_count; j++) {
+   156→   156→            vtx_node_t *sf = vtx_node_get(table, sf_nodes[j]);
+   157→   157→            if (!sf || sf->input_count < 1) continue;
+   158→   158→            if (sf->inputs[0] == cur) {
+   159→   159→                next = sf_nodes[j];
+   160→   160→                break;
+   161→   161→            }
+   162→   162→        }
+   163→   163→        cur = next;
+   164→   164→    }
+   165→   165→
+   166→   166→    /* PEA-001 fix: free the heap-allocated sf_nodes array. */
+   167→   167→    free(sf_nodes);
+   168→   168→    return count;
+   169→   169→}
+   170→   170→
+   171→   171→/* ========================================================================== */
+   172→   172→/* Internal: collect field values from virtual object tracking                 */
+   173→   173→/* ========================================================================== */
+   174→   174→
+   175→   175→/**
+   176→   176→ * Collect field values from the virtual object's field map.
+   177→   177→ * This is used when virtual.c has already rewritten StoreField nodes
+   178→   178→ * (marking them dead) and moved field values into the virtual object's
+   179→   179→ * field map. Reading from dead StoreField nodes would yield stale values,
+   180→   180→ * so we read from the virtual result instead.
+   181→   181→ */
+   182→   182→static uint32_t collect_field_values_from_virtual(
+   183→   183→    const vtx_virtual_result_t *virtual_result,
+   184→   184→    vtx_nodeid_t alloc_id,
+   185→   185→    uint32_t *offsets,
+   186→   186→    vtx_nodeid_t *values,
+   187→   187→    uint32_t max_fields)
+   188→   188→{
+   189→   189→    const vtx_virtual_obj_t *vobj = vtx_virtual_get_obj(virtual_result, alloc_id);
+   190→   190→    if (vobj == NULL) return 0;
+   191→   191→
+   192→   192→    uint32_t count = 0;
+   193→   193→    for (uint32_t f = 0; f < vobj->field_count && count < max_fields; f++) {
+   194→   194→        offsets[count] = vobj->field_offsets[f];
+   195→   195→        values[count]  = vobj->field_values[f];
+   196→   196→        count++;
+   197→   197→    }
+   198→   198→    return count;
+   199→   199→}
+   200→   200→
+   201→   201→/* ========================================================================== */
+   202→   202→/* Internal: check if a node references a scalar-replaced allocation           */
+   203→   203→/* ========================================================================== */
+   204→   204→
+   205→   205→/**
+   206→   206→ * Check if any input of the given node is a scalar-replaced allocation.
+   207→   207→ * Returns the allocation NodeID if found, VTX_NODEID_INVALID otherwise.
+   208→   208→ */
+   209→   209→static vtx_nodeid_t find_scalar_replaced_input(vtx_node_t *node,
+   210→   210→                                                 const vtx_pea_analysis_t *analysis,
+   211→   211→                                                 vtx_node_table_t *table)
+   212→   212→{
+   213→   213→    for (uint32_t i = 0; i < node->input_count; i++) {
+   214→   214→        vtx_nodeid_t input_id = node->inputs[i];
+   215→   215→        vtx_node_t *input = vtx_node_get(table, input_id);
+   216→   216→        if (!input || input->dead) continue;
+   217→   217→
+   218→   218→        if (is_allocation(input->opcode) &&
+   219→   219→            vtx_pea_is_scalar_replaceable(analysis, input_id)) {
+   220→   220→            return input_id;
+   221→   221→        }
+   222→   222→    }
+   223→   223→    return VTX_NODEID_INVALID;
+   224→   224→}
+   225→   225→
+   226→   226→/* ========================================================================== */
+   227→   227→/* Internal: add a materialization point                                       */
+   228→   228→/* ========================================================================== */
+   229→   229→
+   230→   230→static vtx_materialize_point_t *add_materialize_point(
+   231→   231→    vtx_materialize_result_t *result, vtx_arena_t *arena)
+   232→   232→{
+   233→   233→    if (result->point_count >= result->point_capacity) {
+   234→   234→        uint32_t new_cap = result->point_capacity == 0 ? 16 :
+   235→   235→                           result->point_capacity * 2;
+   236→   236→        vtx_materialize_point_t *new_pts = vtx_arena_alloc(arena,
+   237→   237→            new_cap * sizeof(vtx_materialize_point_t));
+   238→   238→        if (!new_pts) return NULL;
+   239→   239→        if (result->points && result->point_count > 0) {
+   240→   240→            memcpy(new_pts, result->points,
+   241→   241→                   result->point_count * sizeof(vtx_materialize_point_t));
+   242→   242→        }
+   243→   243→        result->points = new_pts;
+   244→   244→        result->point_capacity = new_cap;
+   245→   245→    }
+   246→   246→
+   247→   247→    vtx_materialize_point_t *pt = &result->points[result->point_count];
+   248→   248→    memset(pt, 0, sizeof(*pt));
+   249→   249→    result->point_count++;
+   250→   250→    return pt;
+   251→   251→}
+   252→   252→
+   253→   253→/* ========================================================================== */
+   254→   254→/* Internal: insert materialization code into the graph                        */
+   255→   255→/* ========================================================================== */
+   256→   256→
+   257→   257→/**
+   258→   258→ * Insert NewObject + StoreField nodes for a single materialization point.
+   259→   259→ * The materialized object node replaces references to the scalar-replaced
+   260→   260→ * allocation at the escape point.
+   261→   261→ *
+   262→   262→ * If pt->predecessor_control is not VTX_NODEID_INVALID, the NewObject
+   263→   263→ * node is anchored to that control node as its first input. This ensures
+   264→   264→ * the scheduler places the materialization in the predecessor block
+   265→   265→ * (correct for Phi merge-point materialization per SSA semantics).
+   266→   266→ * The last StoreField node becomes the new memory state for subsequent
+   267→   267→ * nodes in the predecessor block.
+   268→   268→ */
+   269→   269→static int insert_materialization_code(vtx_graph_t *graph,
+   270→   270→                                        vtx_materialize_point_t *pt,
+   271→   271→                                        vtx_arena_t *arena)
+   272→   272→{
+   273→   273→    vtx_node_table_t *table = &graph->node_table;
+   274→   274→
+   275→   275→    /* Create NewObject node */
+   276→   276→    vtx_nodeid_t new_obj_id = vtx_node_create(table, VTX_OP_NewObject);
+   277→   277→    if (new_obj_id == VTX_NODEID_INVALID) return -1;
+   278→   278→
+   279→   279→    vtx_node_t *new_obj = vtx_node_get(table, new_obj_id);
+   280→   280→    new_obj->type_id = pt->type_id;
+   281→   281→    new_obj->type    = VTX_TYPE_Ptr;
+   282→   282→    new_obj->flags   = vtx_nf_union(VTX_NF_SIDE_EFFECT, VTX_NF_MEMORY);
+   283→   283→
+   284→   284→    /* If a predecessor control node is specified, add it as the first
+   285→   285→     * input to the NewObject. This anchors the allocation to the
+   286→   286→     * predecessor block's control flow, ensuring the scheduler places
+   287→   287→     * it in the correct block. */
+   288→   288→    if (pt->predecessor_control != VTX_NODEID_INVALID) {
+   289→   289→        vtx_node_add_input(table, new_obj_id, pt->predecessor_control);
+   290→   290→    }
+   291→   291→
+   292→   292→    pt->materialized_obj_id = new_obj_id;
+   293→   293→
+   294→   294→    /* Track the current memory state for chaining StoreField nodes.
+   295→   295→     * Initially, the NewObject produces the new memory state. */
+   296→   296→    vtx_nodeid_t mem_state = new_obj_id;
+   297→   297→
+   298→   298→    /* Create StoreField nodes for each field */
+   299→   299→    for (uint32_t f = 0; f < pt->field_count; f++) {
+   300→   300→        vtx_nodeid_t store_id = vtx_node_create(table, VTX_OP_StoreField);
+   301→   301→        if (store_id == VTX_NODEID_INVALID) return -1;
+   302→   302→
+   303→   303→        vtx_node_t *store = vtx_node_get(table, store_id);
+   304→   304→        store->field_offset = pt->field_offsets[f];
+   305→   305→        store->type    = VTX_TYPE_Void;
+   306→   306→        store->flags   = vtx_nf_union(VTX_NF_SIDE_EFFECT, VTX_NF_MEMORY);
+   307→   307→
+   308→   308→        /* Add inputs: memory chain, receiver (new object), value (scalar local).
+   309→   309→         * The memory chain is threaded: each StoreField takes the previous
+   310→   310→         * memory state as input, ensuring correct ordering. */
+   311→   311→        vtx_node_add_input(table, store_id, mem_state);  /* memory chain */
+   312→   312→        vtx_node_add_input(table, store_id, new_obj_id); /* receiver */
+   313→   313→        vtx_node_add_input(table, store_id, pt->field_local_ids[f]); /* value */
+   314→   314→
+   315→   315→        /* This StoreField becomes the new memory state */
+   316→   316→        mem_state = store_id;
+   317→   317→    }
+   318→   318→
+   319→   319→    return 0;
+   320→   320→}
+   321→   321→
+   322→   322→/* ========================================================================== */
+   323→   323→/* Main entry point                                                            */
+   324→   324→/* ========================================================================== */
+   325→   325→
+   326→   326→vtx_materialize_result_t *vtx_materialize_run(vtx_graph_t *graph,
+   327→   327→                                                const vtx_pea_analysis_t *analysis,
+   328→   328→                                                const vtx_virtual_result_t *virtual_result,
+   329→   329→                                                vtx_arena_t *arena)
+   330→   330→{
+   331→   331→    VTX_ASSERT(graph != NULL, "graph must not be NULL");
+   332→   332→    VTX_ASSERT(analysis != NULL, "analysis must not be NULL");
+   333→   333→    VTX_ASSERT(arena != NULL, "arena must not be NULL");
+   334→   334→
+   335→   335→    vtx_node_table_t *table = &graph->node_table;
+   336→   336→
+   337→   337→    /* Allocate result */
+   338→   338→    vtx_materialize_result_t *result = vtx_arena_alloc(arena,
+   339→   339→        sizeof(vtx_materialize_result_t));
+   340→   340→    if (!result) return NULL;
+   341→   341→    memset(result, 0, sizeof(*result));
+   342→   342→
+   343→   343→    /* Maximum fields per object (conservative bound) */
+   344→   344→    const uint32_t MAX_FIELDS_PER_OBJ = 32;
+   345→   345→
+   346→   346→    /* Scan for escape/deopt points that reference scalar-replaced allocations */
+   347→   347→    for (uint32_t i = 0; i < table->count; i++) {
+   348→   348→        vtx_node_t *node = &table->nodes[i];
+   349→   349→        if (node->dead) continue;
+   350→   350→
+   351→   351→        /* Check if this node is a deopt point or escape point */
+   352→   352→        bool is_escape_point = false;
+   353→   353→        bool is_deopt_point = false;
+   354→   354→
+   355→   355→        switch (node->opcode) {
+   356→   356→        case VTX_OP_Deopt:
+   357→   357→        case VTX_OP_DeoptGuard:
+   358→   358→            is_deopt_point = true;
+   359→   359→            is_escape_point = true;
+   360→   360→            break;
+   361→   361→        case VTX_OP_CallStatic:
+   362→   362→        case VTX_OP_CallVirtual:
+   363→   363→        case VTX_OP_CallInterface:
+   364→   364→        case VTX_OP_CallRuntime:
+   365→   365→            is_escape_point = true;
+   366→   366→            break;
+   367→   367→        case VTX_OP_Return:
+   368→   368→            is_escape_point = true;
+   369→   369→            break;
+   370→   370→        default:
+   371→   371→            break;
+   372→   372→        }
+   373→   373→
+   374→   374→        if (!is_escape_point) continue;
+   375→   375→
+   376→   376→        /* Find scalar-replaced allocations referenced by this node */
+   377→   377→        for (uint32_t inp = 0; inp < node->input_count; inp++) {
+   378→   378→            vtx_nodeid_t input_id = node->inputs[inp];
+   379→   379→            vtx_node_t *input_node = vtx_node_get(table, input_id);
+   380→   380→            if (!input_node || input_node->dead) continue;
+   381→   381→
+   382→   382→            /* Check if this input is a scalar-replaced allocation */
+   383→   383→            if (!is_allocation(input_node->opcode)) continue;
+   384→   384→            if (!vtx_pea_is_scalar_replaceable(analysis, input_id)) continue;
+   385→   385→
+   386→   386→            /* This allocation is scalar-replaced and referenced at an
+   387→   387→             * escape/deopt point — it must be materialized. */
+   388→   388→
+   389→   389→            /* Check if we already have a materialization point for this
+   390→   390→             * (alloc, escape_node) pair */
+   391→   391→            bool already_materialized = false;
+   392→   392→            for (uint32_t p = 0; p < result->point_count; p++) {
+   393→   393→                if (result->points[p].alloc_id == input_id &&
+   394→   394→                    result->points[p].escape_node_id == node->id) {
+   395→   395→                    already_materialized = true;
+   396→   396→                    break;
+   397→   397→                }
+   398→   398→            }
+   399→   399→            if (already_materialized) continue;
+   400→   400→
+   401→   401→            /* Create a new materialization point */
+   402→   402→            vtx_materialize_point_t *pt = add_materialize_point(result, arena);
+   403→   403→            if (!pt) return NULL;
+   404→   404→
+   405→   405→            pt->escape_node_id = node->id;
+   406→   406→            pt->alloc_id       = input_id;
+   407→   407→            pt->type_id        = input_node->type_id;
+   408→   408→
+   409→   409→            /* Collect field values */
+   410→   410→            pt->field_offsets = vtx_arena_alloc(arena,
+   411→   411→                MAX_FIELDS_PER_OBJ * sizeof(uint32_t));
+   412→   412→            pt->field_local_ids = vtx_arena_alloc(arena,
+   413→   413→                MAX_FIELDS_PER_OBJ * sizeof(vtx_nodeid_t));
+   414→   414→            if (!pt->field_offsets || !pt->field_local_ids) return NULL;
+   415→   415→
+   416→   416→            /* F4 fix: when virtual_result is available and the allocation
+   417→   417→             * is classified as virtual, read field values from the virtual
+   418→   418→             * object's field map instead of scanning dead StoreField nodes.
+   419→   419→             * virtual.c marks StoreField nodes as dead after rewriting them
+   420→   420→             * to local variables, so collect_field_values() would miss them. */
+   421→   421→            if (virtual_result != NULL &&
+   422→   422→                vtx_virtual_is_virtual(virtual_result, input_id)) {
+   423→   423→                pt->field_count = collect_field_values_from_virtual(
+   424→   424→                    virtual_result, input_id, pt->field_offsets,
+   425→   425→                    pt->field_local_ids, MAX_FIELDS_PER_OBJ);
+   426→   426→            } else {
+   427→   427→                pt->field_count = collect_field_values(
+   428→   428→                    graph, input_id, pt->field_offsets, pt->field_local_ids,
+   429→   429→                    MAX_FIELDS_PER_OBJ);
+   430→   430→            }
+   431→   431→
+   432→   432→            /* Insert materialization code */
+   433→   433→            if (insert_materialization_code(graph, pt, arena) != 0) {
+   434→   434→                return NULL;
+   435→   435→            }
+   436→   436→
+   437→   437→            /* Replace the reference to the scalar-replaced allocation
+   438→   438→             * with the materialized object */
+   439→   439→            vtx_node_replace_input(table, node->id, inp,
+   440→   440→                                    pt->materialized_obj_id);
+   441→   441→
+   442→   442→            result->objects_materialized++;
+   443→   443→            result->fields_stored += pt->field_count;
+   444→   444→            if (is_deopt_point) {
+   445→   445→                result->deopt_points_handled++;
+   446→   446→            }
+   447→   447→        }
+   448→   448→    }
+   449→   449→
+   450→   450→    /* Also scan FrameState nodes: they may reference scalar-replaced
+   451→   451→     * allocations in the local/stack arrays */
+   452→   452→    for (uint32_t i = 0; i < table->count; i++) {
+   453→   453→        vtx_node_t *node = &table->nodes[i];
+   454→   454→        if (node->dead || node->opcode != VTX_OP_FrameState) continue;
+   455→   455→
+   456→   456→        /* FrameState nodes have inputs: [control, locals..., stack..., monitors...] */
+   457→   457→        for (uint32_t inp = 0; inp < node->input_count; inp++) {
+   458→   458→            vtx_nodeid_t input_id = node->inputs[inp];
+   459→   459→            vtx_node_t *input_node = vtx_node_get(table, input_id);
+   460→   460→            if (!input_node || input_node->dead) continue;
+   461→   461→
+   462→   462→            if (!is_allocation(input_node->opcode)) continue;
+   463→   463→            if (!vtx_pea_is_scalar_replaceable(analysis, input_id)) continue;
+   464→   464→
+   465→   465→            /* This FrameState references a scalar-replaced allocation.
+   466→   466→             * It must be materialized. */
+   467→   467→            bool already_materialized = false;
+   468→   468→            for (uint32_t p = 0; p < result->point_count; p++) {
+   469→   469→                if (result->points[p].alloc_id == input_id &&
+   470→   470→                    result->points[p].escape_node_id == node->id) {
+   471→   471→                    already_materialized = true;
+   472→   472→                    /* Already have a materialization point — just replace
+   473→   473→                     * the FrameState input with the materialized object */
+   474→   474→                    vtx_node_replace_input(table, node->id, inp,
+   475→   475→                                            result->points[p].materialized_obj_id);
+   476→   476→                    break;
+   477→   477→                }
+   478→   478→            }
+   479→   479→
+   480→   480→            if (already_materialized) continue;
+   481→   481→
+   482→   482→            /* Create materialization point for the FrameState */
+   483→   483→            vtx_materialize_point_t *pt = add_materialize_point(result, arena);
+   484→   484→            if (!pt) return NULL;
+   485→   485→
+   486→   486→            pt->escape_node_id = node->id;
+   487→   487→            pt->alloc_id       = input_id;
+   488→   488→
+   489→   489→            vtx_node_t *alloc_node = vtx_node_get(table, input_id);
+   490→   490→            pt->type_id = alloc_node ? alloc_node->type_id : 0;
+   491→   491→
+   492→   492→            pt->field_offsets = vtx_arena_alloc(arena,
+   493→   493→                MAX_FIELDS_PER_OBJ * sizeof(uint32_t));
+   494→   494→            pt->field_local_ids = vtx_arena_alloc(arena,
+   495→   495→                MAX_FIELDS_PER_OBJ * sizeof(vtx_nodeid_t));
+   496→   496→            if (!pt->field_offsets || !pt->field_local_ids) return NULL;
+   497→   497→
+   498→   498→            /* F4 fix: use virtual field map when available */
+   499→   499→            if (virtual_result != NULL &&
+   500→   500→                vtx_virtual_is_virtual(virtual_result, input_id)) {
+   501→   501→                pt->field_count = collect_field_values_from_virtual(
+   502→   502→                    virtual_result, input_id, pt->field_offsets,
+   503→   503→                    pt->field_local_ids, MAX_FIELDS_PER_OBJ);
+   504→   504→            } else {
+   505→   505→                pt->field_count = collect_field_values(
+   506→   506→                    graph, input_id, pt->field_offsets, pt->field_local_ids,
+   507→   507→                    MAX_FIELDS_PER_OBJ);
+   508→   508→            }
+   509→   509→
+   510→   510→            if (insert_materialization_code(graph, pt, arena) != 0) {
+   511→   511→                return NULL;
+   512→   512→            }
+   513→   513→
+   514→   514→            vtx_node_replace_input(table, node->id, inp,
+   515→   515→                                    pt->materialized_obj_id);
+   516→   516→
+   517→   517→            result->objects_materialized++;
+   518→   518→            result->fields_stored += pt->field_count;
+   519→   519→            result->deopt_points_handled++;
+   520→   520→        }
+   521→   521→    }
+   522→   522→
+   523→   523→    /* ---- Phase 3: Handle Phi merge points ----
+   524→   524→     *
+   525→   525→     * When a Phi node merges a scalar-replaced virtual object with another
+   526→   526→     * value (either another virtual object or a real heap object), the
+   527→   527→     * virtual object must be materialized in the predecessor block that
+   528→   528→     * corresponds to the virtual input. Otherwise, the Phi would try to
+   529→   529→     * merge a "virtual" (scalar-replaced) object with a real pointer,
+   530→   530→     * which is type-incorrect.
+   531→   531→     *
+   532→   532→     * For each Phi node that has one or more virtual object inputs:
+   533→   533→     *   1. Identify which inputs are virtual (scalar-replaced allocations)
+   534→   534→     *   2. For each virtual input, determine the predecessor block that
+   535→   535→     *      corresponds to this input (Phi input[i] comes from the i-th
+   536→   536→     *      predecessor of the Phi's Region node)
+   537→   537→     *   3. Emit the allocation + field stores (materialization) in that
+   538→   538→     *      predecessor block, anchored to the predecessor's terminal
+   539→   539→     *      control node
+   540→   540→     *   4. Replace the virtual input with the materialized object
+   541→   541→     *
+   542→   542→     * This ensures that the Phi only merges concrete heap pointers, and
+   543→   543→     * the materialized object exists before control flow reaches the Phi.
+   544→   544→     *
+   545→   545→     * In the SoN IR, a Phi node's layout is:
+   546→   546→     *   Phi->inputs[0] = Region node
+   547→   547→     *   Phi->inputs[1..N] = values from predecessors 0..N-1
+   548→   548→     *   Region->inputs[0..N-1] = control from predecessors 0..N-1
+   549→   549→     * So Phi->inputs[inp] (inp >= 1) corresponds to
+   550→   550→     *   Region->inputs[inp - 1] (the predecessor's control output).
+   551→   551→     */
+   552→   552→    for (uint32_t i = 0; i < table->count; i++) {
+   553→   553→        vtx_node_t *node = &table->nodes[i];
+   554→   554→        if (node->dead || node->opcode != VTX_OP_Phi) continue;
+   555→   555→
+   556→   556→        /* The Phi's first input is the Region node */
+   557→   557→        vtx_nodeid_t region_id = (node->input_count > 0)
+   558→   558→                                 ? node->inputs[0]
+   559→   559→                                 : VTX_NODEID_INVALID;
+   560→   560→        vtx_node_t *region = vtx_node_get(table, region_id);
+   561→   561→
+   562→   562→        /* Check each input of the Phi for scalar-replaced allocations */
+   563→   563→        for (uint32_t inp = 0; inp < node->input_count; inp++) {
+   564→   564→            vtx_nodeid_t input_id = node->inputs[inp];
+   565→   565→            vtx_node_t *input_node = vtx_node_get(table, input_id);
+   566→   566→            if (!input_node || input_node->dead) continue;
+   567→   567→
+   568→   568→            if (!is_allocation(input_node->opcode)) continue;
+   569→   569→            if (!vtx_pea_is_scalar_replaceable(analysis, input_id)) continue;
+   570→   570→
+   571→   571→            /* This Phi input is a scalar-replaced allocation that
+   572→   572→             * must be materialized in the predecessor block. */
+   573→   573→
+   574→   574→            /* Determine the predecessor control node for this input.
+   575→   575→             * Phi input[inp] corresponds to Region input[inp - 1].
+   576→   576→             * (Input 0 of the Phi is the Region itself, value inputs
+   577→   577→             * start at index 1 and map 1:1 to Region predecessor index.) */
+   578→   578→            vtx_nodeid_t pred_control = VTX_NODEID_INVALID;
+   579→   579→            if (inp >= 1 && region && inp - 1 < region->input_count) {
+   580→   580→                pred_control = region->inputs[inp - 1];
+   581→   581→            }
+   582→   582→
+   583→   583→            bool already_materialized = false;
+   584→   584→            for (uint32_t p = 0; p < result->point_count; p++) {
+   585→   585→                if (result->points[p].alloc_id == input_id &&
+   586→   586→                    result->points[p].escape_node_id == node->id) {
+   587→   587→                    already_materialized = true;
+   588→   588→                    /* Replace the Phi input with the already-materialized object */
+   589→   589→                    vtx_node_replace_input(table, node->id, inp,
+   590→   590→                                            result->points[p].materialized_obj_id);
+   591→   591→                    break;
+   592→   592→                }
+   593→   593→            }
+   594→   594→
+   595→   595→            if (already_materialized) continue;
+   596→   596→
+   597→   597→            /* Create a materialization point for the Phi merge */
+   598→   598→            vtx_materialize_point_t *pt = add_materialize_point(result, arena);
+   599→   599→            if (!pt) return NULL;
+   600→   600→
+   601→   601→            pt->escape_node_id = node->id;  /* Phi is the escape point */
+   602→   602→            pt->alloc_id       = input_id;
+   603→   603→            pt->predecessor_control = pred_control; /* anchor to predecessor */
+   604→   604→
+   605→   605→            vtx_node_t *alloc_node = vtx_node_get(table, input_id);
+   606→   606→            pt->type_id = alloc_node ? alloc_node->type_id : 0;
+   607→   607→
+   608→   608→            pt->field_offsets = vtx_arena_alloc(arena,
+   609→   609→                MAX_FIELDS_PER_OBJ * sizeof(uint32_t));
+   610→   610→            pt->field_local_ids = vtx_arena_alloc(arena,
+   611→   611→                MAX_FIELDS_PER_OBJ * sizeof(vtx_nodeid_t));
+   612→   612→            if (!pt->field_offsets || !pt->field_local_ids) return NULL;
+   613→   613→
+   614→   614→            /* F4 fix: use virtual field map when available */
+   615→   615→            if (virtual_result != NULL &&
+   616→   616→                vtx_virtual_is_virtual(virtual_result, input_id)) {
+   617→   617→                pt->field_count = collect_field_values_from_virtual(
+   618→   618→                    virtual_result, input_id, pt->field_offsets,
+   619→   619→                    pt->field_local_ids, MAX_FIELDS_PER_OBJ);
+   620→   620→            } else {
+   621→   621→                pt->field_count = collect_field_values(
+   622→   622→                    graph, input_id, pt->field_offsets, pt->field_local_ids,
+   623→   623→                    MAX_FIELDS_PER_OBJ);
+   624→   624→            }
+   625→   625→
+   626→   626→            /* Insert materialization code (NewObject + StoreField).
+   627→   627→             * The predecessor_control field is set, so the NewObject
+   628→   628→             * will be anchored to the predecessor block's control node,
+   629→   629→             * ensuring correct placement. */
+   630→   630→            if (insert_materialization_code(graph, pt, arena) != 0) {
+   631→   631→                return NULL;
+   632→   632→            }
+   633→   633→
+   634→   634→            /* Replace the Phi's input with the materialized object */
+   635→   635→            vtx_node_replace_input(table, node->id, inp,
+   636→   636→                                    pt->materialized_obj_id);
+   637→   637→
+   638→   638→            result->objects_materialized++;
+   639→   639→            result->fields_stored += pt->field_count;
+   640→   640→            /* Phi merge points are not deopt points per se, but the
+   641→   641→             * materialization is needed for correctness. */
+   642→   642→        }
+   643→   643→    }
+   644→   644→
+   645→   645→    return result;
+   646→   646→}
+   647→   647→
+   648→   648→/* ========================================================================== */
+   649→   649→/* Query helpers                                                               */
+   650→   650→/* ========================================================================== */
+   651→   651→
+   652→   652→vtx_nodeid_t vtx_materialize_get_obj(const vtx_materialize_result_t *result,
+   653→   653→                                      vtx_nodeid_t alloc_id,
+   654→   654→                                      vtx_nodeid_t escape_node_id)
+   655→   655→{
+   656→   656→    VTX_ASSERT(result != NULL, "result must not be NULL");
+   657→   657→    for (uint32_t i = 0; i < result->point_count; i++) {
+   658→   658→        if (result->points[i].alloc_id == alloc_id &&
+   659→   659→            result->points[i].escape_node_id == escape_node_id) {
+   660→   660→            return result->points[i].materialized_obj_id;
+   661→   661→        }
+   662→   662→    }
+   663→   663→    return VTX_NODEID_INVALID;
+   664→   664→}
+   665→   665→
+   666→   666→bool vtx_materialize_is_materialized(const vtx_materialize_result_t *result,
+   667→   667→                                      vtx_nodeid_t alloc_id)
+   668→   668→{
+   669→   669→    VTX_ASSERT(result != NULL, "result must not be NULL");
+   670→   670→    for (uint32_t i = 0; i < result->point_count; i++) {
+   671→   671→        if (result->points[i].alloc_id == alloc_id) {
+   672→   672→            return true;
+   673→   673→        }
+   674→   674→    }
+   675→   675→    return false;
+   676→   676→}
+   677→   677→

@@ -1,0 +1,252 @@
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:1:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:33:    33→    33→#include "pea/speculative_pea.h"
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:2:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:42:    42→    42→static const char * const spec_pea_level_names[] = {
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:3:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:49:    49→    49→const char *vtx_spec_pea_level_name(vtx_spec_pea_level_t level)
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:4:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:51:    51→    51→    if (level > VTX_SPEC_PEA_AGGRESSIVE) return "Unknown";
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:5:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:52:    52→    52→    return spec_pea_level_names[level];
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:6:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:79:    79→    79→static double get_no_escape_threshold(vtx_spec_pea_level_t level,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:7:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:83:    83→    83→    case VTX_SPEC_PEA_NONE:
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:8:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:87:    87→    87→    case VTX_SPEC_PEA_CONSERVATIVE:
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:9:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:94:    94→    94→    case VTX_SPEC_PEA_MODERATE:
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:10:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:104:   104→   104→    case VTX_SPEC_PEA_AGGRESSIVE:
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:11:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:142:   142→   142→    if (profile->total_observations < VTX_SPEC_PEA_MIN_OBSERVATIONS) {
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:12:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:181:   181→   181→static int grow_spec_decisions(vtx_spec_pea_analysis_t *analysis)
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:13:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:188:   188→   188→    if (new_capacity == 0) new_capacity = VTX_SPEC_PEA_INITIAL_CAPACITY;
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:14:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:190:   190→   190→    vtx_spec_pea_decision_t *new_arr = (vtx_spec_pea_decision_t *)realloc(
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:15:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:192:   192→   192→        new_capacity * sizeof(vtx_spec_pea_decision_t));
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:16:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:204:   204→   204→static int grow_lock_profiles(vtx_lock_elision_result_t *result)
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:17:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:227:   227→   227→vtx_spec_pea_analysis_t *vtx_spec_pea_run(vtx_graph_t *graph,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:18:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:229:   229→   229→                                            vtx_spec_pea_level_t level,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:19:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:240:   240→   240→    vtx_spec_pea_analysis_t *result =
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:20:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:241:   241→   241→        (vtx_spec_pea_analysis_t *)vtx_arena_alloc(arena, sizeof(vtx_spec_pea_analysis_t));
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:21:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:249:   249→   249→    result->spec_capacity = VTX_SPEC_PEA_INITIAL_CAPACITY;
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:22:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:250:   250→   250→    result->spec_decisions = (vtx_spec_pea_decision_t *)malloc(
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:23:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:251:   251→   251→        result->spec_capacity * sizeof(vtx_spec_pea_decision_t));
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:24:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:330:   330→   330→            vtx_spec_pea_decision_t *decision =
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:25:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:362:   362→   362→vtx_escape_state_t vtx_spec_pea_effective_escape(
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:26:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:363:   363→   363→    const vtx_spec_pea_analysis_t *analysis,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:27:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:377:   377→   377→bool vtx_spec_pea_is_speculative_sr(const vtx_spec_pea_analysis_t *analysis,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:28:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:380:   380→   380→    return vtx_spec_pea_effective_escape(analysis, alloc_node_id) == VTX_ESCAPE_NONE;
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:29:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:383:   383→   383→bool vtx_spec_pea_has_decision(const vtx_spec_pea_analysis_t *analysis,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:30:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:398:   398→   398→const vtx_spec_pea_decision_t *vtx_spec_pea_get_decision(
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:31:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:399:   399→   399→    const vtx_spec_pea_analysis_t *analysis,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:32:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:418:   418→   418→int vtx_spec_pea_install_guard(vtx_spec_pea_analysis_t *analysis,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:33:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:442:   442→   442→void vtx_spec_pea_analysis_destroy(vtx_spec_pea_analysis_t *analysis)
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:34:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:473:   473→   473→int vtx_lock_elision_init(vtx_lock_elision_result_t *result)
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:35:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:494:   494→   494→void vtx_lock_elision_result_destroy(vtx_lock_elision_result_t *result)
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:36:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:520:   520→   520→static int32_t find_or_create_profile(vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:37:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:623:   623→   623→void vtx_lock_elision_record_acquisition(vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:38:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:677:   677→   677→bool vtx_lock_elision_is_eligible(const vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:39:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:695:   695→   695→int vtx_lock_elision_install_guard(vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:40:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:720:   720→   720→void vtx_lock_elision_get_stats(const vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:41:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:742:   742→   742→    ((vtx_lock_elision_result_t *)result)->eligible_sites = eligible;
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:42:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:753:   753→   753→const vtx_lock_contention_profile_t *vtx_lock_elision_get_profile(
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:43:/home/z/my-project/tool-results/read_1786465754620_e72c5ca8d7a4.txt:754:   754→   754→    const vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:44:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:33:    33→#include "pea/speculative_pea.h"
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:45:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:42:    42→static const char * const spec_pea_level_names[] = {
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:46:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:49:    49→const char *vtx_spec_pea_level_name(vtx_spec_pea_level_t level)
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:47:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:51:    51→    if (level > VTX_SPEC_PEA_AGGRESSIVE) return "Unknown";
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:48:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:52:    52→    return spec_pea_level_names[level];
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:49:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:79:    79→static double get_no_escape_threshold(vtx_spec_pea_level_t level,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:50:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:83:    83→    case VTX_SPEC_PEA_NONE:
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:51:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:87:    87→    case VTX_SPEC_PEA_CONSERVATIVE:
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:52:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:94:    94→    case VTX_SPEC_PEA_MODERATE:
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:53:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:104:   104→    case VTX_SPEC_PEA_AGGRESSIVE:
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:54:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:142:   142→    if (profile->total_observations < VTX_SPEC_PEA_MIN_OBSERVATIONS) {
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:55:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:181:   181→static int grow_spec_decisions(vtx_spec_pea_analysis_t *analysis)
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:56:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:188:   188→    if (new_capacity == 0) new_capacity = VTX_SPEC_PEA_INITIAL_CAPACITY;
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:57:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:190:   190→    vtx_spec_pea_decision_t *new_arr = (vtx_spec_pea_decision_t *)realloc(
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:58:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:192:   192→        new_capacity * sizeof(vtx_spec_pea_decision_t));
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:59:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:204:   204→static int grow_lock_profiles(vtx_lock_elision_result_t *result)
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:60:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:227:   227→vtx_spec_pea_analysis_t *vtx_spec_pea_run(vtx_graph_t *graph,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:61:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:229:   229→                                            vtx_spec_pea_level_t level,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:62:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:240:   240→    vtx_spec_pea_analysis_t *result =
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:63:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:241:   241→        (vtx_spec_pea_analysis_t *)vtx_arena_alloc(arena, sizeof(vtx_spec_pea_analysis_t));
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:64:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:249:   249→    result->spec_capacity = VTX_SPEC_PEA_INITIAL_CAPACITY;
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:65:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:250:   250→    result->spec_decisions = (vtx_spec_pea_decision_t *)malloc(
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:66:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:251:   251→        result->spec_capacity * sizeof(vtx_spec_pea_decision_t));
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:67:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:330:   330→            vtx_spec_pea_decision_t *decision =
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:68:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:362:   362→vtx_escape_state_t vtx_spec_pea_effective_escape(
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:69:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:363:   363→    const vtx_spec_pea_analysis_t *analysis,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:70:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:377:   377→bool vtx_spec_pea_is_speculative_sr(const vtx_spec_pea_analysis_t *analysis,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:71:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:380:   380→    return vtx_spec_pea_effective_escape(analysis, alloc_node_id) == VTX_ESCAPE_NONE;
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:72:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:383:   383→bool vtx_spec_pea_has_decision(const vtx_spec_pea_analysis_t *analysis,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:73:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:398:   398→const vtx_spec_pea_decision_t *vtx_spec_pea_get_decision(
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:74:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:399:   399→    const vtx_spec_pea_analysis_t *analysis,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:75:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:418:   418→int vtx_spec_pea_install_guard(vtx_spec_pea_analysis_t *analysis,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:76:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:442:   442→void vtx_spec_pea_analysis_destroy(vtx_spec_pea_analysis_t *analysis)
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:77:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:473:   473→int vtx_lock_elision_init(vtx_lock_elision_result_t *result)
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:78:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:494:   494→void vtx_lock_elision_result_destroy(vtx_lock_elision_result_t *result)
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:79:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:520:   520→static int32_t find_or_create_profile(vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:80:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:623:   623→void vtx_lock_elision_record_acquisition(vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:81:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:677:   677→bool vtx_lock_elision_is_eligible(const vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:82:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:695:   695→int vtx_lock_elision_install_guard(vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:83:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:720:   720→void vtx_lock_elision_get_stats(const vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:84:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:742:   742→    ((vtx_lock_elision_result_t *)result)->eligible_sites = eligible;
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:85:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:753:   753→const vtx_lock_contention_profile_t *vtx_lock_elision_get_profile(
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:86:/home/z/my-project/tool-results/read_1786465750548_f97aaf538471.txt:754:   754→    const vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:87:/home/z/my-project/rust-bindings/vendor/CMakeLists.txt:96:    pea/speculative_pea.c
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:88:/home/z/my-project/src/CMakeLists.txt:96:    pea/speculative_pea.c
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:89:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:33:#include "pea/speculative_pea.h"
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:90:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:42:static const char * const spec_pea_level_names[] = {
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:91:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:49:const char *vtx_spec_pea_level_name(vtx_spec_pea_level_t level)
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:92:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:51:    if (level > VTX_SPEC_PEA_AGGRESSIVE) return "Unknown";
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:93:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:52:    return spec_pea_level_names[level];
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:94:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:79:static double get_no_escape_threshold(vtx_spec_pea_level_t level,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:95:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:83:    case VTX_SPEC_PEA_NONE:
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:96:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:87:    case VTX_SPEC_PEA_CONSERVATIVE:
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:97:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:94:    case VTX_SPEC_PEA_MODERATE:
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:98:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:104:    case VTX_SPEC_PEA_AGGRESSIVE:
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:99:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:142:    if (profile->total_observations < VTX_SPEC_PEA_MIN_OBSERVATIONS) {
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:100:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:181:static int grow_spec_decisions(vtx_spec_pea_analysis_t *analysis)
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:101:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:188:    if (new_capacity == 0) new_capacity = VTX_SPEC_PEA_INITIAL_CAPACITY;
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:102:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:190:    vtx_spec_pea_decision_t *new_arr = (vtx_spec_pea_decision_t *)realloc(
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:103:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:192:        new_capacity * sizeof(vtx_spec_pea_decision_t));
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:104:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:204:static int grow_lock_profiles(vtx_lock_elision_result_t *result)
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:105:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:227:vtx_spec_pea_analysis_t *vtx_spec_pea_run(vtx_graph_t *graph,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:106:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:229:                                            vtx_spec_pea_level_t level,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:107:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:240:    vtx_spec_pea_analysis_t *result =
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:108:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:241:        (vtx_spec_pea_analysis_t *)vtx_arena_alloc(arena, sizeof(vtx_spec_pea_analysis_t));
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:109:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:249:    result->spec_capacity = VTX_SPEC_PEA_INITIAL_CAPACITY;
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:110:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:250:    result->spec_decisions = (vtx_spec_pea_decision_t *)malloc(
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:111:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:251:        result->spec_capacity * sizeof(vtx_spec_pea_decision_t));
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:112:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:330:            vtx_spec_pea_decision_t *decision =
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:113:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:362:vtx_escape_state_t vtx_spec_pea_effective_escape(
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:114:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:363:    const vtx_spec_pea_analysis_t *analysis,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:115:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:377:bool vtx_spec_pea_is_speculative_sr(const vtx_spec_pea_analysis_t *analysis,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:116:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:380:    return vtx_spec_pea_effective_escape(analysis, alloc_node_id) == VTX_ESCAPE_NONE;
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:117:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:383:bool vtx_spec_pea_has_decision(const vtx_spec_pea_analysis_t *analysis,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:118:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:398:const vtx_spec_pea_decision_t *vtx_spec_pea_get_decision(
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:119:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:399:    const vtx_spec_pea_analysis_t *analysis,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:120:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:418:int vtx_spec_pea_install_guard(vtx_spec_pea_analysis_t *analysis,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:121:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:442:void vtx_spec_pea_analysis_destroy(vtx_spec_pea_analysis_t *analysis)
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:122:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:473:int vtx_lock_elision_init(vtx_lock_elision_result_t *result)
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:123:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:494:void vtx_lock_elision_result_destroy(vtx_lock_elision_result_t *result)
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:124:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:520:static int32_t find_or_create_profile(vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:125:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:623:void vtx_lock_elision_record_acquisition(vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:126:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:677:bool vtx_lock_elision_is_eligible(const vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:127:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:695:int vtx_lock_elision_install_guard(vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:128:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:720:void vtx_lock_elision_get_stats(const vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:129:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:742:    ((vtx_lock_elision_result_t *)result)->eligible_sites = eligible;
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:130:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:753:const vtx_lock_contention_profile_t *vtx_lock_elision_get_profile(
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:131:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.c:754:    const vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:132:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:130:    VTX_SPEC_PEA_NONE       = 0,  /* no speculation, only provable NoEscape */
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:133:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:131:    VTX_SPEC_PEA_CONSERVATIVE = 1, /* speculate on ArgEscape (frequency > 99%) */
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:134:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:132:    VTX_SPEC_PEA_MODERATE   = 2,  /* speculate on ArgEscape + some GlobalEscape (freq > 95%) */
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:135:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:133:    VTX_SPEC_PEA_AGGRESSIVE = 3   /* speculate on any object (frequency > 80%) */
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:136:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:134:} vtx_spec_pea_level_t;
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:137:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:137:const char *vtx_spec_pea_level_name(vtx_spec_pea_level_t level);
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:138:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:166:#define VTX_SPEC_PEA_MIN_OBSERVATIONS 100
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:139:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:186:    vtx_spec_pea_level_t level;            /* confidence level */
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:140:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:200:} vtx_spec_pea_decision_t;
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:141:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:206:#define VTX_SPEC_PEA_INITIAL_CAPACITY 16
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:142:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:224:    vtx_spec_pea_decision_t *spec_decisions;   /* speculative decisions array */
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:143:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:240:    vtx_spec_pea_level_t     level;
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:144:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:241:} vtx_spec_pea_analysis_t;
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:145:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:339:} vtx_lock_elision_result_t;
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:146:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:376:vtx_spec_pea_analysis_t *vtx_spec_pea_run(vtx_graph_t *graph,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:147:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:378:                                            vtx_spec_pea_level_t level,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:148:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:395:vtx_escape_state_t vtx_spec_pea_effective_escape(
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:149:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:396:    const vtx_spec_pea_analysis_t *analysis,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:150:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:409:bool vtx_spec_pea_is_speculative_sr(const vtx_spec_pea_analysis_t *analysis,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:151:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:420:bool vtx_spec_pea_has_decision(const vtx_spec_pea_analysis_t *analysis,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:152:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:433:const vtx_spec_pea_decision_t *vtx_spec_pea_get_decision(
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:153:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:434:    const vtx_spec_pea_analysis_t *analysis,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:154:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:450:int vtx_spec_pea_install_guard(vtx_spec_pea_analysis_t *analysis,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:155:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:463:void vtx_spec_pea_analysis_destroy(vtx_spec_pea_analysis_t *analysis);
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:156:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:478:int vtx_lock_elision_init(vtx_lock_elision_result_t *result);
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:157:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:485:void vtx_lock_elision_result_destroy(vtx_lock_elision_result_t *result);
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:158:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:506:void vtx_lock_elision_record_acquisition(vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:159:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:521:bool vtx_lock_elision_is_eligible(const vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:160:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:537:int vtx_lock_elision_install_guard(vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:161:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:549:void vtx_lock_elision_get_stats(const vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:162:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:563:const vtx_lock_contention_profile_t *vtx_lock_elision_get_profile(
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:163:/home/z/my-project/rust-bindings/vendor/pea/speculative_pea.h:564:    const vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:164:/home/z/my-project/src/pea/speculative_pea.c:33:#include "pea/speculative_pea.h"
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:165:/home/z/my-project/src/pea/speculative_pea.c:42:static const char * const spec_pea_level_names[] = {
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:166:/home/z/my-project/src/pea/speculative_pea.c:49:const char *vtx_spec_pea_level_name(vtx_spec_pea_level_t level)
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:167:/home/z/my-project/src/pea/speculative_pea.c:51:    if (level > VTX_SPEC_PEA_AGGRESSIVE) return "Unknown";
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:168:/home/z/my-project/src/pea/speculative_pea.c:52:    return spec_pea_level_names[level];
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:169:/home/z/my-project/src/pea/speculative_pea.c:79:static double get_no_escape_threshold(vtx_spec_pea_level_t level,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:170:/home/z/my-project/src/pea/speculative_pea.c:83:    case VTX_SPEC_PEA_NONE:
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:171:/home/z/my-project/src/pea/speculative_pea.c:87:    case VTX_SPEC_PEA_CONSERVATIVE:
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:172:/home/z/my-project/src/pea/speculative_pea.c:94:    case VTX_SPEC_PEA_MODERATE:
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:173:/home/z/my-project/src/pea/speculative_pea.c:104:    case VTX_SPEC_PEA_AGGRESSIVE:
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:174:/home/z/my-project/src/pea/speculative_pea.c:142:    if (profile->total_observations < VTX_SPEC_PEA_MIN_OBSERVATIONS) {
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:175:/home/z/my-project/src/pea/speculative_pea.c:181:static int grow_spec_decisions(vtx_spec_pea_analysis_t *analysis)
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:176:/home/z/my-project/src/pea/speculative_pea.c:188:    if (new_capacity == 0) new_capacity = VTX_SPEC_PEA_INITIAL_CAPACITY;
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:177:/home/z/my-project/src/pea/speculative_pea.c:190:    vtx_spec_pea_decision_t *new_arr = (vtx_spec_pea_decision_t *)realloc(
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:178:/home/z/my-project/src/pea/speculative_pea.c:192:        new_capacity * sizeof(vtx_spec_pea_decision_t));
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:179:/home/z/my-project/src/pea/speculative_pea.c:204:static int grow_lock_profiles(vtx_lock_elision_result_t *result)
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:180:/home/z/my-project/src/pea/speculative_pea.c:227:vtx_spec_pea_analysis_t *vtx_spec_pea_run(vtx_graph_t *graph,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:181:/home/z/my-project/src/pea/speculative_pea.c:229:                                            vtx_spec_pea_level_t level,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:182:/home/z/my-project/src/pea/speculative_pea.c:240:    vtx_spec_pea_analysis_t *result =
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:183:/home/z/my-project/src/pea/speculative_pea.c:241:        (vtx_spec_pea_analysis_t *)vtx_arena_alloc(arena, sizeof(vtx_spec_pea_analysis_t));
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:184:/home/z/my-project/src/pea/speculative_pea.c:249:    result->spec_capacity = VTX_SPEC_PEA_INITIAL_CAPACITY;
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:185:/home/z/my-project/src/pea/speculative_pea.c:250:    result->spec_decisions = (vtx_spec_pea_decision_t *)malloc(
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:186:/home/z/my-project/src/pea/speculative_pea.c:251:        result->spec_capacity * sizeof(vtx_spec_pea_decision_t));
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:187:/home/z/my-project/src/pea/speculative_pea.c:330:            vtx_spec_pea_decision_t *decision =
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:188:/home/z/my-project/src/pea/speculative_pea.c:362:vtx_escape_state_t vtx_spec_pea_effective_escape(
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:189:/home/z/my-project/src/pea/speculative_pea.c:363:    const vtx_spec_pea_analysis_t *analysis,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:190:/home/z/my-project/src/pea/speculative_pea.c:377:bool vtx_spec_pea_is_speculative_sr(const vtx_spec_pea_analysis_t *analysis,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:191:/home/z/my-project/src/pea/speculative_pea.c:380:    return vtx_spec_pea_effective_escape(analysis, alloc_node_id) == VTX_ESCAPE_NONE;
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:192:/home/z/my-project/src/pea/speculative_pea.c:383:bool vtx_spec_pea_has_decision(const vtx_spec_pea_analysis_t *analysis,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:193:/home/z/my-project/src/pea/speculative_pea.c:398:const vtx_spec_pea_decision_t *vtx_spec_pea_get_decision(
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:194:/home/z/my-project/src/pea/speculative_pea.c:399:    const vtx_spec_pea_analysis_t *analysis,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:195:/home/z/my-project/src/pea/speculative_pea.c:418:int vtx_spec_pea_install_guard(vtx_spec_pea_analysis_t *analysis,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:196:/home/z/my-project/src/pea/speculative_pea.c:442:void vtx_spec_pea_analysis_destroy(vtx_spec_pea_analysis_t *analysis)
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:197:/home/z/my-project/src/pea/speculative_pea.c:473:int vtx_lock_elision_init(vtx_lock_elision_result_t *result)
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:198:/home/z/my-project/src/pea/speculative_pea.c:494:void vtx_lock_elision_result_destroy(vtx_lock_elision_result_t *result)
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:199:/home/z/my-project/src/pea/speculative_pea.c:520:static int32_t find_or_create_profile(vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:200:/home/z/my-project/src/pea/speculative_pea.c:623:void vtx_lock_elision_record_acquisition(vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:201:/home/z/my-project/src/pea/speculative_pea.c:677:bool vtx_lock_elision_is_eligible(const vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:202:/home/z/my-project/src/pea/speculative_pea.c:695:int vtx_lock_elision_install_guard(vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:203:/home/z/my-project/src/pea/speculative_pea.c:720:void vtx_lock_elision_get_stats(const vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:204:/home/z/my-project/src/pea/speculative_pea.c:742:    ((vtx_lock_elision_result_t *)result)->eligible_sites = eligible;
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:205:/home/z/my-project/src/pea/speculative_pea.c:753:const vtx_lock_contention_profile_t *vtx_lock_elision_get_profile(
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:206:/home/z/my-project/src/pea/speculative_pea.c:754:    const vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:207:/home/z/my-project/src/pea/speculative_pea.h:130:    VTX_SPEC_PEA_NONE       = 0,  /* no speculation, only provable NoEscape */
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:208:/home/z/my-project/src/pea/speculative_pea.h:131:    VTX_SPEC_PEA_CONSERVATIVE = 1, /* speculate on ArgEscape (frequency > 99%) */
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:209:/home/z/my-project/src/pea/speculative_pea.h:132:    VTX_SPEC_PEA_MODERATE   = 2,  /* speculate on ArgEscape + some GlobalEscape (freq > 95%) */
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:210:/home/z/my-project/src/pea/speculative_pea.h:133:    VTX_SPEC_PEA_AGGRESSIVE = 3   /* speculate on any object (frequency > 80%) */
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:211:/home/z/my-project/src/pea/speculative_pea.h:134:} vtx_spec_pea_level_t;
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:212:/home/z/my-project/src/pea/speculative_pea.h:137:const char *vtx_spec_pea_level_name(vtx_spec_pea_level_t level);
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:213:/home/z/my-project/src/pea/speculative_pea.h:166:#define VTX_SPEC_PEA_MIN_OBSERVATIONS 100
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:214:/home/z/my-project/src/pea/speculative_pea.h:186:    vtx_spec_pea_level_t level;            /* confidence level */
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:215:/home/z/my-project/src/pea/speculative_pea.h:200:} vtx_spec_pea_decision_t;
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:216:/home/z/my-project/src/pea/speculative_pea.h:206:#define VTX_SPEC_PEA_INITIAL_CAPACITY 16
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:217:/home/z/my-project/src/pea/speculative_pea.h:224:    vtx_spec_pea_decision_t *spec_decisions;   /* speculative decisions array */
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:218:/home/z/my-project/src/pea/speculative_pea.h:240:    vtx_spec_pea_level_t     level;
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:219:/home/z/my-project/src/pea/speculative_pea.h:241:} vtx_spec_pea_analysis_t;
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:220:/home/z/my-project/src/pea/speculative_pea.h:339:} vtx_lock_elision_result_t;
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:221:/home/z/my-project/src/pea/speculative_pea.h:376:vtx_spec_pea_analysis_t *vtx_spec_pea_run(vtx_graph_t *graph,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:222:/home/z/my-project/src/pea/speculative_pea.h:378:                                            vtx_spec_pea_level_t level,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:223:/home/z/my-project/src/pea/speculative_pea.h:395:vtx_escape_state_t vtx_spec_pea_effective_escape(
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:224:/home/z/my-project/src/pea/speculative_pea.h:396:    const vtx_spec_pea_analysis_t *analysis,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:225:/home/z/my-project/src/pea/speculative_pea.h:409:bool vtx_spec_pea_is_speculative_sr(const vtx_spec_pea_analysis_t *analysis,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:226:/home/z/my-project/src/pea/speculative_pea.h:420:bool vtx_spec_pea_has_decision(const vtx_spec_pea_analysis_t *analysis,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:227:/home/z/my-project/src/pea/speculative_pea.h:433:const vtx_spec_pea_decision_t *vtx_spec_pea_get_decision(
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:228:/home/z/my-project/src/pea/speculative_pea.h:434:    const vtx_spec_pea_analysis_t *analysis,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:229:/home/z/my-project/src/pea/speculative_pea.h:450:int vtx_spec_pea_install_guard(vtx_spec_pea_analysis_t *analysis,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:230:/home/z/my-project/src/pea/speculative_pea.h:463:void vtx_spec_pea_analysis_destroy(vtx_spec_pea_analysis_t *analysis);
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:231:/home/z/my-project/src/pea/speculative_pea.h:478:int vtx_lock_elision_init(vtx_lock_elision_result_t *result);
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:232:/home/z/my-project/src/pea/speculative_pea.h:485:void vtx_lock_elision_result_destroy(vtx_lock_elision_result_t *result);
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:233:/home/z/my-project/src/pea/speculative_pea.h:506:void vtx_lock_elision_record_acquisition(vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:234:/home/z/my-project/src/pea/speculative_pea.h:521:bool vtx_lock_elision_is_eligible(const vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:235:/home/z/my-project/src/pea/speculative_pea.h:537:int vtx_lock_elision_install_guard(vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:236:/home/z/my-project/src/pea/speculative_pea.h:549:void vtx_lock_elision_get_stats(const vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:237:/home/z/my-project/src/pea/speculative_pea.h:563:const vtx_lock_contention_profile_t *vtx_lock_elision_get_profile(
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:238:/home/z/my-project/src/pea/speculative_pea.h:564:    const vtx_lock_elision_result_t *result,
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:239:/home/z/my-project/tests/unit/test_p2_features.c:8: *   4. Speculative PEA + lock elision (speculative_pea)
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:240:/home/z/my-project/tests/unit/test_p2_features.c:20:#include "pea/speculative_pea.h"
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:241:/home/z/my-project/tests/unit/test_p2_features.c:536:VTX_TEST(spec_pea_level_names)
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:242:/home/z/my-project/tests/unit/test_p2_features.c:538:    VTX_ASSERT_TRUE(vtx_spec_pea_level_name(VTX_SPEC_PEA_NONE) != NULL);
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:243:/home/z/my-project/tests/unit/test_p2_features.c:539:    VTX_ASSERT_TRUE(vtx_spec_pea_level_name(VTX_SPEC_PEA_CONSERVATIVE) != NULL);
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:244:/home/z/my-project/tests/unit/test_p2_features.c:540:    VTX_ASSERT_TRUE(vtx_spec_pea_level_name(VTX_SPEC_PEA_MODERATE) != NULL);
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:245:/home/z/my-project/tests/unit/test_p2_features.c:541:    VTX_ASSERT_TRUE(vtx_spec_pea_level_name(VTX_SPEC_PEA_AGGRESSIVE) != NULL);
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:246:/home/z/my-project/tests/unit/test_p2_features.c:544:VTX_TEST(spec_pea_run_no_profiles)
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:247:/home/z/my-project/tests/unit/test_p2_features.c:552:    vtx_spec_pea_analysis_t *analysis = vtx_spec_pea_run(
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:248:/home/z/my-project/tests/unit/test_p2_features.c:553:        &graph, &arena, VTX_SPEC_PEA_CONSERVATIVE, NULL);
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:249:/home/z/my-project/tests/unit/test_p2_features.c:558:        vtx_spec_pea_analysis_destroy(analysis);
+/home/z/my-project/tool-results/grep_1786465769475_022718fb39c7.txt:250:/home/z/my-project/tests/unit/test_p2_features.c:565:VTX_TEST(spec_pea_effective_escape_no_spec)
+
+[Showing results with pagination = limit: 250]

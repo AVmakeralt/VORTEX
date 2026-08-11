@@ -1,0 +1,767 @@
+     1→/* ============================================================================ *
+     2→ * AI-MODIFIED CODE
+     3→ *
+     4→ * This file was originally written by a human developer. It has been
+     5→ * substantially modified by an AI assistant (GLM/Z.ai) for bug fixes,
+     6→ * performance improvements, and feature additions.
+     7→ *
+     8→ * Original human-written structure is preserved; AI changes are marked
+     9→ * with bug fix IDs (B1-B28) or perf notes (Perf 1-10) in comments.
+    10→ *
+    11→ * If reviewing, please verify AI changes against the original logic.
+    12→ * ============================================================================ */
+    13→
+    14→/**
+    15→ * VORTEX Speculative PEA + Lock Elision — Implementation
+    16→ *
+    17→ * Implements two profile-guided speculative optimizations:
+    18→ *
+    19→ *   1. Speculative PEA: Speculate NoEscape for allocations where PEA
+    20→ *      proved ArgEscape/GlobalEscape but profiling suggests they usually
+    21→ *      don't escape. Add guards; deopt on failure.
+    22→ *
+    23→ *   2. Speculative Lock Elision: Elide monitor enter/exit for
+    24→ *      synchronized blocks with zero/near-zero contention. Add guards;
+    25→ *      deopt on contention.
+    26→ *
+    27→ * Both follow the same pattern:
+    28→ *   - Profile → decide → speculate → guard → adapt
+    29→ *   - Failed speculations weaken the guard (FastCheck → FullCheck → DeoptAlways)
+    30→ *   - Successful speculations remain at FastCheck or strengthen to PredicatedCheck
+    31→ */
+    32→
+    33→#include "pea/speculative_pea.h"
+    34→#include <stdlib.h>
+    35→#include <string.h>
+    36→#include <math.h>
+    37→
+    38→/* ========================================================================== */
+    39→/* Speculation level names                                                      */
+    40→/* ========================================================================== */
+    41→
+    42→static const char * const spec_pea_level_names[] = {
+    43→    "NONE",
+    44→    "CONSERVATIVE",
+    45→    "MODERATE",
+    46→    "AGGRESSIVE"
+    47→};
+    48→
+    49→const char *vtx_spec_pea_level_name(vtx_spec_pea_level_t level)
+    50→{
+    51→    if (level > VTX_SPEC_PEA_AGGRESSIVE) return "Unknown";
+    52→    return spec_pea_level_names[level];
+    53→}
+    54→
+    55→/* ========================================================================== */
+    56→/* Internal: check if a node is an allocation                                   */
+    57→/* ========================================================================== */
+    58→
+    59→static inline bool is_allocation(vtx_node_opcode_t opcode)
+    60→{
+    61→    return opcode == VTX_OP_NewObject ||
+    62→           opcode == VTX_OP_NewArray  ||
+    63→           opcode == VTX_OP_Allocate;
+    64→}
+    65→
+    66→/* ========================================================================== */
+    67→/* Internal: get the no-escape rate threshold for a given proven state          */
+    68→/* and speculation level                                                        */
+    69→/* ========================================================================== */
+    70→
+    71→/**
+    72→ * Returns the minimum no_escape_rate required to speculate that an
+    73→ * allocation with the given proven escape state doesn't escape, at
+    74→ * the given speculation level.
+    75→ *
+    76→ * Returns INFINITY if the proven state is not eligible for speculation
+    77→ * at this level (e.g., GlobalEscape at CONSERVATIVE level).
+    78→ */
+    79→static double get_no_escape_threshold(vtx_spec_pea_level_t level,
+    80→                                       vtx_escape_state_t proven_state)
+    81→{
+    82→    switch (level) {
+    83→    case VTX_SPEC_PEA_NONE:
+    84→        /* No speculation at all */
+    85→        return INFINITY;
+    86→
+    87→    case VTX_SPEC_PEA_CONSERVATIVE:
+    88→        /* Only speculate on ArgEscape */
+    89→        if (proven_state == VTX_ESCAPE_ARG) {
+    90→            return VTX_SPEC_RATE_CONSERVATIVE_ARG;  /* 0.99 */
+    91→        }
+    92→        return INFINITY;  /* GlobalEscape not eligible */
+    93→
+    94→    case VTX_SPEC_PEA_MODERATE:
+    95→        /* Speculate on ArgEscape + some GlobalEscape */
+    96→        if (proven_state == VTX_ESCAPE_ARG) {
+    97→            return VTX_SPEC_RATE_MODERATE_ARG;       /* 0.95 */
+    98→        }
+    99→        if (proven_state == VTX_ESCAPE_GLOBAL) {
+   100→            return VTX_SPEC_RATE_MODERATE_GLOBAL;    /* 0.98 */
+   101→        }
+   102→        return INFINITY;
+   103→
+   104→    case VTX_SPEC_PEA_AGGRESSIVE:
+   105→        /* Speculate on any escaping object */
+   106→        if (proven_state == VTX_ESCAPE_ARG) {
+   107→            return VTX_SPEC_RATE_AGGRESSIVE_ARG;     /* 0.80 */
+   108→        }
+   109→        if (proven_state == VTX_ESCAPE_GLOBAL) {
+   110→            return VTX_SPEC_RATE_AGGRESSIVE_GLOBAL;  /* 0.90 */
+   111→        }
+   112→        return INFINITY;
+   113→    }
+   114→
+   115→    return INFINITY;
+   116→}
+   117→
+   118→/* ========================================================================== */
+   119→/* Internal: look up profile data for an allocation site                        */
+   120→/* ========================================================================== */
+   121→
+   122→/**
+   123→ * Look up value profile data for an allocation site identified by
+   124→ * its bytecode_pc. The allocation node's bytecode_pc field is used
+   125→ * to index into the value profile table.
+   126→ *
+   127→ * Returns the no_escape_rate and total_observations from the profile.
+   128→ * If no profile data is available, returns false.
+   129→ */
+   130→static bool lookup_alloc_profile(const vtx_value_profile_table_t *value_profiles,
+   131→                                  uint32_t bytecode_pc,
+   132→                                  uint64_t *out_total_obs,
+   133→                                  uint64_t *out_no_escape_obs,
+   134→                                  double *out_no_escape_rate)
+   135→{
+   136→    if (value_profiles == NULL) return false;
+   137→
+   138→    const vtx_value_profile_t *profile =
+   139→        vtx_value_profile_lookup(value_profiles, bytecode_pc);
+   140→    if (profile == NULL) return false;
+   141→
+   142→    if (profile->total_observations < VTX_SPEC_PEA_MIN_OBSERVATIONS) {
+   143→        return false;  /* not enough data */
+   144→    }
+   145→
+   146→    *out_total_obs = profile->total_observations;
+   147→
+   148→    /* The value profile tracks the most frequent value. For escape
+   149→     * analysis, the "no escape" observations are stored as the top
+   150→     * value count. The value itself encodes whether the object escaped:
+   151→     *   0 = didn't escape, 1 = escaped.
+   152→     * We use the top value's count as no_escape_obs if the top value
+   153→     * is 0 (no escape), otherwise use other_count. */
+   154→    uint64_t top_value;
+   155→    double top_freq;
+   156→    if (vtx_value_profile_top(profile, &top_value, &top_freq)) {
+   157→        if (top_value == 0) {
+   158→            /* Top value is "didn't escape" */
+   159→            *out_no_escape_obs = profile->entries[0].count;
+   160→        } else {
+   161→            /* Top value is "escaped" — the no-escape count is in the
+   162→             * other bucket or second entry */
+   163→            if (profile->entries[1].count > 0 && profile->entries[1].value == 0) {
+   164→                *out_no_escape_obs = profile->entries[1].count;
+   165→            } else {
+   166→                *out_no_escape_obs = profile->other_count;
+   167→            }
+   168→        }
+   169→    } else {
+   170→        return false;
+   171→    }
+   172→
+   173→    *out_no_escape_rate = (double)*out_no_escape_obs / (double)*out_total_obs;
+   174→    return true;
+   175→}
+   176→
+   177→/* ========================================================================== */
+   178→/* Internal: grow the spec_decisions array if needed                            */
+   179→/* ========================================================================== */
+   180→
+   181→static int grow_spec_decisions(vtx_spec_pea_analysis_t *analysis)
+   182→{
+   183→    if (analysis->spec_count < analysis->spec_capacity) {
+   184→        return 0;  /* still have room */
+   185→    }
+   186→
+   187→    uint32_t new_capacity = analysis->spec_capacity * 2;
+   188→    if (new_capacity == 0) new_capacity = VTX_SPEC_PEA_INITIAL_CAPACITY;
+   189→
+   190→    vtx_spec_pea_decision_t *new_arr = (vtx_spec_pea_decision_t *)realloc(
+   191→        analysis->spec_decisions,
+   192→        new_capacity * sizeof(vtx_spec_pea_decision_t));
+   193→    if (!new_arr) return -1;
+   194→
+   195→    analysis->spec_decisions = new_arr;
+   196→    analysis->spec_capacity = new_capacity;
+   197→    return 0;
+   198→}
+   199→
+   200→/* ========================================================================== */
+   201→/* Internal: grow the lock profiles array if needed                             */
+   202→/* ========================================================================== */
+   203→
+   204→static int grow_lock_profiles(vtx_lock_elision_result_t *result)
+   205→{
+   206→    if (result->profile_count < result->profile_capacity) {
+   207→        return 0;  /* still have room */
+   208→    }
+   209→
+   210→    uint32_t new_capacity = result->profile_capacity * 2;
+   211→    if (new_capacity == 0) new_capacity = VTX_LOCK_PROFILE_INITIAL_CAPACITY;
+   212→
+   213→    vtx_lock_contention_profile_t *new_arr = (vtx_lock_contention_profile_t *)realloc(
+   214→        result->profiles,
+   215→        new_capacity * sizeof(vtx_lock_contention_profile_t));
+   216→    if (!new_arr) return -1;
+   217→
+   218→    result->profiles = new_arr;
+   219→    result->profile_capacity = new_capacity;
+   220→    return 0;
+   221→}
+   222→
+   223→/* ========================================================================== */
+   224→/* Speculative PEA: main entry point                                            */
+   225→/* ========================================================================== */
+   226→
+   227→vtx_spec_pea_analysis_t *vtx_spec_pea_run(vtx_graph_t *graph,
+   228→                                            vtx_arena_t *arena,
+   229→                                            vtx_spec_pea_level_t level,
+   230→                                            const vtx_value_profile_table_t *value_profiles)
+   231→{
+   232→    VTX_ASSERT(graph != NULL, "graph must not be NULL");
+   233→    VTX_ASSERT(arena != NULL, "arena must not be NULL");
+   234→
+   235→    /* Step 1: Run standard PEA to get proven escape states */
+   236→    vtx_pea_analysis_t *base = vtx_pea_run(graph, arena);
+   237→    if (base == NULL) return NULL;
+   238→
+   239→    /* Allocate the speculative analysis result */
+   240→    vtx_spec_pea_analysis_t *result =
+   241→        (vtx_spec_pea_analysis_t *)vtx_arena_alloc(arena, sizeof(vtx_spec_pea_analysis_t));
+   242→    if (!result) return NULL;
+   243→    memset(result, 0, sizeof(*result));
+   244→
+   245→    result->base_analysis = *base;  /* copy the base result */
+   246→    result->level = level;
+   247→
+   248→    /* Allocate the speculative decisions array */
+   249→    result->spec_capacity = VTX_SPEC_PEA_INITIAL_CAPACITY;
+   250→    result->spec_decisions = (vtx_spec_pea_decision_t *)malloc(
+   251→        result->spec_capacity * sizeof(vtx_spec_pea_decision_t));
+   252→    if (!result->spec_decisions) return NULL;
+   253→    result->spec_count = 0;
+   254→
+   255→    /* Step 2: Build the speculative escape map.
+   256→     * Start with a copy of the base escape map; we'll override entries
+   257→     * for speculative allocations. */
+   258→    uint32_t state_count = base->escape_map.state_count;
+   259→    result->speculative_escape_map.state_count = state_count;
+   260→
+   261→    result->speculative_escape_map.states =
+   262→        (vtx_escape_state_t *)malloc(state_count * sizeof(vtx_escape_state_t));
+   263→    if (!result->speculative_escape_map.states) {
+   264→        free(result->spec_decisions);
+   265→        return NULL;
+   266→    }
+   267→
+   268→    /* Copy the base states as the starting point */
+   269→    memcpy(result->speculative_escape_map.states,
+   270→           base->escape_map.states,
+   271→           state_count * sizeof(vtx_escape_state_t));
+   272→
+   273→    /* Copy the allocation IDs array */
+   274→    result->speculative_escape_map.alloc_count = base->escape_map.alloc_count;
+   275→    result->speculative_escape_map.alloc_capacity = base->escape_map.alloc_capacity;
+   276→
+   277→    result->speculative_escape_map.alloc_ids =
+   278→        (vtx_nodeid_t *)malloc(base->escape_map.alloc_capacity * sizeof(vtx_nodeid_t));
+   279→    if (!result->speculative_escape_map.alloc_ids) {
+   280→        free(result->speculative_escape_map.states);
+   281→        free(result->spec_decisions);
+   282→        return NULL;
+   283→    }
+   284→
+   285→    memcpy(result->speculative_escape_map.alloc_ids,
+   286→           base->escape_map.alloc_ids,
+   287→           base->escape_map.alloc_count * sizeof(vtx_nodeid_t));
+   288→
+   289→    /* Step 3: For each allocation with proven_state > NoEscape,
+   290→     * check if profiling supports speculation. */
+   291→    vtx_node_table_t *table = &graph->node_table;
+   292→
+   293→    for (uint32_t a = 0; a < base->escape_map.alloc_count; a++) {
+   294→        vtx_nodeid_t alloc_id = base->escape_map.alloc_ids[a];
+   295→        vtx_escape_state_t proven = base->escape_map.states[alloc_id];
+   296→
+   297→        /* Count proven NoEscape allocations */
+   298→        if (proven == VTX_ESCAPE_NONE) {
+   299→            result->total_proven++;
+   300→            continue;  /* already NoEscape, no speculation needed */
+   301→        }
+   302→
+   303→        /* Check if this proven state is eligible for speculation */
+   304→        double threshold = get_no_escape_threshold(level, proven);
+   305→        if (isinf(threshold)) continue;  /* not eligible at this level */
+   306→
+   307→        /* Look up the allocation node to get its bytecode_pc */
+   308→        if (alloc_id >= table->count) continue;
+   309→        vtx_node_t *alloc_node = &table->nodes[alloc_id];
+   310→        if (alloc_node->dead) continue;
+   311→
+   312→        /* Look up profile data for this allocation site */
+   313→        uint64_t total_obs = 0;
+   314→        uint64_t no_escape_obs = 0;
+   315→        double no_escape_rate = 0.0;
+   316→
+   317→        if (!lookup_alloc_profile(value_profiles, alloc_node->bytecode_pc,
+   318→                                   &total_obs, &no_escape_obs, &no_escape_rate)) {
+   319→            continue;  /* no profile data available */
+   320→        }
+   321→
+   322→        /* Check if the no-escape rate meets the threshold */
+   323→        if (no_escape_rate >= threshold) {
+   324→            /* Speculation is justified! Create a decision. */
+   325→            if (grow_spec_decisions(result) != 0) {
+   326→                /* Allocation failure — continue without this speculation */
+   327→                continue;
+   328→            }
+   329→
+   330→            vtx_spec_pea_decision_t *decision =
+   331→                &result->spec_decisions[result->spec_count];
+   332→            memset(decision, 0, sizeof(*decision));
+   333→
+   334→            decision->alloc_node_id    = alloc_id;
+   335→            decision->proven_state     = proven;
+   336→            decision->speculated_state = VTX_ESCAPE_NONE;
+   337→            decision->level            = level;
+   338→            decision->guard_id         = 0;
+   339→            decision->total_observations = total_obs;
+   340→            decision->no_escape_obs    = no_escape_obs;
+   341→            decision->no_escape_rate   = no_escape_rate;
+   342→            decision->guard_installed  = false;
+   343→
+   344→            result->spec_count++;
+   345→            result->total_speculated++;
+   346→
+   347→            /* Update the speculative escape map */
+   348→            result->speculative_escape_map.states[alloc_id] = VTX_ESCAPE_NONE;
+   349→        }
+   350→    }
+   351→
+   352→    /* Step 4: Compute statistics */
+   353→    result->potential_sr_count = result->total_proven + result->total_speculated;
+   354→
+   355→    return result;
+   356→}
+   357→
+   358→/* ========================================================================== */
+   359→/* Speculative PEA: query helpers                                               */
+   360→/* ========================================================================== */
+   361→
+   362→vtx_escape_state_t vtx_spec_pea_effective_escape(
+   363→    const vtx_spec_pea_analysis_t *analysis,
+   364→    vtx_nodeid_t alloc_node_id)
+   365→{
+   366→    VTX_ASSERT(analysis != NULL, "analysis must not be NULL");
+   367→
+   368→    /* Query the speculative escape map first */
+   369→    if (alloc_node_id < analysis->speculative_escape_map.state_count) {
+   370→        return analysis->speculative_escape_map.states[alloc_node_id];
+   371→    }
+   372→
+   373→    /* Fallback to base analysis */
+   374→    return vtx_pea_get_escape(&analysis->base_analysis, alloc_node_id);
+   375→}
+   376→
+   377→bool vtx_spec_pea_is_speculative_sr(const vtx_spec_pea_analysis_t *analysis,
+   378→                                      vtx_nodeid_t alloc_node_id)
+   379→{
+   380→    return vtx_spec_pea_effective_escape(analysis, alloc_node_id) == VTX_ESCAPE_NONE;
+   381→}
+   382→
+   383→bool vtx_spec_pea_has_decision(const vtx_spec_pea_analysis_t *analysis,
+   384→                                 vtx_nodeid_t alloc_node_id)
+   385→{
+   386→    VTX_ASSERT(analysis != NULL, "analysis must not be NULL");
+   387→
+   388→    if (analysis->spec_decisions == NULL) return false;
+   389→
+   390→    for (uint32_t i = 0; i < analysis->spec_count; i++) {
+   391→        if (analysis->spec_decisions[i].alloc_node_id == alloc_node_id) {
+   392→            return true;
+   393→        }
+   394→    }
+   395→    return false;
+   396→}
+   397→
+   398→const vtx_spec_pea_decision_t *vtx_spec_pea_get_decision(
+   399→    const vtx_spec_pea_analysis_t *analysis,
+   400→    vtx_nodeid_t alloc_node_id)
+   401→{
+   402→    VTX_ASSERT(analysis != NULL, "analysis must not be NULL");
+   403→
+   404→    if (analysis->spec_decisions == NULL) return NULL;
+   405→
+   406→    for (uint32_t i = 0; i < analysis->spec_count; i++) {
+   407→        if (analysis->spec_decisions[i].alloc_node_id == alloc_node_id) {
+   408→            return &analysis->spec_decisions[i];
+   409→        }
+   410→    }
+   411→    return NULL;
+   412→}
+   413→
+   414→/* ========================================================================== */
+   415→/* Speculative PEA: guard installation                                          */
+   416→/* ========================================================================== */
+   417→
+   418→int vtx_spec_pea_install_guard(vtx_spec_pea_analysis_t *analysis,
+   419→                                 vtx_nodeid_t alloc_node_id,
+   420→                                 uint32_t guard_id)
+   421→{
+   422→    VTX_ASSERT(analysis != NULL, "analysis must not be NULL");
+   423→    VTX_ASSERT(guard_id != 0, "guard_id must not be 0");
+   424→
+   425→    if (analysis->spec_decisions == NULL) return -1;
+   426→
+   427→    for (uint32_t i = 0; i < analysis->spec_count; i++) {
+   428→        if (analysis->spec_decisions[i].alloc_node_id == alloc_node_id) {
+   429→            analysis->spec_decisions[i].guard_id = guard_id;
+   430→            analysis->spec_decisions[i].guard_installed = true;
+   431→            return 0;
+   432→        }
+   433→    }
+   434→
+   435→    return -1;  /* no speculative decision for this allocation */
+   436→}
+   437→
+   438→/* ========================================================================== */
+   439→/* Speculative PEA: destruction                                                 */
+   440→/* ========================================================================== */
+   441→
+   442→void vtx_spec_pea_analysis_destroy(vtx_spec_pea_analysis_t *analysis)
+   443→{
+   444→    if (analysis == NULL) return;
+   445→
+   446→    /* Free the spec_decisions array (malloc'd) */
+   447→    if (analysis->spec_decisions != NULL) {
+   448→        free(analysis->spec_decisions);
+   449→        analysis->spec_decisions = NULL;
+   450→    }
+   451→
+   452→    /* Free the speculative escape map (malloc'd) */
+   453→    if (analysis->speculative_escape_map.states != NULL) {
+   454→        free(analysis->speculative_escape_map.states);
+   455→        analysis->speculative_escape_map.states = NULL;
+   456→    }
+   457→    if (analysis->speculative_escape_map.alloc_ids != NULL) {
+   458→        free(analysis->speculative_escape_map.alloc_ids);
+   459→        analysis->speculative_escape_map.alloc_ids = NULL;
+   460→    }
+   461→
+   462→    analysis->spec_count = 0;
+   463→    analysis->spec_capacity = 0;
+   464→
+   465→    /* Note: base_analysis was arena-allocated and will be freed
+   466→     * when the arena is destroyed. We don't free it here. */
+   467→}
+   468→
+   469→/* ========================================================================== */
+   470→/* Lock Elision: initialization                                                 */
+   471→/* ========================================================================== */
+   472→
+   473→int vtx_lock_elision_init(vtx_lock_elision_result_t *result)
+   474→{
+   475→    if (result == NULL) return -1;
+   476→
+   477→    result->profiles = (vtx_lock_contention_profile_t *)malloc(
+   478→        VTX_LOCK_PROFILE_INITIAL_CAPACITY * sizeof(vtx_lock_contention_profile_t));
+   479→    if (result->profiles == NULL) return -1;
+   480→
+   481→    result->profile_count = 0;
+   482→    result->profile_capacity = VTX_LOCK_PROFILE_INITIAL_CAPACITY;
+   483→    result->total_sites = 0;
+   484→    result->eligible_sites = 0;
+   485→    result->elided_sites = 0;
+   486→
+   487→    return 0;
+   488→}
+   489→
+   490→/* ========================================================================== */
+   491→/* Lock Elision: destruction                                                    */
+   492→/* ========================================================================== */
+   493→
+   494→void vtx_lock_elision_result_destroy(vtx_lock_elision_result_t *result)
+   495→{
+   496→    if (result == NULL) return;
+   497→
+   498→    if (result->profiles != NULL) {
+   499→        free(result->profiles);
+   500→        result->profiles = NULL;
+   501→    }
+   502→
+   503→    result->profile_count = 0;
+   504→    result->profile_capacity = 0;
+   505→    result->total_sites = 0;
+   506→    result->eligible_sites = 0;
+   507→    result->elided_sites = 0;
+   508→}
+   509→
+   510→/* ========================================================================== */
+   511→/* Lock Elision: internal: find or create a profile for a monitor site          */
+   512→/* ========================================================================== */
+   513→
+   514→/**
+   515→ * Find the profile for a monitor site, or create a new one if it
+   516→ * doesn't exist yet.
+   517→ *
+   518→ * Returns the profile index in the profiles array, or -1 on failure.
+   519→ */
+   520→static int32_t find_or_create_profile(vtx_lock_elision_result_t *result,
+   521→                                        uint32_t monitor_site_id)
+   522→{
+   523→    /* Search for existing profile */
+   524→    for (uint32_t i = 0; i < result->profile_count; i++) {
+   525→        if (result->profiles[i].monitor_site_id == monitor_site_id) {
+   526→            return (int32_t)i;
+   527→        }
+   528→    }
+   529→
+   530→    /* Create new profile */
+   531→    if (grow_lock_profiles(result) != 0) return -1;
+   532→
+   533→    vtx_lock_contention_profile_t *profile =
+   534→        &result->profiles[result->profile_count];
+   535→    memset(profile, 0, sizeof(*profile));
+   536→
+   537→    profile->monitor_site_id    = monitor_site_id;
+   538→    profile->total_acquisitions = 0;
+   539→    profile->contention_count   = 0;
+   540→    profile->contention_rate    = 0.0;
+   541→    profile->sample_counter     = VTX_LOCK_SAMPLE_INTERVAL_DEFAULT;
+   542→    profile->sample_interval    = VTX_LOCK_SAMPLE_INTERVAL_DEFAULT;
+   543→    profile->is_eligible        = false;
+   544→    profile->guard_id           = 0;
+   545→    profile->guard_installed    = false;
+   546→
+   547→    result->profile_count++;
+   548→    result->total_sites++;
+   549→
+   550→    return (int32_t)(result->profile_count - 1);
+   551→}
+   552→
+   553→/* ========================================================================== */
+   554→/* Lock Elision: internal: update eligibility after a sample                    */
+   555→/* ========================================================================== */
+   556→
+   557→/**
+   558→ * Recompute the contention rate and eligibility for a profile.
+   559→ * Called at sample boundaries.
+   560→ */
+   561→static void update_eligibility(vtx_lock_contention_profile_t *profile)
+   562→{
+   563→    /* Recompute contention rate */
+   564→    if (profile->total_acquisitions > 0) {
+   565→        profile->contention_rate =
+   566→            (double)profile->contention_count / (double)profile->total_acquisitions;
+   567→    } else {
+   568→        profile->contention_rate = 0.0;
+   569→    }
+   570→
+   571→    /* Check eligibility:
+   572→     *   - contention_rate < VTX_LOCK_CONTENTION_THRESHOLD (0.1%)
+   573→     *   - total_acquisitions >= VTX_LOCK_MIN_OBSERVATIONS (1000) */
+   574→    bool was_eligible = profile->is_eligible;
+   575→    profile->is_eligible =
+   576→        (profile->total_acquisitions >= VTX_LOCK_MIN_OBSERVATIONS) &&
+   577→        (profile->contention_rate < VTX_LOCK_CONTENTION_THRESHOLD);
+   578→
+   579→    /* Update statistics: if eligibility changed, update the result's
+   580→     * eligible_sites count. (This is approximate — the caller should
+   581→     * recompute stats periodically.) */
+   582→    (void)was_eligible;  /* used for incremental update in a full integration */
+   583→}
+   584→
+   585→/* ========================================================================== */
+   586→/* Lock Elision: internal: adapt sampling interval                              */
+   587→/* ========================================================================== */
+   588→
+   589→/**
+   590→ * Adapt the sampling interval based on the contention stability.
+   591→ *
+   592→ * Stable sites (contention_rate near 0) get longer intervals
+   593→ * (less frequent checking → less overhead).
+   594→ * Unstable sites (contention_rate near threshold) get shorter intervals
+   595→ * (more responsive tracking).
+   596→ *
+   597→ * This mirrors the adaptive sampling in guard metadata and value profiles.
+   598→ */
+   599→static void adapt_sample_interval(vtx_lock_contention_profile_t *profile,
+   600→                                    bool had_contention)
+   601→{
+   602→    if (had_contention) {
+   603→        /* Contention observed → shorten interval for rapid detection */
+   604→        if (profile->sample_interval > VTX_LOCK_SAMPLE_INTERVAL_UNSTABLE) {
+   605→            profile->sample_interval = VTX_LOCK_SAMPLE_INTERVAL_UNSTABLE;
+   606→        }
+   607→    } else if (profile->contention_rate < VTX_LOCK_CONTENTION_THRESHOLD * 0.1) {
+   608→        /* Very stable (contention rate < 0.01%) → lengthen interval */
+   609→        profile->sample_interval = VTX_LOCK_SAMPLE_INTERVAL_STABLE;
+   610→    } else if (profile->contention_rate < VTX_LOCK_CONTENTION_THRESHOLD * 0.5) {
+   611→        /* Moderately stable → default interval */
+   612→        profile->sample_interval = VTX_LOCK_SAMPLE_INTERVAL_DEFAULT;
+   613→    } else {
+   614→        /* Near threshold → keep short for responsiveness */
+   615→        profile->sample_interval = VTX_LOCK_SAMPLE_INTERVAL_UNSTABLE;
+   616→    }
+   617→}
+   618→
+   619→/* ========================================================================== */
+   620→/* Lock Elision: record acquisition (hot path)                                  */
+   621→/* ========================================================================== */
+   622→
+   623→void vtx_lock_elision_record_acquisition(vtx_lock_elision_result_t *result,
+   624→                                           uint32_t monitor_site_id,
+   625→                                           bool is_contended)
+   626→{
+   627→    if (result == NULL) return;
+   628→
+   629→    int32_t idx = find_or_create_profile(result, monitor_site_id);
+   630→    if (idx < 0) return;  /* allocation failure */
+   631→
+   632→    vtx_lock_contention_profile_t *profile = &result->profiles[idx];
+   633→
+   634→    /* Sampling: decrement counter, only record at sample boundary.
+   635→     * This is the zero-cost deopt hot path pattern:
+   636→     *   1. Decrement counter (1 cycle)
+   637→     *   2. If counter > 1, return (predicted branch)
+   638→     *   3. At boundary, do full update and reset counter */
+   639→    if (__builtin_expect(profile->sample_counter > 1, 1)) {
+   640→        profile->sample_counter--;
+   641→
+   642→        /* Even between samples, we accumulate contention info.
+   643→         * This ensures we don't miss rare contention events. */
+   644→        if (is_contended) {
+   645→            profile->contention_count++;
+   646→            /* Shorten interval on contention for rapid detection */
+   647→            if (profile->sample_interval > VTX_LOCK_SAMPLE_INTERVAL_UNSTABLE) {
+   648→                profile->sample_interval = VTX_LOCK_SAMPLE_INTERVAL_UNSTABLE;
+   649→                if (profile->sample_counter > VTX_LOCK_SAMPLE_INTERVAL_UNSTABLE) {
+   650→                    profile->sample_counter = VTX_LOCK_SAMPLE_INTERVAL_UNSTABLE;
+   651→                }
+   652→            }
+   653→        }
+   654→        return;
+   655→    }
+   656→
+   657→    /* Sample boundary — do the full update */
+   658→    profile->total_acquisitions += profile->sample_interval;
+   659→    if (is_contended) {
+   660→        profile->contention_count++;
+   661→    }
+   662→
+   663→    /* Recompute eligibility */
+   664→    update_eligibility(profile);
+   665→
+   666→    /* Adapt sampling interval based on stability */
+   667→    adapt_sample_interval(profile, is_contended);
+   668→
+   669→    /* Reset sample counter */
+   670→    profile->sample_counter = profile->sample_interval;
+   671→}
+   672→
+   673→/* ========================================================================== */
+   674→/* Lock Elision: eligibility check                                              */
+   675→/* ========================================================================== */
+   676→
+   677→bool vtx_lock_elision_is_eligible(const vtx_lock_elision_result_t *result,
+   678→                                    uint32_t monitor_site_id)
+   679→{
+   680→    if (result == NULL || result->profiles == NULL) return false;
+   681→
+   682→    for (uint32_t i = 0; i < result->profile_count; i++) {
+   683→        if (result->profiles[i].monitor_site_id == monitor_site_id) {
+   684→            return result->profiles[i].is_eligible;
+   685→        }
+   686→    }
+   687→
+   688→    return false;  /* no profile for this site */
+   689→}
+   690→
+   691→/* ========================================================================== */
+   692→/* Lock Elision: guard installation                                             */
+   693→/* ========================================================================== */
+   694→
+   695→int vtx_lock_elision_install_guard(vtx_lock_elision_result_t *result,
+   696→                                     uint32_t monitor_site_id,
+   697→                                     uint32_t guard_id)
+   698→{
+   699→    VTX_ASSERT(result != NULL, "result must not be NULL");
+   700→    VTX_ASSERT(guard_id != 0, "guard_id must not be 0");
+   701→
+   702→    if (result == NULL || result->profiles == NULL) return -1;
+   703→
+   704→    for (uint32_t i = 0; i < result->profile_count; i++) {
+   705→        if (result->profiles[i].monitor_site_id == monitor_site_id) {
+   706→            result->profiles[i].guard_id = guard_id;
+   707→            result->profiles[i].guard_installed = true;
+   708→            result->elided_sites++;
+   709→            return 0;
+   710→        }
+   711→    }
+   712→
+   713→    return -1;  /* no profile for this site */
+   714→}
+   715→
+   716→/* ========================================================================== */
+   717→/* Lock Elision: statistics query                                               */
+   718→/* ========================================================================== */
+   719→
+   720→void vtx_lock_elision_get_stats(const vtx_lock_elision_result_t *result,
+   721→                                  uint32_t *total_sites,
+   722→                                  uint32_t *eligible_sites,
+   723→                                  uint32_t *elided_sites)
+   724→{
+   725→    if (result == NULL) {
+   726→        if (total_sites)    *total_sites = 0;
+   727→        if (eligible_sites) *eligible_sites = 0;
+   728→        if (elided_sites)   *elided_sites = 0;
+   729→        return;
+   730→    }
+   731→
+   732→    /* Recompute eligible_sites from profiles (may have changed since
+   733→     * last check due to profile updates) */
+   734→    uint32_t eligible = 0;
+   735→    for (uint32_t i = 0; i < result->profile_count; i++) {
+   736→        if (result->profiles[i].is_eligible) {
+   737→            eligible++;
+   738→        }
+   739→    }
+   740→
+   741→    /* Update the cached count */
+   742→    ((vtx_lock_elision_result_t *)result)->eligible_sites = eligible;
+   743→
+   744→    if (total_sites)    *total_sites = result->total_sites;
+   745→    if (eligible_sites) *eligible_sites = eligible;
+   746→    if (elided_sites)   *elided_sites = result->elided_sites;
+   747→}
+   748→
+   749→/* ========================================================================== */
+   750→/* Lock Elision: profile lookup                                                 */
+   751→/* ========================================================================== */
+   752→
+   753→const vtx_lock_contention_profile_t *vtx_lock_elision_get_profile(
+   754→    const vtx_lock_elision_result_t *result,
+   755→    uint32_t monitor_site_id)
+   756→{
+   757→    if (result == NULL || result->profiles == NULL) return NULL;
+   758→
+   759→    for (uint32_t i = 0; i < result->profile_count; i++) {
+   760→        if (result->profiles[i].monitor_site_id == monitor_site_id) {
+   761→            return &result->profiles[i];
+   762→        }
+   763→    }
+   764→
+   765→    return NULL;
+   766→}
+   767→
