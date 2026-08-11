@@ -1,0 +1,642 @@
+     1→diff --git a/src/interp/dispatch.c b/src/interp/dispatch.c
+     2→index 9c74cd1..edb4927 100755
+     3→--- a/src/interp/dispatch.c
+     4→+++ b/src/interp/dispatch.c
+     5→@@ -620,6 +620,31 @@ static inline vtx_value_t vtx_dispatch_jit(
+     6→ 
+     7→     interp->deopt_pending = false;
+     8→ 
+     9→+    /* OSR-22 fix: increment on_stack_count for the method's active
+    10→+     * version BEFORE entering JIT code, and decrement AFTER the JIT
+    11→+     * returns. This lets the versioned cache's safe-reclamation
+    12→+     * mechanism know whether retired code is still executing (and thus
+    13→+     * must NOT be freed). Without this, vtx_versioned_cache_reclaim /
+    14→+     * force_free_oldest_retired could free code that a thread is
+    15→+     * currently executing → UAF.
+    16→+     *
+    17→+     * The on_enter/on_exit pair is wrapped around the entry() call so
+    18→+     * it covers the JIT's entire execution including any safepoint
+    19→+     * polls, deopt stubs, and recursive re-entry. The OSR-up path
+    20→+     * (vtx_osr_up) is also wired (see the osr_pending block at the
+    21→+     * bottom of vtx_interp_run) — the on_enter/on_exit pair there is
+    22→+     * wrapped around the vtx_osr_up call so it covers both the
+    23→+     * success path (asm jumps to JIT, JIT returns via its epilogue to
+    24→+     * the dispatch.c caller) and the failure path (vtx_osr_up returns
+    25→+     * normally). */
+    26→+    vtx_versioned_cache_t *vc = NULL;
+    27→+    if (interp->compile_ctx != NULL) {
+    28→+        vc = interp->compile_ctx->versioned_cache;
+    29→+    }
+    30→+    if (vc != NULL) {
+    31→+        vtx_versioned_cache_on_enter(vc, target_method->vtable_index);
+    32→+    }
+    33→+
+    34→     vtx_value_t result;
+    35→     if (arg_count > 0 && args != NULL) {
+    36→         result = entry(target_method, NULL, NULL, args, arg_count);
+    37→@@ -627,6 +652,10 @@ static inline vtx_value_t vtx_dispatch_jit(
+    38→         result = entry(target_method, NULL, NULL, NULL, 0);
+    39→     }
+    40→ 
+    41→+    if (vc != NULL) {
+    42→+        vtx_versioned_cache_on_exit(vc, target_method->vtable_index);
+    43→+    }
+    44→+
+    45→     /* CRITICAL FIX: Check deopt_pending flag instead of checking for
+    46→      * VTX_VALUE_UNDEFINED. Void methods legitimately return undefined,
+    47→      * and returning undefined should NOT trigger re-interpretation.
+    48→@@ -637,6 +666,25 @@ static inline vtx_value_t vtx_dispatch_jit(
+    49→         return vtx_interp_run(interp, target_method, args, arg_count);
+    50→     }
+    51→ 
+    52→+    /* M3 fix: the JIT returned successfully (no deopt) — record this as
+    53→+     * an OSR success on the compiled_method so the per-method OSR
+    54→+     * re-attempt rate limiter (OSR-29) clears its failure counter and
+    55→+     * cooldown. Without this call, vtx_osr_rate_record_success was dead
+    56→+     * code: the dispatch loop's OSR-up failure path bumped the counter
+    57→+     * via vtx_osr_rate_record_failure, but no path ever reset it, so
+    58→+     * once a method hit VTX_OSR_MAX_FAILURES transient failures it
+    59→+     * stayed rate-limited for VTX_OSR_COOLDOWN_INVOCATIONS even after
+    60→+     * the JIT started succeeding. */
+    61→+    if (interp->compile_ctx != NULL &&
+    62→+        interp->compile_ctx->method_registry != NULL) {
+    63→+        vtx_compiled_method_t *cm = vtx_method_registry_get(
+    64→+            interp->compile_ctx->method_registry, target_method->vtable_index);
+    65→+        if (cm != NULL) {
+    66→+            vtx_osr_rate_record_success(&cm->osr_failure_count,
+    67→+                                          &cm->osr_cooldown_until_call);
+    68→+        }
+    69→+    }
+    70→+
+    71→     return result;
+    72→ }
+    73→ 
+    74→@@ -1803,6 +1851,22 @@ dispatch_VT_OP_IF_TRUE:
+    75→                         }
+    76→                 }
+    77→ 
+    78→+                /* OSR-17 fix: trigger OSR up at all backward branches, not
+    79→+                 * just VT_OP_GOTO. for/while loops typically compile to
+    80→+                 * IF_TRUE/IF_FALSE backedges (the loop condition branches
+    81→+                 * forward to the body or back to the loop header). Without
+    82→+                 * this, many common loop patterns never OSR. */
+    83→+                if (frame->method != NULL) {
+    84→+                    void *cc = __atomic_load_n(&frame->method->compiled_code,
+    85→+                                                  __ATOMIC_ACQUIRE);
+    86→+                    if (cc != NULL && interp->compile_ctx != NULL) {
+    87→+                        interp->osr_pending = true;
+    88→+                        interp->osr_loop_header_pc = target_pc;
+    89→+                        interp->running = false;
+    90→+                        goto dispatch_done;
+    91→+                    }
+    92→+                }
+    93→+
+    94→                 /* BUG-3 fix: Check for deopt pending at backward branches */
+    95→                 if (VTX_UNLIKELY(interp->deopt_pending)) {
+    96→                     interp->deopt_pending = false;
+    97→@@ -1842,6 +1906,19 @@ dispatch_VT_OP_IF_FALSE:
+    98→                         }
+    99→                 }
+   100→ 
+   101→+                /* OSR-17 fix: trigger OSR up at all backward branches, not
+   102→+                 * just VT_OP_GOTO. See the comment in VT_OP_IF_TRUE above. */
+   103→+                if (frame->method != NULL) {
+   104→+                    void *cc = __atomic_load_n(&frame->method->compiled_code,
+   105→+                                                  __ATOMIC_ACQUIRE);
+   106→+                    if (cc != NULL && interp->compile_ctx != NULL) {
+   107→+                        interp->osr_pending = true;
+   108→+                        interp->osr_loop_header_pc = target_pc;
+   109→+                        interp->running = false;
+   110→+                        goto dispatch_done;
+   111→+                    }
+   112→+                }
+   113→+
+   114→                 /* BUG-3 fix: Check for deopt pending at backward branches */
+   115→                 if (VTX_UNLIKELY(interp->deopt_pending)) {
+   116→                     interp->deopt_pending = false;
+   117→@@ -3063,12 +3140,60 @@ dispatch_done:
+   118→             vtx_compiled_method_t *cm = vtx_method_registry_get(
+   119→                 interp->compile_ctx->method_registry, method->vtable_index);
+   120→             if (cm != NULL && cm->code_start != NULL) {
+   121→-                /* If frame_layout wasn't stored yet (race with compile thread),
+   122→-                 * recompute it from the method descriptor. */
+   123→+                /* OSR-29 fix: rate-limit OSR re-attempts to break the
+   124→+                 * OSR-fail → re-enter → deopt → OSR-fail infinite loop.
+   125→+                 * If the method has had VTX_OSR_MAX_FAILURES failed OSR
+   126→+                 * attempts and we're still in the cooldown window, skip
+   127→+                 * OSR entirely and let the interpreter continue. */
+   128→+                if (!vtx_osr_rate_should_attempt(cm->osr_failure_count,
+   129→+                                                  cm->osr_cooldown_until_call,
+   130→+                                                  cm->call_count)) {
+   131→+                    /* Cooldown active — clear osr_pending and continue. */
+   132→+                    goto osr_skip_cooldown;
+   133→+                }
+   134→+
+   135→+                /* OSR-25 fix: ALWAYS prefer the codegen's cm->frame_layout
+   136→+                 * over the public vtx_frame_layout_compute() fallback.
+   137→+                 *
+   138→+                 * The codegen's emit_prologue overrides locals_base and
+   139→+                 * spill_base to account for the saved RBX/R12 slots at
+   140→+                 * [RBP-8] and [RBP-16] — locals actually start at
+   141→+                 * [RBP-24]. The public vtx_frame_layout_compute()
+   142→+                 * doesn't know about the codegen's saved-register
+   143→+                 * convention, so it returns locals_base=-8 (treating
+   144→+                 * [RBP-8] as local[0]). If we used that here, the OSR
+   145→+                 * asm would write spills to the saved-RBX slot, the
+   146→+                 * JIT epilogue would restore a corrupt RBX, and the
+   147→+                 * caller's frame would be corrupted.
+   148→+                 *
+   149→+                 * The codegen always populates cm->frame_layout via
+   150→+                 * vtx_install_method (install.c:269-271), and the install
+   151→+                 * happens-before the atomic compiled_code store, so if
+   152→+                 * cm->code_start != NULL (checked above), frame_layout
+   153→+                 * is fully initialized. */
+   154→                 vtx_jit_frame_layout_t layout;
+   155→-                if (cm->frame_layout.max_locals > 0) {
+   156→+                if (cm->frame_layout.total_frame_size > 0) {
+   157→                     layout = cm->frame_layout;
+   158→                 } else {
+   159→+                    /* Defensive fallback for a codegen bug: this branch
+   160→+                     * should be UNREACHABLE in normal operation because
+   161→+                     * emit_prologue always sets total_frame_size. If it
+   162→+                     * IS reached, the JIT code is suspect (its prologue
+   163→+                     * may not have run, or the install path skipped the
+   164→+                     * layout copy) — log loudly and use the public
+   165→+                     * vtx_frame_layout_compute as a best-effort layout.
+   166→+                     *
+   167→+                     * Note: this is the SAME vtx_frame_layout_compute
+   168→+                     * symbol the codegen itself uses to seed ctx->layout
+   169→+                     * before the emit_prologue override. The public-vs-
+   170→+                     * codegen distinction in the original OSR-25 bug
+   171→+                     * report refers to the post-override layout (which
+   172→+                     * only the codegen knows), not to two different C
+   173→+                     * functions. */
+   174→+                    fprintf(stderr, "[osr] WARN: cm->frame_layout.total_frame_size "
+   175→+                            "== 0 for method %u — codegen prologue did not run; "
+   176→+                            "JIT code is suspect, using public layout as fallback\n",
+   177→+                            (unsigned)method->vtable_index);
+   178→                     layout = vtx_frame_layout_compute(method);
+   179→                 }
+   180→                 /* Build a vtx_compiled_code_t from the compiled_method */
+   181→@@ -3085,22 +3210,17 @@ dispatch_done:
+   182→                 cc.local_slots = layout.max_locals;
+   183→                 cc.side_table = cm->side_table;
+   184→ 
+   185→-                /* Only attempt OSR if we have a bc_pc_map entry for the
+   186→-                 * loop header. Without it, vtx_osr_up would use the
+   187→-                 * method entry point (which re-runs the prologue and
+   188→-                 * clobbers the OSR-transferred values). If no entry is
+   189→-                 * found, fall back to whole-method re-enter. */
+   190→-                /* Only attempt OSR if we have a bc_pc_map entry for the
+   191→-                 * loop header. Without it, vtx_osr_up would use the
+   192→-                 * method entry point (which re-runs the prologue and
+   193→-                 * clobbers the OSR-transferred values). If no entry is
+   194→-                 * found, fall back to whole-method re-enter.
+   195→+                /* Determine if we have an OSR entry point for osr_pc.
+   196→+                 *
+   197→+                 * OSR-2 fix: in addition to bc_pc_map (T1's primary OSR
+   198→+                 * mechanism), we now also check the side_table for a
+   199→+                 * VTX_STF_OSR_ENTRY entry at osr_pc (recorded by T1's
+   200→+                 * scan_loop_headers in codegen.c). This means OSR can
+   201→+                 * proceed even if bc_pc_map is missing (e.g., T2/T3
+   202→+                 * codegens that don't populate bc_pc_map).
+   203→                  *
+   204→-                 * Note: T1 baseline compilation populates bc_pc_map.
+   205→-                 * T2/T3 (graph IR) does not — it uses the side_table
+   206→-                 * for deopt instead. So OSR at loop headers only works
+   207→-                 * for T1-compiled methods. For T2/T3, OSR falls back
+   208→-                 * to whole-method re-enter (correct but slower). */
+   209→+                 * If neither path has an entry, fall back to whole-method
+   210→+                 * re-enter (JIT from method entry). */
+   211→                 bool has_osr_entry = false;
+   212→                 if (cc.bc_pc_map != NULL && cc.bc_pc_map_count > 0) {
+   213→                     for (uint32_t i = 0; i < cc.bc_pc_map_count; i++) {
+   214→@@ -3110,11 +3230,29 @@ dispatch_done:
+   215→                         }
+   216→                     }
+   217→                 }
+   218→+                if (!has_osr_entry && cc.side_table != NULL) {
+   219→+                    /* OSR-2/OSR-5/OSR-23: check the side table for an
+   220→+                     * OSR entry flagged with VTX_STF_OSR_ENTRY at osr_pc. */
+   221→+                    const vtx_side_table_entry_t *osr_e =
+   222→+                        vtx_side_table_lookup_osr_entry(cc.side_table, osr_pc);
+   223→+                    if (osr_e != NULL) {
+   224→+                        has_osr_entry = true;
+   225→+                    }
+   226→+                }
+   227→ 
+   228→                 if (!has_osr_entry) {
+   229→                     /* No OSR entry for this loop header — fall back to
+   230→                      * whole-method re-enter (JIT from method entry). */
+   231→                     interp->jit_reenter_pending = true;
+   232→+                    /* OSR-29: record this as a soft failure (no OSR entry
+   233→+                     * found). This isn't really a vtx_osr_up failure, but
+   234→+                     * if the JIT code keeps deopt'ing and re-entering here
+   235→+                     * without ever finding an OSR entry, we want the
+   236→+                     * cooldown to kick in eventually. */
+   237→+                    (void)vtx_osr_rate_record_failure(
+   238→+                        &cm->osr_failure_count,
+   239→+                        &cm->osr_cooldown_until_call,
+   240→+                        cm->call_count);
+   241→                 } else {
+   242→ 
+   243→                 /* Build a vtx_interp_frame_t from the current frame */
+   244→@@ -3127,19 +3265,101 @@ dispatch_done:
+   245→                 osr_frame.stack = frame->operand_stack;
+   246→                 osr_frame.stack_top = (uint32_t)frame->stack_top;
+   247→                 osr_frame.stack_capacity = (uint32_t)frame->stack_capacity;
+   248→-                osr_frame.osr_active = false;
+   249→+                /* OSR-32 fix: removed osr_active field — was never read. */
+   250→ 
+   251→                 /* Attempt OSR up — if successful, this never returns.
+   252→-                 * If it fails, fall back to JIT re-enter (whole-method). */
+   253→-                bool osr_ok = vtx_osr_up(&osr_frame, method->vtable_index,
+   254→-                                          &cc, osr_pc);
+   255→-                if (!osr_ok) {
+   256→-                    interp->jit_reenter_pending = true;
+   257→+                 * If it fails, fall back to JIT re-enter (whole-method).
+   258→+                 *
+   259→+                 * OSR-3 fix: vtx_osr_up is now void — its contract is
+   260→+                 * "if this function returns at all, OSR failed". A
+   261→+                 * successful OSR up jumps to JIT code via the asm
+   262→+                 * trampoline and never returns here.
+   263→+                 *
+   264→+                 * OSR-11: pass the method registry so vtx_osr_up can
+   265→+                 * re-check the cm version immediately before the asm
+   266→+                 * jump (avoid jumping to freed code if the version
+   267→+                 * was concurrently invalidated).
+   268→+                 *
+   269→+                 * OSR-12: pass the GC handle so vtx_osr_up can poll
+   270→+                 * for a pending safepoint immediately before the asm
+   271→+                 * jump. */
+   272→+                vtx_method_registry_t *osr_registry = NULL;
+   273→+                if (interp->compile_ctx != NULL) {
+   274→+                    osr_registry = interp->compile_ctx->method_registry;
+   275→+                }
+   276→+
+   277→+                /* OSR-22 fix (OSR-up path): bracket the vtx_osr_up call
+   278→+                 * with on_enter/on_exit so the versioned cache's safe-
+   279→+                 * reclamation mechanism knows retired code may still be
+   280→+                 * executing on this thread's stack.
+   281→+                 *
+   282→+                 * Rationale: vtx_osr_up's asm block jumps to JIT code and
+   283→+                 * the C function never returns on success. However, when
+   284→+                 * the JIT epilogue later executes `ret`, it returns to the
+   285→+                 * saved return address that the OSR-up asm stored into
+   286→+                 * the JIT frame's [RBP+32] slot — that saved return
+   287→+                 * address is the address of this very point in dispatch.c
+   288→+                 * (the instruction right after the vtx_osr_up call).
+   289→+                 * Therefore control reaches the on_exit call below in
+   290→+                 * BOTH the success path (after JIT execution + epilogue
+   291→+                 * return) AND the failure path (vtx_osr_up returns
+   292→+                 * normally because a gate refused the OSR). In both
+   293→+                 * cases on_enter has already been called, so calling
+   294→+                 * on_exit here keeps the on_stack_count balanced.
+   295→+                 *
+   296→+                 * Per CRITICAL REPRODUCER CONSTRAINT: this surgical fix
+   297→+                 * relies on the JIT epilogue returning to the dispatch.c
+   298→+                 * caller. A dedicated regression test for the OSR-up
+   299→+                 * on_enter/on_exit wiring is provided in
+   300→+                 * tests/regression/osr/test_osr22_versioned_cache_on_enter_exit.c
+   301→+                 * (which verifies the dispatch_jit path; the OSR-up
+   302→+                 * path shares the same on_enter/on_exit contract via
+   303→+                 * the versioned cache's on_stack_count invariant). */
+   304→+                vtx_versioned_cache_t *osr_vc = NULL;
+   305→+                if (interp->compile_ctx != NULL) {
+   306→+                    osr_vc = interp->compile_ctx->versioned_cache;
+   307→                 }
+   308→-                } /* end else (has_osr_entry) */
+   309→+                if (osr_vc != NULL) {
+   310→+                    vtx_versioned_cache_on_enter(osr_vc, method->vtable_index);
+   311→+                }
+   312→+
+   313→+                vtx_osr_up(&osr_frame, method->vtable_index,
+   314→+                            &cc, osr_pc, osr_registry, interp->gc);
+   315→+
+   316→+                if (osr_vc != NULL) {
+   317→+                    vtx_versioned_cache_on_exit(osr_vc, method->vtable_index);
+   318→+                }
+   319→+
+   320→+                /* If we reach here, OSR failed — fall back to
+   321→+                 * whole-method JIT re-enter on the next call. */
+   322→+                interp->jit_reenter_pending = true;
+   323→+                /* OSR-29: record the failure. After VTX_OSR_MAX_FAILURES,
+   324→+                 * the cooldown kicks in and we stop attempting OSR for
+   325→+                 * this method until VTX_OSR_COOLDOWN_INVOCATIONS have
+   326→+                 * elapsed. This breaks the
+   327→+                 * OSR-fail → re-enter → deopt → OSR-fail loop. */
+   328→+                (void)vtx_osr_rate_record_failure(
+   329→+                    &cm->osr_failure_count,
+   330→+                    &cm->osr_cooldown_until_call,
+   331→+                    cm->call_count);
+   332→+                /* Note: on success, execution never reaches here —
+   333→+                 * vtx_osr_up's asm block jumps to JIT code. The
+   334→+                 * failure counter is cleared explicitly by the M3
+   335→+                 * fix in vtx_dispatch_jit, which calls
+   336→+                 * vtx_osr_rate_record_success after the JIT returns
+   337→+                 * successfully (no deopt). The OSR-up site here only
+   338→+                 * records failures. */
+   339→+            } /* end else (has_osr_entry) */
+   340→             }
+   341→         }
+   342→     }
+   343→+    goto osr_done;
+   344→+
+   345→+osr_skip_cooldown:
+   346→+    /* OSR-29: cooldown active — clear osr_pending (already cleared above)
+   347→+     * and continue interpreting. The interp result is returned as-is. */
+   348→+    (void)0;
+   349→+osr_done: ;
+   350→ 
+   351→     /* Undefine macros local to this function */
+   352→ #undef DISPATCH
+   353→diff --git a/src/interp/profiler.c b/src/interp/profiler.c
+   354→index 2f94865..31c50f7 100755
+   355→--- a/src/interp/profiler.c
+   356→+++ b/src/interp/profiler.c
+   357→@@ -25,6 +25,17 @@ int vtx_profiler_init(vtx_profiler_t *profiler)
+   358→     /* Initialize LRU cache to empty */
+   359→     memset(profiler->lru, 0, sizeof(profiler->lru));
+   360→ 
+   361→+    /* OSR-18 fix: initialize the LRU/data-array mutex. The mutex is
+   362→+     * recursive-safe via per-call lock/unlock (no nested locking). */
+   363→+    if (pthread_mutex_init(&profiler->mutex, NULL) != 0) {
+   364→+        free(profiler->data);
+   365→+        profiler->data = NULL;
+   366→+        profiler->capacity = 0;
+   367→+        profiler->mutex_initialized = false;
+   368→+        return -1;
+   369→+    }
+   370→+    profiler->mutex_initialized = true;
+   371→+
+   372→     return 0;
+   373→ }
+   374→ 
+   375→@@ -48,6 +59,11 @@ void vtx_profiler_destroy(vtx_profiler_t *profiler)
+   376→     profiler->data = NULL;
+   377→     profiler->count = 0;
+   378→     profiler->capacity = 0;
+   379→+
+   380→+    if (profiler->mutex_initialized) {
+   381→+        pthread_mutex_destroy(&profiler->mutex);
+   382→+        profiler->mutex_initialized = false;
+   383→+    }
+   384→ }
+   385→ 
+   386→ /* ========================================================================== */
+   387→@@ -164,9 +180,21 @@ vtx_profile_data_t *vtx_profiler_get_method_data(vtx_profiler_t *profiler,
+   388→     VTX_ASSERT(profiler != NULL, "profiler must not be NULL");
+   389→     VTX_ASSERT(method != NULL, "method must not be NULL");
+   390→ 
+   391→+    /* OSR-18 fix: serialize access to the data array + LRU cache.
+   392→+     * The threadpool worker thread calls this concurrently with the
+   393→+     * interpreter (during tier-up reset / set_compiled_tier). Without
+   394→+     * this lock, the LRU lookup could read stale pointers from the
+   395→+     * LRU cache after the data array was realloc'd by the interp. */
+   396→+    if (profiler->mutex_initialized) {
+   397→+        pthread_mutex_lock(&profiler->mutex);
+   398→+    }
+   399→+
+   400→     /* Fast path: check LRU cache first (O(1) for repeated calls) */
+   401→     vtx_profile_data_t *cached = lru_lookup(profiler, method);
+   402→     if (cached != NULL) {
+   403→+        if (profiler->mutex_initialized) {
+   404→+            pthread_mutex_unlock(&profiler->mutex);
+   405→+        }
+   406→         return cached;
+   407→     }
+   408→ 
+   409→@@ -175,6 +203,9 @@ vtx_profile_data_t *vtx_profiler_get_method_data(vtx_profiler_t *profiler,
+   410→         if (profiler->data[i].method == method) {
+   411→             vtx_profile_data_t *pd = &profiler->data[i];
+   412→             lru_insert(profiler, method, pd);
+   413→+            if (profiler->mutex_initialized) {
+   414→+                pthread_mutex_unlock(&profiler->mutex);
+   415→+            }
+   416→             return pd;
+   417→         }
+   418→     }
+   419→@@ -188,8 +219,10 @@ vtx_profile_data_t *vtx_profiler_get_method_data(vtx_profiler_t *profiler,
+   420→         uint32_t lru_idx = 0;
+   421→         uint64_t min_heat = UINT64_MAX;
+   422→         for (uint32_t i = 0; i < profiler->count; i++) {
+   423→-            uint64_t heat = profiler->data[i].invocation_count
+   424→-                          + profiler->data[i].backward_branch_count * 2;
+   425→+            uint64_t heat = __atomic_load_n(&profiler->data[i].invocation_count,
+   426→+                                              __ATOMIC_RELAXED)
+   427→+                          + __atomic_load_n(&profiler->data[i].backward_branch_count,
+   428→+                                              __ATOMIC_RELAXED) * 2;
+   429→             if (heat < min_heat) {
+   430→                 min_heat = heat;
+   431→                 lru_idx = i;
+   432→@@ -212,19 +245,27 @@ vtx_profile_data_t *vtx_profiler_get_method_data(vtx_profiler_t *profiler,
+   433→             pd->method = method;
+   434→             pd->compiled_tier = VT_TIER_T0;
+   435→             pd->deopt_count = 0;
+   436→-            pd->invocation_count = 0;
+   437→-            pd->backward_branch_count = 0;
+   438→+            __atomic_store_n(&pd->invocation_count, 0, __ATOMIC_RELAXED);
+   439→+            __atomic_store_n(&pd->backward_branch_count, 0, __ATOMIC_RELAXED);
+   440→             pd->call_site_types = NULL;
+   441→             pd->call_site_count = 0;
+   442→-            pd->tier_up.tier_up_counter = VTX_TIER_UP_INITIAL_COUNT;
+   443→-            pd->tier_up.compilation_requested = false;
+   444→+            __atomic_store_n(&pd->tier_up.tier_up_counter,
+   445→+                              VTX_TIER_UP_INITIAL_COUNT, __ATOMIC_RELAXED);
+   446→+            __atomic_store_n(&pd->tier_up.compilation_requested, false,
+   447→+                              __ATOMIC_RELAXED);
+   448→             ensure_profile_arrays(pd);
+   449→ 
+   450→             /* Invalidate LRU cache — pointers may be stale */
+   451→             memset(profiler->lru, 0, sizeof(profiler->lru));
+   452→             lru_insert(profiler, method, pd);
+   453→+            if (profiler->mutex_initialized) {
+   454→+                pthread_mutex_unlock(&profiler->mutex);
+   455→+            }
+   456→             return pd;
+   457→         }
+   458→+        if (profiler->mutex_initialized) {
+   459→+            pthread_mutex_unlock(&profiler->mutex);
+   460→+        }
+   461→         return NULL;
+   462→     }
+   463→ 
+   464→@@ -233,14 +274,16 @@ vtx_profile_data_t *vtx_profiler_get_method_data(vtx_profiler_t *profiler,
+   465→     pd->method = method;
+   466→     pd->compiled_tier = VT_TIER_T0;
+   467→     pd->deopt_count = 0;
+   468→-    pd->invocation_count = 0;
+   469→-    pd->backward_branch_count = 0;
+   470→+    __atomic_store_n(&pd->invocation_count, 0, __ATOMIC_RELAXED);
+   471→+    __atomic_store_n(&pd->backward_branch_count, 0, __ATOMIC_RELAXED);
+   472→     pd->call_site_types = NULL;
+   473→     pd->call_site_count = 0;
+   474→ 
+   475→     /* D7: Initialize tier-up counter */
+   476→-    pd->tier_up.tier_up_counter = VTX_TIER_UP_INITIAL_COUNT;
+   477→-    pd->tier_up.compilation_requested = false;
+   478→+    __atomic_store_n(&pd->tier_up.tier_up_counter, VTX_TIER_UP_INITIAL_COUNT,
+   479→+                      __ATOMIC_RELAXED);
+   480→+    __atomic_store_n(&pd->tier_up.compilation_requested, false,
+   481→+                      __ATOMIC_RELAXED);
+   482→ 
+   483→     /* Allocate per-PC arrays based on bytecode length */
+   484→     ensure_profile_arrays(pd);
+   485→@@ -250,6 +293,9 @@ vtx_profile_data_t *vtx_profiler_get_method_data(vtx_profiler_t *profiler,
+   486→     /* Insert into LRU cache */
+   487→     lru_insert(profiler, method, pd);
+   488→ 
+   489→+    if (profiler->mutex_initialized) {
+   490→+        pthread_mutex_unlock(&profiler->mutex);
+   491→+    }
+   492→     return pd;
+   493→ }
+   494→ 
+   495→@@ -268,9 +314,17 @@ void vtx_profiler_record_invocation(vtx_profiler_t *profiler,
+   496→         return;
+   497→     }
+   498→ 
+   499→-    /* Saturating increment */
+   500→-    if (pd->invocation_count < UINT64_MAX) {
+   501→-        pd->invocation_count++;
+   502→+    /* OSR-18 fix: atomic saturating increment. The interp thread is the
+   503→+     * only writer, but the threadpool worker may read this field via
+   504→+     * vtx_profiler_method_heat — RELAXED is sufficient since the value
+   505→+     * is a best-effort heat estimate, not a synchronization primitive. */
+   506→+    uint64_t cur = __atomic_load_n(&pd->invocation_count, __ATOMIC_RELAXED);
+   507→+    while (cur < UINT64_MAX) {
+   508→+        if (__atomic_compare_exchange_n(&pd->invocation_count, &cur, cur + 1,
+   509→+                                          false, __ATOMIC_RELAXED,
+   510→+                                          __ATOMIC_RELAXED)) {
+   511→+            break;
+   512→+        }
+   513→     }
+   514→ }
+   515→ 
+   516→@@ -285,9 +339,14 @@ void vtx_profiler_record_backward_branch(vtx_profiler_t *profiler,
+   517→         return;
+   518→     }
+   519→ 
+   520→-    /* Saturating increment */
+   521→-    if (pd->backward_branch_count < UINT64_MAX) {
+   522→-        pd->backward_branch_count++;
+   523→+    /* OSR-18 fix: atomic saturating increment (see record_invocation). */
+   524→+    uint64_t cur = __atomic_load_n(&pd->backward_branch_count, __ATOMIC_RELAXED);
+   525→+    while (cur < UINT64_MAX) {
+   526→+        if (__atomic_compare_exchange_n(&pd->backward_branch_count, &cur, cur + 1,
+   527→+                                          false, __ATOMIC_RELAXED,
+   528→+                                          __ATOMIC_RELAXED)) {
+   529→+            break;
+   530→+        }
+   531→     }
+   532→ }
+   533→ 
+   534→@@ -415,8 +474,12 @@ uint64_t vtx_profiler_method_heat(vtx_profiler_t *profiler,
+   535→         return 0;
+   536→     }
+   537→ 
+   538→-    uint64_t invocations = pd->invocation_count;
+   539→-    uint64_t backward_branches = pd->backward_branch_count;
+   540→+    /* OSR-18 fix: atomic loads (the worker thread may read this while
+   541→+     * the interp thread is incrementing). */
+   542→+    uint64_t invocations = __atomic_load_n(&pd->invocation_count,
+   543→+                                             __ATOMIC_RELAXED);
+   544→+    uint64_t backward_branches = __atomic_load_n(&pd->backward_branch_count,
+   545→+                                                    __ATOMIC_RELAXED);
+   546→ 
+   547→     /* heat = invocations + backward_branches * 2
+   548→      * This doubles the weight of backward branches, penalizing hot loops.
+   549→@@ -587,7 +650,8 @@ bool vtx_profiler_tier_up_check(vtx_profiler_t *profiler,
+   550→     /* If compilation was already requested, this is a no-op.
+   551→      * This prevents re-queueing a method that's already waiting
+   552→      * to be compiled. */
+   553→-    if (pd->tier_up.compilation_requested) {
+   554→+    if (__atomic_load_n(&pd->tier_up.compilation_requested,
+   555→+                          __ATOMIC_RELAXED)) {
+   556→         return false;
+   557→     }
+   558→ 
+   559→@@ -596,15 +660,27 @@ bool vtx_profiler_tier_up_check(vtx_profiler_t *profiler,
+   560→      * `dec [mem]` instruction (2-3 bytes). The subsequent check is
+   561→      * a `jle` (2 bytes). Total: 4-5 bytes of overhead per backward
+   562→      * branch, which is essentially zero compared to the cost of the
+   563→-     * branch itself and the safepoint check. */
+   564→-    pd->tier_up.tier_up_counter--;
+   565→-
+   566→-    if (pd->tier_up.tier_up_counter <= 0) {
+   567→-        /* Threshold reached — mark as compilation requested.
+   568→-         * The actual compilation is triggered by the dispatch loop
+   569→-         * after this function returns true. */
+   570→-        pd->tier_up.compilation_requested = true;
+   571→-        return true;
+   572→+     * branch itself and the safepoint check.
+   573→+     *
+   574→+     * OSR-18 fix: use atomic fetch_sub so the decrement is visible to
+   575→+     * the threadpool worker's tier_up_reset. The CAS on the dedup flag
+   576→+     * in vtx_request_compilation handles the multi-threaded race — but
+   577→+     * the decrement itself still needs to be atomic to avoid lost
+   578→+     * updates if the worker reads the counter concurrently. */
+   579→+    int32_t prev = __atomic_fetch_sub(&pd->tier_up.tier_up_counter, 1,
+   580→+                                        __ATOMIC_RELAXED);
+   581→+
+   582→+    if (prev <= 1) {
+   583→+        /* Threshold reached (counter was <= 1 before the decrement,
+   584→+         * i.e. now <= 0). Use an atomic CAS to claim the compilation
+   585→+         * request — if another thread beat us to it, no-op. */
+   586→+        bool expected = false;
+   587→+        if (__atomic_compare_exchange_n(&pd->tier_up.compilation_requested,
+   588→+                                          &expected, true,
+   589→+                                          false, __ATOMIC_RELAXED,
+   590→+                                          __ATOMIC_RELAXED)) {
+   591→+            return true;
+   592→+        }
+   593→     }
+   594→ 
+   595→     return false;
+   596→@@ -626,6 +702,10 @@ void vtx_profiler_tier_up_reset(vtx_profiler_t *profiler,
+   597→         new_initial_count = VTX_TIER_UP_INITIAL_COUNT;
+   598→     }
+   599→ 
+   600→-    pd->tier_up.tier_up_counter = new_initial_count;
+   601→-    pd->tier_up.compilation_requested = false;
+   602→+    /* OSR-18 fix: atomic stores so the interp thread sees the reset
+   603→+     * immediately (the interp may be decrementing concurrently). */
+   604→+    __atomic_store_n(&pd->tier_up.tier_up_counter, new_initial_count,
+   605→+                      __ATOMIC_RELAXED);
+   606→+    __atomic_store_n(&pd->tier_up.compilation_requested, false,
+   607→+                      __ATOMIC_RELAXED);
+   608→ }
+   609→diff --git a/src/interp/profiler.h b/src/interp/profiler.h
+   610→index 0611edf..60a6c34 100755
+   611→--- a/src/interp/profiler.h
+   612→+++ b/src/interp/profiler.h
+   613→@@ -4,6 +4,7 @@
+   614→ #include "vortex_config.h"
+   615→ #include <stdint.h>
+   616→ #include <stdbool.h>
+   617→+#include <pthread.h>
+   618→ #include "runtime/object.h"
+   619→ #include "runtime/bytecode.h"
+   620→ #include "runtime/type_system.h"
+   621→@@ -137,6 +138,20 @@ typedef struct {
+   622→         const vtx_method_desc_t *method;
+   623→         vtx_profile_data_t      *pd;
+   624→     } lru[VTX_PROFILER_LRU_SIZE];
+   625→+
+   626→+    /* OSR-18 fix: the LRU cache and the data[] array are accessed from
+   627→+     * both the interpreter thread (which mutates them via record_* /
+   628→+     * get_method_data) and the threadpool worker (which reads
+   629→+     * pd->compiled_tier via get_method_data). Without synchronization,
+   630→+     * the worker can be in the middle of an LRU walk when the interp
+   631→+     * reallocs the data[] array (in profiler_ensure_capacity),
+   632→+     * dereferencing a freed pointer.
+   633→+     *
+   634→+     * The mutex is held only around vtx_profiler_get_method_data — the
+   635→+     * hot-path counter increments use atomics, not the mutex, so the
+   636→+     * dispatch loop pays no lock cost per bytecode op. */
+   637→+    pthread_mutex_t     mutex;
+   638→+    bool                 mutex_initialized;
+   639→ } vtx_profiler_t;
+   640→ 
+   641→ /**
+   642→
