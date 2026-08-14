@@ -162,8 +162,8 @@ void vtx_safepoint_mgr_check(vtx_safepoint_manager_t *mgr)
 
     struct timespec wait_end;
     clock_gettime(CLOCK_MONOTONIC, &wait_end);
-    uint64_t wait_ns = (wait_end.tv_sec - wait_start.tv_sec) * 1000000000ULL +
-                        (wait_end.tv_nsec - wait_start.tv_nsec);
+    uint64_t wait_ns = (uint64_t)((uint64_t)wait_end.tv_sec - (uint64_t)wait_start.tv_sec) * 1000000000ULL +
+                        (uint64_t)wait_end.tv_nsec - (uint64_t)wait_start.tv_nsec;
     mgr->threads[my_idx].total_wait_ns += wait_ns;
     mgr->total_wait_ns += wait_ns;
 

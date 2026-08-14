@@ -206,6 +206,7 @@ static void replace_parameters_with_args(vtx_graph_t *caller_graph,
                                           const vtx_nodeid_map_t *id_map,
                                           uint32_t callee_param_count)
 {
+    (void)callee_param_count;  /* reserved for future use */
     vtx_node_t *call_node = vtx_node_get(&caller_graph->node_table, call_node_id);
     if (call_node == NULL) return;
 
@@ -464,6 +465,7 @@ static vtx_nodeid_t add_inline_frame_state(vtx_graph_t *caller_graph,
                                             uint32_t callee_param_count,
                                             vtx_arena_t *arena)
 {
+    (void)callee_param_count; (void)arena;  /* reserved for future frame-state expansion */
     vtx_node_t *call_node = vtx_node_get(&caller_graph->node_table, call_node_id);
     if (call_node == NULL) return VTX_NODEID_INVALID;
 

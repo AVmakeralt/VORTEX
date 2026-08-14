@@ -268,7 +268,10 @@ void vtx_runtime_call_static(const void *m, ...)
          * The entry point receives (method, args_array, argc). */
         typedef vtx_value_t (*compiled_entry_t)(const vtx_method_desc_t *,
                                                  vtx_value_t *, uint32_t);
-        compiled_entry_t entry = (compiled_entry_t)method->compiled_code;
+        /* ISO C forbids object-to-function pointer conversion. Use a union. */
+        union { void *ptr; compiled_entry_t fn; } entry_cast;
+        entry_cast.ptr = method->compiled_code;
+        compiled_entry_t entry = entry_cast.fn;
         vtx_runtime_call_result = entry(method, args, argc);
         return;
     }
@@ -354,7 +357,9 @@ void vtx_runtime_call_virtual(uint32_t x, const void *m, ...)
     if (resolved->compiled_code != NULL) {
         typedef vtx_value_t (*compiled_entry_t)(const vtx_method_desc_t *,
                                                  vtx_value_t *, uint32_t);
-        compiled_entry_t entry = (compiled_entry_t)resolved->compiled_code;
+        union { void *ptr; compiled_entry_t fn; } ec;
+        ec.ptr = resolved->compiled_code;
+        compiled_entry_t entry = ec.fn;
         vtx_runtime_call_result = entry(resolved, args, call_argc);
         return;
     }
@@ -507,7 +512,9 @@ void vtx_runtime_call_interface(uint32_t x, const void *m, ...)
     if (resolved->compiled_code != NULL) {
         typedef vtx_value_t (*compiled_entry_t)(const vtx_method_desc_t *,
                                                  vtx_value_t *, uint32_t);
-        compiled_entry_t entry = (compiled_entry_t)resolved->compiled_code;
+        union { void *ptr; compiled_entry_t fn; } ec2;
+        ec2.ptr = resolved->compiled_code;
+        compiled_entry_t entry = ec2.fn;
         vtx_runtime_call_result = entry(resolved, args, call_argc);
         return;
     }
@@ -1011,8 +1018,9 @@ void vtx_deopt_handler_stub(uint32_t frame_state_index, uint32_t native_pc)
                         typedef vtx_value_t (*continuation_fn_t)(
                             const vtx_method_desc_t *, void *, void *,
                             vtx_value_t *, uint32_t);
-                        continuation_fn_t cont_fn =
-                            (continuation_fn_t)version->continuation_code;
+                        union { void *ptr; continuation_fn_t fn; } cont_cast;
+                        cont_cast.ptr = version->continuation_code;
+                        continuation_fn_t cont_fn = cont_cast.fn;
 
                         /* Look up the method descriptor for this method_id. */
                         const vtx_method_desc_t *cont_method = NULL;

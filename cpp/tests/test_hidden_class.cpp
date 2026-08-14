@@ -76,10 +76,10 @@ static void test_unknown_shape() {
 static void test_long_chain() {
     auto* ts = make_ts(); uint32_t s = vtx_hidden_class_root_shape_id();
     const int N = 1000; std::vector<std::string> names;
-    for (int i = 0; i < N; i++) { char b[32]; snprintf(b, sizeof(b), "p_%d", i); names.emplace_back(b); s = vtx_hidden_class_add_property(s, (void*)ts, names[i].c_str()); }
-    CHECK(vtx_hidden_class_property_count(s) == N, "1000 props");
+    for (int i = 0; i < N; i++) { char b[32]; snprintf(b, sizeof(b), "p_%d", i); names.emplace_back(b); s = vtx_hidden_class_add_property(s, (void*)ts, names[static_cast<size_t>(i)].c_str()); }
+    CHECK(vtx_hidden_class_property_count(s) == (uint32_t)N, "1000 props");
     bool ok = true;
-    for (int i = 0; i < N; i++) if (vtx_hidden_class_find_offset(s, (void*)ts, names[i].c_str()) != (uint32_t)i) { ok = false; break; }
+    for (int i = 0; i < N; i++) if (vtx_hidden_class_find_offset(s, (void*)ts, names[static_cast<size_t>(i)].c_str()) != (uint32_t)i) { ok = false; break; }
     CHECK(ok, "all offsets correct"); free_ts(ts);
 }
 static void test_many_same_seq() {

@@ -151,7 +151,8 @@ public:
         if (is_undefined()) return "undefined";
         if (is_object()) {
             char buf[64];
-            std::snprintf(buf, sizeof(buf), "[Object@%p]", as_object());
+            std::snprintf(buf, sizeof(buf), "[Object@%p]",
+                          static_cast<void*>(as_object()));
             return buf;
         }
         return "<?>";

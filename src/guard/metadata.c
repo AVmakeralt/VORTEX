@@ -90,6 +90,7 @@ static int meta_table_grow(vtx_guard_meta_table_t *table)
 /* Internal: update strength category counts                                   */
 /* ========================================================================== */
 
+__attribute__((unused))
 static void update_strength_counts(vtx_guard_meta_table_t *table,
                                     vtx_guard_strength_t old_strength,
                                     vtx_guard_strength_t new_strength)

@@ -14,7 +14,24 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # Compile flags: strict warnings, no external dependencies
-add_compile_options(-Wall -Wextra)
+#
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  DO NOT HIDE WARNINGS, KEEP THEM AS ERRORS                                ║
+# ║                                                                          ║
+# ║  This is a JIT compiler. A suppressed warning can become a               ║
+# ║  miscompilation that produces wrong machine code silently.               ║
+# ║  - If a warning appears, FIX THE CODE, not the warning.                  ║
+# ║  - Do NOT add -Wno-* to silence warnings.                                ║
+# ║  - Do NOT add casts or unused-variable tricks just to silence.           ║
+# ║  - If a warning is a false positive, use #pragma GCC diagnostic          ║
+# ║    push/pop around the specific line, with a comment explaining why.     ║
+# ║                                                                          ║
+# ║  Every warning is a latent bug. Fix it at the source.                    ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+add_compile_options(-Wall -Wextra -Wpedantic)
+add_compile_options(-Wshadow -Wnull-dereference -Wdouble-promotion -Wformat=2 -Wundef)
+add_compile_options(-Wconversion -Wsign-conversion)
+add_compile_options(-Werror)
 add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions> $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>)
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-fPIC)

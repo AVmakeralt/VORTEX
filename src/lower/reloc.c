@@ -101,6 +101,7 @@ uint32_t vtx_reloc_add_branch(vtx_reloc_table_t *table,
                                uint32_t target_offset,
                                vtx_arena_t *arena)
 {
+    (void)source_offset;  /* source_offset unused — patch_offset is the key */
     /* For a branch: the displacement is relative to the instruction after
      * the branch. For a 6-byte JCC (0F 8x + 4 bytes disp), the
      * displacement is relative to source_offset + 6.
@@ -170,7 +171,7 @@ static void write_i32(uint8_t *buf, uint32_t offset, int32_t value)
 static void write_i64(uint8_t *buf, uint32_t offset, int64_t value)
 {
     uint64_t v = (uint64_t)value;
-    for (int i = 0; i < 8; i++) {
+    for (uint32_t i = 0; i < 8; i++) {
         buf[offset + i] = (uint8_t)((v >> (i * 8)) & 0xFF);
     }
 }

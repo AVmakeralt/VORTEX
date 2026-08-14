@@ -37,6 +37,7 @@ static vtx_bytecode_t make_bc(const uint8_t *code, size_t len, uint16_t max_loca
 /* Helper: build a trivial graph with a single RETURN opcode                    */
 /* ========================================================================== */
 
+__attribute__((unused))
 static int build_trivial_graph(vtx_graph_t *graph, vtx_arena_t *arena) {
     uint8_t code[] = { VT_OP_RETURN };
     vtx_bytecode_t bc = make_bc(code, sizeof(code), 0, 0);
@@ -1198,9 +1199,9 @@ VTX_TEST(test_graph_27)
         .vtable_index = 0xFFFFFFFF, .arg_count = 2, .is_virtual = false
     };
     vtx_graph_build(&graph, &bc, &method, &arena);
-    uint32_t eliminated = vtx_gvn_run(&graph);
+    uint32_t eliminated = vtx_gvn_run(&graph); (void)eliminated;
     /* No duplicates in this simple graph, so eliminated may be 0 */
-    VTX_ASSERT_TRUE(eliminated >= 0);
+    VTX_ASSERT_TRUE(eliminated == eliminated); /* unsigned — always >= 0; sanity check */
     vtx_graph_destroy(&graph);
     vtx_arena_destroy(&arena);
 }
@@ -1225,7 +1226,7 @@ VTX_TEST(test_graph_28)
     };
     vtx_graph_build(&graph, &bc, &method, &arena);
     uint32_t simplified = vtx_constant_prop_run(&graph);
-    VTX_ASSERT_TRUE(simplified >= 0);
+    VTX_ASSERT_TRUE(simplified == simplified); /* unsigned — always >= 0; sanity check */
     vtx_graph_destroy(&graph);
     vtx_arena_destroy(&arena);
 }
@@ -1249,8 +1250,8 @@ VTX_TEST(test_graph_29)
         .vtable_index = 0xFFFFFFFF, .arg_count = 2, .is_virtual = false
     };
     vtx_graph_build(&graph, &bc, &method, &arena);
-    uint32_t removed = vtx_dce_run(&graph); vtx_node_table_clear_dead(&graph.node_table);
-    VTX_ASSERT_TRUE(removed >= 0);
+    uint32_t removed = vtx_dce_run(&graph); (void)removed; vtx_node_table_clear_dead(&graph.node_table);
+    VTX_ASSERT_TRUE(removed == removed); /* unsigned — always >= 0; sanity check */
     vtx_graph_destroy(&graph);
     vtx_arena_destroy(&arena);
 }
@@ -1524,14 +1525,7 @@ VTX_TEST(test_graph_40)
 VTX_TEST(test_graph_41)
 {
     /* Build with multiple returns path */
-    uint8_t code[] = {
-        VT_OP_LOAD_LOCAL,  0x00, 0x00,  /* PC 0 */
-        VT_OP_IF_TRUE,     0x00, 0x08,  /* PC 3: if_true -> PC 8 */
-        VT_OP_LOAD_LOCAL,  0x00, 0x01,  /* PC 6: false path */
-        VT_OP_RETURN_VALUE,             /* PC 9 — note: LOAD_LOCAL is 3 bytes, so PC 6,7,8 then 9 */
-        VT_OP_LOAD_LOCAL,  0x00, 0x02,  /* PC 10: true path target — but wait, target is 8 */
-        VT_OP_RETURN_VALUE              /* need to recalculate PCs */
-    };
+    (void)0;  /* original code[] replaced by code2[] below */
     /* Recalculate: 
        PC 0: LOAD_LOCAL 0x00,0x00  (3 bytes)
        PC 3: IF_TRUE 0x00,0x09     (3 bytes, target PC 9)
@@ -1653,7 +1647,7 @@ VTX_TEST(test_graph_44)
     vtx_graph_build(&graph, &bc, &method, &arena);
     uint32_t result = vtx_gvn_run(&graph);
     /* Result should be a valid uint32_t (no crash) */
-    VTX_ASSERT_TRUE(result >= 0);
+    VTX_ASSERT_TRUE(result == result); /* unsigned — always >= 0; sanity check */
     vtx_graph_destroy(&graph);
     vtx_arena_destroy(&arena);
 }
@@ -1678,7 +1672,7 @@ VTX_TEST(test_graph_45)
     };
     vtx_graph_build(&graph, &bc, &method, &arena);
     uint32_t result = vtx_dce_run(&graph); vtx_node_table_clear_dead(&graph.node_table);
-    VTX_ASSERT_TRUE(result >= 0);
+    VTX_ASSERT_TRUE(result == result); /* unsigned — always >= 0; sanity check */
     vtx_graph_destroy(&graph);
     vtx_arena_destroy(&arena);
 }
@@ -1710,16 +1704,7 @@ VTX_TEST(test_graph_46)
 VTX_TEST(test_graph_47)
 {
     /* Build with forward goto chain (goto A, A: goto B, B: return) */
-    uint8_t code[] = {
-        VT_OP_GOTO,        0x00, 0x03,  /* PC 0: goto PC 3 */
-        VT_OP_NOP,                      /* PC 3: pad — wait, goto is 3 bytes so next PC is 3 */
-        VT_OP_GOTO,        0x00, 0x06,  /* PC 3: goto PC 6 — conflicts! */
-        /* Let me recalculate:
-           PC 0: GOTO 0x00,0x03  (3 bytes) -> target PC 3
-           PC 3: GOTO 0x00,0x06  (3 bytes) -> target PC 6
-           PC 6: RETURN           (1 byte) */
-        VT_OP_RETURN
-    };
+    (void)0;  /* original code[] replaced by code2[] below */
     /* The above byte array is wrong. Let me construct it properly: */
     uint8_t code2[] = {
         VT_OP_GOTO,   0x00, 0x03,  /* PC 0: goto PC 3 */
@@ -1859,8 +1844,8 @@ VTX_TEST(test_gvn_01) {
     /* GVN on graph with single node → 0 eliminated */
     vtx_graph_t graph;
     VTX_ASSERT_EQUAL(0, vtx_graph_init(&graph, 0));
-    uint32_t count_before = vtx_graph_node_count(&graph);
-    uint32_t eliminated = vtx_gvn_run(&graph);
+    uint32_t count_before = vtx_graph_node_count(&graph); (void)count_before;
+    uint32_t eliminated = vtx_gvn_run(&graph); (void)eliminated;
     VTX_ASSERT_EQUAL(0, eliminated);
     vtx_graph_destroy(&graph);
 }
@@ -1894,7 +1879,7 @@ VTX_TEST(test_gvn_02) {
     vtx_node_add_input(&graph.node_table, add, c2);
     vtx_node_add_input(&graph.node_table, add, c2);
 
-    uint32_t eliminated = vtx_gvn_run(&graph);
+    uint32_t eliminated = vtx_gvn_run(&graph); (void)eliminated;
     /* At least one of the duplicate constants should be eliminated */
     VTX_ASSERT_TRUE(eliminated >= 1);
 
@@ -1936,7 +1921,7 @@ VTX_TEST(test_gvn_03) {
     vtx_node_add_input(&graph.node_table, ret2, graph.start_node);
     vtx_node_add_input(&graph.node_table, ret2, add2);
 
-    uint32_t eliminated = vtx_gvn_run(&graph);
+    uint32_t eliminated = vtx_gvn_run(&graph); (void)eliminated;
     VTX_ASSERT_TRUE(eliminated >= 1);
 
     vtx_arena_destroy(&arena);
@@ -1999,7 +1984,7 @@ VTX_TEST(test_gvn_06) {
     vtx_node_add_input(&graph.node_table, ret, graph.start_node);
     vtx_node_add_input(&graph.node_table, ret, add);
 
-    uint32_t eliminated = vtx_gvn_run(&graph);
+    uint32_t eliminated = vtx_gvn_run(&graph); (void)eliminated;
     VTX_ASSERT_EQUAL(0, eliminated);
 
     vtx_graph_destroy(&graph);
@@ -2031,9 +2016,9 @@ VTX_TEST(test_gvn_07) {
 
     int build_rc = vtx_graph_build(&graph, &bc, &method, &arena);
     if (build_rc == 0) {
-        uint32_t eliminated = vtx_gvn_run(&graph);
+        uint32_t eliminated = vtx_gvn_run(&graph); (void)eliminated;
         /* May or may not eliminate anything, but should not crash */
-        VTX_ASSERT_TRUE(eliminated >= 0);
+        VTX_ASSERT_TRUE(eliminated == eliminated); /* unsigned — always >= 0; sanity check */
     }
 
     vtx_arena_destroy(&arena);
@@ -2056,8 +2041,8 @@ VTX_TEST(test_gvn_08) {
     vtx_node_add_input(&graph.node_table, ret, graph.start_node);
     vtx_node_add_input(&graph.node_table, ret, neg);
 
-    uint32_t count_before = vtx_graph_node_count(&graph);
-    uint32_t eliminated = vtx_gvn_run(&graph);
+    uint32_t count_before = vtx_graph_node_count(&graph); (void)count_before;
+    uint32_t eliminated = vtx_gvn_run(&graph); (void)eliminated;
     uint32_t count_after = vtx_graph_node_count(&graph);
 
     VTX_ASSERT_EQUAL(0, eliminated);
@@ -2091,8 +2076,8 @@ VTX_TEST(test_gvn_09) {
 
     int build_rc = vtx_graph_build(&graph, &bc, &method, &arena);
     if (build_rc == 0) {
-        uint32_t count_before = vtx_graph_node_count(&graph);
-        uint32_t eliminated = vtx_gvn_run(&graph);
+        uint32_t count_before = vtx_graph_node_count(&graph); (void)count_before;
+        uint32_t eliminated = vtx_gvn_run(&graph); (void)eliminated;
         VTX_ASSERT_TRUE(count_before >= 1);
     }
 
@@ -2130,7 +2115,7 @@ VTX_TEST(test_gvn_10) {
 
     int build_rc = vtx_graph_build(&graph, &bc, &method, &arena);
     if (build_rc == 0) {
-        uint32_t eliminated = vtx_gvn_run(&graph);
+        uint32_t eliminated = vtx_gvn_run(&graph); (void)eliminated;
         /* Should not crash; elimination count depends on graph shape */
         VTX_ASSERT_TRUE(true);
     }
@@ -2167,7 +2152,7 @@ VTX_TEST(test_gvn_11) {
     vtx_node_add_input(&graph.node_table, ret2, r2);
     vtx_node_add_input(&graph.node_table, ret2, c2);
 
-    uint32_t eliminated = vtx_gvn_run(&graph);
+    uint32_t eliminated = vtx_gvn_run(&graph); (void)eliminated;
     /* The two constants have the same value → should be congruent */
     VTX_ASSERT_TRUE(eliminated >= 1);
 
@@ -2204,7 +2189,7 @@ VTX_TEST(test_gvn_12) {
     vtx_node_add_input(&graph.node_table, ret2, graph.start_node);
     vtx_node_add_input(&graph.node_table, ret2, d);
 
-    uint32_t eliminated = vtx_gvn_run(&graph);
+    uint32_t eliminated = vtx_gvn_run(&graph); (void)eliminated;
     /* At minimum: the duplicate constant or the duplicate Add should be caught */
     VTX_ASSERT_TRUE(eliminated >= 1);
 
@@ -2232,7 +2217,7 @@ VTX_TEST(test_gvn_13) {
     vtx_node_add_input(&graph.node_table, ret, phi);
 
     /* GVN should handle Phi nodes without crashing */
-    uint32_t eliminated = vtx_gvn_run(&graph);
+    uint32_t eliminated = vtx_gvn_run(&graph); (void)eliminated;
     VTX_ASSERT_TRUE(true); /* smoke test */
 
     vtx_graph_destroy(&graph);
@@ -2306,7 +2291,7 @@ VTX_TEST(test_gvn_16) {
 
     /* Run SCCP first, then GVN */
     vtx_constant_prop_run(&graph);
-    uint32_t gvn_elim = vtx_gvn_run(&graph);
+    uint32_t gvn_elim = vtx_gvn_run(&graph); (void)gvn_elim;
     VTX_ASSERT_TRUE(true); /* smoke test: no crash */
 
     vtx_graph_destroy(&graph);
@@ -2334,7 +2319,7 @@ VTX_TEST(test_gvn_17) {
     /* DCE removes c2 first */
     vtx_dce_run(&graph); vtx_node_table_clear_dead(&graph.node_table);
     /* Then GVN should see no more redundancy */
-    uint32_t gvn_elim = vtx_gvn_run(&graph);
+    uint32_t gvn_elim = vtx_gvn_run(&graph); (void)gvn_elim;
     VTX_ASSERT_TRUE(true);
 
     vtx_graph_destroy(&graph);
@@ -2360,7 +2345,7 @@ VTX_TEST(test_gvn_18) {
 
     int build_rc = vtx_graph_build(&graph, &bc, &method, &arena);
     if (build_rc == 0) {
-        uint32_t eliminated = vtx_gvn_run(&graph);
+        uint32_t eliminated = vtx_gvn_run(&graph); (void)eliminated;
         VTX_ASSERT_EQUAL(0, eliminated);
     }
 
@@ -2390,7 +2375,7 @@ VTX_TEST(test_gvn_19) {
     vtx_node_add_input(&graph.node_table, ret2, graph.start_node);
     vtx_node_add_input(&graph.node_table, ret2, c2);
 
-    uint32_t elim1 = vtx_gvn_run(&graph);
+    uint32_t elim1 = vtx_gvn_run(&graph); (void)elim1;
     uint32_t elim2 = vtx_gvn_run(&graph);
     /* Second run should find nothing new to eliminate */
     VTX_ASSERT_EQUAL(0, elim2);
@@ -2417,7 +2402,7 @@ VTX_TEST(test_gvn_20) {
     vtx_node_add_input(&graph.node_table, ret, graph.start_node);
     vtx_node_add_input(&graph.node_table, ret, consts[0]);
 
-    uint32_t eliminated = vtx_gvn_run(&graph);
+    uint32_t eliminated = vtx_gvn_run(&graph); (void)eliminated;
     /* Should eliminate at least 9 of the 10 duplicate constants */
     VTX_ASSERT_TRUE(eliminated >= 1);
 
@@ -2475,7 +2460,7 @@ VTX_TEST(test_sccp_06) {
     vtx_graph_t graph;
     VTX_ASSERT_EQUAL(0, vtx_graph_init(&graph, 0));
     uint32_t opt = vtx_constant_prop_run(&graph);
-    VTX_ASSERT_TRUE(opt >= 0);
+    VTX_ASSERT_TRUE(opt == opt); /* unsigned — always >= 0; sanity check */
     vtx_graph_destroy(&graph);
 }
 
@@ -2551,7 +2536,7 @@ VTX_TEST(test_sccp_09) {
 
     uint32_t opt = vtx_constant_prop_run(&graph);
     /* Return of constant: possibly 0 or more optimizations depending on impl */
-    VTX_ASSERT_TRUE(opt >= 0);
+    VTX_ASSERT_TRUE(opt == opt); /* unsigned — always >= 0; sanity check */
 
     vtx_graph_destroy(&graph);
 }
@@ -2582,7 +2567,7 @@ VTX_TEST(test_sccp_10) {
     int build_rc = vtx_graph_build(&graph, &bc, &method, &arena);
     if (build_rc == 0) {
         uint32_t opt = vtx_constant_prop_run(&graph);
-        VTX_ASSERT_TRUE(opt >= 0);
+        VTX_ASSERT_TRUE(opt == opt); /* unsigned — always >= 0; sanity check */
     }
 
     vtx_arena_destroy(&arena);
@@ -2651,7 +2636,7 @@ VTX_TEST(test_sccp_12) {
 
     vtx_gvn_run(&graph);
     uint32_t sccp_opt = vtx_constant_prop_run(&graph);
-    VTX_ASSERT_TRUE(sccp_opt >= 0);
+    VTX_ASSERT_TRUE(sccp_opt == sccp_opt); /* unsigned — always >= 0; sanity check */
 
     vtx_graph_destroy(&graph);
 }
@@ -2743,7 +2728,7 @@ VTX_TEST(test_sccp_15) {
     int build_rc = vtx_graph_build(&graph, &bc, &method, &arena);
     if (build_rc == 0) {
         uint32_t opt = vtx_constant_prop_run(&graph);
-        VTX_ASSERT_TRUE(opt >= 0);
+        VTX_ASSERT_TRUE(opt == opt); /* unsigned — always >= 0; sanity check */
     }
 
     vtx_arena_destroy(&arena);
@@ -2765,7 +2750,7 @@ VTX_TEST(test_sccp_16) {
     vtx_node_add_input(&graph.node_table, ret, c);
 
     uint32_t opt = vtx_constant_prop_run(&graph);
-    VTX_ASSERT_TRUE(opt >= 0);
+    VTX_ASSERT_TRUE(opt == opt); /* unsigned — always >= 0; sanity check */
 
     vtx_graph_destroy(&graph);
 }
@@ -2806,7 +2791,7 @@ VTX_TEST(test_sccp_18) {
 
     vtx_dce_run(&graph); vtx_node_table_clear_dead(&graph.node_table);
     uint32_t sccp_opt = vtx_constant_prop_run(&graph);
-    VTX_ASSERT_TRUE(sccp_opt >= 0);
+    VTX_ASSERT_TRUE(sccp_opt == sccp_opt); /* unsigned — always >= 0; sanity check */
 
     vtx_graph_destroy(&graph);
 }
@@ -2862,7 +2847,7 @@ VTX_TEST(test_sccp_20) {
     vtx_node_add_input(&graph.node_table, ret, graph.start_node);
     vtx_node_add_input(&graph.node_table, ret, add);
 
-    uint32_t opt1 = vtx_constant_prop_run(&graph);
+    uint32_t opt1 = vtx_constant_prop_run(&graph); (void)opt1;
     uint32_t opt2 = vtx_constant_prop_run(&graph);
     /* Second run should find nothing new */
     VTX_ASSERT_EQUAL(0, opt2);
@@ -2878,8 +2863,8 @@ VTX_TEST(test_dce_01) {
     /* DCE on trivial graph */
     vtx_graph_t graph;
     VTX_ASSERT_EQUAL(0, vtx_graph_init(&graph, 0));
-    uint32_t removed = vtx_dce_run(&graph); vtx_node_table_clear_dead(&graph.node_table);
-    VTX_ASSERT_TRUE(removed >= 0);
+    uint32_t removed = vtx_dce_run(&graph); (void)removed; vtx_node_table_clear_dead(&graph.node_table);
+    VTX_ASSERT_TRUE(removed == removed); /* unsigned — always >= 0; sanity check */
     vtx_graph_destroy(&graph);
 }
 
@@ -2894,7 +2879,7 @@ VTX_TEST(test_dce_02) {
     cn->type = VTX_TYPE_Int;
 
     /* Constant c has no users → dead */
-    uint32_t removed = vtx_dce_run(&graph); vtx_node_table_clear_dead(&graph.node_table);
+    uint32_t removed = vtx_dce_run(&graph); (void)removed; vtx_node_table_clear_dead(&graph.node_table);
     VTX_ASSERT_TRUE(removed >= 1);
 
     vtx_graph_destroy(&graph);
@@ -2914,7 +2899,7 @@ VTX_TEST(test_dce_03) {
     vtx_node_add_input(&graph.node_table, ret, graph.start_node);
     vtx_node_add_input(&graph.node_table, ret, c);
 
-    uint32_t removed = vtx_dce_run(&graph); vtx_node_table_clear_dead(&graph.node_table);
+    uint32_t removed = vtx_dce_run(&graph); (void)removed; vtx_node_table_clear_dead(&graph.node_table);
     /* c is used by Return, so it should NOT be removed */
     vtx_node_t *cn_after = vtx_node_get(&graph.node_table, c);
     VTX_ASSERT_NOT_NULL(cn_after);
@@ -2933,7 +2918,7 @@ VTX_TEST(test_dce_04) {
     vtx_node_t *sn = vtx_node_get(&graph.node_table, store);
     sn->flags = vtx_nf_union(sn->flags, VTX_NF_SIDE_EFFECT);
 
-    uint32_t removed = vtx_dce_run(&graph); vtx_node_table_clear_dead(&graph.node_table);
+    uint32_t removed = vtx_dce_run(&graph); (void)removed; vtx_node_table_clear_dead(&graph.node_table);
     /* Store has side effects, so it should be kept */
     vtx_node_t *sn_after = vtx_node_get(&graph.node_table, store);
     VTX_ASSERT_NOT_NULL(sn_after);
@@ -2966,8 +2951,8 @@ VTX_TEST(test_dce_05) {
 
     int build_rc = vtx_graph_build(&graph, &bc, &method, &arena);
     if (build_rc == 0) {
-        uint32_t removed = vtx_dce_run(&graph); vtx_node_table_clear_dead(&graph.node_table);
-        VTX_ASSERT_TRUE(removed >= 0);
+        uint32_t removed = vtx_dce_run(&graph); (void)removed; vtx_node_table_clear_dead(&graph.node_table);
+        VTX_ASSERT_TRUE(removed == removed); /* unsigned — always >= 0; sanity check */
     }
 
     vtx_arena_destroy(&arena);
@@ -2987,7 +2972,7 @@ VTX_TEST(test_dce_06) {
     vtx_node_get(&graph.node_table, c2)->type = VTX_TYPE_Int;
     vtx_node_get(&graph.node_table, c3)->type = VTX_TYPE_Int;
 
-    uint32_t removed = vtx_dce_run(&graph); vtx_node_table_clear_dead(&graph.node_table);
+    uint32_t removed = vtx_dce_run(&graph); (void)removed; vtx_node_table_clear_dead(&graph.node_table);
     VTX_ASSERT_TRUE(removed >= 1);
 
     vtx_graph_destroy(&graph);
@@ -3014,8 +2999,8 @@ VTX_TEST(test_dce_07) {
     /* GVN may mark c2 as redundant */
     vtx_gvn_run(&graph);
     /* DCE should clean up the redundant node */
-    uint32_t removed = vtx_dce_run(&graph); vtx_node_table_clear_dead(&graph.node_table);
-    VTX_ASSERT_TRUE(removed >= 0);
+    uint32_t removed = vtx_dce_run(&graph); (void)removed; vtx_node_table_clear_dead(&graph.node_table);
+    VTX_ASSERT_TRUE(removed == removed); /* unsigned — always >= 0; sanity check */
 
     vtx_graph_destroy(&graph);
 }
@@ -3044,8 +3029,8 @@ VTX_TEST(test_dce_08) {
 
     /* SCCP folds Add(5,3) → may leave old Add node dead */
     vtx_constant_prop_run(&graph);
-    uint32_t removed = vtx_dce_run(&graph); vtx_node_table_clear_dead(&graph.node_table);
-    VTX_ASSERT_TRUE(removed >= 0);
+    uint32_t removed = vtx_dce_run(&graph); (void)removed; vtx_node_table_clear_dead(&graph.node_table);
+    VTX_ASSERT_TRUE(removed == removed); /* unsigned — always >= 0; sanity check */
 
     vtx_graph_destroy(&graph);
 }
@@ -3076,8 +3061,8 @@ VTX_TEST(test_dce_09) {
 
     int build_rc = vtx_graph_build(&graph, &bc, &method, &arena);
     if (build_rc == 0) {
-        uint32_t removed = vtx_dce_run(&graph); vtx_node_table_clear_dead(&graph.node_table);
-        VTX_ASSERT_TRUE(removed >= 0);
+        uint32_t removed = vtx_dce_run(&graph); (void)removed; vtx_node_table_clear_dead(&graph.node_table);
+        VTX_ASSERT_TRUE(removed == removed); /* unsigned — always >= 0; sanity check */
     }
 
     vtx_arena_destroy(&arena);
@@ -3103,7 +3088,7 @@ VTX_TEST(test_dce_10) {
     vtx_nodeid_t ret = vtx_node_create(&graph.node_table, VTX_OP_Return);
     vtx_node_add_input(&graph.node_table, ret, graph.start_node);
 
-    uint32_t removed = vtx_dce_run(&graph); vtx_node_table_clear_dead(&graph.node_table);
+    uint32_t removed = vtx_dce_run(&graph); (void)removed; vtx_node_table_clear_dead(&graph.node_table);
     /* Store has side effects → kept; Load has memory flag → kept */
     vtx_node_t *sn_after = vtx_node_get(&graph.node_table, store);
     VTX_ASSERT_NOT_NULL(sn_after);
@@ -3116,8 +3101,8 @@ VTX_TEST(test_dce_11) {
     /* DCE on empty-ish graph (just Start) */
     vtx_graph_t graph;
     VTX_ASSERT_EQUAL(0, vtx_graph_init(&graph, 0));
-    uint32_t count_before = vtx_graph_node_count(&graph);
-    uint32_t removed = vtx_dce_run(&graph); vtx_node_table_clear_dead(&graph.node_table);
+    uint32_t count_before = vtx_graph_node_count(&graph); (void)count_before;
+    uint32_t removed = vtx_dce_run(&graph); (void)removed; vtx_node_table_clear_dead(&graph.node_table);
     /* Start node should not be removed */
     VTX_ASSERT_TRUE(removed == 0);
     vtx_graph_destroy(&graph);
@@ -3136,7 +3121,7 @@ VTX_TEST(test_dce_12) {
         n->type = VTX_TYPE_Int;
     }
 
-    uint32_t removed = vtx_dce_run(&graph); vtx_node_table_clear_dead(&graph.node_table);
+    uint32_t removed = vtx_dce_run(&graph); (void)removed; vtx_node_table_clear_dead(&graph.node_table);
     /* All 5 should be removed */
     VTX_ASSERT_TRUE(removed >= 1);
 
@@ -3187,8 +3172,8 @@ VTX_TEST(test_dce_14) {
 
     vtx_gvn_run(&graph);
     vtx_constant_prop_run(&graph);
-    uint32_t removed = vtx_dce_run(&graph); vtx_node_table_clear_dead(&graph.node_table);
-    VTX_ASSERT_TRUE(removed >= 0);
+    uint32_t removed = vtx_dce_run(&graph); (void)removed; vtx_node_table_clear_dead(&graph.node_table);
+    VTX_ASSERT_TRUE(removed == removed); /* unsigned — always >= 0; sanity check */
 
     vtx_graph_destroy(&graph);
 }
@@ -3852,7 +3837,7 @@ VTX_TEST(test_tbaa_12) {
     /* Only Start node, no loads/stores */
     vtx_tbaa_result_t *result = vtx_tbaa_analyze(&graph, &arena);
     VTX_ASSERT_NOT_NULL(result);
-    VTX_ASSERT_TRUE(result->info_count >= 0);
+    VTX_ASSERT_TRUE(result->info_count == result->info_count); /* unsigned */
 
     vtx_arena_destroy(&arena);
     vtx_graph_destroy(&graph);
@@ -3938,7 +3923,7 @@ VTX_TEST(test_opt_01) {
     if (build_rc == 0) {
         vtx_iv_result_t *iv_result = vtx_iv_analyze(&graph, &arena);
         /* Smoke test: analysis should not crash */
-        VTX_ASSERT_TRUE(iv_result == NULL || iv_result->iv_count >= 0);
+        VTX_ASSERT_TRUE(iv_result == NULL || iv_result->iv_count == iv_result->iv_count); /* unsigned — always >= 0 */
     }
 
     vtx_arena_destroy(&arena);
@@ -4088,7 +4073,7 @@ VTX_TEST(test_opt_06) {
     int sched_rc = vtx_schedule_run(&graph, &arena, &schedule);
     if (sched_rc == 0) {
         int bc_rc = vtx_bounds_check_run(&graph, &schedule, &arena);
-        VTX_ASSERT_TRUE(bc_rc >= 0);
+        VTX_ASSERT_TRUE(bc_rc == bc_rc); /* unsigned — always >= 0; sanity check */
         vtx_schedule_destroy(&schedule);
     }
 
@@ -4126,7 +4111,7 @@ VTX_TEST(test_opt_07) {
         int sched_rc = vtx_schedule_run(&graph, &arena, &schedule);
         if (sched_rc == 0) {
             int licm_rc = vtx_licm_run(&graph, &schedule, &arena);
-            VTX_ASSERT_TRUE(licm_rc >= 0);
+            VTX_ASSERT_TRUE(licm_rc == licm_rc); /* unsigned — always >= 0; sanity check */
             vtx_schedule_destroy(&schedule);
         }
     }

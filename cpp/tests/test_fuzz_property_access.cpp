@@ -62,7 +62,7 @@ static void test_fuzz_ic_correctness() {
 
     for (int it = 0; it < iterations; it++) {
         /* Build a random shape */
-        int len = rng() % 6 + 1;
+        int len = (int)(rng() % 6) + 1;
         uint32_t shape = root;
         std::vector<std::pair<uint32_t, uint32_t>> expected;  /* (hash, offset) */
 
@@ -84,7 +84,7 @@ static void test_fuzz_ic_correctness() {
             }
 
             /* Update the IC at this site with this shape → offset */
-            uint32_t site_id = it * 100 + i;  /* unique site per (iteration, step) */
+            uint32_t site_id = (uint32_t)(it * 100 + (int)i);  /* unique site per (iteration, step) */
             vtx_property_ic_update(site_id, new_shape, offset);
 
             shape = new_shape;
@@ -93,7 +93,7 @@ static void test_fuzz_ic_correctness() {
 
         /* Verify: look up each shape via the IC at its site */
         for (size_t i = 0; i < expected.size(); i++) {
-            uint32_t site_id = it * 100 + i;
+            uint32_t site_id = (uint32_t)(it * 100 + (int)i);
             uint32_t ic_result = vtx_property_ic_lookup(site_id, expected[i].first);
             if (ic_result != expected[i].second && ic_result != UINT32_MAX) {
                 /* IC returned a wrong offset — critical bug */
@@ -132,7 +132,7 @@ static void test_fuzz_shape_id_uniqueness() {
     int collisions = 0;
 
     for (int i = 0; i < 2000; i++) {
-        int len = rng() % 5 + 1;
+        int len = (int)(rng() % 5) + 1;
         uint32_t shape = root;
         std::string full_path;
 
@@ -216,7 +216,7 @@ static void test_fuzz_ic_state_machine() {
 
     /* Rapid random lookups should never crash */
     for (int i = 0; i < 10000; i++) {
-        uint32_t shape = rng() % 2000;
+        uint32_t shape = (uint32_t)(rng() % 2000);
         uint32_t result = vtx_property_ic_lookup(0, shape);
         /* Megamorphic → must be UINT32_MAX */
         if (result != UINT32_MAX) {
@@ -328,7 +328,7 @@ static void test_stress_many_monomorphic() {
 
     /* Fill 8192 sites with monomorphic entries */
     for (uint32_t i = 0; i < 8192; i++) {
-        vtx_property_ic_update(i, i + 1, rng() % 1000);
+        vtx_property_ic_update(i, i + 1, (uint32_t)(rng() % 1000));
     }
 
     /* All should be MONOMORPHIC and hit */
@@ -355,25 +355,25 @@ static void test_stress_mixed_ic_states() {
 
     /* Sites 0-999: monomorphic (1 shape each) */
     for (int i = 0; i < 1000; i++)
-        vtx_property_ic_update(i, 100 + i, i);
+        vtx_property_ic_update((uint32_t)i, (uint32_t)(100 + i), (uint32_t)i);
 
     /* Sites 1000-1999: polymorphic (3 shapes each) */
     for (int i = 1000; i < 2000; i++) {
         for (int j = 0; j < 3; j++)
-            vtx_property_ic_update(i, 200 + j, j * 10);
+            vtx_property_ic_update((uint32_t)i, (uint32_t)(200 + j), (uint32_t)(j * 10));
     }
 
     /* Sites 2000-2999: megamorphic (>4 shapes) */
     for (int i = 2000; i < 3000; i++) {
         for (uint32_t j = 0; j <= vortex::kPropertyICMaxEntries; j++)
-            vtx_property_ic_update(i, 300 + j, j);
+            vtx_property_ic_update((uint32_t)i, 300 + j, j);
     }
 
     /* Verify mono sites */
     bool mono_ok = true;
     for (int i = 0; i < 1000; i++) {
-        if (vtx_property_ic_state(i) != (uint8_t)vortex::ICState::MONOMORPHIC ||
-            vtx_property_ic_lookup(i, 100 + i) != (uint32_t)i) {
+        if (vtx_property_ic_state((uint32_t)i) != (uint8_t)vortex::ICState::MONOMORPHIC ||
+            vtx_property_ic_lookup((uint32_t)i, (uint32_t)(100 + i)) != (uint32_t)i) {
             mono_ok = false; break;
         }
     }
@@ -382,11 +382,11 @@ static void test_stress_mixed_ic_states() {
     /* Verify poly sites */
     bool poly_ok = true;
     for (int i = 1000; i < 2000; i++) {
-        if (vtx_property_ic_state(i) != (uint8_t)vortex::ICState::POLYMORPHIC) {
+        if (vtx_property_ic_state((uint32_t)i) != (uint8_t)vortex::ICState::POLYMORPHIC) {
             poly_ok = false; break;
         }
         for (int j = 0; j < 3; j++) {
-            if (vtx_property_ic_lookup(i, 200 + j) != (uint32_t)(j * 10)) {
+            if (vtx_property_ic_lookup((uint32_t)i, (uint32_t)(200 + j)) != (uint32_t)(j * 10)) {
                 poly_ok = false; break;
             }
         }
@@ -396,12 +396,12 @@ static void test_stress_mixed_ic_states() {
     /* Verify mega sites */
     bool mega_ok = true;
     for (int i = 2000; i < 3000; i++) {
-        if (vtx_property_ic_state(i) != (uint8_t)vortex::ICState::MEGAMORPHIC) {
+        if (vtx_property_ic_state((uint32_t)i) != (uint8_t)vortex::ICState::MEGAMORPHIC) {
             mega_ok = false; break;
         }
         /* Megamorphic → all lookups should miss */
         for (uint32_t j = 0; j <= vortex::kPropertyICMaxEntries; j++) {
-            if (vtx_property_ic_lookup(i, 300 + j) != UINT32_MAX) {
+            if (vtx_property_ic_lookup((uint32_t)i, 300 + j) != UINT32_MAX) {
                 mega_ok = false; break;
             }
         }

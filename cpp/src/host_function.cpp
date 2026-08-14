@@ -63,7 +63,7 @@ extern "C" int32_t vtx_cpp_host_trampoline(uint32_t func_id,
     }
 
     vortex::Value result = vortex::HostFunctionRegistry::instance().call(
-        fn_id, argc, argv);
+        fn_id, static_cast<int>(argc), argv);
 
     // Push result back onto the stack (single return value).
     *sp++ = result.raw();

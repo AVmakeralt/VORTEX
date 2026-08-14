@@ -72,7 +72,9 @@ static int64_t sat_add(int64_t a, int64_t b)
 
 /**
  * Saturating subtract: clamps on overflow.
+ * Currently unused but kept as a utility for future range analysis.
  */
+__attribute__((unused))
 static int64_t sat_sub(int64_t a, int64_t b)
 {
     if (sub_overflows(a, b)) {
@@ -925,6 +927,7 @@ static void constrain_after_bounds_check(vtx_range_t *ranges,
                                           vtx_nodeid_t length_id,
                                           const vtx_node_table_t *table)
 {
+    (void)table;  /* reserved for future use (currently unused) */
     if (index_id == VTX_NODEID_INVALID || index_id >= range_count) return;
     if (length_id == VTX_NODEID_INVALID || length_id >= range_count) return;
 

@@ -256,7 +256,7 @@ static thread_local std::vector<CHostFnWrapper> g_host_fn_wrappers;
 uint32_t vtx_embed_register_host_function(const char* name,
                                             vtx_embed_host_fn fn,
                                             void* user_data) {
-    uint32_t id = g_host_fn_wrappers.size();
+    uint32_t id = static_cast<uint32_t>(g_host_fn_wrappers.size());
     g_host_fn_wrappers.push_back({fn, user_data});
 
     return vortex::HostFunctionRegistry::instance().register_function(
@@ -264,8 +264,11 @@ uint32_t vtx_embed_register_host_function(const char* name,
         [id](int argc, const vortex::Value* argv) -> vortex::Value {
             if (id >= g_host_fn_wrappers.size()) return vortex::Value::undefined();
             const auto& w = g_host_fn_wrappers[id];
-            std::vector<vtx_embed_value_t> raw_args(argc);
-            for (int i = 0; i < argc; i++) raw_args[i] = argv[i].raw();
+            std::vector<vtx_embed_value_t> raw_args(
+                static_cast<size_t>(argc));
+            for (int i = 0; i < argc; i++) {
+                raw_args[static_cast<size_t>(i)] = argv[i].raw();
+            }
             return vortex::Value(w.fn(argc, raw_args.data(), w.user_data));
         });
 }

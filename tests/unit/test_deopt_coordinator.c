@@ -34,6 +34,7 @@ typedef struct {
 static void test_recompile_fn(const uint32_t *site_ids, uint32_t count,
                                void *user_data)
 {
+    (void)site_ids;
     test_recompile_state_t *st = (test_recompile_state_t *)user_data;
     st->call_count++;
     st->total_sites += count;

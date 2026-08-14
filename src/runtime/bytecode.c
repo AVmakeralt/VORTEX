@@ -164,6 +164,7 @@ int vtx_bytecode_stack_effect(vtx_opcode_t opcode)
 
 uint32_t vtx_bytecode_compute_max_stack(const vtx_bytecode_t *bc, uint32_t max_locals)
 {
+    (void)max_locals;  /* reserved for future use; current impl starts at depth 0 */
     /*
      * Abstract-interpretation stack depth scan.
      *
@@ -219,14 +220,14 @@ uint32_t vtx_bytecode_compute_max_stack(const vtx_bytecode_t *bc, uint32_t max_l
             if (op >= VT_OP_COUNT) break; /* invalid opcode, stop */
 
             const vtx_opcode_info_t *info = &vtx_opcode_table[op];
-            size_t insn_len = 1 + (info->has_operand ? info->operand_size : 0);
+            size_t insn_len = 1u + (info->has_operand ? (size_t)info->operand_size : 0u);
 
             /* Check stack underflow in the scan (shouldn't happen in valid bytecode) */
             uint16_t inputs = info->stack_input_count;
             uint16_t outputs = info->stack_output_count;
             if (cur_depth < inputs) break; /* underflow, stop this path */
 
-            cur_depth = cur_depth - inputs + outputs;
+            cur_depth = (uint16_t)(cur_depth - inputs + outputs);
             if (cur_depth > computed_max) computed_max = cur_depth;
 
             /* Handle branches */
@@ -311,7 +312,7 @@ size_t vtx_bytecode_insn_length(const vtx_bytecode_t *bc, size_t pc)
 
     const vtx_opcode_info_t *info = &vtx_opcode_table[opcode];
     /* 1 byte for opcode + operand size */
-    return 1 + (info->has_operand ? info->operand_size : 0);
+    return 1u + (info->has_operand ? (size_t)info->operand_size : 0u);
 }
 
 size_t vtx_bytecode_disassemble_op(const vtx_bytecode_t *bc, size_t pc,
@@ -351,7 +352,7 @@ uint16_t vtx_bytecode_scan_max_locals(const vtx_bytecode_t *bc)
         uint8_t op = bc->code[pc];
         if (op >= VT_OP_COUNT) break;
         const vtx_opcode_info_t *info = &vtx_opcode_table[op];
-        size_t insn_len = 1 + (info->has_operand ? info->operand_size : 0);
+        size_t insn_len = 1u + (info->has_operand ? (size_t)info->operand_size : 0u);
         if (info->has_operand && pc + 2 < bc->length) {
             uint16_t operand = ((uint16_t)bc->code[pc + 1] << 8) |
                                (uint16_t)bc->code[pc + 2];

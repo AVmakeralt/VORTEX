@@ -141,7 +141,8 @@ public:
         raw_args.reserve(args.size());
         for (auto& a : args) raw_args.push_back(a.raw());
         return Value(vtx_runtime_run_with_args(
-            raw_ptr_, bc.raw(), raw_args.data(), raw_args.size()));
+            raw_ptr_, bc.raw(), raw_args.data(),
+            static_cast<uint32_t>(raw_args.size())));
     }
 
     // Compile + run in one call.
@@ -186,7 +187,8 @@ public:
     };
     HeapStats heap_stats() const {
         HeapStats s{};
-        s.young_used = raw_ptr_->gc.young_from.current - raw_ptr_->gc.young_from.start;
+        s.young_used = static_cast<size_t>(
+            raw_ptr_->gc.young_from.current - raw_ptr_->gc.young_from.start);
         s.young_size = raw_ptr_->gc.young_from.size;
         s.old_used  = raw_ptr_->gc.old_gen.used;
         s.old_size  = raw_ptr_->gc.old_gen.size;

@@ -779,7 +779,7 @@ static int create_block_entry(vtx_graph_t *graph, vtx_block_info_t *blocks,
      * can look up the target block for conditional branches by matching
      * the If node's method_index (branch target PC) against Region PCs. */
     vtx_node_t *region_n = vtx_node_get(nt, region);
-    if (region_n) region_n->bytecode_pc = block->start_pc;
+    if (region_n) region_n->bytecode_pc = (uint32_t)block->start_pc;
 
     /* Connect predecessor control outputs as Region inputs.
      *

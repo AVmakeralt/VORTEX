@@ -72,14 +72,14 @@ static void test_one_constant_field() {
     vtx_nodeid_t alloc = make_alloc(g);
     vtx_nodeid_t c42 = make_const(g, 42);
     vtx_nodeid_t store = make_store_field(g, alloc, 0, c42);
-    vtx_nodeid_t load = make_load_field(g, alloc, 0);
+    vtx_nodeid_t load = make_load_field(g, alloc, 0); (void)load;
     (void)store;
 
-    auto r = partial_virtualize(g);
+    auto r = partial_virtualize(g); (void)r;
     assert(r.objects_analyzed == 1);
     assert(r.fields_virtualized == 1);
     // The LoadField should be dead, and its uses redirected to the constant
-    vtx_node_t* load_node = vtx_node_get(&g->node_table, load);
+    vtx_node_t* load_node = vtx_node_get(&g->node_table, load); (void)load_node;
     assert(load_node->dead);
     printf("  [PASS] test_one_constant_field\n");
     free(g->node_table.nodes);
@@ -93,13 +93,13 @@ static void test_runtime_field_not_replaced() {
     vtx_nodeid_t param = vtx_node_create(&g->node_table, VTX_OP_Parameter);
     vtx_node_get(&g->node_table, param)->type = VTX_TYPE_Int;
     vtx_nodeid_t store = make_store_field(g, alloc, 0, param);
-    vtx_nodeid_t load = make_load_field(g, alloc, 0);
+    vtx_nodeid_t load = make_load_field(g, alloc, 0); (void)load;
     (void)store;
 
-    auto r = partial_virtualize(g);
+    auto r = partial_virtualize(g); (void)r;
     assert(r.objects_analyzed == 1);
     assert(r.fields_virtualized == 0);  // NOT replaced — runtime value
-    vtx_node_t* load_node = vtx_node_get(&g->node_table, load);
+    vtx_node_t* load_node = vtx_node_get(&g->node_table, load); (void)load_node;
     assert(!load_node->dead);
     printf("  [PASS] test_runtime_field_not_replaced\n");
     free(g->node_table.nodes);
@@ -114,12 +114,12 @@ static void test_escaping_object_not_replaced() {
     // Make the object "escape" by using it as a Return input
     vtx_nodeid_t ret = vtx_node_create(&g->node_table, VTX_OP_Return);
     vtx_node_add_input(&g->node_table, ret, alloc);
-    vtx_nodeid_t load = make_load_field(g, alloc, 0);
+    vtx_nodeid_t load = make_load_field(g, alloc, 0); (void)load;
     (void)store; (void)ret;
 
-    auto r = partial_virtualize(g);
+    auto r = partial_virtualize(g); (void)r;
     assert(r.fields_virtualized == 0);  // NOT replaced — object escapes
-    vtx_node_t* load_node = vtx_node_get(&g->node_table, load);
+    vtx_node_t* load_node = vtx_node_get(&g->node_table, load); (void)load_node;
     assert(!load_node->dead);
     printf("  [PASS] test_escaping_object_not_replaced\n");
     free(g->node_table.nodes);
@@ -133,10 +133,10 @@ static void test_two_constant_fields() {
     vtx_nodeid_t c2 = make_const(g, 20);
     make_store_field(g, alloc, 0, c1);
     make_store_field(g, alloc, 1, c2);
-    vtx_nodeid_t load0 = make_load_field(g, alloc, 0);
-    vtx_nodeid_t load1 = make_load_field(g, alloc, 1);
+    vtx_nodeid_t load0 = make_load_field(g, alloc, 0); (void)load0;
+    vtx_nodeid_t load1 = make_load_field(g, alloc, 1); (void)load1;
 
-    auto r = partial_virtualize(g);
+    auto r = partial_virtualize(g); (void)r;
     assert(r.fields_virtualized == 2);
     assert(vtx_node_get(&g->node_table, load0)->dead);
     assert(vtx_node_get(&g->node_table, load1)->dead);
@@ -152,9 +152,9 @@ static void test_conflicting_writes_not_replaced() {
     vtx_nodeid_t c2 = make_const(g, 20);
     make_store_field(g, alloc, 0, c1);
     make_store_field(g, alloc, 0, c2);  // conflicting!
-    vtx_nodeid_t load = make_load_field(g, alloc, 0);
+    vtx_nodeid_t load = make_load_field(g, alloc, 0); (void)load;
 
-    auto r = partial_virtualize(g);
+    auto r = partial_virtualize(g); (void)r;
     assert(r.fields_virtualized == 0);  // NOT replaced — conflicting writes
     assert(!vtx_node_get(&g->node_table, load)->dead);
     printf("  [PASS] test_conflicting_writes_not_replaced\n");
@@ -166,7 +166,7 @@ static void test_no_objects_noop() {
     vtx_graph_t* g = make_graph(0);
     vtx_nodeid_t c1 = make_const(g, 10);
     (void)c1;
-    auto r = partial_virtualize(g);
+    auto r = partial_virtualize(g); (void)r;
     assert(r.objects_analyzed == 0);
     assert(r.fields_virtualized == 0);
     printf("  [PASS] test_no_objects_noop\n");

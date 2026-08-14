@@ -95,7 +95,7 @@ VTX_TEST(patch_log_append_branch)
     /* File should have header + 1 entry. */
     struct stat st;
     VTX_ASSERT_EQUAL(0, stat(fn, &st));
-    VTX_ASSERT_TRUE(st.st_size > sizeof(uint32_t) * 4 + VTX_PROFILE_HASH_SIZE);
+    VTX_ASSERT_TRUE((uintmax_t)st.st_size > (uintmax_t)(sizeof(uint32_t) * 4 + VTX_PROFILE_HASH_SIZE));
 
     remove(fn);
 }
@@ -310,7 +310,7 @@ VTX_TEST(patch_log_crash_recovery)
     /* Simulate a crash: truncate the file to 80% of its size (mid-entry). */
     int tfd = open(fn, O_WRONLY);
     VTX_ASSERT_TRUE(tfd >= 0);
-    off_t truncated_size = (off_t)(full_size * 0.8);
+    off_t truncated_size = (off_t)((double)full_size * 0.8);
     VTX_ASSERT_EQUAL(0, ftruncate(tfd, truncated_size));
     close(tfd);
 
@@ -380,10 +380,10 @@ VTX_TEST(patch_log_partial_write_survives)
     fake_header[1] = 1;
     /* payload_len = 100 at offset 13 (after type=1, method_id=4, timestamp=8) */
     fake_header[13] = 100;
-    write(tfd, fake_header, sizeof(fake_header));
+    ssize_t w1 = write(tfd, fake_header, sizeof(fake_header)); (void)w1;
     /* Write only 5 bytes of "payload" (claimed 100). */
     uint8_t partial[5] = {1, 2, 3, 4, 5};
-    write(tfd, partial, sizeof(partial));
+    ssize_t w2 = write(tfd, partial, sizeof(partial)); (void)w2;
     close(tfd);
 
     /* Replay — the partial entry should be skipped (truncated read), but

@@ -339,7 +339,7 @@ inline int predecode(const vtx_bytecode_t* bc, PreDecodeResult* out) {
             // (branch to non-instruction PC). Leave the operand as-is;
             // the interpreter will catch this at runtime.
         }
-        walk += 1 + meta[op].operand_size;
+        walk += static_cast<size_t>(1 + meta[op].operand_size);
     }
 
     out->code = new_code;

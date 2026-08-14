@@ -60,7 +60,7 @@ static void test_many_sites() {
 static void test_fuzz() {
     vtx_property_ic_init(4096); std::mt19937 rng(12345);
     for (int i = 0; i < 10000; i++) {
-        uint32_t site = rng()%100, shape = rng()%50+1, off = rng()%1000;
+        uint32_t site = (uint32_t)(rng()%100), shape = (uint32_t)(rng()%50+1), off = (uint32_t)(rng()%1000);
         if (rng()%2) vtx_property_ic_update(site, shape, off); else vtx_property_ic_lookup(site, shape);
     }
     g_pass++; vtx_property_ic_destroy();

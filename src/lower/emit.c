@@ -134,8 +134,7 @@ static void emit_mem_operand(vtx_x86_emit_t *e, uint8_t reg,
 {
     int need_sib = (index != 0xFF) || (base == 0xFF) ||
                    ((base & 7) == 4);  /* RSP/R12 as base requires SIB */
-    int need_disp = (disp != 0) || (base == 0xFF) ||
-                    ((base & 7) == 5 && !need_sib); /* RBP/R13 as base with mod=0 → need disp8=0 */
+    /* need_disp was set but unused — disp handling is done inline below */
     /* Special case: no base register, only displacement */
     if (base == 0xFF && index == 0xFF) {
         /* [disp32] — mod=00, r/m=5 */
@@ -235,6 +234,7 @@ void vtx_x86_emit_ri(vtx_x86_emit_t *e, uint8_t opcode, uint8_t reg_ext,
 void vtx_x86_emit_rm(vtx_x86_emit_t *e, uint8_t opcode, uint8_t opcode2,
                       uint8_t reg, uint8_t base, int32_t disp, bool is_load)
 {
+    (void)is_load;  /* direction encoded in opcode — is_load unused */
     /* is_load: reg ← [base+disp] → opcode with direction bit
      * is_store: [base+disp] ← reg → opcode without direction bit */
     int r = reg_hi(reg);
@@ -1800,7 +1800,7 @@ int vtx_x86_emit_safepoint_poll(vtx_x86_emit_t *e)
                                             cmp_disp_offset,
                                             0,  /* target_offset (N/A for external) */
                                             0,  /* target_addr: resolved at install time */
-                                            -5, /* stub_id: special marker for safepoint_flag */
+                                            (uint32_t)-5, /* stub_id: special marker for safepoint_flag */
                                             0, e->reloc_arena);
         if (reloc_idx == UINT32_MAX) return -1;
         /* Mark as external so it gets re-applied at install time */
@@ -1892,7 +1892,7 @@ int vtx_x86_emit_safepoint_poll_guard_page(vtx_x86_emit_t *e)
                                             cmp_disp_offset,
                                             0,  /* target_offset (N/A for external) */
                                             0,  /* target_addr: resolved at install time */
-                                            -6, /* stub_id: special marker for guard_page */
+                                            (uint32_t)-6, /* stub_id: special marker for guard_page */
                                             0, e->reloc_arena);
         if (reloc_idx == UINT32_MAX) return -1;
         /* Mark as external so it gets re-applied at install time */
@@ -2008,10 +2008,10 @@ void vtx_x86_emit_prologue(vtx_x86_emit_t *e, uint32_t frame_size,
      * Fix: Always compute the alignment, even when frame_size == 0.
      * If alignment is needed, sub rsp, 8 (a dummy slot). */
     {
-        static const uint8_t cs_regs[] = { 3, 12, 13, 14, 15 };
+        static const uint8_t cs_count_regs[] = { 3, 12, 13, 14, 15 };
         int cs_count = 0;
         for (int i = 0; i < 5; i++) {
-            if (callee_saved_mask & (1u << cs_regs[i])) cs_count++;
+            if (callee_saved_mask & (1u << cs_count_regs[i])) cs_count++;
         }
         /* Total pushes before frame_size: non-leaf=4+N, leaf=1+N */
         int total_pushes = (is_leaf ? 1 : 4) + cs_count;
@@ -2274,6 +2274,7 @@ static bool is_reg_read_after(vtx_inst_block_t *blk, uint32_t from, uint8_t preg
 uint32_t vtx_peephole_optimize(vtx_inst_stream_t *stream,
                                 const vtx_regalloc_result_t *result)
 {
+    (void)result;  /* reserved for future peephole use */
     if (!stream) return 0;
     uint32_t eliminated = 0;
 
@@ -2672,6 +2673,7 @@ static uint32_t estimate_inst_size(const vtx_inst_t *inst)
 int vtx_branch_optimize(vtx_inst_stream_t *stream, vtx_x86_emit_t *emit,
                          const vtx_regalloc_result_t *result)
 {
+    (void)emit; (void)result;  /* reserved for future branch optimization */
     if (!stream) return 0;
 
     /* ---- Phase 1: Invert JCC + JMP to eliminate jumps over jumps ----
@@ -4227,7 +4229,7 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
             emit_byte(e, 0x66);
             emit_byte(e, 0x0F);
             emit_byte(e, 0x28);
-            emit_modrm(e, 3, reg_lo(r0), reg_lo(r1));
+            emit_modrm(e, 3, (uint8_t)reg_lo(r0), (uint8_t)reg_lo(r1));
         }
         break;
 
@@ -4240,7 +4242,7 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
             emit_byte(e, 0x66);
             emit_byte(e, 0x0F);
             emit_byte(e, 0x58);
-            emit_modrm(e, 3, reg_lo(r0), reg_lo(r1));
+            emit_modrm(e, 3, (uint8_t)reg_lo(r0), (uint8_t)reg_lo(r1));
         }
         break;
 
@@ -4253,7 +4255,7 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
             emit_byte(e, 0x66);
             emit_byte(e, 0x0F);
             emit_byte(e, 0x59);
-            emit_modrm(e, 3, reg_lo(r0), reg_lo(r1));
+            emit_modrm(e, 3, (uint8_t)reg_lo(r0), (uint8_t)reg_lo(r1));
         }
         break;
 
@@ -4266,7 +4268,7 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
             emit_byte(e, 0x66);
             emit_byte(e, 0x0F);
             emit_byte(e, 0x5D);
-            emit_modrm(e, 3, reg_lo(r0), reg_lo(r1));
+            emit_modrm(e, 3, (uint8_t)reg_lo(r0), (uint8_t)reg_lo(r1));
         }
         break;
 
@@ -4279,7 +4281,7 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
             emit_byte(e, 0x66);
             emit_byte(e, 0x0F);
             emit_byte(e, 0x5F);
-            emit_modrm(e, 3, reg_lo(r0), reg_lo(r1));
+            emit_modrm(e, 3, (uint8_t)reg_lo(r0), (uint8_t)reg_lo(r1));
         }
         break;
 
@@ -4292,7 +4294,7 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
             emit_byte(e, 0x66);
             emit_byte(e, 0x0F);
             emit_byte(e, 0x54);
-            emit_modrm(e, 3, reg_lo(r0), reg_lo(r1));
+            emit_modrm(e, 3, (uint8_t)reg_lo(r0), (uint8_t)reg_lo(r1));
         }
         break;
 
@@ -4305,7 +4307,7 @@ static int emit_single_inst(vtx_x86_emit_t *e, vtx_inst_t *inst,
             emit_byte(e, 0x66);
             emit_byte(e, 0x0F);
             emit_byte(e, 0x57);
-            emit_modrm(e, 3, reg_lo(r0), reg_lo(r1));
+            emit_modrm(e, 3, (uint8_t)reg_lo(r0), (uint8_t)reg_lo(r1));
         }
         break;
 

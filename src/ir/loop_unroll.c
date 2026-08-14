@@ -600,7 +600,7 @@ uint32_t vtx_loop_unroll_run(vtx_graph_t *graph,
         /* Mark the loop as unrolled (re-fetch pointer — node table may
          * have been realloc'd by vtx_node_create calls above) */
         vtx_node_t *loop_fresh = vtx_node_get(&graph->node_table, i);
-        if (loop_fresh) loop_fresh->value_number = -(int32_t)effective_factor;
+        if (loop_fresh) loop_fresh->value_number = (uint32_t)(-(int32_t)effective_factor);
         unrolled = 1;
 
     skip_loop:

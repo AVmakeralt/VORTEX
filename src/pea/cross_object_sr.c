@@ -391,7 +391,7 @@ static vtx_effective_escape_t *compute_effective_escape(
         /* Count fields: for NewObject, the field count comes from the
          * type descriptor. For our purposes, we count the number of
          * distinct field_offsets accessed via LoadField/StoreField. */
-        uint32_t field_count = 0;
+        uint32_t field_count = 0; (void)field_count;
         uint32_t *offsets = NULL;
         uint32_t offset_count = 0;
         uint32_t offset_capacity = 0;

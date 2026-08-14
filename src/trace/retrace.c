@@ -192,7 +192,7 @@ uint32_t vtx_trace_retrace_check(vtx_trace_retrace_t *rt,
 
         /* Check the guard metadata for the last failed guard.
          * If the failure rate is above the threshold, trigger re-tracing. */
-        vtx_guard_meta_table_t *guard_table = NULL;
+        vtx_guard_meta_table_t *guard_table = NULL; (void)guard_table;
         /* TODO: wire the guard table from the orchestrator. For now,
          * we use a simpler heuristic: if the method has any re-trace
          * state at all (meaning it deoptimized), and the cooldown is
@@ -284,7 +284,7 @@ void vtx_trace_retrace_on_compile_done(vtx_trace_retrace_t *rt,
 
 vtx_retrace_stats_t vtx_trace_retrace_stats(const vtx_trace_retrace_t *rt)
 {
-    vtx_retrace_stats_t stats = {};
+    vtx_retrace_stats_t stats = {0};
     if (!rt || !rt->states) return stats;
 
     for (uint32_t i = 0; i < rt->capacity; i++) {

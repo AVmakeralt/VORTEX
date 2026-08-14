@@ -29,7 +29,7 @@ Object Object::create(Runtime& rt, uint32_t max_fields) {
 
     // Initialize the header
     vtx_heap_object_init(obj, 0 /* type_id */, 1 /* root shape */,
-                         total_fields, size);
+                         total_fields, static_cast<uint32_t>(size));
 
     // Initialize all fields to undefined
     for (uint32_t i = 0; i < total_fields; i++) {
@@ -222,7 +222,7 @@ Array Array::create(Runtime& rt, uint32_t length) {
     vtx_heap_object_t* obj = vtx_gc_alloc(rt.gc(), size, 0);
     if (!obj) return Array(nullptr);
 
-    vtx_heap_object_init(obj, 0, 1, total_fields, size);
+    vtx_heap_object_init(obj, 0, 1, total_fields, static_cast<uint32_t>(size));
     // Set length
     vtx_object_set_field(obj, 0, Value::smi(length).raw());
     // Initialize elements to undefined

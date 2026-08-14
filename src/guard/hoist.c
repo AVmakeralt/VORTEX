@@ -39,6 +39,7 @@ static uint32_t node_loop_depth(const vtx_schedule_t *schedule, vtx_nodeid_t nod
 /* Helper: get the block index of a node from the schedule                     */
 /* ========================================================================== */
 
+__attribute__((unused))
 static uint32_t node_block_idx(const vtx_schedule_t *schedule, vtx_nodeid_t node_id)
 {
     if (node_id >= schedule->node_block_count) return (uint32_t)-1;

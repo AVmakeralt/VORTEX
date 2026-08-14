@@ -390,7 +390,7 @@ static int vtx_record_instruction(vtx_record_state_t *state)
     /* ---- Field access ---- */
     case VT_OP_LOAD_FIELD: {
         /* Capture stack depth before consuming inputs (Bug 1 fix) */
-        uint32_t pre_sp = state->stack_top;
+        uint32_t pre_sp = state->stack_top; (void)pre_sp;
         vtx_nodeid_t obj = vtx_record_stack_pop(state);
         if (obj == VTX_NODEID_INVALID) return -1;
 
@@ -434,7 +434,7 @@ static int vtx_record_instruction(vtx_record_state_t *state)
     }
     case VT_OP_STORE_FIELD: {
         /* Capture stack depth before consuming inputs (Bug 1 fix) */
-        uint32_t pre_sp = state->stack_top;
+        uint32_t pre_sp = state->stack_top; (void)pre_sp;
         vtx_nodeid_t val = vtx_record_stack_pop(state);
         vtx_nodeid_t obj = vtx_record_stack_pop(state);
         if (val == VTX_NODEID_INVALID || obj == VTX_NODEID_INVALID) return -1;
@@ -518,7 +518,7 @@ static int vtx_record_instruction(vtx_record_state_t *state)
     }
     case VT_OP_IDIV: {
         /* Capture stack depth before consuming inputs (Bug 1 fix) */
-        uint32_t pre_sp = state->stack_top;
+        uint32_t pre_sp = state->stack_top; (void)pre_sp;
         vtx_nodeid_t b = vtx_record_stack_pop(state);
         vtx_nodeid_t a = vtx_record_stack_pop(state);
         if (a == VTX_NODEID_INVALID || b == VTX_NODEID_INVALID) return -1;
@@ -555,7 +555,7 @@ static int vtx_record_instruction(vtx_record_state_t *state)
     }
     case VT_OP_IMOD: {
         /* Capture stack depth before consuming inputs (Bug 1 fix) */
-        uint32_t pre_sp = state->stack_top;
+        uint32_t pre_sp = state->stack_top; (void)pre_sp;
         vtx_nodeid_t b = vtx_record_stack_pop(state);
         vtx_nodeid_t a = vtx_record_stack_pop(state);
         if (a == VTX_NODEID_INVALID || b == VTX_NODEID_INVALID) return -1;
@@ -814,7 +814,7 @@ static int vtx_record_instruction(vtx_record_state_t *state)
 
     case VT_OP_IF_TRUE: {
         /* Capture stack depth before consuming condition (Bug 1 fix) */
-        uint32_t pre_sp = state->stack_top;
+        uint32_t pre_sp = state->stack_top; (void)pre_sp;
         vtx_nodeid_t cond = vtx_record_stack_pop(state);
         if (cond == VTX_NODEID_INVALID) return -1;
 
@@ -880,7 +880,7 @@ static int vtx_record_instruction(vtx_record_state_t *state)
 
     case VT_OP_IF_FALSE: {
         /* Capture stack depth before consuming condition (Bug 1 fix) */
-        uint32_t pre_sp = state->stack_top;
+        uint32_t pre_sp = state->stack_top; (void)pre_sp;
         vtx_nodeid_t cond = vtx_record_stack_pop(state);
         if (cond == VTX_NODEID_INVALID) return -1;
 
@@ -946,7 +946,7 @@ static int vtx_record_instruction(vtx_record_state_t *state)
     /* ---- Calls ---- */
     case VT_OP_CALL_STATIC: {
         /* Capture stack depth for side exits (Bug 1 fix) */
-        uint32_t pre_sp = state->stack_top;
+        uint32_t pre_sp = state->stack_top; (void)pre_sp;
 
         /* Bug 6 fix: Determine argument count and pop arguments from stack */
         uint32_t arg_count = 0;
@@ -1006,7 +1006,7 @@ static int vtx_record_instruction(vtx_record_state_t *state)
     }
     case VT_OP_CALL_VIRTUAL: {
         /* Capture stack depth for side exits (Bug 1 fix) */
-        uint32_t pre_sp = state->stack_top;
+        uint32_t pre_sp = state->stack_top; (void)pre_sp;
 
         /* Bug 6 fix: Determine argument count (including receiver) and pop from stack */
         uint32_t arg_count = 1; /* at minimum the receiver */
@@ -1097,7 +1097,7 @@ static int vtx_record_instruction(vtx_record_state_t *state)
     }
     case VT_OP_CALL_INTERFACE: {
         /* Capture stack depth for side exits (Bug 1 fix) */
-        uint32_t pre_sp = state->stack_top;
+        uint32_t pre_sp = state->stack_top; (void)pre_sp;
 
         /* Bug 6 fix: Determine argument count (including receiver) and pop from stack */
         uint32_t arg_count = 1; /* at minimum the receiver */
@@ -1221,7 +1221,7 @@ static int vtx_record_instruction(vtx_record_state_t *state)
     /* ---- Type checks ---- */
     case VT_OP_CHECKCAST: {
         /* Capture stack depth before consuming inputs (Bug 1 fix) */
-        uint32_t pre_sp = state->stack_top;
+        uint32_t pre_sp = state->stack_top; (void)pre_sp;
         vtx_nodeid_t obj = vtx_record_stack_pop(state);
         if (obj == VTX_NODEID_INVALID) return -1;
 
@@ -1280,7 +1280,7 @@ static int vtx_record_instruction(vtx_record_state_t *state)
     /* ---- Array operations ---- */
     case VT_OP_ARRAY_LOAD: {
         /* Capture stack depth before consuming inputs (Bug 1 fix) */
-        uint32_t pre_sp = state->stack_top;
+        uint32_t pre_sp = state->stack_top; (void)pre_sp;
         vtx_nodeid_t idx = vtx_record_stack_pop(state);
         vtx_nodeid_t arr = vtx_record_stack_pop(state);
         if (arr == VTX_NODEID_INVALID || idx == VTX_NODEID_INVALID) return -1;
@@ -1316,7 +1316,7 @@ static int vtx_record_instruction(vtx_record_state_t *state)
     }
     case VT_OP_ARRAY_STORE: {
         /* Capture stack depth before consuming inputs (Bug 1 fix) */
-        uint32_t pre_sp = state->stack_top;
+        uint32_t pre_sp = state->stack_top; (void)pre_sp;
         vtx_nodeid_t val = vtx_record_stack_pop(state);
         vtx_nodeid_t idx = vtx_record_stack_pop(state);
         vtx_nodeid_t arr = vtx_record_stack_pop(state);
@@ -1354,7 +1354,7 @@ static int vtx_record_instruction(vtx_record_state_t *state)
     }
     case VT_OP_ARRAY_LENGTH: {
         /* Capture stack depth before consuming inputs (Bug 1 fix) */
-        uint32_t pre_sp = state->stack_top;
+        uint32_t pre_sp = state->stack_top; (void)pre_sp;
         vtx_nodeid_t arr = vtx_record_stack_pop(state);
         if (arr == VTX_NODEID_INVALID) return -1;
 

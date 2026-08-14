@@ -60,9 +60,9 @@ static void test_basic_const_int_iadd() {
         op::RETURN_VALUE,
     };
     std::vector<vtx_value_t> consts = { vtx_make_smi(1) };
-    vtx_bytecode_t bc = make_bc(code, consts);
+    vtx_bytecode_t bc = make_bc(code, consts); (void)bc;
 
-    PreDecodeResult r;
+    PreDecodeResult r = {};
     assert(predecode(&bc, &r) == 0);
     assert(r.length == 6);  // 1 (opcode) + 4 (operand) + 1 (RETURN_VALUE)
     assert(r.fused_count == 1);
@@ -82,9 +82,9 @@ static void test_basic_load_local_load_local() {
         op::RETURN_VALUE,
     };
     std::vector<vtx_value_t> consts;
-    vtx_bytecode_t bc = make_bc(code, consts);
+    vtx_bytecode_t bc = make_bc(code, consts); (void)bc;
 
-    PreDecodeResult r;
+    PreDecodeResult r = {};
     assert(predecode(&bc, &r) == 0);
     assert(r.length == 6);  // 1 + 4 + 1
     assert(r.fused_count == 1);
@@ -103,9 +103,9 @@ static void test_basic_load_local_store_field() {
         op::RETURN_VALUE,
     };
     std::vector<vtx_value_t> consts;
-    vtx_bytecode_t bc = make_bc(code, consts);
+    vtx_bytecode_t bc = make_bc(code, consts); (void)bc;
 
-    PreDecodeResult r;
+    PreDecodeResult r = {};
     assert(predecode(&bc, &r) == 0);
     assert(r.length == 6);  // 1 + 4 + 1
     assert(r.fused_count == 1);
@@ -138,9 +138,9 @@ static void test_no_fusion_across_branch_target() {
         op::RETURN_VALUE,                // PC=7
     };
     std::vector<vtx_value_t> consts = { vtx_make_smi(1) };
-    vtx_bytecode_t bc = make_bc(code, consts);
+    vtx_bytecode_t bc = make_bc(code, consts); (void)bc;
 
-    PreDecodeResult r;
+    PreDecodeResult r = {};
     assert(predecode(&bc, &r) == 0);
     assert(r.fused_count == 0);  // pair blocked by branch target on second op
     assert(r.length == code.size());
@@ -168,15 +168,16 @@ static void test_fusion_with_branch_to_first_op() {
         op::RETURN_VALUE,                // PC=7
     };
     std::vector<vtx_value_t> consts = { vtx_make_smi(1) };
-    vtx_bytecode_t bc = make_bc(code, consts);
+    vtx_bytecode_t bc = make_bc(code, consts); (void)bc;
 
-    PreDecodeResult r;
+    PreDecodeResult r = {};
     assert(predecode(&bc, &r) == 0);
     assert(r.fused_count == 1);  // pair IS fusable when only first op is a target
     // After fusion: GOTO (3 bytes) + fused (5 bytes) + RETURN_VALUE (1 byte) = 9
     assert(r.length == 9);
     assert(r.code[0] == op::GOTO);
-    uint16_t target = (r.code[1] << 8) | r.code[2];
+    uint16_t target = (uint16_t)((r.code[1] << 8) | r.code[2]);
+    (void)target;
     assert(target == 3);  // GOTO target was remapped (3 -> 3 since fusion didn't shift it)
     assert(r.code[3] == op::LOAD_CONST_INT__IADD);
     std::free(r.code);
@@ -191,9 +192,9 @@ static void test_idempotency() {
         op::RETURN_VALUE,
     };
     std::vector<vtx_value_t> consts = { vtx_make_smi(1) };
-    vtx_bytecode_t bc = make_bc(code, consts);
+    vtx_bytecode_t bc = make_bc(code, consts); (void)bc;
 
-    PreDecodeResult r1;
+    PreDecodeResult r1 = {};
     assert(predecode(&bc, &r1) == 0);
     assert(r1.fused_count == 1);
     assert(r1.code[0] == op::LOAD_CONST_INT__IADD);
@@ -202,8 +203,8 @@ static void test_idempotency() {
     // (the original test used a temporary that was destroyed before
     // predecode read it — leading to a dangling-pointer read).
     std::vector<uint8_t> fused_code(r1.code, r1.code + r1.length);
-    vtx_bytecode_t bc2 = make_bc(fused_code, consts);
-    PreDecodeResult r2;
+    vtx_bytecode_t bc2 = make_bc(fused_code, consts); (void)bc2;
+    PreDecodeResult r2 = {};
     assert(predecode(&bc2, &r2) == 0);
     assert(r2.fused_count == 0);  // already fused — no more pairs
     assert(r2.length == r1.length);
@@ -251,15 +252,16 @@ static void test_branch_target_remapping() {
         op::RETURN_VALUE,                  // PC 10
     };
     std::vector<vtx_value_t> consts = { vtx_make_smi(1), vtx_make_smi(2) };
-    vtx_bytecode_t bc = make_bc(code, consts);
+    vtx_bytecode_t bc = make_bc(code, consts); (void)bc;
 
-    PreDecodeResult r;
+    PreDecodeResult r = {};
     assert(predecode(&bc, &r) == 0);
     assert(r.fused_count == 1);
     assert(r.code[0] == op::LOAD_CONST_INT__IADD);
     // new PC 5: GOTO with remapped target
     assert(r.code[5] == op::GOTO);
-    uint16_t new_target = (r.code[6] << 8) | r.code[7];
+    uint16_t new_target = (uint16_t)((r.code[6] << 8) | r.code[7]);
+    (void)new_target;
     // old PC 7 maps to new PC 5 (LOAD_CONST_INT__IADD is 5 bytes, so
     // the next instruction GOTO is at new PC 5; the LOAD_CONST_INT 1
     // after GOTO is at new PC 5 + 3 = 8).
@@ -272,8 +274,8 @@ static void test_empty_and_single() {
     // Empty input.
     std::vector<uint8_t> empty_code;
     std::vector<vtx_value_t> empty_consts;
-    vtx_bytecode_t empty_bc = make_bc(empty_code, empty_consts);
-    PreDecodeResult r;
+    vtx_bytecode_t empty_bc = make_bc(empty_code, empty_consts); (void)empty_bc;
+    PreDecodeResult r = {};
     assert(predecode(&empty_bc, &r) == 0);
     assert(r.length == 0);
     assert(r.fused_count == 0);
@@ -281,7 +283,7 @@ static void test_empty_and_single() {
 
     // Single instruction — no pair possible.
     std::vector<uint8_t> code = { op::RETURN_VALUE };
-    vtx_bytecode_t bc = make_bc(code, empty_consts);
+    vtx_bytecode_t bc = make_bc(code, empty_consts); (void)bc;
     assert(predecode(&bc, &r) == 0);
     assert(r.length == 1);
     assert(r.fused_count == 0);

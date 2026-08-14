@@ -228,7 +228,7 @@ uint32_t vtx_strength_reduce_run(vtx_graph_t *graph)
                 node->opcode = VTX_OP_Sar;
                 /* Also clear the SIDE_EFFECT flag — Sar is a pure
                  * arithmetic op, unlike Div which can trap on div-by-zero. */
-                node->flags &= ~(VTX_NF_SIDE_EFFECT);
+                node->flags &= ~(uint32_t)VTX_NF_SIDE_EFFECT;
                 vtx_node_replace_input(nt, (vtx_nodeid_t)i, 0, add_id);
                 vtx_node_replace_input(nt, (vtx_nodeid_t)i, 1, shift_const);
                 replaced++;
