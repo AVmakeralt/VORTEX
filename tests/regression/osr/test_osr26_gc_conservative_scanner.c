@@ -224,7 +224,7 @@ VTX_TEST(osr26_wide_window_finds_deep_stack_root_and_writes_back) {
      * area). The OLD 11-slot scanner (window [-8, +2]) would NOT reach
      * index -60. The OSR-26 scanner (window [-64, +5]) WILL. */
     const int total_slots = OSR26_SCAN_SLOTS_BELOW + 1 + OSR26_SCAN_SLOTS_ABOVE;
-    uint64_t *frame_buf = (uint64_t *)calloc(total_slots, sizeof(uint64_t));
+    uint64_t *frame_buf = (uint64_t *)calloc((size_t)total_slots, sizeof(uint64_t));
     VTX_ASSERT_TRUE(frame_buf != NULL);
 
     /* frame_base points at the [RBP+0] slot. The negative-index
@@ -287,7 +287,7 @@ VTX_TEST(osr26_old_bug_window_would_miss_deep_slot) {
 
     /* Same setup as the wide-window test. */
     const int total_slots = OSR26_SCAN_SLOTS_BELOW + 1 + OSR26_SCAN_SLOTS_ABOVE;
-    uint64_t *frame_buf = (uint64_t *)calloc(total_slots, sizeof(uint64_t));
+    uint64_t *frame_buf = (uint64_t *)calloc((size_t)total_slots, sizeof(uint64_t));
     VTX_ASSERT_TRUE(frame_buf != NULL);
     uint64_t *frame_base = &frame_buf[OSR26_SCAN_SLOTS_BELOW];
 
@@ -334,7 +334,7 @@ VTX_TEST(osr26_shallow_slot_within_old_window_also_found_by_wide_window) {
     vtx_value_t shallow_val = vtx_make_heap_ptr(o1);
 
     const int total_slots = OSR26_SCAN_SLOTS_BELOW + 1 + OSR26_SCAN_SLOTS_ABOVE;
-    uint64_t *frame_buf = (uint64_t *)calloc(total_slots, sizeof(uint64_t));
+    uint64_t *frame_buf = (uint64_t *)calloc((size_t)total_slots, sizeof(uint64_t));
     uint64_t *frame_base = &frame_buf[OSR26_SCAN_SLOTS_BELOW];
 
     for (int i = -OSR26_SCAN_SLOTS_BELOW; i <= OSR26_SCAN_SLOTS_ABOVE; i++) {

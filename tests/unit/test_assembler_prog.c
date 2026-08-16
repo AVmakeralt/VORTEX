@@ -79,7 +79,7 @@ VTX_TEST(asm_prog_label_forward_branch) {
         VTX_ASSERT_TRUE(a.code[0] == VT_OP_LOAD_CONST_INT);
         VTX_ASSERT_TRUE(a.code[3] == VT_OP_IF_TRUE);
         /* Branch target should be 9 (skip label) */
-        uint16_t target = ((uint16_t)a.code[4] << 8) | a.code[5];
+        uint16_t target = (uint16_t)(((uint16_t)a.code[4] << 8) | (uint16_t)a.code[5]);
         VTX_ASSERT_TRUE(target == 9);
         VTX_ASSERT_TRUE(a.code[6] == VT_OP_LOAD_CONST_INT);
         VTX_ASSERT_TRUE(a.code[9] == VT_OP_RETURN_VALUE);
@@ -150,11 +150,11 @@ VTX_TEST(asm_prog_loop_backward_branch) {
         VTX_ASSERT_TRUE(vtx_asm_label_pc(&a, "done") == 25);
 
         /* goto loop should target PC 6 */
-        uint16_t goto_target = ((uint16_t)a.code[23] << 8) | a.code[24];
+        uint16_t goto_target = (uint16_t)(((uint16_t)a.code[23] << 8) | (uint16_t)a.code[24]);
         VTX_ASSERT_TRUE(goto_target == 6);
 
         /* if_false done should target PC 25 */
-        uint16_t if_target = ((uint16_t)a.code[10] << 8) | a.code[11];
+        uint16_t if_target = (uint16_t)(((uint16_t)a.code[10] << 8) | (uint16_t)a.code[11]);
         VTX_ASSERT_TRUE(if_target == 25);
 
         /* max_locals should be 1 (set explicitly) */

@@ -176,7 +176,7 @@ VTX_TEST(osr18_profiler_atomic_counters_no_lost_updates) {
     const int N_THREADS = 4;
     const int N_INCS_PER_THREAD = 1000;
     pthread_barrier_t bar;
-    pthread_barrier_init(&bar, NULL, N_THREADS);
+    pthread_barrier_init(&bar, NULL, (unsigned)N_THREADS);
 
     osr18_profiler_arg_t arg = {
         .profiler = &profiler,

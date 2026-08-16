@@ -72,6 +72,10 @@ target_link_libraries(test_bugfixes PRIVATE
     vortex_profile
     vortex_inliner
     vortex_pea
+    vortex_trace
+    vortex_region
+    vortex_midtier
+    vortex_sota
     vortex_midtier
     -Wl,--end-group
     m
@@ -111,6 +115,10 @@ target_link_libraries(test_zero_cost_deopt PRIVATE
     vortex_baseline
     vortex_inliner
     vortex_pea
+    vortex_trace
+    vortex_region
+    vortex_midtier
+    vortex_sota
     -Wl,--end-group
     m
     pthread
@@ -138,6 +146,10 @@ target_link_libraries(test_p2_features PRIVATE
     vortex_baseline
     vortex_inliner
     vortex_pea
+    vortex_trace
+    vortex_region
+    vortex_midtier
+    vortex_sota
     -Wl,--end-group
     m
     pthread
@@ -198,6 +210,10 @@ target_link_libraries(test_interp_basics PRIVATE
     vortex_profile
     vortex_inliner
     vortex_pea
+    vortex_trace
+    vortex_region
+    vortex_midtier
+    vortex_sota
     -Wl,--end-group
     m
     pthread
@@ -351,6 +367,9 @@ target_link_libraries(test_regalloc_upgrade PRIVATE
     vortex_inliner
     vortex_pea
     vortex_midtier
+    vortex_trace
+    vortex_region
+    vortex_sota
     -Wl,--end-group
     m
     pthread
@@ -517,6 +536,10 @@ target_link_libraries(test_stress_compile_lower PRIVATE
     vortex_codecache
     $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota>
     vortex_pea
+    vortex_trace
+    vortex_region
+    vortex_midtier
+    vortex_sota
     vortex_ir
     vortex_runtime
     vortex_profile

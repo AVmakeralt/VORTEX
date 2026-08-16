@@ -19,6 +19,19 @@ target_link_libraries(bench_arith PRIVATE
     vortex_bench_framework
     vortex_interp
     vortex_runtime
+    vortex_compile
+    vortex_trace
+    vortex_region
+    vortex_midtier
+    vortex_ir
+    vortex_deopt
+    vortex_baseline
+    vortex_codecache
+    vortex_lower
+    vortex_guard
+    vortex_profile
+    vortex_inliner
+    vortex_pea
     m
 )
 
@@ -30,6 +43,19 @@ target_link_libraries(bench_call PRIVATE
     vortex_bench_framework
     vortex_interp
     vortex_runtime
+    vortex_compile
+    vortex_trace
+    vortex_region
+    vortex_midtier
+    vortex_ir
+    vortex_deopt
+    vortex_baseline
+    vortex_codecache
+    vortex_lower
+    vortex_guard
+    vortex_profile
+    vortex_inliner
+    vortex_pea
     m
 )
 
@@ -43,6 +69,19 @@ target_link_libraries(bench_fib PRIVATE
     vortex_bench_framework
     vortex_interp
     vortex_runtime
+    vortex_compile
+    vortex_trace
+    vortex_region
+    vortex_midtier
+    vortex_ir
+    vortex_deopt
+    vortex_baseline
+    vortex_codecache
+    vortex_lower
+    vortex_guard
+    vortex_profile
+    vortex_inliner
+    vortex_pea
     m
 )
 
@@ -58,6 +97,17 @@ target_link_libraries(bench_jit_exec PRIVATE
     vortex_runtime
     vortex_codecache
     vortex_lower
+    vortex_compile
+    vortex_trace
+    vortex_region
+    vortex_midtier
+    vortex_ir
+    vortex_deopt
+    vortex_baseline
+    vortex_guard
+    vortex_profile
+    vortex_inliner
+    vortex_pea
     m
 )
 
@@ -75,6 +125,15 @@ target_link_libraries(bench_real_workload PRIVATE
     vortex_lower
     vortex_baseline
     vortex_deopt
+    vortex_compile
+    vortex_trace
+    vortex_region
+    vortex_midtier
+    vortex_ir
+    vortex_guard
+    vortex_profile
+    vortex_inliner
+    vortex_pea
     m
     pthread
 )

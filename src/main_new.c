@@ -198,8 +198,8 @@ static vtx_bytecode_t *load_bytecode_file(const char *filename, vtx_arena_t *are
             fclose(f);
             return NULL;
         }
-        hdr_max_locals = ((uint16_t)buf[0] << 8) | buf[1];
-        hdr_max_stack  = ((uint16_t)buf[2] << 8) | buf[3];
+        hdr_max_locals = (uint16_t)((((uint16_t)buf[0] << 8) | (uint16_t)buf[1]));
+        hdr_max_stack  = (uint16_t)((((uint16_t)buf[2] << 8) | (uint16_t)buf[3]));
     }
 
     /* Allocate bytecode structure */

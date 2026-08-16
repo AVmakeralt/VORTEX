@@ -95,14 +95,14 @@ int main(int argc, char **argv)
     /* Read max_locals (2 bytes) */
     uint16_t max_locals = 0;
     if (offset + 2 <= read_bytes) {
-        max_locals = (uint16_t)data[offset] | ((uint16_t)data[offset + 1] << 8);
+        max_locals = (uint16_t)(((uint16_t)data[offset]) | ((uint16_t)data[offset + 1] << 8));
         offset += 2;
     }
 
     /* Read max_stack (2 bytes) */
     uint16_t max_stack = 0;
     if (offset + 2 <= read_bytes) {
-        max_stack = (uint16_t)data[offset] | ((uint16_t)data[offset + 1] << 8);
+        max_stack = (uint16_t)(((uint16_t)data[offset]) | ((uint16_t)data[offset + 1] << 8));
         offset += 2;
     }
 

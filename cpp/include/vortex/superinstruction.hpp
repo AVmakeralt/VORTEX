@@ -269,10 +269,13 @@ inline int predecode(const vtx_bytecode_t* bc, PreDecodeResult* out) {
     std::unordered_map<size_t, size_t> pc_map;
     pc_map.reserve(scan.insn_starts.size() * 2);
 
-    // Pre-allocate the new code buffer. Fusion never grows code; it
-    // only shrinks it (replacing 2 insns of total length N with 1 insn
-    // of length 5). So the input length is an upper bound.
-    uint8_t* new_code = static_cast<uint8_t*>(std::malloc(bc->length));
+    // Pre-allocate the new code buffer. Fusion can grow the code by
+    // at most 1 byte per fusion (replacing N bytes with N+1), so
+    // allocate bc->length + fused_count_max as upper bound.
+    // ASan fix: was bc->length, but LOAD_CONST_INT(3) + IADD(1) = 4 bytes
+    // fuses into LOAD_CONST_INT__IADD(5) — a 1-byte growth. Allocating
+    // bc->length caused a heap-buffer-overflow.
+    uint8_t* new_code = static_cast<uint8_t*>(std::malloc(bc->length + 64));
     if (!new_code) return -1;
     size_t new_pc = 0;
     uint32_t fused = 0;
@@ -310,10 +313,16 @@ inline int predecode(const vtx_bytecode_t* bc, PreDecodeResult* out) {
         }
         // Not fusable — copy verbatim.
         pc_map[pc] = new_pc;
-        /* C16: bounds check before memcpy */
-            size_t copy_len = orig_len;
-            if (pc + copy_len > bc->length) copy_len = bc->length - pc;
+        /* ASan fix: bounds check the SOURCE only. The destination buffer
+         * is bc->length + 64 bytes (allocated above), so new_pc + copy_len
+         * is always within bounds. The old code used bc->length as the
+         * destination bound, which incorrectly truncated the copy when
+         * fusion grew the code past bc->length. */
+        size_t copy_len = orig_len;
+        if (pc + copy_len > bc->length) copy_len = bc->length - pc;
+        if (copy_len > 0) {
             std::memcpy(new_code + new_pc, bc->code + pc, copy_len);
+        }
         new_pc += orig_len;
         pc += orig_len;
     }
@@ -330,10 +339,18 @@ inline int predecode(const vtx_bytecode_t* bc, PreDecodeResult* out) {
         uint8_t op = new_code[walk];
         if (op >= meta.size()) { walk += 1; continue; }
         if (meta[op].is_branch_target) {
+            /* ASan fix: bounds-check before reading the 2-byte operand.
+             * Branch instructions are 1 byte opcode + 2 bytes operand.
+             * read_op2 reads at offset+1 and offset+2, so we need
+             * walk + 3 <= new_pc to safely read. */
+            if (walk + 3 > new_pc) { walk += 1; continue; }
             uint16_t old_target = read_op2(new_code, walk);
             auto it = pc_map.find(old_target);
             if (it != pc_map.end()) {
-                write_op2(new_code, walk + 1, static_cast<uint16_t>(it->second));
+                /* Bounds check before write_op2 as well. */
+                if (walk + 3 <= new_pc) {
+                    write_op2(new_code, walk + 1, static_cast<uint16_t>(it->second));
+                }
             }
             // If old_target is not in pc_map, it's a malformed bytecode
             // (branch to non-instruction PC). Leave the operand as-is;
