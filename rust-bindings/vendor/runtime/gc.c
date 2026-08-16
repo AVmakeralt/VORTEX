@@ -115,6 +115,16 @@ static void *semi_space_alloc(vtx_semi_space_t *space, size_t size)
     }
     void *ptr = space->current;
     space->current += size;
+
+    /* ASan compatibility: the GC uses mmap'd memory (not malloc), so
+     * ASan doesn't track these allocations. Unpoison the region so
+     * ASan doesn't report false positives when JIT code or C code
+     * reads heap objects allocated by the GC. */
+#if defined(__SANITIZE_ADDRESS__) || defined(ADDRESS_SANITIZER)
+    extern void __asan_unpoison_memory_region(const volatile void *addr, size_t size);
+    __asan_unpoison_memory_region(ptr, size);
+#endif
+
     return ptr;
 }
 

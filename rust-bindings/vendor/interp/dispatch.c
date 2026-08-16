@@ -576,6 +576,29 @@ static inline vtx_value_t vtx_dispatch_jit(
         return VTX_VALUE_UNDEFINED; /* Should not happen, but be safe */
     }
 
+    /* ASan compatibility: JIT-generated code is not instrumented by ASan
+     * (ASan instruments at compile time; JIT code is generated at runtime).
+     * The JIT code accesses the C stack frame directly (e.g., [rbp-0x18]
+     * for locals), and ASan has poisoned those bytes as stack redzones
+     * between C variables. Without unpoisoning, ASan reports a false
+     * stack-buffer-overflow when the JIT code reads its own locals.
+     *
+     * Fix: unpoison a generous region of the stack below the current RSP
+     * before entering JIT code. The JIT frame is at most a few hundred
+     * bytes (prologue + locals + spills). 4096 bytes covers any method. */
+#if defined(__SANITIZE_ADDRESS__) || defined(ADDRESS_SANITIZER)
+    {
+        extern void __asan_unpoison_memory_region(const volatile void *addr, size_t size);
+        /* Unpoison 2KB of stack below the current frame marker.
+         * This covers the JIT code's frame (max ~500 bytes) with margin.
+         * Using a smaller region avoids touching stack guard pages. */
+        volatile char stack_marker = 0;
+        const volatile char *frame_base = &stack_marker - 2048;
+        __asan_unpoison_memory_region(frame_base, 2048);
+        (void)stack_marker;
+    }
+#endif
+
     /* Call the JIT-compiled code directly.
      * The baseline JIT's prologue expects:
      *   RDI = method ptr, RSI = deopt_info, RDX = profile_data
