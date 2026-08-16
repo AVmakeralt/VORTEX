@@ -49,12 +49,20 @@ static void *(*vtx_deopt_handler)(uint32_t frame_state_index,
 
 void vtx_guard_emit_set_deopt_handler(void *handler)
 {
-    vtx_deopt_handler = handler;
+    /* ISO C forbids assignment between function pointer and void *.
+     * Use a union for safe reinterpretation. The handler type is
+     * `void *(*)(uint32_t, uint32_t)` (returns void*) to match
+     * vtx_deopt_handler's signature. */
+    union { void *ptr; void *(*fn)(uint32_t, uint32_t); } cast;
+    cast.ptr = handler;
+    vtx_deopt_handler = cast.fn;
 }
 
 void *vtx_guard_emit_get_deopt_handler(void)
 {
-    return vtx_deopt_handler;
+    union { void *ptr; void *(*fn)(uint32_t, uint32_t); } cast;
+    cast.fn = vtx_deopt_handler;
+    return cast.ptr;
 }
 
 /* ========================================================================== */
@@ -352,8 +360,12 @@ int vtx_guard_emit_deopt_stubs(vtx_guard_desc_array_t *guards,
 
         /* Load the deopt handler address into RAX.
          * Use the registered handler if available, otherwise use the default stub. */
-        void *handler = vtx_deopt_handler;
-        if (handler == NULL) {
+        void *handler;
+        if (vtx_deopt_handler != NULL) {
+            union { void *ptr; void *(*fn)(uint32_t, uint32_t); } cast;
+            cast.fn = vtx_deopt_handler;
+            handler = cast.ptr;
+        } else {
             handler = (void *)(uintptr_t)vtx_deopt_handler_stub;
         }
 

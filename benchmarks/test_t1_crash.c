@@ -112,7 +112,11 @@ int main(void) {
                 printf("  CRASH! signal=%d\n", got_signal);
                 return 1;
             }
-            jit_entry_t entry = (jit_entry_t)code;
+            /* ISO C forbids direct object-pointer → function-pointer cast;
+             * use a union (the portable, pedantic-clean idiom). */
+            union { void *ptr; jit_entry_t fn; } u_e1;
+            u_e1.ptr = code;
+            jit_entry_t entry = u_e1.fn;
             vtx_value_t arg = vtx_make_smi(10);
             printf("  calling count(10)...\n");
             vtx_value_t r = entry(&method, NULL, NULL, &arg, 1);
@@ -152,7 +156,11 @@ int main(void) {
                 printf("  CRASH! signal=%d\n", got_signal);
                 return 1;
             }
-            jit_entry_t entry = (jit_entry_t)code;
+            /* ISO C forbids direct object-pointer → function-pointer cast;
+             * use a union (the portable, pedantic-clean idiom). */
+            union { void *ptr; jit_entry_t fn; } u_e2;
+            u_e2.ptr = code;
+            jit_entry_t entry = u_e2.fn;
             for (int n = 0; n <= 10; n++) {
                 vtx_value_t arg = vtx_make_smi(n);
                 vtx_value_t r = entry(&method, NULL, NULL, &arg, 1);

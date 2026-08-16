@@ -143,7 +143,7 @@ VTX_TEST(t1_save_load_roundtrip_single_method)
     /* Call the entry point — it should return 1337.
      * The fake code is: mov eax, 1337; ret */
     typedef int (*int_fn_t)(void);
-    int_fn_t fn = (int_fn_t)entry;
+    union { void *ptr; int_fn_t fn; } u_fn; u_fn.ptr = entry; int_fn_t fn = u_fn.fn;
     int result = fn();
     VTX_ASSERT_EQUAL(1337, result);
 
@@ -179,13 +179,13 @@ VTX_TEST(t1_save_load_roundtrip_multiple_methods)
     /* Call each method and verify the return value. */
     typedef int (*int_fn_t)(void);
 
-    int_fn_t fn1 = (int_fn_t)vtx_t1_cache_get_entry(&cache, 1);
+    union { void *ptr; int_fn_t fn; } u_fn1; u_fn1.ptr = vtx_t1_cache_get_entry(&cache, 1); int_fn_t fn1 = u_fn1.fn;
     VTX_ASSERT_EQUAL(100, fn1());
 
-    int_fn_t fn2 = (int_fn_t)vtx_t1_cache_get_entry(&cache, 2);
+    union { void *ptr; int_fn_t fn; } u_fn2; u_fn2.ptr = vtx_t1_cache_get_entry(&cache, 2); int_fn_t fn2 = u_fn2.fn;
     VTX_ASSERT_EQUAL(200, fn2());
 
-    int_fn_t fn3 = (int_fn_t)vtx_t1_cache_get_entry(&cache, 3);
+    union { void *ptr; int_fn_t fn; } u_fn3; u_fn3.ptr = vtx_t1_cache_get_entry(&cache, 3); int_fn_t fn3 = u_fn3.fn;
     VTX_ASSERT_EQUAL(300, fn3());
 
     vtx_t1_cache_destroy(&cache);
@@ -232,7 +232,7 @@ VTX_TEST(t1_loaded_code_is_executable)
 
     /* Execute it. */
     typedef int (*int_fn_t)(void);
-    int_fn_t fn = (int_fn_t)entry;
+    union { void *ptr; int_fn_t fn; } u_fn; u_fn.ptr = entry; int_fn_t fn = u_fn.fn;
     int result = fn();
     VTX_ASSERT_EQUAL(0xDEAD, result);
 
@@ -377,8 +377,8 @@ VTX_TEST(t1_load_time_is_submillisecond)
     /* Build 10 fake methods. */
     vtx_compiled_code_t *methods_arr[10];
     const vtx_compiled_code_t *methods[10];
-    for (int i = 0; i < 10; i++) {
-        methods_arr[i] = make_fake_compiled_code(i, i * 100);
+    for (uint32_t i = 0; i < 10; i++) {
+        methods_arr[i] = make_fake_compiled_code(i, (int32_t)(i * 100));
         methods[i] = methods_arr[i];
     }
 

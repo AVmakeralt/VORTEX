@@ -315,7 +315,6 @@ int main(void)
     fib_bench_arg_t fib_ba = { &interp, &fib_method, fib_args, 5 };
 
     /* T0 interpreter: use fewer iterations since it's much slower */
-    int64_t t0_iters = 10000;
     honest_bench_result_t t0_fib = honest_bench_run(
         "T0 fib_iter(30) x10K",
         bench_interp_fib_iter, &fib_ba, 5, 3);

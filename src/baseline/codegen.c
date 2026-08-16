@@ -3479,7 +3479,7 @@ static void compile_call_runtime(vtx_compile_ctx_t *ctx, uint16_t func_id)
 /* Main compilation loop                                                       */
 /* ========================================================================== */
 
-vtx_compiled_code_t *vtx_baseline_compile(const vtx_method_desc_t *method,
+vtx_compiled_code_t *vtx_baseline_compile(vtx_method_desc_t *method,
                                            vtx_profile_data_t *profile_data,
                                            vtx_arena_t *arena,
                                            vtx_code_cache_t *cache,

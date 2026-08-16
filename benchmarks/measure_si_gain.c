@@ -64,7 +64,7 @@ static uint64_t run_bench(const vtx_bytecode_t *bc, int64_t N, int iters, int wa
             vtx_runtime_run_with_args(&rt, bc, args, 1);
         }
         uint64_t t1 = now_ns();
-        samples[s] = (t1 - t0) / iters;
+        samples[s] = (t1 - t0) / (uint64_t)iters;
         vtx_runtime_destroy(&rt);
     }
     return median(samples, nsamp);
@@ -127,8 +127,8 @@ int main(void) {
     uint64_t orig_ns = run_bench(&bc_orig, N, iters, warmup);
     uint64_t fused_ns = run_bench(bc_fused, N, iters, warmup);
 
-    double orig_ms = orig_ns / 1e6;
-    double fused_ms = fused_ns / 1e6;
+    double orig_ms = (double)orig_ns / 1e6;
+    double fused_ms = (double)fused_ns / 1e6;
     double speedup = (double)orig_ns / (double)fused_ns;
     double gain_pct = (1.0 - (double)fused_ns / (double)orig_ns) * 100.0;
 

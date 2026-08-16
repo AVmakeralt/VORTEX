@@ -114,8 +114,8 @@ vtx_midtier_config_t vtx_midtier_config_default(void)
 static uint32_t midtier_specialize_types(
     vtx_graph_t *graph,
     const vtx_type_feedback_t *type_feedback,
-    vtx_type_system_t *ts,
-    vtx_arena_t *arena,
+    vtx_type_system_t *ts __attribute__((unused)),
+    vtx_arena_t *arena __attribute__((unused)),
     uint32_t *guards_inserted)
 {
     uint32_t sites_specialized = 0;
@@ -178,8 +178,6 @@ static uint32_t midtier_specialize_types(
             node->opcode == VTX_OP_Mul ||
             node->opcode == VTX_OP_Div ||
             node->opcode == VTX_OP_Mod) {
-
-            uint32_t site_index = node->bytecode_pc;
 
             /* Check if the result is always integer.
              * We use the call site feedback at the same bytecode PC

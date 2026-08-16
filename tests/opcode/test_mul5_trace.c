@@ -106,7 +106,11 @@ int main(void) {
         typedef vtx_value_t (*vtx_jit_entry_t)(
             const vtx_method_desc_t *, void *, void *,
             vtx_value_t *, uint32_t);
-        vtx_jit_entry_t entry = (vtx_jit_entry_t)method.compiled_code;
+        /* ISO C forbids direct object-pointer → function-pointer cast;
+         * use a union (the portable, pedantic-clean idiom). */
+        union { void *ptr; vtx_jit_entry_t fn; } u_entry;
+        u_entry.ptr = method.compiled_code;
+        vtx_jit_entry_t entry = u_entry.fn;
         vtx_value_t arg2 = vtx_make_smi(7);
         vtx_value_t r_jit = entry(&method, NULL, (void*)1, &arg2, 1);
 

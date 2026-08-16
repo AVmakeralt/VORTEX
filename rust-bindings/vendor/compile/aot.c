@@ -268,7 +268,7 @@ static int aot_compile_artifact(vtx_aot_manager_t *aot,
 
     /* Build the pipeline config for AOT */
     vtx_pipeline_config_t cfg = vtx_pipeline_config_aot();
-    cfg.inline_size_limit = artifact->inline_size_limit;
+    cfg.inline_size_limit = (int)artifact->inline_size_limit;
     cfg.run_speculative   = artifact->run_speculative;
     cfg.run_loop_spec     = artifact->run_loop_spec;
     cfg.run_vectorize     = artifact->run_vectorize;
@@ -430,7 +430,7 @@ void vtx_aot_on_guard_failure(vtx_aot_manager_t *aot,
 
 vtx_aot_stats_t vtx_aot_stats(const vtx_aot_manager_t *aot)
 {
-    vtx_aot_stats_t stats = {};
+    vtx_aot_stats_t stats = {0};
     if (!aot) return stats;
 
     pthread_mutex_lock((pthread_mutex_t *)&aot->queue.mutex);

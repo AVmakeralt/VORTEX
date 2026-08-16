@@ -48,7 +48,7 @@ void vtx_callee_lookup_destroy(void *ctx);
  * Build an IR graph for a method.
  * Returns NULL on failure.
  */
-static vtx_graph_t *build_callee_graph(vtx_callee_lookup_ctx_t *ctx,
+static vtx_graph_t *build_callee_graph(vtx_callee_lookup_ctx_t *ctx __attribute__((unused)),
                                         const vtx_method_desc_t *method,
                                         vtx_arena_t **out_arena)
 {

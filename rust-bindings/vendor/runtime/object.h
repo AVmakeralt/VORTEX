@@ -273,7 +273,16 @@ typedef struct {
     uint32_t     size;
     uint32_t     shape_id;
     uint32_t     field_count;
+    /* Flexible array member is C99 but ISO C++ forbids it (and zero-size
+     * arrays) under -Wpedantic. When compiled as C++, use a size-1 array
+     * and access fields via pointer arithmetic (the VTX_HEAP_OBJECT_HEADER_SIZE
+     * macro gives the correct header offset). When compiled as C, use
+     * the proper flexible array member. */
+#ifdef __cplusplus
+    vtx_value_t  fields[1];
+#else
     vtx_value_t  fields[];
+#endif
 } vtx_heap_object_t;
 
 /* Size of the header (everything before fields[]) */

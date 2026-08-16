@@ -537,6 +537,7 @@ static void transfer_block_fast(vtx_graph_t *graph, uint32_t block_idx,
                                  vtx_node_table_t *table,
                                  const vtx_block_node_list_t *block_lists)
 {
+    (void)graph;  /* graph unused — operates on table + bs */
     /* Start from entry state */
     copy_escape_states(bs->exit_state, bs->entry_state, bs->state_count);
 
@@ -704,7 +705,7 @@ vtx_pea_analysis_t *vtx_pea_run(vtx_graph_t *graph, vtx_arena_t *arena)
      * GlobalEscape (safe fallback — no scalar replacement). */
     uint32_t iterations = 0;
     const uint32_t MAX_ITERATIONS = 10000; /* safety bound — was 100 */
-    bool hit_cap = false;
+    bool hit_cap = false; (void)hit_cap;
 
     while (wl_head != wl_tail && iterations < MAX_ITERATIONS) {
         iterations++;

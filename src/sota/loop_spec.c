@@ -497,7 +497,7 @@ vtx_loop_spec_result_t vtx_sota_loop_spec_check(
 
 bool vtx_sota_loop_spec_transform(vtx_graph_t *graph,
                                     vtx_nodeid_t loop_node,
-                                    uint32_t cpu_features,
+                                    uint32_t cpu_features __attribute__((unused)),
                                     const vtx_loop_spec_result_t *spec_result,
                                     vtx_arena_t *arena)
 {
@@ -562,7 +562,7 @@ bool vtx_sota_loop_spec_transform(vtx_graph_t *graph,
                 ag->bytecode_pc = loop->bytecode_pc;
                 /* Mark with XOR checksum metadata if available */
                 if (spec_result->needs_xor_checksum_guard) {
-                    ag->value_number = -1; /* signals XOR checksum guard to lowering */
+                    ag->value_number = (uint32_t)-1; /* signals XOR checksum guard to lowering */
                 }
             }
         }
@@ -585,7 +585,7 @@ bool vtx_sota_loop_spec_transform(vtx_graph_t *graph,
     /* Mark the LoopBegin node with vectorization metadata.
      * The lowering phase checks value_number > 0 to emit SIMD code.
      * value_number = vector_width means this loop is vectorized. */
-    loop->value_number = (int32_t)vector_width;
+    loop->value_number = (uint32_t)vector_width;
 
     /* Replace scalar loop body operations with vector operations.
      *
@@ -658,7 +658,7 @@ bool vtx_sota_loop_spec_transform(vtx_graph_t *graph,
             vtx_node_t *vl = vtx_node_get(table, vl_id);
             if (vl != NULL) {
                 vl->type = node->type;  /* element type */
-                vl->value_number = (int32_t)vector_width; /* vector width metadata */
+                vl->value_number = (uint32_t)vector_width; /* vector width metadata */
 
                 /* Copy inputs from the scalar LoadIndexed */
                 for (uint32_t inp = 0; inp < node->input_count && inp < 3; inp++) {
@@ -676,7 +676,7 @@ bool vtx_sota_loop_spec_transform(vtx_graph_t *graph,
 
             vtx_node_t *vs = vtx_node_get(table, vs_id);
             if (vs != NULL) {
-                vs->value_number = (int32_t)vector_width;
+                vs->value_number = (uint32_t)vector_width;
 
                 /* Copy inputs from the scalar StoreIndexed */
                 for (uint32_t inp = 0; inp < node->input_count && inp < 4; inp++) {
@@ -695,7 +695,7 @@ bool vtx_sota_loop_spec_transform(vtx_graph_t *graph,
 
             vtx_node_t *va = vtx_node_get(table, va_id);
             if (va != NULL) {
-                va->value_number = (int32_t)vector_width;
+                va->value_number = (uint32_t)vector_width;
 
                 /* Copy inputs from the scalar Add */
                 for (uint32_t inp = 0; inp < node->input_count && inp < 2; inp++) {
@@ -712,7 +712,7 @@ bool vtx_sota_loop_spec_transform(vtx_graph_t *graph,
 
             vtx_node_t *vm = vtx_node_get(table, vm_id);
             if (vm != NULL) {
-                vm->value_number = (int32_t)vector_width;
+                vm->value_number = (uint32_t)vector_width;
 
                 /* Copy inputs from the scalar Mul */
                 for (uint32_t inp = 0; inp < node->input_count && inp < 2; inp++) {
@@ -980,7 +980,7 @@ bool vtx_sota_loop_unroll_transform(vtx_graph_t *graph,
      *   value_number > 0  → vectorized with this width
      *   value_number < 0  → unrolled with |value_number| factor
      *   value_number == 0 → not transformed */
-    loop->value_number = -(int32_t)unroll_result->unroll_factor;
+    loop->value_number = (uint32_t)(-(int32_t)unroll_result->unroll_factor);
 
     /* For full unrolling (unroll_factor == trip_count), the loop
      * back-edge is eliminated. The LoopEnd node is marked dead,

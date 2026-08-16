@@ -53,12 +53,6 @@ void vtx_versioned_cache_destroy(vtx_versioned_cache_t *vc)
     }
 }
 
-/* Find the version list for a method. Returns the head, or NULL if none. */
-static vtx_versioned_code_version_t *find_version_list(vtx_versioned_cache_t *vc, uint32_t method_id)
-{
-    return vc->versions[METHOD_INDEX(method_id)];
-}
-
 /* Force-free the oldest retired version for a method (used when we exceed
  * MAX_RETIRED). This is potentially unsafe but better than unbounded growth.
  * Fix C12: Skip versions with on_stack_count > 0 — freeing code that a

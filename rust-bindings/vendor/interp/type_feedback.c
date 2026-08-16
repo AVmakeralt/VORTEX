@@ -200,7 +200,7 @@ void vtx_type_feedback_record_call(vtx_type_feedback_t *feedback,
     site->observations[site->write_index].result_typeid = result_typeid;
 
     /* Advance write index (wraps around) */
-    site->write_index = (site->write_index + 1) % VTX_TYPE_FEEDBACK_BUFFER_SIZE;
+    site->write_index = (uint8_t)((site->write_index + 1) % VTX_TYPE_FEEDBACK_BUFFER_SIZE);
 
     /* Increment count up to the buffer size */
     if (site->count < VTX_TYPE_FEEDBACK_BUFFER_SIZE) {
@@ -255,7 +255,7 @@ void vtx_type_feedback_record_field(vtx_type_feedback_t *feedback,
     site->observations[site->write_index].holder_shapeid = holder_shapeid;
     site->observations[site->write_index].value_typeid = value_typeid;
 
-    site->write_index = (site->write_index + 1) % VTX_TYPE_FEEDBACK_BUFFER_SIZE;
+    site->write_index = (uint8_t)((site->write_index + 1) % VTX_TYPE_FEEDBACK_BUFFER_SIZE);
 
     if (site->count < VTX_TYPE_FEEDBACK_BUFFER_SIZE) {
         site->count++;
@@ -295,7 +295,7 @@ void vtx_type_feedback_record_branch(vtx_type_feedback_t *feedback,
 
     site->observations[site->write_index].taken = taken;
 
-    site->write_index = (site->write_index + 1) % VTX_TYPE_FEEDBACK_BUFFER_SIZE;
+    site->write_index = (uint8_t)((site->write_index + 1) % VTX_TYPE_FEEDBACK_BUFFER_SIZE);
 
     if (site->count < VTX_TYPE_FEEDBACK_BUFFER_SIZE) {
         site->count++;

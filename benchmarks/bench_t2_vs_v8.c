@@ -83,7 +83,11 @@ static jit_entry_t compile_t2(const char *prog_text, uint32_t arg_count) {
     memset(&result, 0, sizeof(result));
     int rc = vtx_pipeline_run(graph, &config, arena, &result);
     if (rc != 0 || !result.success || method->compiled_code == NULL) return NULL;
-    return (jit_entry_t)method->compiled_code;
+    /* ISO C forbids direct object-pointer → function-pointer cast;
+     * use a union (the portable, pedantic-clean idiom). */
+    union { void *ptr; jit_entry_t fn; } u_e;
+    u_e.ptr = method->compiled_code;
+    return u_e.fn;
 }
 
 /* ---- Programs ---- */
@@ -173,7 +177,7 @@ static double bench_jit1(jit_entry_t entry, int64_t n, int iters) {
     vtx_method_desc_t m = {0}; m.name = "f";
     static double samples[SAMPLES];
     for (int s = 0; s < SAMPLES; s++) {
-        uint64_t lcg = 12345 + s;
+        uint64_t lcg = 12345u + (uint64_t)s;
         uint64_t t0 = now_ns();
         int64_t acc = 0;
         for (int i = 0; i < iters; i++) {
@@ -197,7 +201,7 @@ static double bench_jit2(jit_entry_t entry, int64_t a, int64_t b, int iters) {
     vtx_method_desc_t m = {0}; m.name = "f";
     static double samples[SAMPLES];
     for (int s = 0; s < SAMPLES; s++) {
-        uint64_t lcg = 12345 + s;
+        uint64_t lcg = 12345u + (uint64_t)s;
         uint64_t t0 = now_ns();
         int64_t acc = 0;
         for (int i = 0; i < iters; i++) {
@@ -222,7 +226,7 @@ static double bench_jit2(jit_entry_t entry, int64_t a, int64_t b, int iters) {
 static double bench_native1(int64_t (*fn)(int64_t), int64_t n, int iters) {
     static double samples[SAMPLES];
     for (int s = 0; s < SAMPLES; s++) {
-        uint64_t lcg = 12345 + s;
+        uint64_t lcg = 12345u + (uint64_t)s;
         uint64_t t0 = now_ns();
         int64_t acc = 0;
         for (int i = 0; i < iters; i++) {
@@ -242,7 +246,7 @@ static double bench_native1(int64_t (*fn)(int64_t), int64_t n, int iters) {
 static double bench_native2(int64_t (*fn)(int64_t, int64_t), int64_t a, int64_t b, int iters) {
     static double samples[SAMPLES];
     for (int s = 0; s < SAMPLES; s++) {
-        uint64_t lcg = 12345 + s;
+        uint64_t lcg = 12345u + (uint64_t)s;
         uint64_t t0 = now_ns();
         int64_t acc = 0;
         for (int i = 0; i < iters; i++) {

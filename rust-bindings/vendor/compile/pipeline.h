@@ -114,7 +114,7 @@ typedef struct {
      * destruction — it never becomes executable. */
     struct vtx_code_cache       *code_cache;
     struct vtx_method_registry  *method_registry;
-    const vtx_method_desc_t     *method;           /* the method being compiled */
+    vtx_method_desc_t          *method;           /* the method being compiled (non-const: install writes compiled_code) */
     vtx_arena_t                 *install_arena;    /* arena for installation allocations */
 
     /* Runtime orchestrator. If non-NULL, the pipeline notifies it after a

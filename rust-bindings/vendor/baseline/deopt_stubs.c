@@ -111,6 +111,7 @@ static void emit_store_to_frame(vtx_code_buffer_t *buf, int32_t offset, vtx_reg_
  * Emit: mov reg, [rbp + offset]  (64-bit)
  * Load a frame slot into a register.
  */
+__attribute__((unused))
 static void emit_load_from_frame(vtx_code_buffer_t *buf, vtx_reg_t reg, int32_t offset)
 {
     uint8_t rex = REX_W;
@@ -173,6 +174,7 @@ static void emit_push_reg(vtx_code_buffer_t *buf, vtx_reg_t reg)
 /**
  * Emit: sub rsp, imm8
  */
+__attribute__((unused))
 static void emit_sub_rsp_imm8(vtx_code_buffer_t *buf, uint8_t imm8)
 {
     vtx_code_buffer_emit_byte(buf, 0x48); /* REX.W */
@@ -311,7 +313,7 @@ const vtx_deopt_stub_t *vtx_deopt_stub_emit(vtx_deopt_context_t *ctx,
         } \
     } while(0)
 
-    uint32_t stack_pushed = 0;
+    uint32_t stack_pushed = 0; (void)stack_pushed;
 
     if (depth >= 4) {
         SAVE_REG(VTX_REG_RBX, spilled_count, 0);

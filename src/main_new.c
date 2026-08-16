@@ -308,45 +308,7 @@ static vtx_bytecode_t *load_bytecode_file(const char *filename, vtx_arena_t *are
  */
 static vtx_bytecode_t *build_fib_bytecode(vtx_arena_t *arena)
 {
-    /* Assemble by hand using opcode constants */
-    uint8_t code[] = {
-        VT_OP_LOAD_LOCAL,    0x00, 0x00,   /* load_local 0  (n) */
-        VT_OP_LOAD_CONST_INT, 0x00, 0x02,  /* load_const_int 2 */
-        VT_OP_ICMP_LT,                      /* icmp_lt */
-        VT_OP_IF_TRUE,      0x00, 0x2A,    /* if_true offset 42 → Lreturn_n */
-        VT_OP_LOAD_LOCAL,    0x00, 0x00,   /* load_local 0  (n) */
-        VT_OP_LOAD_CONST_INT, 0x00, 0x01,  /* load_const_int 1 */
-        VT_OP_ISUB,                         /* isub: n-1 */
-        VT_OP_STORE_LOCAL,   0x00, 0x01,   /* store_local 1  (a = n-1) */
-        VT_OP_LOAD_LOCAL,    0x00, 0x01,   /* load_local 1  (a) */
-        VT_OP_LOAD_LOCAL,    0x00, 0x00,   /* load_local 0  (n) */
-        VT_OP_LOAD_CONST_INT, 0x00, 0x02,  /* load_const_int 2 */
-        VT_OP_ISUB,                         /* isub: n-2 */
-        VT_OP_STORE_LOCAL,   0x00, 0x02,   /* store_local 2  (b = n-2) */
-        /* Lloop: PC=28 */
-        VT_OP_LOAD_LOCAL,    0x00, 0x02,   /* load_local 2  (b) */
-        VT_OP_LOAD_CONST_INT, 0x00, 0x00,  /* load_const_int 0 */
-        VT_OP_ICMP_GT,                      /* icmp_gt */
-        VT_OP_IF_FALSE,      0x00, 0x16,   /* if_false offset 22 → Lend (PC=28+22=50) */
-        VT_OP_LOAD_LOCAL,    0x00, 0x01,   /* load_local 1  (a) */
-        VT_OP_LOAD_LOCAL,    0x00, 0x02,   /* load_local 2  (b) */
-        VT_OP_IADD,                         /* iadd: a+b */
-        VT_OP_STORE_LOCAL,   0x00, 0x03,   /* store_local 3  (temp = a+b) */
-        VT_OP_LOAD_LOCAL,    0x00, 0x02,   /* load_local 2  (b) */
-        VT_OP_LOAD_CONST_INT, 0x00, 0x01,  /* load_const_int 1 */
-        VT_OP_ISUB,                         /* isub: b-1 */
-        VT_OP_STORE_LOCAL,   0x00, 0x02,   /* store_local 2  (b = b-1) */
-        VT_OP_LOAD_LOCAL,    0x00, 0x03,   /* load_local 3  (temp) */
-        VT_OP_STORE_LOCAL,   0x00, 0x01,   /* store_local 1  (a = temp) */
-        VT_OP_GOTO,          0xFF, 0xE4,   /* goto -28 → Lloop (PC=28) */
-        /* Lend: PC=50 */
-        VT_OP_LOAD_LOCAL,    0x00, 0x01,   /* load_local 1  (a) */
-        VT_OP_RETURN_VALUE,                 /* return_value */
-        /* Lreturn_n: PC=42+... need to fix offsets */
-        /* Actually let's use a simpler layout */
-    };
-
-    /* Simpler approach: build the code buffer programmatically */
+    /* Build the code buffer programmatically */
     size_t cap = 256;
     uint8_t *buf = vtx_arena_alloc(arena, cap);
     size_t pos = 0;
@@ -690,7 +652,7 @@ static int run_self_test(void)
         vtx_graph_init(&graph, 1);
 
         /* Build a simple graph with an allocation */
-        vtx_nodeid_t start = vtx_node_create(&graph.node_table, VTX_OP_Start);
+        (void)vtx_node_create(&graph.node_table, VTX_OP_Start);  /* start node created for graph validity but unused */
         vtx_nodeid_t alloc = vtx_node_create(&graph.node_table, VTX_OP_NewObject);
         vtx_nodeid_t ret = vtx_node_create(&graph.node_table, VTX_OP_Return);
         vtx_node_add_input(&graph.node_table, ret, alloc);
@@ -847,7 +809,7 @@ static int run_benchmarks(void)
         }
 
         clock_gettime(CLOCK_MONOTONIC, &end);
-        double elapsed_ns = (end.tv_sec - start.tv_sec) * 1e9 + (end.tv_nsec - start.tv_nsec);
+        double elapsed_ns = ((double)(end.tv_sec - start.tv_sec)) * 1e9 + ((double)(end.tv_nsec - start.tv_nsec));
         double per_call_ns = elapsed_ns / VTX_BENCH_ITERATIONS;
 
         printf("fib(18..22) T0 interpreter: %.1f ns/call  (accum=%ld)\n", per_call_ns, (long)accum);
@@ -876,7 +838,7 @@ static int run_benchmarks(void)
             native_accum += a; /* consume result */
         }
         clock_gettime(CLOCK_MONOTONIC, &n_end);
-        double elapsed_ns = (n_end.tv_sec - n_start.tv_sec) * 1e9 + (n_end.tv_nsec - n_start.tv_nsec);
+        double elapsed_ns = ((double)(n_end.tv_sec - n_start.tv_sec)) * 1e9 + ((double)(n_end.tv_nsec - n_start.tv_nsec));
         double per_call_ns = elapsed_ns / VTX_BENCH_ITERATIONS;
         printf("fib(18..22) native C:       %.1f ns/call  (accum=%ld)\n", per_call_ns, (long)native_accum);
         (void)sink;
@@ -1147,7 +1109,7 @@ static vtx_bytecode_t *build_nested_loop_bytecode(vtx_arena_t *arena)
  *   Start → LoopBegin → [loop body with Add/Sub/Cmp] → If → LoopEnd/Exit
  *   Exit → Return
  */
-static vtx_graph_t *build_loop_graph(vtx_arena_t *arena)
+static __attribute__((unused)) vtx_graph_t *build_loop_graph(vtx_arena_t *arena)
 {
     vtx_graph_t *graph = vtx_arena_alloc(arena, sizeof(vtx_graph_t));
     vtx_graph_init(graph, 1);
@@ -1303,8 +1265,8 @@ static int run_benchmarks_v2(void)
             vtx_interp_run(&interp, &method, &arg, 1);
         }
         clock_gettime(CLOCK_MONOTONIC, &t0_end);
-        t0_ns[0] = ((t0_end.tv_sec - t0_start.tv_sec) * 1e9 +
-                     (t0_end.tv_nsec - t0_start.tv_nsec)) / VTX_BENCH_ITERATIONS;
+        t0_ns[0] = (((double)(t0_end.tv_sec - t0_start.tv_sec)) * 1e9 +
+                     ((double)(t0_end.tv_nsec - t0_start.tv_nsec))) / VTX_BENCH_ITERATIONS;
         printf("  T0 interpreter: %.0f ns/call\n", t0_ns[0]);
         vtx_interp_destroy(&interp);
 
@@ -1324,8 +1286,8 @@ static int run_benchmarks_v2(void)
                 sink = a;
             }
             clock_gettime(CLOCK_MONOTONIC, &n_end);
-            native_ns[0] = ((n_end.tv_sec - n_start.tv_sec) * 1e9 +
-                            (n_end.tv_nsec - n_start.tv_nsec)) / VTX_BENCH_ITERATIONS;
+            native_ns[0] = (((double)(n_end.tv_sec - n_start.tv_sec)) * 1e9 +
+                            ((double)(n_end.tv_nsec - n_start.tv_nsec))) / VTX_BENCH_ITERATIONS;
             printf("  Native C:       %.0f ns/call\n", native_ns[0]);
             (void)sink;
         }
@@ -1415,8 +1377,8 @@ static int run_benchmarks_v2(void)
             vtx_interp_run(&interp, &method, &arg, 1);
         }
         clock_gettime(CLOCK_MONOTONIC, &t0_end);
-        t0_ns[1] = ((t0_end.tv_sec - t0_start.tv_sec) * 1e9 +
-                     (t0_end.tv_nsec - t0_start.tv_nsec)) / VTX_BENCH_ITERATIONS;
+        t0_ns[1] = (((double)(t0_end.tv_sec - t0_start.tv_sec)) * 1e9 +
+                     ((double)(t0_end.tv_nsec - t0_start.tv_nsec))) / VTX_BENCH_ITERATIONS;
         printf("  T0 interpreter: %.0f ns/call\n", t0_ns[1]);
         vtx_interp_destroy(&interp);
 
@@ -1436,8 +1398,8 @@ static int run_benchmarks_v2(void)
                 sink = result;
             }
             clock_gettime(CLOCK_MONOTONIC, &n_end);
-            native_ns[1] = ((n_end.tv_sec - n_start.tv_sec) * 1e9 +
-                            (n_end.tv_nsec - n_start.tv_nsec)) / VTX_BENCH_ITERATIONS;
+            native_ns[1] = (((double)(n_end.tv_sec - n_start.tv_sec)) * 1e9 +
+                            ((double)(n_end.tv_nsec - n_start.tv_nsec))) / VTX_BENCH_ITERATIONS;
             printf("  Native C:       %.0f ns/call\n", native_ns[1]);
             (void)sink;
         }
@@ -1517,8 +1479,8 @@ static int run_benchmarks_v2(void)
             vtx_interp_run(&interp, &method, &arg, 1);
         }
         clock_gettime(CLOCK_MONOTONIC, &t0_end);
-        t0_ns[2] = ((t0_end.tv_sec - t0_start.tv_sec) * 1e9 +
-                     (t0_end.tv_nsec - t0_start.tv_nsec)) / VTX_BENCH_ITERATIONS;
+        t0_ns[2] = (((double)(t0_end.tv_sec - t0_start.tv_sec)) * 1e9 +
+                     ((double)(t0_end.tv_nsec - t0_start.tv_nsec))) / VTX_BENCH_ITERATIONS;
         printf("  T0 interpreter: %.0f ns/call\n", t0_ns[2]);
         vtx_interp_destroy(&interp);
 
@@ -1538,8 +1500,8 @@ static int run_benchmarks_v2(void)
                 sink = sum;
             }
             clock_gettime(CLOCK_MONOTONIC, &n_end);
-            native_ns[2] = ((n_end.tv_sec - n_start.tv_sec) * 1e9 +
-                            (n_end.tv_nsec - n_start.tv_nsec)) / VTX_BENCH_ITERATIONS;
+            native_ns[2] = (((double)(n_end.tv_sec - n_start.tv_sec)) * 1e9 +
+                            ((double)(n_end.tv_nsec - n_start.tv_nsec))) / VTX_BENCH_ITERATIONS;
             printf("  Native C:       %.0f ns/call\n", native_ns[2]);
             (void)sink;
         }
@@ -1610,8 +1572,8 @@ static int run_benchmarks_v2(void)
             vtx_interp_run(&interp, &method, &arg, 1);
         }
         clock_gettime(CLOCK_MONOTONIC, &t0_end);
-        t0_ns[3] = ((t0_end.tv_sec - t0_start.tv_sec) * 1e9 +
-                     (t0_end.tv_nsec - t0_start.tv_nsec)) / VTX_BENCH_ITERATIONS;
+        t0_ns[3] = (((double)(t0_end.tv_sec - t0_start.tv_sec)) * 1e9 +
+                     ((double)(t0_end.tv_nsec - t0_start.tv_nsec))) / VTX_BENCH_ITERATIONS;
         printf("  T0 interpreter: %.0f ns/call\n", t0_ns[3]);
         vtx_interp_destroy(&interp);
 
@@ -1635,8 +1597,8 @@ static int run_benchmarks_v2(void)
                 sink = sum;
             }
             clock_gettime(CLOCK_MONOTONIC, &n_end);
-            native_ns[3] = ((n_end.tv_sec - n_start.tv_sec) * 1e9 +
-                            (n_end.tv_nsec - n_start.tv_nsec)) / VTX_BENCH_ITERATIONS;
+            native_ns[3] = (((double)(n_end.tv_sec - n_start.tv_sec)) * 1e9 +
+                            ((double)(n_end.tv_nsec - n_start.tv_nsec))) / VTX_BENCH_ITERATIONS;
             printf("  Native C:       %.0f ns/call\n", native_ns[3]);
             (void)sink;
         }
@@ -1873,8 +1835,8 @@ static int64_t (*jit_make_executable(const vtx_compile_result_t *result))(int64_
     /* Make the native code buffer executable.
      * malloc'd memory is RW; we need RX for execution.
      * We round up to page size for mprotect. */
-    long page_size = sysconf(_SC_PAGESIZE);
-    if (page_size <= 0) page_size = 4096;
+    size_t page_size = (size_t)sysconf(_SC_PAGESIZE);
+    if (page_size == 0) page_size = 4096;
 
     uintptr_t code_start = (uintptr_t)result->native_code;
     uintptr_t page_start = code_start & ~(uintptr_t)(page_size - 1);
@@ -1887,7 +1849,11 @@ static int64_t (*jit_make_executable(const vtx_compile_result_t *result))(int64_
     }
 
     typedef int64_t (*jit_fn_t)(int64_t);
-    return (jit_fn_t)result->native_code;
+    /* ISO C forbids direct object-pointer-to-function-pointer cast.
+     * Use a union (the dlsym pattern) for safe reinterpretation. */
+    union { void *ptr; jit_fn_t fn; } cast;
+    cast.ptr = result->native_code;
+    return cast.fn;
 }
 
 /* ---- IR Graph Builders for Real Workloads ---- */
@@ -1906,7 +1872,7 @@ static vtx_graph_t *build_sum_ir(vtx_arena_t *arena)
     vtx_graph_init(graph, 1);
 
     /* Use Start and Parameter nodes created by vtx_graph_init */
-    vtx_nodeid_t start = graph->start_node;
+    (void)graph->start_node;  // Start node created by vtx_graph_init, unused here
     vtx_nodeid_t param_n = graph->parameters[0];
 
     /* Constants */
@@ -2013,13 +1979,13 @@ static vtx_graph_t *build_sum_ir(vtx_arena_t *arena)
  *
  * Tests: nested loops, Multiply, Add, Phi
  */
-static vtx_graph_t *build_matrix_sum_ir(vtx_arena_t *arena)
+static __attribute__((unused)) vtx_graph_t *build_matrix_sum_ir(vtx_arena_t *arena)
 {
     vtx_graph_t *graph = vtx_arena_alloc(arena, sizeof(vtx_graph_t));
     vtx_graph_init(graph, 1);
 
     /* Use Start and Parameter nodes created by vtx_graph_init */
-    vtx_nodeid_t start = graph->start_node;
+    (void)graph->start_node;  // Start node created by vtx_graph_init, unused here
     vtx_nodeid_t param_n = graph->parameters[0];
 
     vtx_nodeid_t zero = vtx_node_create(&graph->node_table, VTX_OP_Constant);
@@ -2188,7 +2154,7 @@ static vtx_graph_t *build_collatz_ir(vtx_arena_t *arena)
     vtx_graph_init(graph, 1);
 
     /* Use Start and Parameter nodes created by vtx_graph_init */
-    vtx_nodeid_t start = graph->start_node;
+    (void)graph->start_node;  // Start node created by vtx_graph_init, unused here
     vtx_nodeid_t param_n = graph->parameters[0];
 
     vtx_nodeid_t zero = vtx_node_create(&graph->node_table, VTX_OP_Constant);
@@ -2354,7 +2320,7 @@ static vtx_graph_t *build_hash_ir(vtx_arena_t *arena)
     vtx_graph_init(graph, 1);
 
     /* Use Start and Parameter nodes created by vtx_graph_init */
-    vtx_nodeid_t start = graph->start_node;
+    (void)graph->start_node;  // Start node created by vtx_graph_init, unused here
     vtx_nodeid_t param_n = graph->parameters[0];
 
     vtx_nodeid_t zero = vtx_node_create(&graph->node_table, VTX_OP_Constant);
@@ -2486,13 +2452,13 @@ static vtx_graph_t *build_hash_ir(vtx_arena_t *arena)
  *   while (b != 0) { int64_t t = b; b = a % b; a = t; }
  *   return a;
  */
-static vtx_graph_t *build_gcd_ir(vtx_arena_t *arena)
+static __attribute__((unused)) vtx_graph_t *build_gcd_ir(vtx_arena_t *arena)
 {
     vtx_graph_t *graph = vtx_arena_alloc(arena, sizeof(vtx_graph_t));
     vtx_graph_init(graph, 2);
 
     /* Use Start and Parameter nodes created by vtx_graph_init */
-    vtx_nodeid_t start = graph->start_node;
+    (void)graph->start_node;  // Start node created by vtx_graph_init, unused here
     vtx_nodeid_t param_a = graph->parameters[0];
     vtx_nodeid_t param_b = graph->parameters[1];
 
@@ -2617,8 +2583,8 @@ static void bench3_run(const char *name,
     clock_gettime(CLOCK_MONOTONIC, &comp_start);
     int rc = vtx_pipeline_run(graph, &config, &pipe_arena, &result);
     clock_gettime(CLOCK_MONOTONIC, &comp_end);
-    out->compile_ns = (comp_end.tv_sec - comp_start.tv_sec) * 1e9 +
-                      (comp_end.tv_nsec - comp_start.tv_nsec);
+    out->compile_ns = ((double)(comp_end.tv_sec - comp_start.tv_sec)) * 1e9 +
+                      ((double)(comp_end.tv_nsec - comp_start.tv_nsec));
 
     if (rc != 0 || !result.success || !result.native_code) {
         printf("  %-18s JIT compile FAILED\n", name);
@@ -2656,8 +2622,8 @@ static void bench3_run(const char *name,
         jit_sink = r;
     }
     clock_gettime(CLOCK_MONOTONIC, &jit_end);
-    out->jit_ns = ((jit_end.tv_sec - jit_start.tv_sec) * 1e9 +
-                   (jit_end.tv_nsec - jit_start.tv_nsec)) / BENCH3_ITERS;
+    out->jit_ns = (((double)(jit_end.tv_sec - jit_start.tv_sec)) * 1e9 +
+                   ((double)(jit_end.tv_nsec - jit_start.tv_nsec))) / BENCH3_ITERS;
 
     /* Verify result */
     int64_t jit_result = jit_fn(input);
@@ -2678,8 +2644,8 @@ static void bench3_run(const char *name,
         native_sink = native_fn(input);
     }
     clock_gettime(CLOCK_MONOTONIC, &nat_end);
-    out->native_ns = ((nat_end.tv_sec - nat_start.tv_sec) * 1e9 +
-                      (nat_end.tv_nsec - nat_start.tv_nsec)) / BENCH3_ITERS;
+    out->native_ns = (((double)(nat_end.tv_sec - nat_start.tv_sec)) * 1e9 +
+                      ((double)(nat_end.tv_nsec - nat_start.tv_nsec))) / BENCH3_ITERS;
 
     (void)jit_sink;
     (void)native_sink;
@@ -2696,7 +2662,7 @@ static int64_t native_sum(int64_t n)
     return result;
 }
 
-static int64_t native_matrix_sum(int64_t n)
+static __attribute__((unused)) int64_t native_matrix_sum(int64_t n)
 {
     int64_t sum = 0;
     for (int64_t i = 0; i < n; i++)
@@ -2726,7 +2692,7 @@ static int64_t native_hash(int64_t n)
     return h;
 }
 
-static int64_t native_gcd_2param(int64_t ab)
+static __attribute__((unused)) int64_t native_gcd_2param(int64_t ab)
 {
     /* GCD only takes 1 arg in our bench; use a/b from the single arg */
     int64_t a = ab;
@@ -2761,12 +2727,7 @@ static int run_benchmarks_v3(void)
 
     /* --- Benchmark 2: gcd(252, 105) = 21 --- */
     {
-        vtx_graph_t *g = build_gcd_ir(&arena);
-        /* Note: gcd only takes 1 arg in bench3_run, but our graph takes 2.
-         * Use sum-like workload as fallback for single-arg */
-        /* Actually, bench3_run only passes 1 arg. Use a simpler loop workload. */
-        /* Replace with a counting loop: count(n) = n iterations */
-        /* Use sum(1000) with different input */
+        /* bench3_run passes 1 arg; gcd takes 2. Use sum(1000) instead. */
         vtx_graph_t *g2 = build_sum_ir(&arena);
         int64_t expected = 500500; /* sum(1..1000) */
         bench3_run("sum(1000)", g2, 1000, expected, native_sum, &results[1]);
@@ -3309,7 +3270,6 @@ int main(int argc, char *argv[])
              *
              * Opt-out via VORTEX_NO_T1_CACHE=1. */
             vtx_t1_cache_t t1_cache;
-            bool t1_cache_loaded = false;
             const char *no_t1 = getenv("VORTEX_NO_T1_CACHE");
             if (!(no_t1 && strcmp(no_t1, "1") == 0) &&
                 !vtx_deterministic_disable_persistence()) {
@@ -3323,7 +3283,6 @@ int main(int argc, char *argv[])
                         fprintf(stderr, "[pgo] Loaded T1 code cache from %s "
                                 "(%u methods, %u bytes, %lu ns load)\n",
                                 t1_file, mcount, csize, (unsigned long)ltime);
-                        t1_cache_loaded = true;
                     } else {
                         fprintf(stderr, "[pgo] No T1 code cache at %s (cold start)\n",
                                 t1_file);
@@ -3362,11 +3321,9 @@ int main(int argc, char *argv[])
              * At exit, the current run's profile is saved as a new ensemble
              * file, and old files beyond K are evicted. */
             vtx_ensemble_t ensemble;
-            bool ensemble_active = false;
             const char *ens_env = getenv("VORTEX_ENSEMBLE");
             if (ens_env && strcmp(ens_env, "1") == 0) {
                 vtx_ensemble_init(&ensemble);
-                ensemble_active = true;
 
                 /* Load previous ensemble runs. */
                 for (uint32_t k = 0; k < VTX_ENSEMBLE_MAX_RUNS; k++) {

@@ -43,7 +43,11 @@ int main(void) {
     vtx_pipeline_run(g,&cfg,ar,&res);
     if (m->compiled_code) {
         vtx_value_t v=vtx_make_smi(100);
-        vtx_value_t r2=((jit_entry_t)m->compiled_code)(m,NULL,(void*)1,&v,1);
+        /* ISO C forbids direct object-pointer → function-pointer cast;
+         * use a union (the portable, pedantic-clean idiom). */
+        union { void *ptr; jit_entry_t fn; } u_e;
+        u_e.ptr = m->compiled_code;
+        vtx_value_t r2 = u_e.fn(m, NULL, (void*)1, &v, 1);
         printf("sum(100) = %ld (expected 5050)\n",(long)vtx_smi_value(r2));
     }
     return 0;

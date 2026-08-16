@@ -190,7 +190,7 @@ static void update_arg_profile(
 
     if (found_idx >= 0) {
         /* Update existing entry's frequency */
-        top_freqs[found_idx] = (double)(top_freqs[found_idx] * (total - 1) + 1) / (double)total;
+        top_freqs[found_idx] = ((double)(top_freqs[found_idx] * (double)(total - 1) + 1.0)) / (double)total;
     } else {
         /* Type not in top-4 — find a slot */
         int slot = -1;

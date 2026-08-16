@@ -263,7 +263,6 @@ bool vtx_markov_detect_transition(vtx_markov_t *mk, uint32_t *new_phase)
      * The phase with the smallest KL divergence is the best match. */
     double best_kl = 1e30;
     uint32_t best_phase = mk->current_phase;
-    bool found_better = false;
 
     for (uint32_t p = 0; p < mk->phase_count; p++) {
         uint32_t pid = mk->phases[p].phase_id;

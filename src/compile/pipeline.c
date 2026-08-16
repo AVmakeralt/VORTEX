@@ -2006,7 +2006,7 @@ vtx_pipeline_config_t vtx_pipeline_config_heat_adapted(uint64_t execution_count)
     if (config.inline_size_limit == 0) config.inline_size_limit = 512;
     uint32_t size_boost = (uint32_t)(log_exec * 30);
     if (size_boost > 256) size_boost = 256;
-    config.inline_size_limit += size_boost;
+    config.inline_size_limit += (int)size_boost;
 
     /* Adjust GVN iterations: hotter methods benefit from more iterations.
      * Default is around 3. Increase to 5 for very hot methods. */

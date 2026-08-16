@@ -55,7 +55,6 @@ vtx_compiled_method_t *vtx_evict_find_lru(vtx_method_registry_t *registry)
      * We use (pos & capacity_mask) instead of (pos % capacity)
      * because capacity is always a power of 2. */
 
-    uint32_t capacity = registry->capacity;
     uint32_t mask = registry->capacity_mask;
     uint32_t start = registry->clock_hand & mask;
     uint32_t pos = start;

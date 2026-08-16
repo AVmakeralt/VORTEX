@@ -203,7 +203,7 @@ static void run_t2_in_child(const vtx_assembler_t *a, int64_t arg,
                     typedef vtx_value_t (*vtx_jit_entry_t)(
                         const vtx_method_desc_t *, void *, void *,
                         vtx_value_t *, uint32_t);
-                    vtx_jit_entry_t entry = (vtx_jit_entry_t)method.compiled_code;
+                    union { void *ptr; vtx_jit_entry_t fn; } u_e; u_e.ptr = method.compiled_code; vtx_jit_entry_t entry = u_e.fn;
                     vtx_value_t arg_v = vtx_make_smi(arg);
                     child_result = entry(&method, NULL, (void*)1, &arg_v, 1);
                     child_status = 0;
@@ -225,8 +225,9 @@ static void run_t2_in_child(const vtx_assembler_t *a, int64_t arg,
         }
 
         /* Write result + status to parent. */
-        write(pipefd[1], &child_result, sizeof(child_result));
-        write(pipefd[1], &child_status, sizeof(child_status));
+        ssize_t w1 = write(pipefd[1], &child_result, sizeof(child_result));
+        ssize_t w2 = write(pipefd[1], &child_status, sizeof(child_status));
+        (void)w1; (void)w2;
         close(pipefd[1]);
         _exit(0);
     }
@@ -240,7 +241,7 @@ static void run_t2_in_child(const vtx_assembler_t *a, int64_t arg,
         pid_t r = waitpid(pid, &status, WNOHANG);
         if (r == pid) break;
         if (r < 0) break;
-        usleep(poll_ms * 1000);
+        usleep((useconds_t)poll_ms * 1000u);
     }
     if (waitpid(pid, &status, WNOHANG) == 0) {
         kill(pid, SIGKILL);
@@ -828,7 +829,11 @@ VTX_TEST(tier_eq_21_loop_sum_odd) {
         "done:\n"
         "load_local 1\n"
         "return_value\n";
-    /* Hmm — cmp_gt is not in the opcode table; use icmp_gt. */
+    /* Hmm — cmp_gt is not in the opcode table; use icmp_gt.
+     * This stub is intentionally non-functional — the corrected
+     * variant below runs the actual equivalence check. Keep the
+     * source string for reference; mark as used to silence -Wunused. */
+    (void)prog;
 }
 
 VTX_TEST(tier_eq_21_loop_sum_odd_corrected) {

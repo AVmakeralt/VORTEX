@@ -77,7 +77,11 @@ static jit_entry_t compile_t2(const char *prog_text, uint32_t arg_count) {
     memset(&result, 0, sizeof(result));
     int rc = vtx_pipeline_run(graph, &config, arena, &result);
     if (rc != 0 || !result.success || method->compiled_code == NULL) return NULL;
-    return (jit_entry_t)method->compiled_code;
+    /* ISO C forbids direct object-pointer → function-pointer cast;
+     * use a union (the portable, pedantic-clean idiom). */
+    union { void *ptr; jit_entry_t fn; } u_e;
+    u_e.ptr = method->compiled_code;
+    return u_e.fn;
 }
 
 static const char *PROG_SUM =
@@ -179,7 +183,7 @@ int main(void) {
         double nat_ns = (double)(t1 - t0) / iters;
 
         double ratio = 100.0 * nat_ns / t2_ns;
-        double per_iter = t2_ns / N;
+        double per_iter = t2_ns / (double)N;
 
         printf("  %-10ld  %10.0f ns  %10.0f ns  %9.1f%%  %8.2f\n",
                (long)N, t2_ns, nat_ns, ratio, per_iter);
@@ -220,7 +224,7 @@ int main(void) {
         double ratio = 100.0 * nat_ns / t2_ns;
         /* collatz(27) = 111 steps, collatz(97) = 118, etc. */
         int64_t steps = native_collatz(N);
-        double per_step = t2_ns / steps;
+        double per_step = t2_ns / (double)steps;
 
         printf("  %-10ld  %10.0f ns  %10.0f ns  %9.1f%%  %8.2f\n",
                (long)N, t2_ns, nat_ns, ratio, per_step);

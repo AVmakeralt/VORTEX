@@ -281,15 +281,36 @@ static jit_entry_t compile(const char *prog_text, uint32_t arg_count) {
     clock_gettime(CLOCK_MONOTONIC, &comp_start);
     int rc = vtx_pipeline_run(graph, &config, arena, &result);
     clock_gettime(CLOCK_MONOTONIC, &comp_end);
-    double compile_ns = (comp_end.tv_sec - comp_start.tv_sec) * 1e9 +
-                        (comp_end.tv_nsec - comp_start.tv_nsec);
+    /* tv_sec / tv_nsec are signed integers; convert through uint64_t to
+     * avoid sign-conversion warnings when promoting to double. */
+    double compile_ns = (double)(uint64_t)(comp_end.tv_sec - comp_start.tv_sec) * 1e9 +
+                        (double)(uint64_t)(comp_end.tv_nsec - comp_start.tv_nsec);
     fprintf(stderr, "  [compile] %.0f ns (%.1f us)\n", compile_ns, compile_ns / 1000.0);
 
     if (rc != 0 || !result.success || method->compiled_code == NULL) {
         fprintf(stderr, "FAIL: pipeline rc=%d success=%d\n", rc, result.success);
         return NULL;
     }
-    return (jit_entry_t)method->compiled_code;
+    /* ISO C forbids direct object-pointer → function-pointer cast;
+     * use a union (the portable, pedantic-clean idiom). */
+    union { void *ptr; jit_entry_t fn; } u_e;
+    u_e.ptr = method->compiled_code;
+    return u_e.fn;
+}
+
+/* File-scope wrappers for kernel benchmarks that take no argument.
+ *
+ * ISO C forbids nested function definitions (we hit -Werror=pedantic),
+ * so these wrappers live at file scope. They forward to the kernel
+ * functions and discard the result via g_sink. */
+static int g_sor_iters = 10;
+
+static void sor_wrapper(void) {
+    g_sink = (double)native_sor(g_sor_iters);
+}
+
+static void mc_wrapper(void) {
+    g_sink = (double)native_monte_carlo(10000);
 }
 
 int main(void) {
@@ -305,14 +326,11 @@ int main(void) {
     print_stats("FFT (N=256)", s_fft);
 
     native_sor_init();
-    /* Wrapper for SOR */
-    static int sor_iters = 10;
-    void sor_wrapper(void) { g_sink = native_sor(sor_iters); }
+    /* sor_wrapper / mc_wrapper are defined at file scope above main();
+     * they reference g_sor_iters (also file scope). */
     stats_t s_sor = bench_run(sor_wrapper, 10);
     print_stats("SOR (50x50, 10 iters)", s_sor);
 
-    /* Wrapper for Monte Carlo */
-    void mc_wrapper(void) { g_sink = native_monte_carlo(10000); }
     stats_t s_mc = bench_run(mc_wrapper, 10);
     print_stats("Monte Carlo (10K samples)", s_mc);
 
@@ -352,7 +370,7 @@ int main(void) {
         static double samples[20];
         for (int s = 0; s < 20; s++) {
             uint64_t t0 = now_ns();
-            for (int i = 0; i < 2000; i++) g_sink = vtx_smi_value(j_sum(&m, NULL, (void*)1, &arg, 1));
+            for (int i = 0; i < 2000; i++) g_sink = (double)vtx_smi_value(j_sum(&m, NULL, (void*)1, &arg, 1));
             uint64_t t1 = now_ns();
             samples[s] = (double)(t1 - t0) / 2000;
         }
@@ -370,7 +388,7 @@ int main(void) {
         static double samples[20];
         for (int s = 0; s < 20; s++) {
             uint64_t t0 = now_ns();
-            for (int i = 0; i < 2000; i++) g_sink = vtx_smi_value(j_col(&m, NULL, (void*)1, &arg, 1));
+            for (int i = 0; i < 2000; i++) g_sink = (double)vtx_smi_value(j_col(&m, NULL, (void*)1, &arg, 1));
             uint64_t t1 = now_ns();
             samples[s] = (double)(t1 - t0) / 2000;
         }
@@ -388,7 +406,7 @@ int main(void) {
         static double samples[20];
         for (int s = 0; s < 20; s++) {
             uint64_t t0 = now_ns();
-            for (int i = 0; i < 2000; i++) g_sink = vtx_smi_value(j_gcd(&m, NULL, (void*)1, args, 2));
+            for (int i = 0; i < 2000; i++) g_sink = (double)vtx_smi_value(j_gcd(&m, NULL, (void*)1, args, 2));
             uint64_t t1 = now_ns();
             samples[s] = (double)(t1 - t0) / 2000;
         }

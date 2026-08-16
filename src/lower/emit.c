@@ -2180,46 +2180,6 @@ void vtx_x86_emit_epilogue(vtx_x86_emit_t *e, uint32_t callee_saved_mask,
 /* ========================================================================== */
 
 /**
- * Check if an instruction writes to a physical register operand.
- * Returns the physical register written, or 0xFF if none.
- */
-static uint8_t inst_dst_preg(const vtx_inst_t *inst)
-{
-    if (inst->opnd_kinds[0] != VTX_OPND_PREG) return 0xFF;
-    /* Only certain opcodes write to operand 0 */
-    switch (inst->opcode) {
-    case VTX_X86_MOV: case VTX_X86_ADD: case VTX_X86_SUB:
-    case VTX_X86_IMUL: case VTX_X86_AND: case VTX_X86_OR:
-    case VTX_X86_XOR: case VTX_X86_SHL: case VTX_X86_SHR:
-    case VTX_X86_SAR: case VTX_X86_NEG: case VTX_X86_NOT:
-    case VTX_X86_LEA: case VTX_X86_INC: case VTX_X86_DEC:
-    case VTX_X86_CMOV: case VTX_X86_SETCC: case VTX_X86_MOVZX:
-    case VTX_X86_MOVSX: case VTX_X86_POP:
-    case VTX_X86_XADD: case VTX_X86_CMPXCHG:
-    case VTX_X86_ROL: case VTX_X86_ROR: case VTX_X86_BSWAP:
-    case VTX_X86_BSF: case VTX_X86_BSR: case VTX_X86_POPCNT:
-    case VTX_X86_RDTSC: case VTX_X86_RDTSCP:
-    case VTX_X86_ROUNDSD: case VTX_X86_ROUNDSS:
-    case VTX_X86_MOVSD_RIP:
-    /* AVX2 256-bit ops write to operand 0 */
-    case VTX_X86_VMOVAPD_256: case VTX_X86_VADDPD_256: case VTX_X86_VSUBPD_256:
-    case VTX_X86_VMULPD_256: case VTX_X86_VDIVPD_256:
-    case VTX_X86_VMINPD_256: case VTX_X86_VMAXPD_256:
-    case VTX_X86_VXORPD_256: case VTX_X86_VANDPD_256: case VTX_X86_VCMPPD_256:
-    case VTX_X86_VMOVAPS_256: case VTX_X86_VADDPS_256: case VTX_X86_VSUBPS_256:
-    case VTX_X86_VMULPS_256: case VTX_X86_VDIVPS_256:
-    case VTX_X86_VMOVDQA_256: case VTX_X86_VPADDD_256: case VTX_X86_VPSUBD_256:
-    case VTX_X86_VPMULLD_256: case VTX_X86_VPXOR_256:
-    case VTX_X86_VPAND_256: case VTX_X86_VPOR_256:
-    case VTX_X86_VBROADCASTSD: case VTX_X86_VBROADCASTSS:
-    case VTX_X86_VPERM2F128: case VTX_X86_VINSERTF128: case VTX_X86_VEXTRACTF128:
-        return (uint8_t)inst->operands[0];
-    default:
-        return 0xFF;
-    }
-}
-
-/**
  * Check if an instruction reads from a physical register.
  * Returns true if the instruction reads the given register.
  */
@@ -2579,15 +2539,6 @@ uint32_t vtx_peephole_optimize(vtx_inst_stream_t *stream,
 /* ========================================================================== */
 /* Branch optimization                                                         */
 /* ========================================================================== */
-
-/**
- * Invert an x86 condition code.
- * E.g., JE → JNE, JL → JGE
- */
-static uint8_t invert_x86_cond(uint8_t cond)
-{
-    return cond ^ 1; /* Flip the low bit inverts the condition */
-}
 
 /**
  * Estimate the native code size of an instruction in bytes.

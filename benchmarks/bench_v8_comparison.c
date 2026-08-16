@@ -90,7 +90,7 @@ static int cmp_u64(const void *a, const void *b) {
 }
 
 static uint64_t sample_median(uint64_t *samples, int n) {
-    qsort(samples, n, sizeof(uint64_t), cmp_u64);
+    qsort(samples, (size_t)n, sizeof(uint64_t), cmp_u64);
     return samples[n / 2];
 }
 
@@ -109,9 +109,9 @@ static uint64_t vortex_run_bench(const uint8_t *code, size_t code_len,
     bc.code = hc;
     bc.length = code_len;
     bc.constant_pool = consts;
-    bc.constant_count = nconsts;
-    bc.max_locals = max_locals;
-    bc.max_stack = max_stack;
+    bc.constant_count = (uint32_t)nconsts;
+    bc.max_locals = (uint16_t)max_locals;
+    bc.max_stack = (uint16_t)max_stack;
 
     /* §2.6 superinstruction pre-decode pass.
      * If libvortex_cpp is linked, this fuses qualifying bytecode pairs

@@ -139,7 +139,9 @@ static bool is_eligible_arith(vtx_node_opcode_t op) {
 
 /* Check if a node is a "chain terminator" — its input must be retagged
  * because the consumer expects a NaN-boxed SMI, not a raw int.
- * Note: Cmp/Phi are NOT terminators — they can consume raw int directly. */
+ * Note: Cmp/Phi are NOT terminators — they can consume raw int directly.
+ * Currently unused but kept as a utility for future tag-elision passes. */
+__attribute__((unused))
 static bool is_chain_terminator(vtx_node_opcode_t op) {
     switch (op) {
     case VTX_OP_Return:

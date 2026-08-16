@@ -143,17 +143,6 @@ uint32_t vtx_reloc_add_deopt_handler(vtx_reloc_table_t *table,
 /* ========================================================================== */
 
 /**
- * Read a 32-bit little-endian value from a buffer.
- */
-static int32_t read_i32(const uint8_t *buf, uint32_t offset)
-{
-    return (int32_t)((uint32_t)buf[offset] |
-                     ((uint32_t)buf[offset + 1] << 8) |
-                     ((uint32_t)buf[offset + 2] << 16) |
-                     ((uint32_t)buf[offset + 3] << 24));
-}
-
-/**
  * Write a 32-bit little-endian value to a buffer.
  */
 static void write_i32(uint8_t *buf, uint32_t offset, int32_t value)

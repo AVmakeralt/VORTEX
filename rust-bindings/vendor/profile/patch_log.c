@@ -511,7 +511,7 @@ int vtx_patch_log_replay(vtx_patch_log_t *log,
         if (n == 0) break;  /* EOF */
         if (n != (ssize_t)sizeof(eh)) break;  /* truncated — stop */
 
-        pos += sizeof(eh);
+        pos += (off_t)sizeof(eh);
 
         /* Read payload. */
         uint8_t payload[VTX_PATCH_LOG_MAX_PAYLOAD];

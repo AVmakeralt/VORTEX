@@ -119,6 +119,7 @@ static void emit_mov_reg_reg64(vtx_code_buffer_t *buf, vtx_reg_t dst, vtx_reg_t 
 }
 
 /* MOV r/m64, r64 */
+__attribute__((unused))
 static void emit_mov_reg64_reg(vtx_code_buffer_t *buf, vtx_reg_t dst, vtx_reg_t src)
 {
     emit_rex64(buf, src, dst);
@@ -258,6 +259,7 @@ static void emit_test_reg_reg(vtx_code_buffer_t *buf, vtx_reg_t reg)
     vtx_code_buffer_emit_byte(buf, modrm(3, reg, reg));
 }
 
+__attribute__((unused))
 static void emit_test_reg_reg2(vtx_code_buffer_t *buf, vtx_reg_t reg1, vtx_reg_t reg2)
 {
     emit_rex64(buf, reg1, reg2);
@@ -322,6 +324,7 @@ static void emit_ret(vtx_code_buffer_t *buf)
 }
 
 /* NOP (1 byte) */
+__attribute__((unused))
 static void emit_nop(vtx_code_buffer_t *buf)
 {
     vtx_code_buffer_emit_byte(buf, 0x90);
@@ -510,6 +513,7 @@ static void emit_idiv_reg(vtx_code_buffer_t *buf, vtx_reg_t reg)
  *   RAX → RCX → RDX → RBX → load from spill
  */
 
+__attribute__((unused))
 static const vtx_reg_t expr_regs[VTX_EXPR_REG_COUNT] = {
     VTX_REG_RAX, VTX_REG_RCX, VTX_REG_RDX, VTX_REG_RBX
 };
@@ -678,7 +682,7 @@ static void scan_loop_headers(vtx_compile_ctx_t *ctx)
                 }
             }
         }
-        pc += vtx_bytecode_insn_length(bc, pc);
+        pc += (uint32_t)vtx_bytecode_insn_length(bc, pc);
     }
 }
 
@@ -1278,6 +1282,7 @@ static void compile_halt(vtx_compile_ctx_t *ctx)
 
 static void compile_nop(vtx_compile_ctx_t *ctx)
 {
+    (void)ctx;  /* NOP compiles to nothing */
     /* No operation */
 }
 
@@ -1429,7 +1434,7 @@ static void compile_store_field(vtx_compile_ctx_t *ctx, uint16_t field_offset)
 static void compile_load_const_int(vtx_compile_ctx_t *ctx, uint16_t cp_idx)
 {
     vtx_value_t val = ctx->bc->constant_pool[cp_idx];
-    int64_t int_val = vtx_smi_value(val);
+    int64_t int_val = vtx_smi_value(val); (void)int_val;
     emit_stack_push(ctx);
     emit_mov_reg_imm64(&ctx->buf, VTX_REG_RAX, (uint64_t)val);
 }
@@ -1641,7 +1646,7 @@ static void compile_int_arith(vtx_compile_ctx_t *ctx, vtx_opcode_t op)
         uint32_t smi_check_jnz = emit_smi_type_check(ctx);
 
         /* --- Fast SMI path --- */
-        uint32_t fast_path_start = vtx_code_buffer_position(buf);
+        uint32_t fast_path_start = vtx_code_buffer_position(buf); (void)fast_path_start;
 
         if (op == VT_OP_IADD) {
             /* add rax, rcx  (SMI(a) + SMI(b) = 2*HEADER + (a+b)<<3) */
@@ -1737,7 +1742,7 @@ static void compile_int_arith(vtx_compile_ctx_t *ctx, vtx_opcode_t op)
         uint32_t smi_check_jnz = emit_smi_type_check(ctx);
 
         /* --- Fast IMUL path (SMI operands, no stack shuffle) --- */
-        uint32_t fast_path_start = vtx_code_buffer_position(buf);
+        uint32_t fast_path_start = vtx_code_buffer_position(buf); (void)fast_path_start;
 
         /* Untag lhs (RCX): sar rcx, 3 */
         emit_untag_smi(ctx, VTX_REG_RCX);
@@ -2282,6 +2287,7 @@ static void compile_if_false(vtx_compile_ctx_t *ctx, uint16_t target_pc)
 
 static void compile_call_static(vtx_compile_ctx_t *ctx, uint16_t method_idx)
 {
+    (void)method_idx;  /* method_idx not used in baseline — callee resolves by vtable_index */
     vtx_code_buffer_t *buf = &ctx->buf;
 
     /* Record call site type for profiling */
@@ -2377,6 +2383,7 @@ static void compile_call_static(vtx_compile_ctx_t *ctx, uint16_t method_idx)
 
 static void compile_call_virtual(vtx_compile_ctx_t *ctx, uint16_t method_idx)
 {
+    (void)method_idx;
     vtx_code_buffer_t *buf = &ctx->buf;
 
     /* Record call site type for profiling */
@@ -2625,6 +2632,7 @@ static void compile_call_virtual(vtx_compile_ctx_t *ctx, uint16_t method_idx)
 
 static void compile_call_interface(vtx_compile_ctx_t *ctx, uint16_t method_idx)
 {
+    (void)method_idx;
     vtx_code_buffer_t *buf = &ctx->buf;
 
     /* Interface calls use the same IC mechanism as virtual calls.
@@ -3471,7 +3479,7 @@ static void compile_call_runtime(vtx_compile_ctx_t *ctx, uint16_t func_id)
 /* Main compilation loop                                                       */
 /* ========================================================================== */
 
-vtx_compiled_code_t *vtx_baseline_compile(const vtx_method_desc_t *method,
+vtx_compiled_code_t *vtx_baseline_compile(vtx_method_desc_t *method,
                                            vtx_profile_data_t *profile_data,
                                            vtx_arena_t *arena,
                                            vtx_code_cache_t *cache,
@@ -3728,7 +3736,7 @@ vtx_compiled_code_t *vtx_baseline_compile(const vtx_method_desc_t *method,
         }
 
         /* Advance to next instruction */
-        ctx.bc_pc += vtx_bytecode_insn_length(ctx.bc, ctx.bc_pc);
+        ctx.bc_pc += (uint32_t)vtx_bytecode_insn_length(ctx.bc, ctx.bc_pc);
 
         /* Ensure buffer has space for next instruction */
         vtx_code_buffer_ensure_capacity(&ctx.buf, 64);

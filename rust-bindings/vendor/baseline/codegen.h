@@ -260,7 +260,7 @@ void vtx_compiled_code_destroy(vtx_compiled_code_t *code);
  * @param registry     Method registry for code installation (may be NULL)
  * @return             Compiled code struct, or NULL on failure
  */
-vtx_compiled_code_t *vtx_baseline_compile(const vtx_method_desc_t *method,
+vtx_compiled_code_t *vtx_baseline_compile(vtx_method_desc_t *method,
                                            vtx_profile_data_t *profile_data,
                                            vtx_arena_t *arena,
                                            vtx_code_cache_t *cache,

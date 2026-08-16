@@ -378,8 +378,8 @@ int vtx_invalidate_dependencies(uint64_t typeid_,
                                                       "invalidate.c: poly_ics");
                 } else {
                     /* OOM — fall back to immediate free (still risky). */
-                    for (uint32_t i = 0; i < old_poly_ic_count; i++) {
-                        free(old_poly_ics[i]);
+                    for (uint32_t pi = 0; pi < old_poly_ic_count; pi++) {
+                        free(old_poly_ics[pi]);
                     }
                     free(old_poly_ics);
                 }

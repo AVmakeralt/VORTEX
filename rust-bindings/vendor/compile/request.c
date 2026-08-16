@@ -175,7 +175,7 @@ void vtx_clear_compilation_requested(vtx_compile_context_t *ctx,
 /* ========================================================================== */
 
 void vtx_request_compilation(vtx_compile_context_t *ctx,
-                              const vtx_method_desc_t *method,
+                              vtx_method_desc_t *method,
                               uint64_t execution_count)
 {
     if (ctx == NULL || method == NULL) return;
@@ -258,10 +258,12 @@ static int compile_callback(uint32_t method_id, vtx_compile_tier_t tier, void *c
     vtx_compile_context_t *ctx = (vtx_compile_context_t *)context;
     if (ctx == NULL) return -1;
 
-    /* Look up the method descriptor */
-    const vtx_method_desc_t *method = NULL;
+    /* Look up the method descriptor. Cast away const: the method
+     * descriptor's compiled_code field is written atomically by
+     * vtx_install_method during baseline compilation. */
+    vtx_method_desc_t *method = NULL;
     if (ctx->method_lookup != NULL) {
-        method = ctx->method_lookup(method_id, ctx->method_lookup_context);
+        method = (vtx_method_desc_t *)ctx->method_lookup(method_id, ctx->method_lookup_context);
     }
     if (method == NULL || method->bytecode == NULL) {
         /* Method not found or has no bytecode — skip */

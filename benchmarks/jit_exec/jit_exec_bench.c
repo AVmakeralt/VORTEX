@@ -181,7 +181,11 @@ static fib_jit_fn jit_fib_create_mmap(void)
     /* Copy the hand-crafted machine code */
     memcpy(mem, fib_x86_64, fib_x86_64_size);
 
-    return (fib_jit_fn)mem;
+    /* ISO C forbids direct object-pointer → function-pointer cast;
+     * use a union (the portable, pedantic-clean idiom). */
+    union { void *ptr; fib_jit_fn fn; } u_fn;
+    u_fn.ptr = mem;
+    return u_fn.fn;
 }
 
 static void jit_fib_destroy_mmap(fib_jit_fn fn)
@@ -189,7 +193,11 @@ static void jit_fib_destroy_mmap(fib_jit_fn fn)
     if (fn) {
         long page_size = sysconf(_SC_PAGESIZE);
         if (page_size <= 0) page_size = 4096;
-        munmap((void *)fn, (size_t)page_size);
+        /* ISO C forbids direct function-pointer → object-pointer cast;
+         * use a union (the portable, pedantic-clean idiom). */
+        union { void *ptr; fib_jit_fn fn; } u_fn;
+        u_fn.fn = fn;
+        munmap(u_fn.ptr, (size_t)page_size);
     }
 }
 
@@ -221,7 +229,11 @@ static fib_jit_fn jit_fib_create_codecache(vtx_code_cache_t *cache)
         return NULL;
     }
 
-    return (fib_jit_fn)mem;
+    /* ISO C forbids direct object-pointer → function-pointer cast;
+     * use a union (the portable, pedantic-clean idiom). */
+    union { void *ptr; fib_jit_fn fn; } u_fn;
+    u_fn.ptr = mem;
+    return u_fn.fn;
 }
 
 /* ========================================================================== */
@@ -565,7 +577,11 @@ int main(void)
         }
         uint32_t code_size = vtx_x86_emit_position(&emitter);
         memcpy(mem, vtx_x86_emit_code(&emitter), code_size);
-        jit_emitted = (fib_jit_fn)mem;
+        /* ISO C forbids direct object-pointer → function-pointer cast;
+         * use a union (the portable, pedantic-clean idiom). */
+        union { void *ptr; fib_jit_fn fn; } u_fn;
+        u_fn.ptr = mem;
+        jit_emitted = u_fn.fn;
     }
 
     int64_t emitted_result = jit_emitted(FIB_N);
@@ -751,7 +767,11 @@ int main(void)
     if (jit_emitted) {
         long pgsz = sysconf(_SC_PAGESIZE);
         if (pgsz <= 0) pgsz = 4096;
-        munmap((void *)jit_emitted, (size_t)pgsz);
+        /* ISO C forbids direct function-pointer → object-pointer cast;
+         * use a union (the portable, pedantic-clean idiom). */
+        union { void *ptr; fib_jit_fn fn; } u_fn;
+        u_fn.fn = jit_emitted;
+        munmap(u_fn.ptr, (size_t)pgsz);
     }
 
 cleanup_emitter:

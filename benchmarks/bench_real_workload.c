@@ -124,9 +124,11 @@ static bench_result_t bench_run(const char *name, void (*fn)(void *), void *arg,
     r.min_ns    = s[0];
     r.median_ns = s[samples / 2];
     r.p95_ns    = s[(uint32_t)(samples * 0.95)];
-    r.mean_ns   = 0;
-    for (uint32_t i = 0; i < samples; i++) r.mean_ns += s[i];
-    r.mean_ns /= samples;
+    /* mean_ns is double; sum uint64 samples into a uint64 accumulator
+     * first to avoid losing precision, then convert at the divide. */
+    uint64_t sum_ns = 0;
+    for (uint32_t i = 0; i < samples; i++) sum_ns += s[i];
+    r.mean_ns = (double)sum_ns / (double)samples;
 
     free(s);
     return r;
@@ -317,7 +319,11 @@ static jit_fn_t jit_copy_to_exec(vtx_x86_emit_t *emit)
     if (mem == MAP_FAILED) return NULL;
     uint32_t size = vtx_x86_emit_position(emit);
     memcpy(mem, vtx_x86_emit_code(emit), size);
-    return (jit_fn_t)mem;
+    /* ISO C forbids direct object-pointer → function-pointer cast;
+     * use a union (the portable, pedantic-clean idiom). */
+    union { void *ptr; jit_fn_t fn; } u_fn;
+    u_fn.ptr = mem;
+    return u_fn.fn;
 }
 
 static void jit_destroy(jit_fn_t fn)
@@ -325,7 +331,11 @@ static void jit_destroy(jit_fn_t fn)
     if (fn) {
         long pgsz = sysconf(_SC_PAGESIZE);
         if (pgsz <= 0) pgsz = 4096;
-        munmap((void *)fn, (size_t)pgsz);
+        /* ISO C forbids direct function-pointer → object-pointer cast;
+         * use a union (the portable, pedantic-clean idiom). */
+        union { void *ptr; jit_fn_t fn; } u_fn;
+        u_fn.fn = fn;
+        munmap(u_fn.ptr, (size_t)pgsz);
     }
 }
 

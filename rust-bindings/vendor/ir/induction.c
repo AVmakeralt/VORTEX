@@ -206,6 +206,7 @@ static void find_basic_ivs(vtx_graph_t *graph, vtx_iv_result_t *result,
     /* The loop_depth of this header — used to determine if nodes are
      * inside this specific loop */
     uint32_t loop_depth = schedule->blocks[loop_header_block].loop_depth;
+    (void)loop_depth;  /* currently unused — kept for future use */
 
     /* Walk all nodes to find Phi nodes whose first input is this LoopBegin.
      * In SoN IR, a Phi's last input is typically its controlling Region/LoopBegin. */
@@ -614,6 +615,7 @@ static void compute_iteration_ranges(vtx_graph_t *graph, vtx_iv_result_t *result
 static void find_derived_ivs(vtx_graph_t *graph, vtx_iv_result_t *result,
                               vtx_arena_t *arena, const vtx_schedule_t *schedule)
 {
+    (void)schedule;  /* reserved for future loop-depth-based filtering */
     vtx_node_table_t *nt = &graph->node_table;
     uint32_t node_count = nt->count;
 
@@ -682,13 +684,13 @@ static void find_derived_ivs(vtx_graph_t *graph, vtx_iv_result_t *result,
                         if (right_node->opcode == VTX_OP_Mul && right_node->input_count >= 2) {
                             vtx_nodeid_t mul_left  = right_node->inputs[0];
                             vtx_nodeid_t mul_right = right_node->inputs[1];
-                            int64_t c;
-                            if (mul_left == phi_id && get_int_constant(nt, mul_right, &c)) {
-                                scale = c;
+                            int64_t mul_c;
+                            if (mul_left == phi_id && get_int_constant(nt, mul_right, &mul_c)) {
+                                scale = mul_c;
                                 offset = 0;
                                 found = true;
-                            } else if (mul_right == phi_id && get_int_constant(nt, mul_left, &c)) {
-                                scale = c;
+                            } else if (mul_right == phi_id && get_int_constant(nt, mul_left, &mul_c)) {
+                                scale = mul_c;
                                 offset = 0;
                                 found = true;
                             }
@@ -707,13 +709,13 @@ static void find_derived_ivs(vtx_graph_t *graph, vtx_iv_result_t *result,
                         if (left_node->opcode == VTX_OP_Mul && left_node->input_count >= 2) {
                             vtx_nodeid_t mul_left  = left_node->inputs[0];
                             vtx_nodeid_t mul_right = left_node->inputs[1];
-                            int64_t c;
-                            if (mul_left == phi_id && get_int_constant(nt, mul_right, &c)) {
-                                scale = c;
+                            int64_t mul_c;
+                            if (mul_left == phi_id && get_int_constant(nt, mul_right, &mul_c)) {
+                                scale = mul_c;
                                 offset = 0;
                                 found = true;
-                            } else if (mul_right == phi_id && get_int_constant(nt, mul_left, &c)) {
-                                scale = c;
+                            } else if (mul_right == phi_id && get_int_constant(nt, mul_left, &mul_c)) {
+                                scale = mul_c;
                                 offset = 0;
                                 found = true;
                             }
@@ -1166,7 +1168,7 @@ bool vtx_iv_can_eliminate_bounds(const vtx_iv_result_t *result,
          * range for Add(IV, 5) where IV ∈ [0, N) would be [0, N),
          * but the actual index range is [5, N+5) which may exceed
          * the array length. */
-        vtx_iv_range_t idx_range = {0, 0, false, false, false};
+        vtx_iv_range_t affine_idx_range = {0, 0, false, false, false};
         bool idx_range_valid = false;
 
         if (!index_matches_iv) {
@@ -1186,16 +1188,16 @@ bool vtx_iv_can_eliminate_bounds(const vtx_iv_result_t *result,
                       idx_node->inputs[1] == iv->phi_node))) {
                     index_matches_iv = true;
                     /* Compute the actual range of the affine expression */
-                    idx_range = vtx_iv_value_range(result, table, index_node);
-                    idx_range_valid = (idx_range.lo_known && idx_range.hi_known);
+                    affine_idx_range = vtx_iv_value_range(result, table, index_node);
+                    idx_range_valid = (affine_idx_range.lo_known && affine_idx_range.hi_known);
                 }
             }
         }
 
         if (index_matches_iv && !idx_range_valid) {
             /* For a basic IV (no affine transform), use its range directly */
-            idx_range = iv->iteration_range;
-            idx_range_valid = (idx_range.lo_known && idx_range.hi_known);
+            affine_idx_range = iv->iteration_range;
+            idx_range_valid = (affine_idx_range.lo_known && affine_idx_range.hi_known);
         }
 
         if (!index_matches_iv) continue;
@@ -1206,7 +1208,7 @@ bool vtx_iv_can_eliminate_bounds(const vtx_iv_result_t *result,
          * This is the Bug #1 fix: previously we used the base
          * IV's range for affine index expressions, which was
          * incorrect (e.g., Add(IV, 5) has range shifted by 5). */
-        if (idx_range_valid && idx_range.lo >= 0) {
+        if (idx_range_valid && affine_idx_range.lo >= 0) {
             /* The index has a known range starting at non-negative.
              * We need to verify that the upper bound doesn't exceed
              * the length. Since we can't always evaluate length as a

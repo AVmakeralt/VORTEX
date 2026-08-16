@@ -45,7 +45,7 @@ static vtx_bytecode_t make_bc(
     return bc;
 }
 
-static vtx_bytecode_t make_bc_simple(
+static __attribute__((unused)) vtx_bytecode_t make_bc_simple(
     const uint8_t *code, size_t len,
     uint16_t max_locals, uint16_t max_stack)
 {
@@ -139,7 +139,7 @@ static bool run_t2_and_compare(
         typedef vtx_value_t (*vtx_jit_entry_t)(
             const vtx_method_desc_t *, void *, void *,
             vtx_value_t *, uint32_t);
-        vtx_jit_entry_t entry = (vtx_jit_entry_t)method.compiled_code;
+        union { void *ptr; vtx_jit_entry_t fn; } u_e; u_e.ptr = method.compiled_code; vtx_jit_entry_t entry = u_e.fn;
         vtx_value_t jit_result = entry(&method, NULL, (void*)1, args, arg_count);
         *out_jit_result = jit_result;
         match = (interp_result == jit_result);
@@ -315,7 +315,7 @@ VTX_TEST(smi_lea_displacement_identity)
     int64_t a = 10, c = 5;
     vtx_value_t sa = vtx_make_smi(a);
     int64_t c_shifted = c << 3; /* c * 8 */
-    vtx_value_t actual = sa + c_shifted;
+    vtx_value_t actual = sa + (uint64_t)c_shifted;
     vtx_value_t expected = vtx_make_smi(a + c);
     VTX_ASSERT_EQUAL(actual, expected);
 }
@@ -326,7 +326,7 @@ VTX_TEST(smi_lea_displacement_negative)
     int64_t a = 10, c = 3;
     vtx_value_t sa = vtx_make_smi(a);
     int64_t neg_c_shifted = -(c << 3);
-    vtx_value_t actual = sa + neg_c_shifted;
+    vtx_value_t actual = sa + (uint64_t)neg_c_shifted;
     vtx_value_t expected = vtx_make_smi(a - c);
     VTX_ASSERT_EQUAL(actual, expected);
 }

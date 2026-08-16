@@ -540,6 +540,7 @@ static void emit_smi_retag(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
  * Emit SMI load-header-only: just load HEADER into scratch, no retag.
  * Used for cases where we only need the header constant (e.g., Mul(x,0)).
  */
+__attribute__((unused))
 static void emit_smi_load_header(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
                                   vtx_nodeid_t node_id, vtx_arena_t *arena)
 {
@@ -791,7 +792,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
          * XORPS xmm, xmm zeros the entire 128-bit register, which gives
          * us +0.0 in the low 64 bits. This is shorter and faster than
          * loading a 64-bit immediate. The register renamer handles
-        /* Float zero optimization (XORPS) is DISABLED because float arithmetic
+         * (Float zero optimization (XORPS) is DISABLED because float arithmetic
          * is lowered to runtime calls that take NaN-boxed values in GPRs.
          * XORPS zeros an XMM register, but we need the raw double bits (0x0
          * for 0.0) in a GPR. The generic MOV imm path below handles this
@@ -1001,11 +1002,11 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             const vtx_node_t *rhs_n = vtx_node_get_const(&graph->node_table, node->inputs[1]);
             bool lhs_raw = lhs_n && vtx_nf_has(lhs_n->flags, VTX_NF_RAW_INT);
             bool rhs_raw = rhs_n && vtx_nf_has(rhs_n->flags, VTX_NF_RAW_INT);
-            bool rhs_const;
+            bool rhs_const_add;
             int64_t dummy;
-            rhs_const = try_get_const_int(graph, node->inputs[1], &dummy);
+            rhs_const_add = try_get_const_int(graph, node->inputs[1], &dummy);
 
-            if (!lhs_raw && !rhs_raw && !rhs_const) {
+            if (!lhs_raw && !rhs_raw && !rhs_const_add) {
                 /* Both inputs are tagged SMIs, neither is raw, rhs is not a
                  * constant (const has its own fast path above). Use the
                  * header-subtraction trick: dst = lhs + rhs - HEADER. */
@@ -1155,9 +1156,9 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
             bool lhs_raw = lhs_n && vtx_nf_has(lhs_n->flags, VTX_NF_RAW_INT);
             bool rhs_raw = rhs_n && vtx_nf_has(rhs_n->flags, VTX_NF_RAW_INT);
             int64_t dummy;
-            bool rhs_const = try_get_const_int(graph, node->inputs[1], &dummy);
+            bool rhs_const_sub = try_get_const_int(graph, node->inputs[1], &dummy);
 
-            if (!lhs_raw && !rhs_raw && !rhs_const) {
+            if (!lhs_raw && !rhs_raw && !rhs_const_sub) {
                 stream->uses_smi = true;
                 if (dst != lhs_vreg) {
                     vtx_isel_emit_inst(block, make_rr_inst(VTX_X86_MOV, dst, lhs_vreg, node_id), arena);
@@ -2242,14 +2243,21 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         extern vtx_value_t vtx_runtime_float_mul(vtx_value_t a, vtx_value_t b);
         extern vtx_value_t vtx_runtime_float_div(vtx_value_t a, vtx_value_t b);
 
-        void *helper;
+        /* ISO C forbids function-pointer-to-object-pointer conversion.
+         * Use a union to safely reinterpret the function pointer as a
+         * void pointer for storage. On x86-64, function pointers and
+         * data pointers have the same size and representation. */
+        union { void (*fn)(void); void *ptr; } helper_cast;
+        void (*helper_fn)(void);
         switch (node->opcode) {
-        case VTX_OP_AddF: helper = (void *)vtx_runtime_float_add; break;
-        case VTX_OP_SubF: helper = (void *)vtx_runtime_float_sub; break;
-        case VTX_OP_MulF: helper = (void *)vtx_runtime_float_mul; break;
-        case VTX_OP_DivF: helper = (void *)vtx_runtime_float_div; break;
-        default: helper = (void *)vtx_runtime_float_add; break;
+        case VTX_OP_AddF: helper_fn = (void (*)(void))vtx_runtime_float_add; break;
+        case VTX_OP_SubF: helper_fn = (void (*)(void))vtx_runtime_float_sub; break;
+        case VTX_OP_MulF: helper_fn = (void (*)(void))vtx_runtime_float_mul; break;
+        case VTX_OP_DivF: helper_fn = (void (*)(void))vtx_runtime_float_div; break;
+        default: helper_fn = (void (*)(void))vtx_runtime_float_add; break;
         }
+        helper_cast.fn = helper_fn;
+        void *helper = helper_cast.ptr;
 
         uint32_t rdi_preg = vtx_isel_alloc_vreg_fixed(stream, arena, 7);
         vtx_inst_t mov_rdi = make_rr_inst(VTX_X86_MOV, rdi_preg, lhs_vreg, node_id);
@@ -2512,7 +2520,7 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         int64_t rhs_const_val;
         bool rhs_is_const = try_get_const_int(graph, node->inputs[1], &rhs_const_val);
         int64_t lhs_const_val;
-        bool lhs_is_const = try_get_const_int(graph, node->inputs[0], &lhs_const_val);
+        bool lhs_is_const = try_get_const_int(graph, node->inputs[0], &lhs_const_val); (void)lhs_is_const;
 
         uint32_t lhs_untagged;
         if (lhs_is_raw) {
@@ -3466,16 +3474,21 @@ static int select_node(vtx_inst_stream_t *stream, vtx_inst_block_t *block,
         extern vtx_value_t vtx_runtime_float_gt(vtx_value_t a, vtx_value_t b);
         extern vtx_value_t vtx_runtime_float_ge(vtx_value_t a, vtx_value_t b);
 
-        void *helper;
+        /* ISO C forbids function-pointer-to-object-pointer conversion.
+         * Use a union to safely reinterpret. */
+        union { void (*fn)(void); void *ptr; } fcmp_helper_cast;
+        void (*fcmp_fn)(void);
         switch (node->cond) {
-        case VTX_COND_EQ: helper = (void*)vtx_runtime_float_eq; break;
-        case VTX_COND_NE: helper = (void*)vtx_runtime_float_ne; break;
-        case VTX_COND_LT: helper = (void*)vtx_runtime_float_lt; break;
-        case VTX_COND_LE: helper = (void*)vtx_runtime_float_le; break;
-        case VTX_COND_GT: helper = (void*)vtx_runtime_float_gt; break;
-        case VTX_COND_GE: helper = (void*)vtx_runtime_float_ge; break;
-        default: helper = (void*)vtx_runtime_float_eq; break;
+        case VTX_COND_EQ: fcmp_fn = (void (*)(void))vtx_runtime_float_eq; break;
+        case VTX_COND_NE: fcmp_fn = (void (*)(void))vtx_runtime_float_ne; break;
+        case VTX_COND_LT: fcmp_fn = (void (*)(void))vtx_runtime_float_lt; break;
+        case VTX_COND_LE: fcmp_fn = (void (*)(void))vtx_runtime_float_le; break;
+        case VTX_COND_GT: fcmp_fn = (void (*)(void))vtx_runtime_float_gt; break;
+        case VTX_COND_GE: fcmp_fn = (void (*)(void))vtx_runtime_float_ge; break;
+        default: fcmp_fn = (void (*)(void))vtx_runtime_float_eq; break;
         }
+        fcmp_helper_cast.fn = fcmp_fn;
+        void *helper = fcmp_helper_cast.ptr;
 
         /* RDI = lhs */
         uint32_t rdi_preg = vtx_isel_alloc_vreg_fixed(stream, arena, 7);
@@ -3933,7 +3946,7 @@ static int resolve_phis(vtx_inst_stream_t *stream, const vtx_schedule_t *schedul
                      * Fix: Scan ALL nodes in the predecessor's schedule and
                      * check if any of them is an input to the current block's
                      * Region. This correctly finds the Proj or Goto. */
-                    const vtx_schedule_block_t *pred_blk = &schedule->blocks[pred_block_idx];
+                    const vtx_schedule_block_t *pred_sched_blk = &schedule->blocks[pred_block_idx];
 
                     /* Find the Region node for this block */
                     vtx_nodeid_t region_id = VTX_NODEID_INVALID;
@@ -3957,8 +3970,8 @@ static int resolve_phis(vtx_inst_stream_t *stream, const vtx_schedule_t *schedul
                      * connects this predecessor to the current block. */
                     vtx_nodeid_t pred_ctrl = VTX_NODEID_INVALID;
                     uint32_t matching_region_input_idx = 0;
-                    for (uint32_t sn = 0; sn < pred_blk->node_count; sn++) {
-                        vtx_nodeid_t cand = pred_blk->nodes[sn];
+                    for (uint32_t sn = 0; sn < pred_sched_blk->node_count; sn++) {
+                        vtx_nodeid_t cand = pred_sched_blk->nodes[sn];
                         for (uint32_t ri = 0; ri < region_n->input_count; ri++) {
                             if (region_n->inputs[ri] == cand) {
                                 pred_ctrl = cand;
@@ -4067,16 +4080,16 @@ static int resolve_phis(vtx_inst_stream_t *stream, const vtx_schedule_t *schedul
                 vtx_inst_t _mov2 = make_rr_inst(VTX_X86_MOV, (dst), _tmp, (node_id)); \
                 _mov2.flags |= VTX_INST_FLAG_PHI_COPY; \
                 if (vtx_isel_block_ensure_capacity(pred_blk, 4, arena) != 0) return -1; \
-                for (int _i = 0; _i < 4; _i++) { \
-                    if ((offset) + _i < pred_blk->inst_count) { \
-                        memmove(&pred_blk->insts[(offset) + _i + 1], &pred_blk->insts[(offset) + _i], \
-                                (pred_blk->inst_count - ((offset) + _i)) * sizeof(vtx_inst_t)); \
+                for (uint32_t _i = 0; _i < 4; _i++) { \
+                    if ((uint32_t)(offset) + _i < pred_blk->inst_count) { \
+                        memmove(&pred_blk->insts[(uint32_t)(offset) + _i + 1], &pred_blk->insts[(uint32_t)(offset) + _i], \
+                                (pred_blk->inst_count - ((uint32_t)(offset) + _i)) * sizeof(vtx_inst_t)); \
                     } \
                 } \
-                pred_blk->insts[(offset)] = _mov1; \
-                pred_blk->insts[(offset) + 1] = _shl; \
-                pred_blk->insts[(offset) + 2] = _sar; \
-                pred_blk->insts[(offset) + 3] = _mov2; \
+                pred_blk->insts[(uint32_t)(offset)] = _mov1; \
+                pred_blk->insts[(uint32_t)(offset) + 1] = _shl; \
+                pred_blk->insts[(uint32_t)(offset) + 2] = _sar; \
+                pred_blk->insts[(uint32_t)(offset) + 3] = _mov2; \
                 pred_blk->inst_count += 4; \
             } while(0)
 
@@ -4113,17 +4126,17 @@ static int resolve_phis(vtx_inst_stream_t *stream, const vtx_schedule_t *schedul
                 _mov2.flags |= VTX_INST_FLAG_PHI_COPY; \
                 stream->uses_smi = true; \
                 if (vtx_isel_block_ensure_capacity(pred_blk, 5, arena) != 0) return -1; \
-                for (int _i = 0; _i < 5; _i++) { \
-                    if ((offset) + _i < pred_blk->inst_count) { \
-                        memmove(&pred_blk->insts[(offset) + _i + 1], &pred_blk->insts[(offset) + _i], \
-                                (pred_blk->inst_count - ((offset) + _i)) * sizeof(vtx_inst_t)); \
+                for (uint32_t _i = 0; _i < 5; _i++) { \
+                    if ((uint32_t)(offset) + _i < pred_blk->inst_count) { \
+                        memmove(&pred_blk->insts[(uint32_t)(offset) + _i + 1], &pred_blk->insts[(uint32_t)(offset) + _i], \
+                                (pred_blk->inst_count - ((uint32_t)(offset) + _i)) * sizeof(vtx_inst_t)); \
                     } \
                 } \
-                pred_blk->insts[(offset)] = _mov1; \
-                pred_blk->insts[(offset) + 1] = _and; \
-                pred_blk->insts[(offset) + 2] = _shl; \
-                pred_blk->insts[(offset) + 3] = _or; \
-                pred_blk->insts[(offset) + 4] = _mov2; \
+                pred_blk->insts[(uint32_t)(offset)] = _mov1; \
+                pred_blk->insts[(uint32_t)(offset) + 1] = _and; \
+                pred_blk->insts[(uint32_t)(offset) + 2] = _shl; \
+                pred_blk->insts[(uint32_t)(offset) + 3] = _or; \
+                pred_blk->insts[(uint32_t)(offset) + 4] = _mov2; \
                 pred_blk->inst_count += 5; \
             } while(0)
 

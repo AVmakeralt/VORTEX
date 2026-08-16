@@ -136,6 +136,16 @@ static void test_instanceof(vtx_arena_t *arena, vtx_type_system_t *ts, vtx_gc_t 
     fields[1].name = "y"; fields[1].offset = 0; fields[1].type = 0;
     vtx_typeid_t point_type = vtx_type_register(ts, "Point", VTX_TYPE_OBJECT,
                                                   2, fields, 0, NULL);
+    /* Bytecode operands for type IDs are 16 bits; assert at registration time
+     * that the assigned type ID fits so the implicit narrowing below is
+     * well-defined. Note: vtx_type_register takes ownership of `fields`,
+     * so we must not free it here. */
+    if (point_type > UINT16_MAX) {
+        fprintf(stderr, "FATAL: point_type=%u exceeds 16-bit operand range\n",
+                point_type);
+        return;
+    }
+    uint16_t const point_type_op = (uint16_t)point_type;
 
     /* Bytecode:
      *   new Point        (push a Point instance)
@@ -143,8 +153,8 @@ static void test_instanceof(vtx_arena_t *arena, vtx_type_system_t *ts, vtx_gc_t 
      *   return_value
      */
     builder_t b; b_init(&b, arena, 64);
-    b_op(&b, VT_OP_NEW);           b_u16(&b, point_type);
-    b_op(&b, VT_OP_INSTANCEOF);    b_u16(&b, point_type);
+    b_op(&b, VT_OP_NEW);           b_u16(&b, point_type_op);
+    b_op(&b, VT_OP_INSTANCEOF);    b_u16(&b, point_type_op);
     b_op(&b, VT_OP_RETURN_VALUE);
 
     vtx_value_t consts[1] = { VTX_VALUE_UNDEFINED };  /* unused */
@@ -164,7 +174,7 @@ static void test_instanceof(vtx_arena_t *arena, vtx_type_system_t *ts, vtx_gc_t 
     /* Test instanceof on a non-Point value (SMI) */
     builder_t b2; b_init(&b2, arena, 64);
     b_op(&b2, VT_OP_LOAD_CONST_INT); b_u16(&b2, 0);  /* push SMI 42 */
-    b_op(&b2, VT_OP_INSTANCEOF);     b_u16(&b2, point_type);
+    b_op(&b2, VT_OP_INSTANCEOF);     b_u16(&b2, point_type_op);
     b_op(&b2, VT_OP_RETURN_VALUE);
 
     vtx_value_t consts2[1] = { vtx_make_smi(42) };
@@ -350,6 +360,16 @@ static void test_object_fields(vtx_arena_t *arena, vtx_type_system_t *ts, vtx_gc
     fields[1].name = "y"; fields[1].offset = 1; fields[1].type = 0;
     vtx_typeid_t point_type = vtx_type_register(ts, "Point2", VTX_TYPE_OBJECT,
                                                   2, fields, 0, NULL);
+    /* Bytecode operands for type IDs are 16 bits; assert at registration time
+     * that the assigned type ID fits so the implicit narrowing below is
+     * well-defined. Note: vtx_type_register takes ownership of `fields`,
+     * so we must not free it here. */
+    if (point_type > UINT16_MAX) {
+        fprintf(stderr, "FATAL: point_type=%u exceeds 16-bit operand range\n",
+                point_type);
+        return;
+    }
+    uint16_t const point_type_op = (uint16_t)point_type;
 
     /* locals: [0]=p
      * const pool: [0]=3, [1]=4
@@ -362,7 +382,7 @@ static void test_object_fields(vtx_arena_t *arena, vtx_type_system_t *ts, vtx_gc
      *   imul... wait need to square. Let's just do x + y = 7
      */
     builder_t b; b_init(&b, arena, 128);
-    b_op(&b, VT_OP_NEW);            b_u16(&b, point_type);
+    b_op(&b, VT_OP_NEW);            b_u16(&b, point_type_op);
     b_op(&b, VT_OP_STORE_LOCAL);    b_u16(&b, 0);
 
     b_op(&b, VT_OP_LOAD_LOCAL);     b_u16(&b, 0);
@@ -530,6 +550,14 @@ static void test_call_virtual(vtx_arena_t *arena, vtx_type_system_t *ts, vtx_gc_
     methods[0] = area_method;
     vtx_typeid_t point_type = vtx_type_register(ts, "Point3", VTX_TYPE_OBJECT,
                                                   2, fields, 1, methods);
+    /* Bytecode operands for type IDs are 16 bits; assert the assigned type
+     * ID fits before narrowing so the conversion is well-defined. */
+    if (point_type > UINT16_MAX) {
+        fprintf(stderr, "FATAL: point_type=%u exceeds 16-bit operand range\n",
+                point_type);
+        return;
+    }
+    uint16_t const point_type_op = (uint16_t)point_type;
 
     /* Update vtable so virtual dispatch finds area_method */
     vtx_type_update_vtable(ts, point_type, &area_method);
@@ -557,7 +585,7 @@ static void test_call_virtual(vtx_arena_t *arena, vtx_type_system_t *ts, vtx_gc_
     vtx_value_t area_str_val = vtx_make_heap_ptr(str_obj);
 
     builder_t b; b_init(&b, arena, 64);
-    b_op(&b, VT_OP_NEW);            b_u16(&b, point_type);
+    b_op(&b, VT_OP_NEW);            b_u16(&b, point_type_op);
     b_op(&b, VT_OP_STORE_LOCAL);    b_u16(&b, 0);
 
     b_op(&b, VT_OP_LOAD_LOCAL);     b_u16(&b, 0);

@@ -141,6 +141,7 @@ VTX_TEST(test_fullpipe_02)
 
     uint32_t elim = vtx_gvn_run(&graph);
     /* elim may be 0 if no redundancy, just ensure it doesn't crash */
+    (void)elim;
     VTX_ASSERT_TRUE(vtx_verify_graph(&graph));
 
     vtx_graph_destroy(&graph);
@@ -367,7 +368,10 @@ VTX_TEST(test_fullpipe_09)
 
 VTX_TEST(test_fullpipe_10)
 {
-    /* Nested if → build graph → verify multiple Regions */
+    /* Nested if → build graph → verify multiple Regions.
+     * The first draft below (`code`) has incorrect PC offsets; the
+     * corrected version (`code2`) is what we actually compile. The draft
+     * is retained for reference. */
     uint8_t code[] = {
         VT_OP_LOAD_LOCAL, 0x00, 0x00,
         VT_OP_IF_FALSE, 0x00, 0x16,   /* PC 3: if_false goto 22 */
@@ -379,6 +383,7 @@ VTX_TEST(test_fullpipe_10)
         VT_OP_LOAD_CONST_INT, 0x00, 0x01, /* PC 18.. actually let me recalculate */
         VT_OP_RETURN_VALUE
     };
+    (void)code; /* draft retained for reference; see code2 below */
     /* Simplify: just test that nested ifs build a valid graph */
     uint8_t code2[] = {
         VT_OP_LOAD_LOCAL, 0x00, 0x00,
@@ -965,6 +970,7 @@ VTX_TEST(test_fullpipe_31)
 
     int hoisted = vtx_licm_run(&graph, &schedule, &arena);
     /* hoisted may be 0 or > 0, just ensure no crash */
+    (void)hoisted;
     VTX_ASSERT_TRUE(vtx_verify_graph(&graph));
 
     vtx_schedule_destroy(&schedule);
@@ -995,6 +1001,7 @@ VTX_TEST(test_fullpipe_32)
 
     int elim = vtx_bounds_check_run(&graph, &schedule, &arena);
     /* Just ensure no crash; elim may be 0 if no redundant checks */
+    (void)elim;
     VTX_ASSERT_TRUE(vtx_verify_graph(&graph));
 
     vtx_schedule_destroy(&schedule);
@@ -1025,6 +1032,7 @@ VTX_TEST(test_fullpipe_33)
 
     vtx_tbaa_result_t *tbaa = vtx_tbaa_analyze(&graph, &arena);
     /* Just verify it runs without crashing */
+    (void)tbaa;
     VTX_ASSERT_TRUE(vtx_verify_graph(&graph));
 
     vtx_graph_destroy(&graph);
@@ -1165,7 +1173,10 @@ VTX_TEST(test_fullpipe_37)
 
 VTX_TEST(test_fullpipe_38)
 {
-    /* Diamond pattern (if-else merge) */
+    /* Diamond pattern (if-else merge).
+     * The first draft below (`code`) has incorrect PC offsets; the
+     * corrected version (`code2`) is what we actually compile. The draft
+     * is retained for reference. */
     uint8_t code[] = {
         VT_OP_LOAD_LOCAL, 0x00, 0x00,
         VT_OP_IF_TRUE, 0x00, 0x0A,     /* PC 3: goto 10 */
@@ -1174,6 +1185,7 @@ VTX_TEST(test_fullpipe_38)
         VT_OP_LOAD_CONST_INT, 0x00, 0x01, /* PC 12: then: 1 */
         VT_OP_RETURN_VALUE              /* PC 15... recalc */
     };
+    (void)code; /* draft retained for reference; see code2 below */
     /* Let me recalculate more carefully:
      * PC  0: load_local 0        (3 bytes)
      * PC  3: if_true → PC 12     (3 bytes)
@@ -1646,6 +1658,7 @@ VTX_TEST(test_fullpipe_53)
     vtx_schedule_run(&graph, &arena, &schedule);
 
     vtx_tbaa_result_t *tbaa = vtx_tbaa_analyze(&graph, &arena);
+    (void)tbaa;
     VTX_ASSERT_TRUE(vtx_verify_graph(&graph));
 
     vtx_schedule_destroy(&schedule);
@@ -2203,7 +2216,10 @@ VTX_TEST(test_interp_18)
 
 VTX_TEST(test_interp_19)
 {
-    /* Run method with FNEG: -(2.5) = -2.5 */
+    /* Run method with FNEG: -(2.5) = -2.5.
+     * The first draft below (`code`) uses INEG, which is wrong for floats;
+     * the corrected version (`code2`) computes 0.0 - x. The draft is
+     * retained for reference. */
     uint8_t code[] = {
         VT_OP_LOAD_LOCAL, 0x00, 0x00,
         VT_OP_INEG,        /* INEG is for integers; FNEG is not in the opcode list.
@@ -2211,6 +2227,7 @@ VTX_TEST(test_interp_19)
                              * Use -(0.0 - x) instead: load 0.0, load x, fsub */
         VT_OP_RETURN_VALUE
     };
+    (void)code; /* draft retained for reference; see code2 below */
     /* Actually, the spec doesn't have FNEG. Let's test INEG for integer and
      * compute float negation as 0.0 - x */
     uint8_t code2[] = {
@@ -2341,8 +2358,11 @@ VTX_TEST(test_interp_23)
 
 VTX_TEST(test_interp_24)
 {
-    /* Run method with GOTO loop (N iterations) */
-    /* Loop: local0 times, accumulate local1 += 1 each time */
+    /* Run method with GOTO loop (N iterations).
+     * Loop: local0 times, accumulate local1 += 1 each time.
+     * The first draft below (`code`) has incorrect PC offsets in its
+     * branch targets; the corrected version (`code2`) is what we
+     * actually compile. The draft is retained for reference. */
     vtx_value_t consts[] = { vtx_make_smi(0), vtx_make_smi(1) };
     uint8_t code[] = {
         VT_OP_LOAD_LOCAL, 0x00, 0x00,       /* PC 0: load counter */
@@ -2363,6 +2383,7 @@ VTX_TEST(test_interp_24)
         VT_OP_LOAD_LOCAL, 0x00, 0x01,       /* PC 33: return accum */
         VT_OP_RETURN_VALUE                   /* PC 36 */
     };
+    (void)code; /* draft retained for reference; see code2 below */
     /* Recalculate PC offsets:
      * PC  0: load_local 0      (3) → 3
      * PC  3: load_const_int 0  (3) → 6
@@ -4281,14 +4302,14 @@ VTX_TEST(test_stress_23)
     vtx_profile_global_t sources[5];
     for (int i = 0; i < 5; i++) {
         vtx_profile_global_init(&sources[i]);
-        vtx_profile_record_invocation(&sources[i], 10 + i);
+        vtx_profile_record_invocation(&sources[i], (uint32_t)(10 + i));
     }
     for (int i = 0; i < 5; i++) {
         vtx_profile_merge_into(&target, &sources[i]);
     }
     VTX_ASSERT_EQUAL(target.method_count, 5u);
     for (int i = 0; i < 5; i++) {
-        vtx_profile_method_t *m = vtx_profile_get_method(&target, 10 + i);
+        vtx_profile_method_t *m = vtx_profile_get_method(&target, (uint32_t)(10 + i));
         VTX_ASSERT_NOT_NULL(m);
     }
     vtx_profile_global_destroy(&target);

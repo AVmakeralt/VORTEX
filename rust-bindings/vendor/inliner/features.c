@@ -113,7 +113,7 @@ static double receiver_type_certainty(const vtx_profile_global_t *profile,
 
 static double constant_arg_ratio(const vtx_graph_t *graph, vtx_nodeid_t call_node_id)
 {
-    vtx_node_t *call_node = vtx_node_get(&graph->node_table, call_node_id);
+    const vtx_node_t *call_node = vtx_node_get_const(&graph->node_table, call_node_id);
     if (call_node == NULL || call_node->input_count == 0) {
         return 0.0;
     }
@@ -137,7 +137,7 @@ static double constant_arg_ratio(const vtx_graph_t *graph, vtx_nodeid_t call_nod
     for (uint32_t i = data_start; i < call_node->input_count; i++) {
         vtx_nodeid_t arg_id = call_node->inputs[i];
         if (arg_id == VTX_NODEID_INVALID) continue;
-        vtx_node_t *arg = vtx_node_get_const(&graph->node_table, arg_id);
+        const vtx_node_t *arg = vtx_node_get_const(&graph->node_table, arg_id);
         if (arg != NULL && arg->opcode == VTX_OP_Constant) {
             constant_args++;
         }

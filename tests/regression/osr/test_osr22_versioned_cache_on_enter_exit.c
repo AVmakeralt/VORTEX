@@ -100,6 +100,11 @@ static int osr22_runtime_callback(uint32_t func_id,
                                     void *user_data)
 {
     (void)user_data;
+    /* sp_ptr is part of the callback signature and intentionally unused
+     * here: the JIT's CALL_RUNTIME helper already moved TOS into the
+     * `arg` parameter and decremented sp, so we leave the value in
+     * place rather than popping/pushing through sp_ptr. */
+    (void)sp_ptr;
     if (func_id != 7 || g_test_vc == NULL) {
         return -1;  /* decline — let the default handler push undefined */
     }

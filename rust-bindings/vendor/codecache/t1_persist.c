@@ -102,12 +102,6 @@ static uint32_t crc32_end(uint32_t crc)
     return crc ^ 0xFFFFFFFFu;
 }
 
-/* Convenience: compute CRC32 of a single buffer (begin + update + end). */
-static uint32_t crc32_compute(const void *data, size_t len)
-{
-    return crc32_end(crc32_update(crc32_begin(), data, len));
-}
-
 static uint64_t t1_now_ns(void)
 {
     struct timespec ts;
@@ -413,15 +407,16 @@ bool vtx_t1_cache_load(vtx_t1_cache_t *cache,
     }
 
     /* Page-align the mmap offset and size. */
-    long page_size = sysconf(_SC_PAGESIZE);
-    long map_offset = (code_blob_offset / page_size) * page_size;
-    long map_adjust = code_blob_offset - map_offset;
-    size_t map_size = (size_t)header.total_code_size + (size_t)map_adjust;
+    long page_size_l = sysconf(_SC_PAGESIZE);
+    size_t page_size = (size_t)page_size_l;
+    size_t map_offset = ((size_t)code_blob_offset / page_size) * page_size;
+    size_t map_adjust = (size_t)code_blob_offset - map_offset;
+    size_t map_size = (size_t)header.total_code_size + map_adjust;
     /* Round up to page size. */
     map_size = (map_size + page_size - 1) & ~(page_size - 1);
 
     void *mapped = mmap(NULL, map_size, PROT_READ | PROT_EXEC,
-                        MAP_PRIVATE, fd, map_offset);
+                        MAP_PRIVATE, fd, (off_t)map_offset);
     if (mapped == MAP_FAILED) {
         close(fd);
         free(cache->methods); cache->methods = NULL;
@@ -481,9 +476,9 @@ void vtx_t1_cache_destroy(vtx_t1_cache_t *cache)
     if (cache->code_base != NULL && cache->code_map_size > 0) {
         /* Unmap from the page-aligned base. We need to recompute it
          * because code_base has the adjustment added. */
-        long page_size = sysconf(_SC_PAGESIZE);
+        size_t page_size = (size_t)sysconf(_SC_PAGESIZE);
         uintptr_t base = (uintptr_t)cache->code_base;
-        uintptr_t aligned = base & ~(page_size - 1);
+        uintptr_t aligned = base & ~((uintptr_t)page_size - 1);
         size_t extra = (size_t)(base - aligned);
         munmap((void *)aligned, cache->code_map_size);
         (void)extra;

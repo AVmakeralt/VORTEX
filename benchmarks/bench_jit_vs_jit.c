@@ -86,7 +86,11 @@ static jit_entry_t compile_t2(const char *prog_text, uint32_t arg_count) {
     memset(&result, 0, sizeof(result));
     int rc = vtx_pipeline_run(graph, &config, arena, &result);
     if (rc != 0 || !result.success || method->compiled_code == NULL) return NULL;
-    return (jit_entry_t)method->compiled_code;
+    /* ISO C forbids direct object-pointer → function-pointer cast;
+     * use a union (the portable, pedantic-clean idiom). */
+    union { void *ptr; jit_entry_t fn; } u_e;
+    u_e.ptr = method->compiled_code;
+    return u_e.fn;
 }
 
 /* ---- Programs ---- */
@@ -159,13 +163,13 @@ static double bench_jit1(jit_entry_t entry, int64_t baseN, int iters) {
     vtx_method_desc_t m = {0}; m.name = "f";
     static double samples[SAMPLES];
     /* Seed from getpid so V8 can't predict (both use same seed though) */
-    uint64_t seed = (uint64_t)getpid() * 1000000007ULL;
+    uint64_t seed = (uint64_t)getpid() * (uint64_t)1000000007ULL;
     for (int s = 0; s < SAMPLES; s++) {
-        lcg_seed(seed + s * 31);
+        lcg_seed(seed + (uint64_t)s * 31u);
         uint64_t t0 = now_ns();
         int64_t acc = 0;
         for (int i = 0; i < iters; i++) {
-            int64_t n = baseN + (lcg_next() & 15);
+            int64_t n = baseN + (int64_t)(lcg_next() & 15);
             vtx_value_t v = vtx_make_smi(n);
             vtx_value_t r = entry(&m, NULL, (void*)1, &v, 1);
             acc += vtx_smi_value(r);
@@ -183,14 +187,14 @@ static double bench_jit1(jit_entry_t entry, int64_t baseN, int iters) {
 static double bench_jit2(jit_entry_t entry, int64_t a, int64_t b, int iters) {
     vtx_method_desc_t m = {0}; m.name = "f";
     static double samples[SAMPLES];
-    uint64_t seed = (uint64_t)getpid() * 1000000007ULL;
+    uint64_t seed = (uint64_t)getpid() * (uint64_t)1000000007ULL;
     for (int s = 0; s < SAMPLES; s++) {
-        lcg_seed(seed + s * 31);
+        lcg_seed(seed + (uint64_t)s * 31u);
         uint64_t t0 = now_ns();
         int64_t acc = 0;
         for (int i = 0; i < iters; i++) {
-            int64_t aa = a + (lcg_next() & 15);
-            int64_t bb = b + (lcg_next() & 7);
+            int64_t aa = a + (int64_t)(lcg_next() & 15);
+            int64_t bb = b + (int64_t)(lcg_next() & 7);
             vtx_value_t args[2] = { vtx_make_smi(aa), vtx_make_smi(bb) };
             vtx_value_t r = entry(&m, NULL, (void*)1, args, 2);
             acc += vtx_smi_value(r);
@@ -207,13 +211,13 @@ static double bench_jit2(jit_entry_t entry, int64_t a, int64_t b, int iters) {
 
 static double bench_native1(int64_t (*fn)(int64_t), int64_t baseN, int iters) {
     static double samples[SAMPLES];
-    uint64_t seed = (uint64_t)getpid() * 1000000007ULL;
+    uint64_t seed = (uint64_t)getpid() * (uint64_t)1000000007ULL;
     for (int s = 0; s < SAMPLES; s++) {
-        lcg_seed(seed + s * 31);
+        lcg_seed(seed + (uint64_t)s * 31u);
         uint64_t t0 = now_ns();
         int64_t acc = 0;
         for (int i = 0; i < iters; i++) {
-            acc += fn(baseN + (lcg_next() & 15));
+            acc += fn(baseN + (int64_t)(lcg_next() & 15));
         }
         uint64_t t1 = now_ns();
         g_sink = acc;
@@ -227,13 +231,13 @@ static double bench_native1(int64_t (*fn)(int64_t), int64_t baseN, int iters) {
 
 static double bench_native2(int64_t (*fn)(int64_t, int64_t), int64_t a, int64_t b, int iters) {
     static double samples[SAMPLES];
-    uint64_t seed = (uint64_t)getpid() * 1000000007ULL;
+    uint64_t seed = (uint64_t)getpid() * (uint64_t)1000000007ULL;
     for (int s = 0; s < SAMPLES; s++) {
-        lcg_seed(seed + s * 31);
+        lcg_seed(seed + (uint64_t)s * 31u);
         uint64_t t0 = now_ns();
         int64_t acc = 0;
         for (int i = 0; i < iters; i++) {
-            acc += fn(a + (lcg_next() & 15), b + (lcg_next() & 7));
+            acc += fn(a + (int64_t)(lcg_next() & 15), b + (int64_t)(lcg_next() & 7));
         }
         uint64_t t1 = now_ns();
         g_sink = acc;

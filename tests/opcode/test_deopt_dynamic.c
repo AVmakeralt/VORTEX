@@ -41,7 +41,7 @@ int main(void) {
     };
     vtx_value_t consts[1] = { vtx_make_smi(1) };
     vtx_bytecode_t bc = { code, sizeof(code), consts, 1, 1, 4 };
-    vtx_method_desc_t m = { "add_one","(I)I",&bc,NULL,1,1,false };
+    vtx_method_desc_t m = { "add_one","(I)I",&bc,NULL,1,1,0,false };
 
     /* Compile with T2 */
     vtx_graph_t g; vtx_graph_init(&g, 1);
@@ -62,7 +62,11 @@ int main(void) {
     }
 
     typedef vtx_value_t(*E)(const vtx_method_desc_t*,void*,void*,vtx_value_t*,uint32_t);
-    E jit = (E)code_ptr;
+    /* ISO C forbids direct object-pointer → function-pointer cast;
+     * use a union (the portable, pedantic-clean idiom). */
+    union { void *ptr; E fn; } u_e;
+    u_e.ptr = code_ptr;
+    E jit = u_e.fn;
 
     printf("=== Dynamic Code / Deopt Test ===\n\n");
 
@@ -159,6 +163,7 @@ int main(void) {
             /* Let's fix: use const[0]=0 for sum/i init, const[1]=1 for increment */
             0, 0, 0, /* padding */
         };
+        (void)loop_code; /* draft retained for reference; see `lc` below */
         /* Actually let me build this properly */
         uint8_t lc[] = {
             6,0,0, 3,0,1,   /* sum=0 */
@@ -173,7 +178,7 @@ int main(void) {
         };
         vtx_value_t lconsts[2] = { vtx_make_smi(0), vtx_make_smi(1) };
         vtx_bytecode_t lbc = { lc, sizeof(lc), lconsts, 2, 3, 4 };
-        vtx_method_desc_t lm = { "sum_loop","(I)I",&lbc,NULL,2,1,false };
+        vtx_method_desc_t lm = { "sum_loop","(I)I",&lbc,NULL,2,1,0,false };
 
         /* Compile */
         vtx_graph_t lg; vtx_graph_init(&lg, 1);
@@ -190,7 +195,11 @@ int main(void) {
 
         if (lok && lcode) {
             typedef vtx_value_t(*E2)(const vtx_method_desc_t*,void*,void*,vtx_value_t*,uint32_t);
-            E2 ljit = (E2)lcode;
+            /* ISO C forbids direct object-pointer → function-pointer cast;
+             * use a union (the portable, pedantic-clean idiom). */
+            union { void *ptr; E2 fn; } u_e2;
+            u_e2.ptr = lcode;
+            E2 ljit = u_e2.fn;
 
             printf("\nTest 7: sum_loop(1000)...\n");
             vtx_value_t arg = vtx_make_smi(1000);

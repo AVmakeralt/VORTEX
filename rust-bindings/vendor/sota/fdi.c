@@ -188,7 +188,6 @@ bool vtx_sota_fdi_evaluate(vtx_sota_fdi_t *fdi, uint32_t method_id)
     vtx_fdi_method_record_t *rec = find_record(fdi, method_id);
 
     /* Check if any inlined call sites are unprofitable */
-    bool has_unprofitable = false;
 
     if (fdi->feedback != NULL) {
         /* BS-3 fix: Scan feedback decisions ONLY for this method's call sites */
@@ -198,7 +197,6 @@ bool vtx_sota_fdi_evaluate(vtx_sota_fdi_t *fdi, uint32_t method_id)
             /* Skip decisions for other methods */
             if (dec->method_id != method_id) continue;
             if (dec->inlined && dec->outcome == VTX_OUTCOME_UNPROFITABLE) {
-                has_unprofitable = true;
 
                 /* Create or update the method record */
                 if (rec == NULL) {
@@ -235,7 +233,6 @@ bool vtx_sota_fdi_evaluate(vtx_sota_fdi_t *fdi, uint32_t method_id)
         double deopt_rate = (double)rec->deopt_count_at_inlined_sites /
                             (double)rec->total_executions;
         if (deopt_rate > VTX_INLINE_DEOPT_THRESHOLD) {
-            has_unprofitable = true;
         }
     }
 
@@ -495,7 +492,6 @@ uint32_t vtx_sota_fdi_get_replacement_version(vtx_sota_fdi_t *fdi,
 
     /* Check if there are alternative versions with better scores.
      * We pick the one with the highest score. */
-    double best_score = rec->best_version_score;
     uint32_t best_version = rec->best_version_id;
 
     /* The alternative_versions array tracks versions we know about.

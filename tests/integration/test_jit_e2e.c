@@ -911,7 +911,11 @@ int main(void)
                 typedef vtx_value_t (*vtx_jit_entry_t)(
                     const vtx_method_desc_t *, void *, void *,
                     vtx_value_t *, uint32_t);
-                vtx_jit_entry_t entry = (vtx_jit_entry_t)method.compiled_code;
+                /* ISO C forbids direct object-pointer → function-pointer cast;
+                 * use a union (the portable, pedantic-clean idiom). */
+                union { void *ptr; vtx_jit_entry_t fn; } u_entry;
+                u_entry.ptr = method.compiled_code;
+                vtx_jit_entry_t entry = u_entry.fn;
                 vtx_value_t jit_result = entry(&method, NULL, (void*)1, args, 2);
 
                 printf("  t2_add: interp_raw=0x%016llX, jit_raw=0x%016llX\n",
@@ -1011,7 +1015,11 @@ int main(void)
                 typedef vtx_value_t (*vtx_jit_entry_t)(
                     const vtx_method_desc_t *, void *, void *,
                     vtx_value_t *, uint32_t);
-                vtx_jit_entry_t entry = (vtx_jit_entry_t)method.compiled_code;
+                /* ISO C forbids direct object-pointer → function-pointer cast;
+                 * use a union (the portable, pedantic-clean idiom). */
+                union { void *ptr; vtx_jit_entry_t fn; } u_entry;
+                u_entry.ptr = method.compiled_code;
+                vtx_jit_entry_t entry = u_entry.fn;
                 vtx_value_t jit_result_pos = entry(&method, NULL, (void*)1, &arg_pos, 1);
 
                 /* Execute JIT code directly with negative arg */

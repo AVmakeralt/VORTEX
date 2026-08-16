@@ -52,6 +52,31 @@
 /* Compile Pipeline tests (20)                                                 */
 /* ========================================================================== */
 
+/* File-scope counters and task bodies for the threadpool tests below.
+ *
+ * GCC's -Wpedantic (with -Werror) rejects nested function definitions
+ * ("ISO C forbids nested functions"), so the dummy_task* bodies must
+ * live at file scope. Each counter is paired with its task body and is
+ * reset at the start of its owning test to preserve isolation. */
+static volatile int pool_test_counter_03 = 0;
+static volatile int pool_test_counter_04 = 0;
+static volatile int pool_test_counter_05 = 0;
+
+static void dummy_task_03(void *arg) {
+    (void)arg;
+    __atomic_add_fetch(&pool_test_counter_03, 1, __ATOMIC_SEQ_CST);
+}
+
+static void dummy_task_04(void *arg) {
+    (void)arg;
+    __atomic_add_fetch(&pool_test_counter_04, 1, __ATOMIC_SEQ_CST);
+}
+
+static void dummy_task_05(void *arg) {
+    (void)arg;
+    __atomic_add_fetch(&pool_test_counter_05, 1, __ATOMIC_SEQ_CST);
+}
+
 VTX_TEST(test_pipe_01) {
     vtx_pipeline_config_t cfg = vtx_pipeline_config_t1();
     VTX_ASSERT_FALSE(cfg.run_gvn);
@@ -346,44 +371,38 @@ VTX_TEST(test_pool_02) {
 VTX_TEST(test_pool_03) {
     vtx_threadpool_t pool;
     VTX_ASSERT_EQUAL(vtx_threadpool_init(&pool, 1), 0);
-    static volatile int counter = 0;
-    counter = 0;
-    void dummy_task(void *arg) { (void)arg; __atomic_add_fetch(&counter, 1, __ATOMIC_SEQ_CST); }
-    VTX_ASSERT_EQUAL(vtx_threadpool_submit(&pool, dummy_task, NULL, 10), 0);
+    pool_test_counter_03 = 0;
+    VTX_ASSERT_EQUAL(vtx_threadpool_submit(&pool, dummy_task_03, NULL, 10), 0);
     /* Give the worker time to process */
     struct timespec ts = {0, 10000000}; /* 10ms */
     nanosleep(&ts, NULL);
-    VTX_ASSERT_TRUE(counter >= 1);
+    VTX_ASSERT_TRUE(pool_test_counter_03 >= 1);
     vtx_threadpool_shutdown(&pool);
 }
 
 VTX_TEST(test_pool_04) {
     vtx_threadpool_t pool;
     VTX_ASSERT_EQUAL(vtx_threadpool_init(&pool, 2), 0);
-    static volatile int counter2 = 0;
-    counter2 = 0;
-    void dummy_task2(void *arg) { (void)arg; __atomic_add_fetch(&counter2, 1, __ATOMIC_SEQ_CST); }
+    pool_test_counter_04 = 0;
     for (int i = 0; i < 10; i++) {
-        vtx_threadpool_submit(&pool, dummy_task2, NULL, i);
+        vtx_threadpool_submit(&pool, dummy_task_04, NULL, i);
     }
     struct timespec ts = {0, 50000000}; /* 50ms */
     nanosleep(&ts, NULL);
-    VTX_ASSERT_TRUE(counter2 >= 5);
+    VTX_ASSERT_TRUE(pool_test_counter_04 >= 5);
     vtx_threadpool_shutdown(&pool);
 }
 
 VTX_TEST(test_pool_05) {
     vtx_threadpool_t pool;
     VTX_ASSERT_EQUAL(vtx_threadpool_init(&pool, 1), 0);
-    static volatile int counter3 = 0;
-    counter3 = 0;
-    void dummy_task3(void *arg) { (void)arg; __atomic_add_fetch(&counter3, 1, __ATOMIC_SEQ_CST); }
+    pool_test_counter_05 = 0;
     for (int i = 0; i < 5; i++) {
-        vtx_threadpool_submit(&pool, dummy_task3, NULL, i);
+        vtx_threadpool_submit(&pool, dummy_task_05, NULL, i);
     }
     struct timespec ts = {0, 100000000}; /* 100ms */
     nanosleep(&ts, NULL);
-    VTX_ASSERT_TRUE(counter3 >= 5);
+    VTX_ASSERT_TRUE(pool_test_counter_05 >= 5);
     vtx_threadpool_shutdown(&pool);
 }
 
@@ -1180,8 +1199,10 @@ VTX_TEST(test_regalloc_10) {
     uint8_t regs[16];
     vtx_nodeid_t nodeids[16];
     uint32_t n = vtx_regalloc_live_regs_at_position(&ra, 0, regs, nodeids, 16);
-    /* With no intervals, count should be 0 */
-    VTX_ASSERT_TRUE(n >= 0);
+    /* With no intervals, count should be 0. The prior assertion `n >= 0`
+     * was tautological because n is uint32_t. Assert the actual expected
+     * value instead. */
+    VTX_ASSERT_EQUAL(n, 0u);
 }
 
 /* ========================================================================== */
@@ -2318,8 +2339,11 @@ VTX_TEST(test_sota_misc_08) {
 
     vtx_sota_fdi_record_deopt(&fdi, 1, 100);
     vtx_sota_fdi_record_deopt(&fdi, 1, 100);
-    /* Should track deopt rate */
-    VTX_ASSERT_TRUE(fdi.total_recompilations >= 0);
+    /* record_deopt updates per-method deopt counters; the aggregate
+     * total_recompilations counter is only bumped by record_recompilation,
+     * so it must still be 0 here. The previous `>= 0` assertion was
+     * tautological on uint32_t. */
+    VTX_ASSERT_EQUAL(fdi.total_recompilations, 0u);
 
     vtx_sota_fdi_destroy(&fdi);
     vtx_feedback_destroy(&fb);

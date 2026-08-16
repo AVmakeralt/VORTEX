@@ -1095,8 +1095,6 @@ void vtx_gc_collect_young(vtx_gc_t *gc)
         for (uint32_t i = 0; i < gc->pinned_count; i++) {
             vtx_heap_object_t *pinned = gc->pinned_objects[i];
             /* Pinned objects stay in from-space, but their fields may need updating */
-            uint8_t old_field_count = pinned->field_count; /* save before scan may change refs */
-            (void)old_field_count;
             scan_object(gc, pinned);
         }
         /* Scan to-space again — pinned-object scanning may have forwarded
@@ -1282,6 +1280,7 @@ void vtx_gc_collect_young(vtx_gc_t *gc)
  * and popped when we finish tracing its fields. */
 static void mark_object(vtx_gc_t *gc, vtx_heap_object_t *root)
 {
+    (void)gc;  /* gc unused — mark_object operates only on `root` */
     VTX_ASSERT(root != NULL, "object must not be NULL");
 
     if (root->gc_mark) return; /* already marked */

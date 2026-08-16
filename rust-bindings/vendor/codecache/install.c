@@ -163,7 +163,7 @@ int vtx_method_registry_remove(vtx_method_registry_t *registry, uint32_t method_
 
 bool vtx_install_method(vtx_code_cache_t *cache,
                          vtx_method_registry_t *registry,
-                         const vtx_method_desc_t *method,
+                         vtx_method_desc_t *method,
                          uint32_t method_id,
                          const uint8_t *code,
                          uint32_t code_size,

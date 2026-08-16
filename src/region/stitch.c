@@ -259,7 +259,7 @@ static uint32_t vtx_estimate_native_size(const vtx_node_table_t *table,
 {
     uint32_t total = 0;
     for (uint32_t i = 0; i < count; i++) {
-        vtx_node_t *node = vtx_node_get_const(table, nodes[i]);
+        const vtx_node_t *node = vtx_node_get_const(table, nodes[i]);
         if (node == NULL) continue;
 
         switch (node->opcode) {

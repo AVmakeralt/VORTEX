@@ -62,6 +62,7 @@ static inline uint64_t now_ns(void) {
  *   LoadField(config, scale)  → Constant(2)  [second use]
  *
  * This collapses `area` computation to a compile-time constant. */
+__attribute__((unused))
 static jit_entry_t compile_object_heavy_t2(void) {
     vtx_arena_t *arena = calloc(1, sizeof(*arena));
     vtx_type_system_t *ts = calloc(1, sizeof(*ts));
@@ -238,7 +239,11 @@ static jit_entry_t compile_object_heavy_t2(void) {
     fprintf(stderr, "  [compile] rc=%d success=%d code=%p\n",
             rc, result.success, method->compiled_code);
     if (rc != 0 || !result.success || method->compiled_code == NULL) return NULL;
-    return (jit_entry_t)method->compiled_code;
+    /* ISO C forbids direct object-pointer → function-pointer cast;
+     * use a union (the portable, pedantic-clean idiom). */
+    union { void *ptr; jit_entry_t fn; } u_e;
+    u_e.ptr = method->compiled_code;
+    return u_e.fn;
 }
 
 /* Native C reference */
@@ -254,6 +259,7 @@ static int64_t native_object_heavy(volatile int64_t n) {
 #define SAMPLES 20
 static volatile int64_t g_sink;
 
+__attribute__((unused))
 static double bench_jit(jit_entry_t entry, int64_t n, int iters) {
     vtx_method_desc_t m = {0}; m.name = "render";
     static double samples[SAMPLES];
@@ -275,6 +281,7 @@ static double bench_jit(jit_entry_t entry, int64_t n, int iters) {
     return samples[SAMPLES / 2];
 }
 
+__attribute__((unused))
 static double bench_native(int64_t n, int iters) {
     static double samples[SAMPLES];
     for (int s = 0; s < SAMPLES; s++) {

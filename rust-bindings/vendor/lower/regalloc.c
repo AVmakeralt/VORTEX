@@ -755,7 +755,7 @@ vtx_regalloc_result_t *vtx_regalloc_run_target(vtx_inst_stream_t *stream,
     const vtx_calling_conv_t *cc = vtx_target_calling_conv(target);
     uint32_t target_call_clobber = (uint32_t)vtx_target_call_clobber_mask(target);
     uint32_t target_callee_saved = (uint32_t)cc->callee_saved_mask;
-    uint32_t target_reserved = (uint32_t)cc->reserved_mask;
+    uint32_t target_reserved = (uint32_t)cc->reserved_mask; (void)target_reserved;
 
     vtx_regalloc_result_t *result = (vtx_regalloc_result_t *)vtx_arena_alloc(
         arena, sizeof(vtx_regalloc_result_t));
@@ -1082,9 +1082,9 @@ vtx_regalloc_result_t *vtx_regalloc_run_target(vtx_inst_stream_t *stream,
             bool overlaps_call = false;
             for (uint32_t b = 0; b < stream->block_count && !overlaps_call; b++) {
                 vtx_inst_block_t *blk = &stream->blocks[b];
-                for (uint32_t i = 0; i < blk->inst_count; i++) {
-                    if (blk->insts[i].opcode != VTX_X86_CALL) continue;
-                    uint32_t call_pos = blk->insts[i].native_offset;
+                for (uint32_t ci = 0; ci < blk->inst_count; ci++) {
+                    if (blk->insts[ci].opcode != VTX_X86_CALL) continue;
+                    uint32_t call_pos = blk->insts[ci].native_offset;
                     if (call_pos >= current->start && call_pos <= current->end) {
                         overlaps_call = true;
                         break;

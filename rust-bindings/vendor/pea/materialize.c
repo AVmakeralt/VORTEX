@@ -204,31 +204,6 @@ static uint32_t collect_field_values_from_virtual(
 }
 
 /* ========================================================================== */
-/* Internal: check if a node references a scalar-replaced allocation           */
-/* ========================================================================== */
-
-/**
- * Check if any input of the given node is a scalar-replaced allocation.
- * Returns the allocation NodeID if found, VTX_NODEID_INVALID otherwise.
- */
-static vtx_nodeid_t find_scalar_replaced_input(vtx_node_t *node,
-                                                 const vtx_pea_analysis_t *analysis,
-                                                 vtx_node_table_t *table)
-{
-    for (uint32_t i = 0; i < node->input_count; i++) {
-        vtx_nodeid_t input_id = node->inputs[i];
-        vtx_node_t *input = vtx_node_get(table, input_id);
-        if (!input || input->dead) continue;
-
-        if (is_allocation(input->opcode) &&
-            vtx_pea_is_scalar_replaceable(analysis, input_id)) {
-            return input_id;
-        }
-    }
-    return VTX_NODEID_INVALID;
-}
-
-/* ========================================================================== */
 /* Internal: add a materialization point                                       */
 /* ========================================================================== */
 

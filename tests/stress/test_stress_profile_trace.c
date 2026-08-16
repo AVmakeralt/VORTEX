@@ -1362,7 +1362,8 @@ VTX_TEST(test_trace_18)
     /* Record from entry_pc=0 — may return NULL if no loop found, that's OK */
     vtx_trace_t *trace = vtx_trace_recorder_record(
         &recorder, &graph, &bc, &method, 0, &profiler, &profile, &arena);
-    /* Just test it doesn't crash */
+    /* Just test it doesn't crash (return value may be NULL on no-loop). */
+    (void)trace;
     VTX_ASSERT_TRUE(1);
     vtx_profile_global_destroy(&profile);
     vtx_profiler_destroy(&profiler);
@@ -1453,7 +1454,8 @@ VTX_TEST(test_tree_01)
     vtx_trace_tree_t *tree = vtx_trace_tree_build_root(
         &recorder, &graph, &bc, &method, 0,
         &profiler, &profile, &arena);
-    /* May be NULL if no valid trace found */
+    /* May be NULL if no valid trace found — we only verify no crash. */
+    (void)tree;
     VTX_ASSERT_TRUE(1); /* no crash */
     vtx_profile_global_destroy(&profile);
     vtx_profiler_destroy(&profiler);
@@ -1579,7 +1581,10 @@ VTX_TEST(test_tree_10)
     tree.all_branches = NULL;
     tree.all_branch_capacity = 0;
     /* We don't call vtx_trace_tree_destroy because we don't have a properly
-       allocated tree. The real test is in test_tree_01. */
+       allocated tree. The real test is in test_tree_01.
+       The fields are initialised to keep the struct in a consistent state;
+       they are not subsequently read here. */
+    (void)tree;
     VTX_ASSERT_TRUE(1);
 }
 
@@ -1795,8 +1800,10 @@ VTX_TEST(test_ewma_07)
     vtx_ewma_t ewma;
     vtx_ewma_init(&ewma);
     vtx_ewma_update(&ewma, 0.5);
-    /* Alternating */
+    /* Alternating — capture the pre-update value so future readers can
+     * verify direction of motion; not asserted here (smoke test only). */
     double prev = vtx_ewma_value(&ewma);
+    (void)prev;
     for (int i = 0; i < 10; i++) {
         vtx_ewma_update(&ewma, (i % 2 == 0) ? 1.0 : 0.0);
     }
@@ -2080,6 +2087,9 @@ VTX_TEST(test_gmeta_15)
         &table, 1, 0, 100, VTX_GUARD_FAST_CHECK);
     vtx_guard_meta_t *m2 = vtx_guard_meta_register(
         &table, 2, 1, 200, VTX_GUARD_FULL_CHECK);
+    /* m2 is registered to populate the table; its handle isn't needed
+     * for this assertion. */
+    (void)m2;
     vtx_guard_meta_update(m1, true);
     uint32_t pending = vtx_guard_meta_pending_transitions(&table);
     VTX_ASSERT_TRUE(pending >= 1u);
@@ -2136,7 +2146,8 @@ VTX_TEST(test_hoist_03)
     int rc = vtx_schedule_run(&graph, &arena, &schedule);
     if (rc == 0) {
         vtx_hoist_result_t result = vtx_hoist_guards(&graph, &schedule, &arena);
-        /* Just verify it doesn't crash */
+        /* Smoke test: just verify it doesn't crash. */
+        (void)result;
         VTX_ASSERT_TRUE(1);
         vtx_schedule_destroy(&schedule);
     } else {
@@ -2163,6 +2174,8 @@ VTX_TEST(test_hoist_04)
     int rc = vtx_schedule_run(&graph, &arena, &schedule);
     if (rc == 0) {
         vtx_hoist_result_t result = vtx_hoist_guards(&graph, &schedule, &arena);
+        /* Smoke test: verify it doesn't crash. */
+        (void)result;
         VTX_ASSERT_TRUE(1);
         vtx_schedule_destroy(&schedule);
     } else {
@@ -2254,6 +2267,8 @@ VTX_TEST(test_hoist_09)
     int rc = vtx_schedule_run(&graph, &arena, &schedule);
     if (rc == 0) {
         vtx_hoist_result_t result = vtx_hoist_guards(&graph, &schedule, &arena);
+        /* Smoke test: verify it doesn't crash. */
+        (void)result;
         VTX_ASSERT_TRUE(1);
         vtx_schedule_destroy(&schedule);
     }
@@ -2307,7 +2322,8 @@ VTX_TEST(test_gmerge_02)
     vtx_node_add_input(&graph.node_table, g1, p);
     vtx_node_add_input(&graph.node_table, g2, p);
     vtx_merge_result_t result = vtx_merge_guards(&graph, &arena);
-    /* At minimum, should check and not crash */
+    /* Smoke test: just verify it doesn't crash. */
+    (void)result;
     VTX_ASSERT_TRUE(1);
     vtx_graph_destroy(&graph);
     vtx_arena_destroy(&arena);
@@ -2326,6 +2342,8 @@ VTX_TEST(test_gmerge_03)
     vtx_node_add_input(&graph.node_table, g1, p);
     vtx_node_add_input(&graph.node_table, g2, p);
     vtx_merge_result_t result = vtx_merge_guards(&graph, &arena);
+    /* Smoke test: verify it doesn't crash. */
+    (void)result;
     VTX_ASSERT_TRUE(1);
     vtx_graph_destroy(&graph);
     vtx_arena_destroy(&arena);
@@ -2346,6 +2364,8 @@ VTX_TEST(test_gmerge_04)
     vtx_node_add_input(&graph.node_table, g2, p1);
     vtx_node_add_input(&graph.node_table, g2, p2);
     vtx_merge_result_t result = vtx_merge_guards(&graph, &arena);
+    /* Smoke test: verify it doesn't crash. */
+    (void)result;
     VTX_ASSERT_TRUE(1);
     vtx_graph_destroy(&graph);
     vtx_arena_destroy(&arena);
@@ -2405,6 +2425,8 @@ VTX_TEST(test_gmerge_07)
     vtx_node_add_input(&graph.node_table, g2, p);
     vtx_node_add_input(&graph.node_table, g3, p);
     vtx_merge_result_t result = vtx_merge_guards(&graph, &arena);
+    /* Smoke test: verify it doesn't crash. */
+    (void)result;
     VTX_ASSERT_TRUE(1);
     vtx_graph_destroy(&graph);
     vtx_arena_destroy(&arena);
@@ -2454,6 +2476,8 @@ VTX_TEST(test_gmerge_10)
     vtx_node_add_input(&graph.node_table, g2, p1);
     vtx_node_add_input(&graph.node_table, g3, p2);
     vtx_merge_result_t result = vtx_merge_guards(&graph, &arena);
+    /* Smoke test: verify it doesn't crash. */
+    (void)result;
     VTX_ASSERT_TRUE(1);
     vtx_graph_destroy(&graph);
     vtx_arena_destroy(&arena);
@@ -2728,6 +2752,9 @@ VTX_TEST(test_deopt_st_06)
     vtx_side_table_t *table = vtx_side_table_build(NULL);
     VTX_ASSERT_NOT_NULL(table);
     uint32_t idx = vtx_side_table_add_entry(table, 100, 0, VTX_STF_GUARD, UINT32_MAX);
+    /* The first added entry occupies slot 0; the subsequent add_register
+     * call below relies on that. Verify the index returned. */
+    VTX_ASSERT_EQUAL(idx, 0u);
     int rc = vtx_side_table_add_register(table, 0, 42);
     VTX_ASSERT_EQUAL(rc, 0);
     vtx_nodeid_t nid = vtx_side_table_find_register(table, 100, 0);

@@ -879,7 +879,6 @@ int vtx_node_replace_all_uses(vtx_node_table_t *table,
     }
 
     vtx_node_t *old_node = &table->nodes[old_id];
-    vtx_node_t *new_node = &table->nodes[new_id];
 
     /* Walk the use list of old_id and replace each input reference.
      * We must be careful: each replacement modifies the use list of old_id

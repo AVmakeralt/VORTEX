@@ -58,7 +58,7 @@ int main(void) {
     };
     vtx_value_t consts[2] = { vtx_make_smi(0), vtx_make_smi(1) };
     vtx_bytecode_t bc = { code, sizeof(code), consts, 2, 3, 4 };
-    vtx_method_desc_t m = { "sum","(I)I",&bc,NULL,1,1,false };
+    vtx_method_desc_t m = { "sum","(I)I",&bc,NULL,1,1,0,false };
 
     /* Build graph */
     vtx_graph_t g; vtx_graph_init(&g, 1);
@@ -102,11 +102,15 @@ int main(void) {
 
     if (rc == 0 && r2.success && m.compiled_code) {
         typedef vtx_value_t(*E)(const vtx_method_desc_t*,void*,void*,vtx_value_t*,uint32_t);
-        E jit = (E)m.compiled_code;
+        /* ISO C forbids direct object-pointer → function-pointer cast;
+         * use a union (the portable, pedantic-clean idiom). */
+        union { void *ptr; E fn; } u_e;
+        u_e.ptr = m.compiled_code;
+        E jit = u_e.fn;
         vtx_value_t arg = vtx_make_smi(100);
-        vtx_value_t r = jit(&m, NULL, (void*)1, &arg, 1);
+        vtx_value_t r_val = jit(&m, NULL, (void*)1, &arg, 1);
         printf("JIT sum(100) = %lld (expected 4950)\n",
-               vtx_is_smi(r) ? (long long)vtx_smi_value(r) : -999);
+               vtx_is_smi(r_val) ? (long long)vtx_smi_value(r_val) : -999);
     } else {
         printf("Compilation failed (rc=%d success=%d)\n", rc, r2.success);
     }

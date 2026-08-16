@@ -57,16 +57,28 @@ typedef struct {
     bool    is_const;  /* true if min == max */
 } vtx_range_t;
 
-#define VTX_RANGE_UNKNOWN ((vtx_range_t){INT64_MIN, INT64_MAX, false})
-#define VTX_RANGE_CONST(v) ((vtx_range_t){(v), (v), true})
-#define VTX_RANGE(lo, hi) ((vtx_range_t){(lo), (hi), ((lo) == (hi))})
+/* Compound literals are C99 but ISO C++ forbids them (-Wpedantic).
+ * Use an inline helper function that works in both C and C++.
+ * The compiler inlines these — zero runtime overhead. */
+static inline vtx_range_t vtx_range_make(int64_t lo, int64_t hi, bool is_c)
+{
+    vtx_range_t r;
+    r.min = lo;
+    r.max = hi;
+    r.is_const = is_c;
+    return r;
+}
+
+#define VTX_RANGE_UNKNOWN vtx_range_make(INT64_MIN, INT64_MAX, false)
+#define VTX_RANGE_CONST(v) vtx_range_make((v), (v), true)
+#define VTX_RANGE(lo, hi) vtx_range_make((lo), (hi), ((lo) == (hi)))
 
 /* Range operations */
 static inline vtx_range_t vtx_range_union(vtx_range_t a, vtx_range_t b)
 {
     int64_t lo = (a.min < b.min) ? a.min : b.min;
     int64_t hi = (a.max > b.max) ? a.max : b.max;
-    return (vtx_range_t){lo, hi, (lo == hi)};
+    return vtx_range_make(lo, hi, (lo == hi));
 }
 
 static inline vtx_range_t vtx_range_intersect(vtx_range_t a, vtx_range_t b)
@@ -74,7 +86,7 @@ static inline vtx_range_t vtx_range_intersect(vtx_range_t a, vtx_range_t b)
     int64_t lo = (a.min > b.min) ? a.min : b.min;
     int64_t hi = (a.max < b.max) ? a.max : b.max;
     if (lo > hi) return VTX_RANGE_UNKNOWN; /* empty intersection */
-    return (vtx_range_t){lo, hi, (lo == hi)};
+    return vtx_range_make(lo, hi, (lo == hi));
 }
 
 static inline bool vtx_range_contains(vtx_range_t range, int64_t val)

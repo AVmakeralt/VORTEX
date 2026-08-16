@@ -95,15 +95,21 @@ static jit_entry_t compile(const char *prog_text, uint32_t arg_count, int tier) 
     clock_gettime(CLOCK_MONOTONIC, &comp_start);
     int rc = vtx_pipeline_run(graph, &config, arena, &result);
     clock_gettime(CLOCK_MONOTONIC, &comp_end);
-    double compile_ns = (comp_end.tv_sec - comp_start.tv_sec) * 1e9 +
-                        (comp_end.tv_nsec - comp_start.tv_nsec);
+    /* tv_sec / tv_nsec are signed integers; convert through uint64_t to
+     * avoid sign-conversion warnings when promoting to double. */
+    double compile_ns = (double)(uint64_t)(comp_end.tv_sec - comp_start.tv_sec) * 1e9 +
+                        (double)(uint64_t)(comp_end.tv_nsec - comp_start.tv_nsec);
     fprintf(stderr, "  [compile] tier=%d  %.0f ns  (%.1f us)\n",
             tier, compile_ns, compile_ns / 1000.0);
     if (rc != 0 || !result.success || method->compiled_code == NULL) {
         fprintf(stderr, "FAIL: pipeline rc=%d success=%d\n", rc, result.success);
         return NULL;
     }
-    return (jit_entry_t)method->compiled_code;
+    /* ISO C forbids direct object-pointer → function-pointer cast;
+     * use a union (the portable, pedantic-clean idiom). */
+    union { void *ptr; jit_entry_t fn; } u_e;
+    u_e.ptr = method->compiled_code;
+    return u_e.fn;
 }
 
 /* ----- T0 interpreter runner ----- */

@@ -429,7 +429,9 @@ int vtx_schedule_run(vtx_graph_t *graph, vtx_arena_t *arena, vtx_schedule_t *sch
         schedule->node_block[i] = (uint32_t)-1;
     }
 
-    /* Phase 2: Create blocks and assign control nodes */
+    /* Phase 2: Create blocks and assign control nodes.
+     * Wrap in a block scope so `bi` doesn't shadow later loop variables. */
+    {
     uint32_t bi = 0;
 
     /* The Start node always starts block 0 */
@@ -459,6 +461,7 @@ int vtx_schedule_run(vtx_graph_t *graph, vtx_arena_t *arena, vtx_schedule_t *sch
 
     /* Fill in actual block count if we miscounted */
     schedule->count = bi;
+    }  /* end Phase 2 scope */
 
     /* Phase 2.5: Assign control and pinned nodes to their blocks.
      *

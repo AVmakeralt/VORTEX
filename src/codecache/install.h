@@ -63,7 +63,7 @@ typedef struct vtx_compiled_method vtx_compiled_method_t;
 struct vtx_compiled_method {
     /* Method identity */
     uint32_t                 method_id;         /* unique method identifier */
-    const vtx_method_desc_t *method_desc;       /* method descriptor */
+    vtx_method_desc_t       *method_desc;       /* method descriptor (non-const: compiled_code is written atomically) */
 
     /* Code location */
     uint8_t                 *code_start;        /* pointer to code in cache */
@@ -211,7 +211,7 @@ int vtx_method_registry_remove(vtx_method_registry_t *registry, uint32_t method_
  */
 bool vtx_install_method(vtx_code_cache_t *cache,
                          vtx_method_registry_t *registry,
-                         const vtx_method_desc_t *method,
+                         vtx_method_desc_t *method,
                          uint32_t method_id,
                          const uint8_t *code,
                          uint32_t code_size,

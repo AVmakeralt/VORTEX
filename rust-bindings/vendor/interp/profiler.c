@@ -145,7 +145,7 @@ static vtx_profile_data_t *lru_lookup(vtx_profiler_t *profiler,
                 const vtx_method_desc_t *tmp_method = profiler->lru[i].method;
                 vtx_profile_data_t      *tmp_pd     = profiler->lru[i].pd;
                 memmove(&profiler->lru[1], &profiler->lru[0],
-                        i * sizeof(profiler->lru[0]));
+                        (size_t)i * sizeof(profiler->lru[0]));
                 profiler->lru[0].method = tmp_method;
                 profiler->lru[0].pd     = tmp_pd;
             }

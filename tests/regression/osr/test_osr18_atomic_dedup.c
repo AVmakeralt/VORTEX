@@ -199,7 +199,7 @@ VTX_TEST(osr18_profiler_atomic_counters_no_lost_updates) {
     uint64_t heat = vtx_profiler_method_heat(&profiler, &method);
     /* heat = invocation_count + backward_branch_count * 2. We only
      * recorded backward branches (no invocations), so heat = bb_count * 2. */
-    uint64_t expected_heat = (uint64_t)N_THREADS * N_INCS_PER_THREAD * 2;
+    uint64_t expected_heat = (uint64_t)N_THREADS * (uint64_t)N_INCS_PER_THREAD * 2ULL;
     VTX_ASSERT_TRUE(heat == expected_heat);
 
     vtx_profiler_destroy(&profiler);
