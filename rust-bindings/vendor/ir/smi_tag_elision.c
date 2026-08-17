@@ -72,25 +72,18 @@ static bool can_produce_raw_int(vtx_node_opcode_t op) {
     case VTX_OP_Neg:
         return true;
     case VTX_OP_Phi:
-        /* BUGFIX (T2 correctness): Phi nodes are NOT marked RAW_INT.
-         *
-         * While the resolve_phis function handles forward-edge untag
-         * (INSERT_UNTAG) and back-edge retag (INSERT_RETAG), there are
-         * edge cases where tagged consumers (Return, Store) read a
-         * RAW_INT Phi without a retag. The all_consumers_arith check
-         * should prevent this, but in practice the Return's input chain
-         * can bypass the check via intermediate nodes.
-         *
-         * The callee-saved fix resolved the register clobber, but the
-         * representation boundary is still not fully correct. Disabling
-         * Phi RAW_INT is the safe choice — Add/Sub/Mul nodes are still
-         * RAW_INT (the per-op retag is skipped), and the boundary retag
-         * happens at the Phi resolution via INSERT_RETAG.
-         *
-         * Performance impact: ~10-30% on int-heavy loops vs. full
-         * representation selection. A proper V8-style representation
-         * selection pass (with explicit ChangeTaggedToInt32 /
-         * ChangeInt32ToTagged nodes) would close this gap. */
+        /* Phi nodes: disabled for now — resolve_phis doesn't correctly
+         * handle RAW_INT Phis (the INSERT_UNTAG/INSERT_RETAG logic
+         * assumes tagged values at merge points). Re-enabling requires
+         * updating resolve_phis to skip untag/retag when the Phi is
+         * RAW_INT. See the performance comment below for the impact. */
+        /* TODO: Fix resolve_phis to handle RAW_INT Phis:
+         *   - If Phi is RAW_INT and input is tagged: INSERT_UNTAG
+         *   - If Phi is RAW_INT and input is raw: INSERT_MOV (no tag change)
+         *   - If Phi is tagged and input is raw: INSERT_RETAG
+         *   - If Phi is tagged and input is tagged: INSERT_MOV
+         * Currently resolve_phis always inserts untag/retag based on
+         * the INPUT's flags, not the Phi's flags. */
         return false;
     default:
         return false;
@@ -128,6 +121,10 @@ static bool can_consume_raw_int(vtx_node_opcode_t op) {
      * consumer and it's tagged. This defeats the entire purpose of
      * SMI tag elision for loops. */
     if (op == VTX_OP_Phi) return true;
+    /* Return: the isel retags RAW_INT inputs before returning (line 3168
+     * in isel.c). So Return is a valid consumer of RAW_INT values —
+     * the boundary retag happens at the consumer, not the producer. */
+    if (op == VTX_OP_Return) return true;
     return false;
 }
 

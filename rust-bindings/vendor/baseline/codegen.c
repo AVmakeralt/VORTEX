@@ -953,37 +953,34 @@ static void emit_stack_pop2(vtx_compile_ctx_t *ctx, vtx_reg_t *first, vtx_reg_t 
 /* NaN-boxing helpers                                                          */
 /* ========================================================================== */
 
+/* PERF: Cache VTX_NAN_BOX_HEADER in R15 and VTX_NAN_DATA_MASK in R14
+ * in the prologue. This eliminates the 10-byte MOV imm64 from every
+ * emit_tag_smi / emit_untag_smi call — the single biggest perf win.
+ *
+ * R14 = VTX_NAN_DATA_MASK (0x0000FFFFFFFFFFFF)
+ * R15 = VTX_NAN_BOX_HEADER (0x7FF8000000000000)
+ *
+ * These are callee-saved, so they persist across the entire method.
+ * The prologue pushes them, loads the constants, and the epilogue
+ * restores them. */
+#define VTX_REG_NAN_HEADER  VTX_REG_R15
+#define VTX_REG_NAN_MASK    VTX_REG_R14
+
 /**
  * Tag an int64_t value as an SMI (small integer).
  * SMI encoding: VTX_NAN_BOX_HEADER | (raw << VTX_NAN_DATA_SHIFT) | VTX_TAG_SMI
- * This requires multiple instructions, so we call a helper function.
+ *
+ * PERF: Uses R15 (cached header) instead of MOV imm64.
+ * Old: SHL + MOV R10,imm64(10B) + OR = 3 instructions, ~14 bytes
+ * New: SHL + OR R15 = 2 instructions, ~4 bytes
  */
 static void emit_tag_smi(vtx_compile_ctx_t *ctx, vtx_reg_t val_reg)
 {
-    /* RAX = val_reg value (raw int64_t)
-     * We need to compute: VTX_NAN_BOX_HEADER | (val & VTX_NAN_DATA_MASK) << 3 | VTX_TAG_SMI
-     *
-     * Steps:
-     *   1. Truncate val to 48 bits: val &= VTX_NAN_DATA_MASK
-     *   2. Shift left by 3: val <<= VTX_NAN_DATA_SHIFT (3)
-     *   3. OR with VTX_NAN_BOX_HEADER | VTX_TAG_SMI
-     *
-     * Since VTX_NAN_DATA_SHIFT = 3 and VTX_TAG_SMI = 0, we just need:
-     *   val = (val & 0x0000FFFFFFFFFFFF) << 3
-     *   val |= VTX_NAN_BOX_HEADER
-     *
-     * But working with 64-bit immediates in x86-64 requires multiple steps.
-     * We'll use R10 as scratch.
-     */
-
     /* shl val_reg, 3 */
     emit_shl_reg_imm8(&ctx->buf, val_reg, 3);
 
-    /* mov r10, VTX_NAN_BOX_HEADER */
-    emit_mov_reg_imm64(&ctx->buf, VTX_REG_R10, VTX_NAN_BOX_HEADER);
-
-    /* or val_reg, r10 */
-    emit_or_reg_reg(&ctx->buf, val_reg, VTX_REG_R10);
+    /* or val_reg, R15 (cached NaN-box header) */
+    emit_or_reg_reg(&ctx->buf, val_reg, VTX_REG_NAN_HEADER);
 }
 
 /**
@@ -1002,10 +999,21 @@ static void emit_tag_bool(vtx_compile_ctx_t *ctx, vtx_reg_t val_reg)
     /* shl val_reg, 3 (0→0, 1→8) */
     emit_shl_reg_imm8(&ctx->buf, val_reg, 3);
 
-    /* or val_reg, VTX_VALUE_FALSE (header | tag_bool = 0x7FF8000000000003) */
-    emit_mov_reg_imm64(&ctx->buf, VTX_REG_R10,
-                        VTX_NAN_BOX_HEADER | VTX_TAG_BOOL);
-    emit_or_reg_reg(&ctx->buf, val_reg, VTX_REG_R10);
+    /* or val_reg, (R15 | VTX_TAG_BOOL).
+     * PERF: R15 has HEADER. We need HEADER|3. Since VTX_TAG_BOOL=3
+     * and HEADER's low 3 bits are 0, we can use: or val_reg, R15; or val_reg, 3.
+     * But that's 2 ORs. Simpler: just OR with R15 then OR with 3.
+     * Actually even simpler: the result is (val<<3) | HEADER | 3.
+     * Since val is 0 or 1, (val<<3) is 0 or 8. 0|8 = 8, so val|3 = 3 or 0xB.
+     * We can do: or val_reg, R15; or val_reg, 3. But that's 2 instructions.
+     * Or: mov r10, r15; or r10, 3; or val_reg, r10. 3 instructions.
+     * Simplest 2-instruction: or val_reg, R15; or val_reg, 3. */
+    emit_or_reg_reg(&ctx->buf, val_reg, VTX_REG_NAN_HEADER);
+    /* or val_reg, VTX_TAG_BOOL (3) — imm8 */
+    emit_rex64(&ctx->buf, (vtx_reg_t)1, val_reg);
+    vtx_code_buffer_emit_byte(&ctx->buf, 0x83);  /* OR r/m64, imm8 */
+    vtx_code_buffer_emit_byte(&ctx->buf, modrm(3, 1, val_reg));
+    vtx_code_buffer_emit_byte(&ctx->buf, VTX_TAG_BOOL);
 }
 
 /**
@@ -1016,24 +1024,15 @@ static void emit_untag_smi(vtx_compile_ctx_t *ctx, vtx_reg_t val_reg)
 {
     vtx_code_buffer_t *buf = &ctx->buf;
 
-    /* SMI decoding: raw = (val >> 3) & VTX_NAN_DATA_MASK, then sign-extend.
-     *
-     * Bug fix: The old code used R10 as the mask temporary, but R10 is
-     * frequently used to hold the untagged heap pointer (see
-     * emit_untag_heap_ptr → compile_array_load). The mask load clobbered
-     * the pointer, causing the bounds check to compare against garbage.
-     *
-     * Fix: use R8 as the mask temporary (same fix as emit_untag_heap_ptr).
-     * If val_reg IS R8, fall back to R9. */
+    /* PERF: Uses R14 (cached mask) instead of MOV imm64.
+     * Old: SAR + MOV R8,imm64(10B) + AND + SHL + SAR = 5 instructions, ~18 bytes
+     * New: SAR + AND R14 + SHL + SAR = 4 instructions, ~6 bytes */
 
     /* Step 1: sar val_reg, 3 — arithmetic shift right by VTX_NAN_DATA_SHIFT */
     emit_sar_reg_imm8(buf, val_reg, VTX_NAN_DATA_SHIFT);
 
-    /* Step 2: and val_reg, VTX_NAN_DATA_MASK — mask out NaN-box header bits */
-    vtx_reg_t temp = VTX_REG_R8;
-    if (val_reg == VTX_REG_R8) temp = VTX_REG_R9;
-    emit_mov_reg_imm64(buf, temp, VTX_NAN_DATA_MASK);
-    emit_and_reg_reg(buf, val_reg, temp);
+    /* Step 2: and val_reg, R14 (cached data mask) */
+    emit_and_reg_reg(buf, val_reg, VTX_REG_NAN_MASK);
 
     /* Step 3: Sign-extend from 48 bits using shift trick:
      *   shl val_reg, 16  — moves bit 47 to bit 63
@@ -1176,27 +1175,28 @@ static void emit_prologue(vtx_compile_ctx_t *ctx)
     /* Save callee-saved registers below RBP */
     emit_push(buf, VTX_REG_RBX);  /* [RBP-8] */
     emit_push(buf, VTX_REG_R12);  /* [RBP-16] */
+    /* PERF: R14 and R15 cache NaN-box constants to eliminate MOV imm64
+     * from every tag/untag call. R13 is NOT saved (not used by codegen). */
+    emit_push(buf, VTX_REG_R14);  /* [RBP-24] */
+    emit_push(buf, VTX_REG_R15);  /* [RBP-32] */
 
-    /* Calculate frame_size for sub rsp (locals + spills only).
-     * Need frame_size ≡ 8 (mod 16) for proper stack alignment. */
+    /* Calculate frame_size for sub rsp (saved regs + locals + spills).
+     * Need frame_size ≡ 8 (mod 16) for proper stack alignment.
+     * actual_saved_bytes = 4 pushes (RBX, R12, R14, R15) = 32 bytes. */
+    uint32_t actual_saved_bytes = 32;
     uint32_t locals_bytes = ctx->layout.max_locals * 8;
     uint32_t spill_bytes = ctx->layout.max_spills * 8;
-    /* Calculate frame_size for sub rsp (saved regs + locals + spills).
-     * Bug fix: The old code did not include VTX_FRAME_SAVED_REGS_SIZE in
-     * raw_size, causing the frame to be 16 bytes too small. With max_spills=4,
-     * spill[3] at RBP-64 was below RSP (RBP-56), causing a stack smash
-     * when the deopt stub saved registers to spill slots.
-     * Fix: include saved regs in the frame size calculation. */
-    uint32_t raw_size = VTX_FRAME_SAVED_REGS_SIZE + locals_bytes + spill_bytes;
+    uint32_t raw_size = actual_saved_bytes + locals_bytes + spill_bytes;
     uint32_t frame_size = ((raw_size + 7) & ~(uint32_t)0xF) | 8;
     if (frame_size < 8) frame_size = 8;  /* minimum */
     ctx->layout.total_frame_size = frame_size;
     ctx->layout.frame_bottom = -(int32_t)frame_size;
 
     /* Override locals_base and spill_base for the codegen layout.
-     * Saved regs occupy [RBP-8] and [RBP-16]; locals start at [RBP-24]. */
-    ctx->layout.locals_base = -(int32_t)(VTX_FRAME_SAVED_REGS_SIZE + 8); /* local[0] at RBP-24 */
-    ctx->layout.spill_base = -(int32_t)(VTX_FRAME_SAVED_REGS_SIZE + (ctx->layout.max_locals + 1) * 8);
+     * Saved regs: RBX at [RBP-8], R12 at [RBP-16], R14 at [RBP-24], R15 at [RBP-32].
+     * Locals start after all saved regs: [RBP-40]. */
+    ctx->layout.locals_base = -(int32_t)(actual_saved_bytes + 8); /* local[0] at RBP-40 */
+    ctx->layout.spill_base = -(int32_t)(actual_saved_bytes + (ctx->layout.max_locals + 1) * 8);
 
     /* sub rsp, frame_size */
     vtx_code_buffer_emit_byte(buf, REX_W);
@@ -1209,6 +1209,11 @@ static void emit_prologue(vtx_compile_ctx_t *ctx)
         vtx_code_buffer_emit_byte(buf, modrm(3, 5, VTX_REG_RSP));
         vtx_code_buffer_emit_dword(buf, frame_size);
     }
+
+    /* PERF: Load NaN-box constants into R14/R15 for use by tag/untag.
+     * This is done ONCE per method instead of on every arithmetic op. */
+    emit_mov_reg_imm64(buf, VTX_REG_NAN_HEADER, VTX_NAN_BOX_HEADER);
+    emit_mov_reg_imm64(buf, VTX_REG_NAN_MASK, VTX_NAN_DATA_MASK);
 
     /* Initialize locals to VTX_VALUE_UNDEFINED */
     emit_mov_reg_imm64(buf, VTX_REG_RAX, VTX_VALUE_UNDEFINED);
@@ -1270,22 +1275,36 @@ static void emit_epilogue(vtx_compile_ctx_t *ctx)
 {
     vtx_code_buffer_t *buf = &ctx->buf;
 
-    /* Restore callee-saved registers */
-    emit_mov_reg_rbp_offset(buf, VTX_REG_RBX, VTX_FRAME_SAVED_RBX_OFFSET);
-    emit_mov_reg_rbp_offset(buf, VTX_REG_R12, VTX_FRAME_SAVED_R12_OFFSET);
-
-    /* mov rsp, rbp — unwind all pushes and sub rsp */
+    /* Deallocate locals + spill area: add rsp, frame_size.
+     * We can't use 'mov rsp, rbp' because the callee-saved registers
+     * (RBX, R12, R14, R15) are stored BELOW RBP at [RBP-8..RBP-32].
+     * 'mov rsp, rbp' would set RSP above them, and the subsequent
+     * pops would read the wrong values (caller RBP, profile_data, etc.
+     * instead of the saved registers).
+     *
+     * Instead, use 'add rsp, frame_size' to deallocate just the
+     * locals+spills, leaving RSP pointing at the saved R15. */
     vtx_code_buffer_emit_byte(buf, REX_W);
-    vtx_code_buffer_emit_byte(buf, 0x89);
-    vtx_code_buffer_emit_byte(buf, modrm(3, VTX_REG_RBP, VTX_REG_RSP));
+    if (ctx->layout.total_frame_size <= 127) {
+        vtx_code_buffer_emit_byte(buf, 0x83);
+        vtx_code_buffer_emit_byte(buf, modrm(3, 0, VTX_REG_RSP));
+        vtx_code_buffer_emit_byte(buf, (uint8_t)ctx->layout.total_frame_size);
+    } else {
+        vtx_code_buffer_emit_byte(buf, 0x81);
+        vtx_code_buffer_emit_byte(buf, modrm(3, 0, VTX_REG_RSP));
+        vtx_code_buffer_emit_dword(buf, ctx->layout.total_frame_size);
+    }
 
-    /* pop rbp — restore caller RBP */
+    /* pop callee-saved registers (reverse order of prologue pushes) */
+    emit_pop(buf, VTX_REG_R15);  /* was at [RBP-32] */
+    emit_pop(buf, VTX_REG_R14);  /* was at [RBP-24] */
+    emit_pop(buf, VTX_REG_R12);  /* was at [RBP-16] */
+    emit_pop(buf, VTX_REG_RBX);  /* was at [RBP-8] */
+
+    /* pop rbp — restore caller RBP (was at [RBP+0]) */
     emit_pop(buf, VTX_REG_RBP);
 
-    /* add rsp, 24 — skip profile_data, deopt_info, method_ptr pushed in prologue
-     * Bug fix: Use modrm(3, ...) (register form) instead of modrm(1, ...) because
-     * RSP (rm=4) requires a SIB byte in memory forms (mod=01/10), which was not
-     * emitted. The register form (mod=3) does not need a SIB byte. */
+    /* add rsp, 24 — skip profile_data, deopt_info, method_ptr pushed in prologue */
     emit_add_reg_imm32(buf, VTX_REG_RSP, 24);
 
     /* ret — pop return address */

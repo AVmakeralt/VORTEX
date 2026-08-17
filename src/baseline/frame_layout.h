@@ -81,8 +81,9 @@
 #define VTX_FRAME_SAVED_R12_OFFSET    -16  /* [RBP-16] saved R12 (scratch) */
 
 /* Number and size of callee-saved register slots below RBP */
-#define VTX_FRAME_SAVED_REGS_COUNT     2
-#define VTX_FRAME_SAVED_REGS_SIZE     16   /* 2 * 8 bytes */
+#define VTX_FRAME_SAVED_REGS_COUNT     4
+#define VTX_FRAME_SAVED_REGS_SIZE     16   /* 4 * 8 bytes but only RBX+R12 are at fixed offsets;
+                                            * R14/R15 are pushed but accessed via RBP unwind, not fixed offsets */
 
 /* Number of 8-byte slots in the frame header above RBP (excluding caller RBP at [RBP]) */
 #define VTX_FRAME_HEADER_SLOTS_ABOVE   4   /* profile_data, deopt_info, method_ptr, return_addr */
