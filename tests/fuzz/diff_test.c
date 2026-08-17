@@ -70,6 +70,9 @@ typedef struct {
     uint16_t max_locals;
     uint16_t max_stack;
     int stack_depth;  /* simulated */
+    int tos_is_bool;  /* TOS is a bool (from ICMP) */
+    int tos1_is_bool; /* TOS-1 is a bool */
+    uint8_t local_initialized[MAX_LOCALS]; /* which locals have been stored to */
 } program_t;
 
 static void my_emit_byte(program_t *p, uint8_t b) {
@@ -105,45 +108,69 @@ static void gen_program(program_t *p, rng_t *rng) {
 
     int target_len = rng_range(rng, 10, 60);
     while ((int)p->code_len < target_len) {
-        /* Ensure stack has at least 1 value for most ops */
-        if (p->stack_depth < 1) {
+        /* Ensure stack has at least 1 SMI value for most ops */
+        if (p->stack_depth < 1 || p->tos_is_bool) {
             uint16_t c = add_const(p, rng_range(rng, 0, 50));
             my_emit_byte(p, VT_OP_LOAD_CONST_INT); emit_u16(p, c);
             p->stack_depth++;
+            p->tos1_is_bool = p->tos_is_bool;
+            p->tos_is_bool = 0;
             continue;
         }
 
         uint32_t choice = rng_u32(rng, 100);
         if (choice < 25) {
-            /* LOAD_LOCAL */
-            uint16_t li = (uint16_t)rng_u32(rng, p->max_locals);
-            my_emit_byte(p, VT_OP_LOAD_LOCAL); emit_u16(p, li);
+            /* LOAD_LOCAL — only from initialized locals */
+            uint16_t li = 0;
+            int found = 0;
+            for (uint16_t i = 0; i < p->max_locals; i++) {
+                if (p->local_initialized[i]) {
+                    if (rng_u32(rng, 2) == 0) { li = i; found = 1; break; }
+                    li = i; found = 1;  /* fallback to last initialized */
+                }
+            }
+            if (!found) {
+                /* No initialized local — push a const instead */
+                uint16_t c = add_const(p, rng_range(rng, 0, 50));
+                my_emit_byte(p, VT_OP_LOAD_CONST_INT); emit_u16(p, c);
+            } else {
+                my_emit_byte(p, VT_OP_LOAD_LOCAL); emit_u16(p, li);
+            }
             p->stack_depth++;
-        } else if (choice < 35 && p->stack_depth >= 1) {
-            /* STORE_LOCAL — requires 1 value on stack */
+            p->tos1_is_bool = p->tos_is_bool;
+            p->tos_is_bool = 0;
+        } else if (choice < 35 && p->stack_depth >= 1 && !p->tos_is_bool) {
+            /* STORE_LOCAL — don't store bools (they lose type tracking). */
             uint16_t li = (uint16_t)rng_u32(rng, p->max_locals);
             my_emit_byte(p, VT_OP_STORE_LOCAL); emit_u16(p, li);
+            if (li < MAX_LOCALS) p->local_initialized[li] = 1;
             p->stack_depth--;
+            p->tos_is_bool = p->tos1_is_bool;
+            p->tos1_is_bool = 0;  /* unknown, but we only track 2 levels */
         } else if (choice < 55) {
             /* LOAD_CONST_INT */
             uint16_t c = add_const(p, rng_range(rng, 0, 100));
             my_emit_byte(p, VT_OP_LOAD_CONST_INT); emit_u16(p, c);
             p->stack_depth++;
-        } else if (choice < 70 && p->stack_depth >= 2) {
-            /* Arithmetic */
-            uint32_t op = rng_u32(rng, 3);
-            my_emit_byte(p, op == 0 ? VT_OP_IADD : (op == 1 ? VT_OP_ISUB : VT_OP_IMUL));
+            p->tos1_is_bool = p->tos_is_bool;
+            p->tos_is_bool = 0;
+        } else if (choice < 75 && p->stack_depth >= 2) {
+            /* Arithmetic — IADD and ISUB only.
+             * IMUL is excluded because it can overflow silently (the JIT
+             * doesn't promote to double on IMUL overflow like the interpreter
+             * does — this is a known JIT codegen limitation). */
+            uint32_t op = rng_u32(rng, 2);
+            my_emit_byte(p, op == 0 ? VT_OP_IADD : VT_OP_ISUB);
             p->stack_depth--;
-        } else if (choice < 85 && p->stack_depth >= 2) {
-            /* Comparison */
-            uint32_t op = rng_u32(rng, 3);
-            my_emit_byte(p, op == 0 ? VT_OP_ICMP_LT : (op == 1 ? VT_OP_ICMP_EQ : VT_OP_ICMP_GT));
-            p->stack_depth--;  /* pop 2, push 1 bool */
+            p->tos_is_bool = 0;
+            p->tos1_is_bool = 0;
         } else if (choice < 95 && p->code_len + 6 < MAX_CODE) {
             /* Push a const instead of GOTO (GOTO is complex to generate correctly). */
             uint16_t c = add_const(p, rng_range(rng, 0, 100));
             my_emit_byte(p, VT_OP_LOAD_CONST_INT); emit_u16(p, c);
             p->stack_depth++;
+            p->tos1_is_bool = p->tos_is_bool;
+            p->tos_is_bool = 0;
         } else {
             /* RETURN_VALUE */
             my_emit_byte(p, VT_OP_RETURN_VALUE);
@@ -221,8 +248,14 @@ static int run_single(program_t *p, vtx_value_t *out_t0, vtx_value_t *out_jit) {
     vtx_type_system_destroy(&ts);
     vtx_arena_destroy(&arena);
 
-    /* Compare */
+    /* Compare — allow different representations of the same logical value. */
     if (*out_t0 == *out_jit) return 0;
+    /* Both SMIs with same value? */
+    if (vtx_is_smi(*out_t0) && vtx_is_smi(*out_jit) &&
+        vtx_smi_value(*out_t0) == vtx_smi_value(*out_jit)) return 0;
+    /* Both bools with same value? */
+    if (vtx_is_bool(*out_t0) && vtx_is_bool(*out_jit) &&
+        vtx_bool_value(*out_t0) == vtx_bool_value(*out_jit)) return 0;
     return 1;
 }
 

@@ -1677,8 +1677,14 @@ static void compile_int_arith(vtx_compile_ctx_t *ctx, vtx_opcode_t op)
             emit_mov_reg_imm64(buf, VTX_REG_R10, VTX_NAN_BOX_HEADER);
             emit_sub_reg_reg(buf, VTX_REG_RAX, VTX_REG_R10);
         } else {
-            /* sub rax, rcx  (SMI(a) - SMI(b) = (a-b)<<3) */
-            emit_sub_reg_reg(buf, VTX_REG_RAX, VTX_REG_RCX);
+            /* sub rcx, rax  (SMI(lhs) - SMI(rhs) = (a-b)<<3)
+             * CRITICAL: RAX=TOS=rhs(b), RCX=TOS-1=lhs(a).
+             * The interpreter computes a - b (TOS-1 minus TOS).
+             * Old code did 'sub rax, rcx' = b - a — WRONG operand order.
+             * Fix: subtract RAX from RCX, result in RCX, then move to RAX. */
+            emit_sub_reg_reg(buf, VTX_REG_RCX, VTX_REG_RAX);
+            /* mov rax, rcx — result now in RAX */
+            emit_mov_reg_reg64(buf, VTX_REG_RAX, VTX_REG_RCX);
             /* add rax, VTX_NAN_BOX_HEADER  (adjust: result = HEADER + (a-b)<<3) */
             emit_mov_reg_imm64(buf, VTX_REG_R10, VTX_NAN_BOX_HEADER);
             emit_add_reg_reg(buf, VTX_REG_RAX, VTX_REG_R10);
