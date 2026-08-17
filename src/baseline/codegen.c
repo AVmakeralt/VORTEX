@@ -987,6 +987,28 @@ static void emit_tag_smi(vtx_compile_ctx_t *ctx, vtx_reg_t val_reg)
 }
 
 /**
+ * Tag a bool result (0 or 1 in val_reg) as a NaN-boxed bool value.
+ * Produces VTX_VALUE_FALSE (0x7FF8000000000003) when val=0,
+ * VTX_VALUE_TRUE (0x7FF800000000000B) when val=1.
+ *
+ * Encoding: (val << 3) | VTX_NAN_BOX_HEADER | VTX_TAG_BOOL
+ * = (val << 3) | VTX_VALUE_FALSE
+ *
+ * When val=0: 0 | FALSE = FALSE ✓
+ * When val=1: 8 | FALSE = TRUE ✓ (8 | 3 = 0xB = header|8|3 = TRUE)
+ */
+static void emit_tag_bool(vtx_compile_ctx_t *ctx, vtx_reg_t val_reg)
+{
+    /* shl val_reg, 3 (0→0, 1→8) */
+    emit_shl_reg_imm8(&ctx->buf, val_reg, 3);
+
+    /* or val_reg, VTX_VALUE_FALSE (header | tag_bool = 0x7FF8000000000003) */
+    emit_mov_reg_imm64(&ctx->buf, VTX_REG_R10,
+                        VTX_NAN_BOX_HEADER | VTX_TAG_BOOL);
+    emit_or_reg_reg(&ctx->buf, val_reg, VTX_REG_R10);
+}
+
+/**
  * Untag an SMI value to get the raw int64_t.
  * SMI decoding: (val >> VTX_NAN_DATA_SHIFT) & VTX_NAN_DATA_MASK, then sign-extend.
  */
@@ -2061,8 +2083,12 @@ static void compile_int_cmp(vtx_compile_ctx_t *ctx, vtx_opcode_t op)
     /* setcc al — uses flags from cmp */
     emit_setcc(buf, cc, VTX_REG_RAX);
 
-    /* Tag as SMI: shift left by 3, OR with NaN header */
-    emit_tag_smi(ctx, VTX_REG_RAX);
+    /* Tag as bool: VTX_VALUE_TRUE or VTX_VALUE_FALSE.
+     * The interpreter uses vtx_make_bool() which produces NaN-boxed
+     * bools (tag=3), NOT SMIs (tag=0). The old code used emit_tag_smi
+     * which produced SMI(0)/SMI(1) — a DIFFERENT value representation
+     * than the interpreter, causing differential test mismatches. */
+    emit_tag_bool(ctx, VTX_REG_RAX);
 
     /* Push result (already in RAX) */
     emit_stack_push(ctx);
@@ -2125,7 +2151,8 @@ static void compile_float_cmp(vtx_compile_ctx_t *ctx, vtx_opcode_t op)
     vtx_code_buffer_emit_byte(buf, 0x31);
     vtx_code_buffer_emit_byte(buf, modrm(3, VTX_REG_RAX, VTX_REG_RAX));
     emit_setcc(buf, cc, VTX_REG_RAX);
-    emit_tag_smi(ctx, VTX_REG_RAX);
+    /* Tag as bool (same fix as compile_int_cmp) */
+    emit_tag_bool(ctx, VTX_REG_RAX);
     emit_stack_push(ctx);
 }
 

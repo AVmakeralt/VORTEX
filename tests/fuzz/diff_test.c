@@ -119,8 +119,8 @@ static void gen_program(program_t *p, rng_t *rng) {
             uint16_t li = (uint16_t)rng_u32(rng, p->max_locals);
             my_emit_byte(p, VT_OP_LOAD_LOCAL); emit_u16(p, li);
             p->stack_depth++;
-        } else if (choice < 35) {
-            /* STORE_LOCAL */
+        } else if (choice < 35 && p->stack_depth >= 1) {
+            /* STORE_LOCAL — requires 1 value on stack */
             uint16_t li = (uint16_t)rng_u32(rng, p->max_locals);
             my_emit_byte(p, VT_OP_STORE_LOCAL); emit_u16(p, li);
             p->stack_depth--;
@@ -151,19 +151,23 @@ static void gen_program(program_t *p, rng_t *rng) {
         }
     }
 
-    /* Ensure ends with RETURN_VALUE and exactly 1 value on stack. */
-    if (p->stack_depth < 1) {
-        uint16_t c = add_const(p, 0);
-        my_emit_byte(p, VT_OP_LOAD_CONST_INT); emit_u16(p, c);
-        p->stack_depth++;
+    /* Ensure ends with exactly one RETURN_VALUE and exactly 1 value on stack.
+     * If the loop already emitted RETURN_VALUE (via the else branch), don't
+     * emit another one — that would cause stack underflow. */
+    int has_return = (p->code_len > 0 &&
+                      p->code[p->code_len - 1] == VT_OP_RETURN_VALUE);
+    if (!has_return) {
+        if (p->stack_depth < 1) {
+            uint16_t c = add_const(p, 0);
+            my_emit_byte(p, VT_OP_LOAD_CONST_INT); emit_u16(p, c);
+            p->stack_depth++;
+        }
+        while (p->stack_depth > 1) {
+            my_emit_byte(p, VT_OP_POP);
+            p->stack_depth--;
+        }
+        my_emit_byte(p, VT_OP_RETURN_VALUE);
     }
-    /* If stack has > 1 value, pop extras with POP (or just ignore —
-     * RETURN_VALUE takes TOS, extras are discarded). */
-    while (p->stack_depth > 1) {
-        my_emit_byte(p, VT_OP_POP);
-        p->stack_depth--;
-    }
-    my_emit_byte(p, VT_OP_RETURN_VALUE);
 }
 
 /* ---- Runner: returns 0 if match, 1 if mismatch, 2 if crash ---- */
@@ -241,7 +245,11 @@ int main(int argc, char **argv) {
         /* Fork to isolate crashes */
         pid_t pid = fork();
         if (pid == 0) {
-            /* Child */
+            /* Child — print bytecodes first for debugging */
+            fprintf(stderr, "PROG %d bytecode: ", i);
+            for (size_t j = 0; j < p.code_len; j++)
+                fprintf(stderr, "%02x ", p.code[j]);
+            fprintf(stderr, "\n");
             vtx_value_t t0, jit;
             int rc = run_single(&p, &t0, &jit);
             if (rc == 0) _exit(0);
@@ -259,6 +267,11 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "\n");
                 _exit(1);
             }
+            /* Crash — print the bytecode before dying */
+            fprintf(stderr, "CRASH prog %d bytecode: ", i);
+            for (size_t j = 0; j < p.code_len; j++)
+                fprintf(stderr, "%02x ", p.code[j]);
+            fprintf(stderr, "\n");
             _exit(2);  /* crash */
         }
         /* Parent */
