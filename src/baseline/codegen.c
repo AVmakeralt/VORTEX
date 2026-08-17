@@ -1653,11 +1653,21 @@ static void compile_int_arith(vtx_compile_ctx_t *ctx, vtx_opcode_t op)
      * then shift registers up by 1 (pop2 + push1 = net pop1).
      */
 
-    /* For IADD only: emit fast SMI path.
-     * ISUB's fast path (SMI(a)-SMI(b)+HEADER) is broken for negative results
-     * because the addition borrows from the NaN-box header. ISUB falls through
-     * to the untag→compute→retag path below. */
-    if (op == VT_OP_IADD) {
+    /* For IADD/ISUB: emit fast SMI path.
+     *
+     * CRITICAL FIX: The old IADD fast path used 'add rax, rcx; sub rax, HEADER'
+     * which assumes SMI(a)+SMI(b) = 2*HEADER + (a+b)<<3. But the SMI encoding
+     * uses OR (HEADER | data), not ADD. For negative values, OR ≠ ADD because
+     * the sign extension sets upper bits that overlap with the header.
+     * This caused the JIT to return raw integers (without the NaN-box header)
+     * for computations involving negative SMI values.
+     *
+     * Fix: use the untag→compute→retag approach for BOTH fast and slow paths.
+     * The fast path checks SMI type, then untags both, computes, retags.
+     * This is slightly slower than the old header-arithmetic trick but
+     * produces correct results for all SMI values.
+     */
+    if (op == VT_OP_IADD || op == VT_OP_ISUB) {
         /* RAX = TOS (rhs), RCX = TOS-1 (lhs) — already in the right registers */
 
         /* Save pre-operation stack depth for both fast and slow paths.
@@ -1667,28 +1677,24 @@ static void compile_int_arith(vtx_compile_ctx_t *ctx, vtx_opcode_t op)
         /* SMI type check: (RAX | RCX) & 0x7 == 0 */
         uint32_t smi_check_jnz = emit_smi_type_check(ctx);
 
-        /* --- Fast SMI path --- */
+        /* --- Fast SMI path: untag → compute → retag --- */
         uint32_t fast_path_start = vtx_code_buffer_position(buf); (void)fast_path_start;
 
+        /* Untag both: RAX = raw(b), RCX = raw(a) */
+        emit_untag_smi(ctx, VTX_REG_RAX);
+        emit_untag_smi(ctx, VTX_REG_RCX);
+
         if (op == VT_OP_IADD) {
-            /* add rax, rcx  (SMI(a) + SMI(b) = 2*HEADER + (a+b)<<3) */
+            /* add rax, rcx → RAX = a + b (raw) */
             emit_add_reg_reg(buf, VTX_REG_RAX, VTX_REG_RCX);
-            /* sub rax, VTX_NAN_BOX_HEADER  (adjust: result = HEADER + (a+b)<<3) */
-            emit_mov_reg_imm64(buf, VTX_REG_R10, VTX_NAN_BOX_HEADER);
-            emit_sub_reg_reg(buf, VTX_REG_RAX, VTX_REG_R10);
         } else {
-            /* sub rcx, rax  (SMI(lhs) - SMI(rhs) = (a-b)<<3)
-             * CRITICAL: RAX=TOS=rhs(b), RCX=TOS-1=lhs(a).
-             * The interpreter computes a - b (TOS-1 minus TOS).
-             * Old code did 'sub rax, rcx' = b - a — WRONG operand order.
-             * Fix: subtract RAX from RCX, result in RCX, then move to RAX. */
+            /* sub rcx, rax → RCX = a - b (raw), then mov to RAX */
             emit_sub_reg_reg(buf, VTX_REG_RCX, VTX_REG_RAX);
-            /* mov rax, rcx — result now in RAX */
             emit_mov_reg_reg64(buf, VTX_REG_RAX, VTX_REG_RCX);
-            /* add rax, VTX_NAN_BOX_HEADER  (adjust: result = HEADER + (a-b)<<3) */
-            emit_mov_reg_imm64(buf, VTX_REG_R10, VTX_NAN_BOX_HEADER);
-            emit_add_reg_reg(buf, VTX_REG_RAX, VTX_REG_R10);
         }
+
+        /* Re-tag: RAX = SMI(result) = HEADER | (result << 3) */
+        emit_tag_smi(ctx, VTX_REG_RAX);
 
         /* Overflow check: verify result header is intact */
         emit_smi_overflow_guard(ctx);
