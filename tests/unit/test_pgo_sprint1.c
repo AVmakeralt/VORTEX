@@ -70,8 +70,15 @@ VTX_TEST(confidence_call_target_monomorphic)
     memset(&cs, 0, sizeof(cs));
     cs.count = 1;
     cs.types[0] = 42;
-    /* Monomorphic → confidence 1.0 */
-    VTX_ASSERT_TRUE(vtx_confidence_call_target(&cs) == 1.0);
+    /* Monomorphic with total_count=0 (no D5 data) → conservative 0.0.
+     * The T11 audit fix deliberately prevents single-sample speculation.
+     * This prevents the "saw it once, now I speculate" deopt storm. */
+    VTX_ASSERT_TRUE(vtx_confidence_call_target(&cs) == 0.0);
+
+    /* With enough total_count, monomorphic → high confidence. */
+    cs.total_count = 100;
+    double conf = vtx_confidence_call_target(&cs);
+    VTX_ASSERT_TRUE(conf > 0.5);
 }
 
 VTX_TEST(confidence_type_dist_monomorphic_is_high)

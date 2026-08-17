@@ -267,6 +267,39 @@ target_link_libraries(fuzz_graph_build PRIVATE
 add_test(NAME fuzz_graph_build COMMAND fuzz_graph_build)
 set_tests_properties(fuzz_graph_build PROPERTIES TIMEOUT 60)
 
+# diff_test: differential testing harness (T0 interpreter vs T2 JIT).
+# Generates random valid bytecode programs, runs each through both
+# tiers, and reports any mismatch as a JIT optimizer bug. Each T2
+# run is in a fork()ed child so JIT crashes don't kill the fuzzer.
+add_executable(diff_test
+    fuzz/diff_test.c
+)
+target_link_libraries(diff_test PRIVATE
+    -Wl,--start-group
+    vortex_test_framework
+    vortex_compile
+    vortex_baseline
+    vortex_lower
+    vortex_codecache
+    vortex_interp
+    vortex_runtime
+    vortex_ir
+    vortex_guard
+    vortex_deopt
+    vortex_profile
+    vortex_inliner
+    vortex_pea
+    vortex_trace
+    vortex_region
+    vortex_midtier
+    $<$<BOOL:${VORTEX_ENABLE_SOTA}>:vortex_sota>
+    -Wl,--end-group
+    m
+    pthread
+)
+add_test(NAME diff_test COMMAND diff_test 200)
+set_tests_properties(diff_test PROPERTIES TIMEOUT 120)
+
 # test_assembler_prog: program-mode assembler (labels + pseudo-instructions)
 add_executable(test_assembler_prog
     unit/test_assembler_prog.c
