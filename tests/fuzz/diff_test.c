@@ -60,7 +60,7 @@ static int rng_range(rng_t *r, int lo, int hi) {
 #define MAX_CODE  256
 #define MAX_CONSTS 8
 #define MAX_LOCALS 4
-#define MAX_STACK  8
+#define MAX_STACK  4  /* Keep stack ≤ 4 (register count) to avoid spill bugs */
 
 typedef struct {
     uint8_t code[MAX_CODE];
@@ -108,7 +108,17 @@ static void gen_program(program_t *p, rng_t *rng) {
 
     int target_len = rng_range(rng, 10, 60);
     while ((int)p->code_len < target_len) {
-        /* Ensure stack has at least 1 SMI value for most ops */
+        /* Ensure stack has at least 1 SMI value and stack < MAX_STACK.
+         * If stack is full, emit STORE_LOCAL to make room. */
+        if (p->stack_depth >= MAX_STACK) {
+            /* Stack full — store to a local to make room */
+            uint16_t li = (uint16_t)rng_u32(rng, p->max_locals);
+            my_emit_byte(p, VT_OP_STORE_LOCAL); emit_u16(p, li);
+            if (li < MAX_LOCALS) p->local_initialized[li] = 1;
+            p->stack_depth--;
+            p->tos_is_bool = p->tos1_is_bool;
+            p->tos1_is_bool = 0;
+        }
         if (p->stack_depth < 1 || p->tos_is_bool) {
             uint16_t c = add_const(p, rng_range(rng, 0, 50));
             my_emit_byte(p, VT_OP_LOAD_CONST_INT); emit_u16(p, c);
